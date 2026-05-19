@@ -41,7 +41,7 @@ export async function isAdminAuthConfigured(): Promise<boolean> {
   return (await getAdminAuthConfigError()) === null
 }
 
-export const COOKIE_NAME = 'qmblog_admin'
+export const COOKIE_NAME = 'nmblog_admin'
 export const COOKIE_MAX_AGE = 60 * 60 * 24 * 30 // 30 天
 
 /**
@@ -76,9 +76,9 @@ export async function isAdminAuthenticated(
 
 // ── API Token 认证 ──
 
-/** 生成 API Token（qm_ 前缀 + 32 位 nanoid） */
+/** 生成 API Token（nm_ 前缀 + 32 位 nanoid） */
 export function generateApiToken(): string {
-  return `qm_${nanoid(32)}`
+  return `nm_${nanoid(32)}`
 }
 
 interface ApiTokenRow {
@@ -88,7 +88,7 @@ interface ApiTokenRow {
 
 /** 验证 API Token（查询数据库，更新 last_used_at） */
 export async function verifyApiToken(db: D1Database, token: string): Promise<boolean> {
-  if (!token || !token.startsWith('qm_')) return false
+  if (!token || !token.startsWith('nm_')) return false
   try {
     const row = await db
       .prepare('SELECT id, is_active FROM api_tokens WHERE token = ?')

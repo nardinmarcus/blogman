@@ -126,9 +126,9 @@ export default async function RootLayout({
     document.documentElement.setAttribute('data-font', key || 'default');
     if (c) {
       document.documentElement.style.setProperty('--body-font', c.family);
-      if (c.link && !document.getElementById('qm-font-link')) {
+      if (c.link && !document.getElementById('nm-font-link')) {
         var l = document.createElement('link');
-        l.id = 'qm-font-link';
+        l.id = 'nm-font-link';
         l.rel = 'stylesheet';
         l.href = c.link;
         document.head.appendChild(l);

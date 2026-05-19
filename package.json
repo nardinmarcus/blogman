@@ -1,5 +1,5 @@
 {
-  "name": "qiaomu-blog-opensource",
+  "name": "blogman",
   "version": "0.1.0",
   "private": false,
   "scripts": {
@@ -70,11 +70,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/joeseesun/qiaomu-blog-opensource.git"
+    "url": "git+https://github.com/nardinmarcus/blogman.git"
   },
-  "homepage": "https://github.com/joeseesun/qiaomu-blog-opensource",
+  "homepage": "https://github.com/nardinmarcus/blogman",
   "bugs": {
-    "url": "https://github.com/joeseesun/qiaomu-blog-opensource/issues"
+    "url": "https://github.com/nardinmarcus/blogman/issues"
   },
   "cloudflare": {
     "bindings": {

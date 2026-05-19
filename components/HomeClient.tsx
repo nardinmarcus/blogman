@@ -53,13 +53,13 @@ export function HomeClient(props: HomeProps) {
   useEffect(() => {
     if (theme === 'refined' || theme === 'terminal' || theme === 'editorial') {
       injectFont(
-        'qm-jetbrains-mono',
+        'nm-jetbrains-mono',
         'https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap',
       )
     }
     if (theme === 'editorial') {
       injectFont(
-        'qm-noto-serif-sc',
+        'nm-noto-serif-sc',
         'https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700;900&display=swap',
       )
     }

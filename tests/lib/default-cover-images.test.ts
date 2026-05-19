@@ -22,7 +22,7 @@ describe('default cover images', () => {
       { baseUrl: 'https://blog.qiaomu.ai' },
     )
 
-    expect(cover).toMatch(/^https:\/\/blog\.qiaomu\.ai\/default-covers\/qm-cover-[1-3]\.jpg$/)
+    expect(cover).toMatch(/^https:\/\/blog\.qiaomu\.ai\/default-covers\/nm-cover-[1-3]\.jpg$/)
   })
 
   it('prefers the explicit cover image and resolves relative paths', () => {
@@ -39,6 +39,6 @@ describe('default cover images', () => {
 
   it('resolves the site-wide fallback cover image', () => {
     expect(resolveDefaultSiteCoverImage('https://blog.qiaomu.ai'))
-      .toBe('https://blog.qiaomu.ai/default-covers/qm-cover-1.jpg')
+      .toBe('https://blog.qiaomu.ai/default-covers/nm-cover-1.jpg')
   })
 })

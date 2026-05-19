@@ -119,7 +119,7 @@ function fromBase64(input: string): Uint8Array {
 }
 
 async function deriveAesKey(secret: string): Promise<CryptoKey> {
-  const normalized = secret.trim() || 'qmblog-ai-config'
+  const normalized = secret.trim() || 'nmblog-ai-config'
   const cached = keyCache.get(normalized)
   if (cached) return cached
 
@@ -180,7 +180,7 @@ export function resolveAiConfigSecret(env?: Record<string, unknown>): string {
     process.env.AI_CONFIG_ENCRYPTION_SECRET ||
     envSalt ||
     process.env.ADMIN_TOKEN_SALT ||
-    'qmblog-ai-config-secret'
+    'nmblog-ai-config-secret'
   )
 }
 

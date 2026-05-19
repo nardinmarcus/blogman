@@ -1,3 +1,3 @@
-export const WECHAT_DEFAULT_AUTHOR = '向阳乔木'
+export const WECHAT_DEFAULT_AUTHOR = 'Namoo'
 export const WECHAT_DEFAULT_NEED_OPEN_COMMENT = true
 export const WECHAT_DEFAULT_ONLY_FANS_CAN_COMMENT = false

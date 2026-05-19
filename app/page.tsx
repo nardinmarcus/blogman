@@ -61,9 +61,9 @@ export default async function Home({
           __html: JSON.stringify({
             '@context': 'https://schema.org',
             '@type': 'WebSite',
-            name: '乔木博客',
+            name: 'Namoo Blog',
             url: BASE_URL,
-            description: '记录思考，分享所学，留住当下。技术、生活、读书笔记的数字花园。',
+            description: '记录思考，分享所学。',
             potentialAction: {
               '@type': 'SearchAction',
               target: { '@type': 'EntryPoint', urlTemplate: `${BASE_URL}/search?q={search_term_string}` },
@@ -78,7 +78,7 @@ export default async function Home({
           __html: JSON.stringify({
             '@context': 'https://schema.org',
             '@type': 'Organization',
-            name: '乔木博客',
+            name: 'Namoo Blog',
             url: BASE_URL,
             logo: { '@type': 'ImageObject', url: `${BASE_URL}/icon-512.png` },
           }),

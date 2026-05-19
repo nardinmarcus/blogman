@@ -75,7 +75,7 @@ const DEFAULT_HISTORY_SCOPE = 'default'
 const TEMPLATE_COLLAPSED_HEIGHT = 84
 
 function createHistoryStorageKey(scope: string) {
-  return `qmblog:ai-image-history:${scope || DEFAULT_HISTORY_SCOPE}`
+  return `nmblog:ai-image-history:${scope || DEFAULT_HISTORY_SCOPE}`
 }
 
 function formatHistoryTime(timestamp: number) {

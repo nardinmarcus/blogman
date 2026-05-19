@@ -1,6 +1,6 @@
 'use client'
 
-export const LOCAL_HISTORY_UPDATED_EVENT = 'qmblog:local-history-updated'
+export const LOCAL_HISTORY_UPDATED_EVENT = 'nmblog:local-history-updated'
 
 export interface BackgroundTaskToastApi {
   success: (message: string, duration?: number) => void

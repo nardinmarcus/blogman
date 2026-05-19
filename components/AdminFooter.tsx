@@ -5,7 +5,7 @@ export function AdminFooter() {
         <div className="flex items-center justify-center text-xs text-[var(--stone-gray)]">
           <span>© 2026</span>
           <span className="mx-2">·</span>
-          <span>向阳乔木</span>
+          <span>Namoo</span>
         </div>
       </div>
     </footer>

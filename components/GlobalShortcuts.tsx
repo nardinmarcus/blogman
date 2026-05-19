@@ -12,7 +12,7 @@ export function GlobalShortcuts() {
       if (e.metaKey && e.key.toLowerCase() === 'k') {
         e.preventDefault()
         // 检查是否已登录
-        if (document.cookie.includes('qmblog_admin=')) {
+        if (document.cookie.includes('nmblog_admin=')) {
           router.push('/editor')
         } else {
           console.log('请先登录后台')
@@ -23,7 +23,7 @@ export function GlobalShortcuts() {
       // Ctrl + Cmd + N → 新建文章（备用快捷键）
       if (e.ctrlKey && e.metaKey && e.key.toLowerCase() === 'n') {
         e.preventDefault()
-        if (document.cookie.includes('qmblog_admin=')) {
+        if (document.cookie.includes('nmblog_admin=')) {
           router.push('/editor')
         } else {
           console.log('请先登录后台')
