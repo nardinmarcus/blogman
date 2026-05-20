@@ -240,7 +240,8 @@ const TEXT_OPTIONS: Array<{
     label: '代码块',
     icon: <Code2 className="h-4 w-4" />,
     isActive: (editor) => editor.isActive('codeBlock'),
-    apply: (editor) => editor.chain().focus().toggleCodeBlock().run(),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    apply: (editor) => (editor.chain().focus() as any).toggleCodeBlock().run(),
   },
 ]
 
@@ -287,7 +288,7 @@ export const suggestionItems = createSuggestionItems([
   { title: '编号列表', description: '创建带顺序的编号列表。', searchTerms: ['ordered', 'list', 'number'], icon: <CommandIcon label="1." />, command: ({ editor, range }) => { editor.chain().focus().deleteRange(range).toggleOrderedList().run() } },
   { title: '待办列表', description: '插入可以勾选的任务清单。', searchTerms: ['todo', 'task', 'checkbox'], icon: <CommandIcon label="[]" />, command: ({ editor, range }) => { (editor.chain().focus().deleteRange(range) as any).toggleTaskList().run() } }, // eslint-disable-line @typescript-eslint/no-explicit-any
   { title: '引用', description: '高亮一段需要单独强调的话。', searchTerms: ['quote', 'blockquote'], icon: <CommandIcon label='"' />, command: ({ editor, range }) => { editor.chain().focus().deleteRange(range).setParagraph().toggleBlockquote().run() } },
-  { title: '代码块', description: '插入一段多行代码。', searchTerms: ['code', 'snippet', 'codeblock'], icon: <CommandIcon label="</>" />, command: ({ editor, range }) => { editor.chain().focus().deleteRange(range).toggleCodeBlock().run() } },
+  { title: '代码块', description: '插入一段多行代码。', searchTerms: ['code', 'snippet', 'codeblock'], icon: <CommandIcon label="</>" />, command: ({ editor, range }) => { (editor.chain().focus().deleteRange(range) as any).toggleCodeBlock().run() } }, // eslint-disable-line @typescript-eslint/no-explicit-any
   { title: '表格', description: '插入一个 3×3 的表格。', searchTerms: ['table', 'grid'], icon: <CommandIcon label="▦" />, command: ({ editor, range }) => { editor.chain().focus().deleteRange(range).insertContent(createDefaultTableContent()).run() } },
   { title: '分隔线', description: '用一条线把内容切成两个段落。', searchTerms: ['divider', 'hr', 'line'], icon: <CommandIcon label="—" />, command: ({ editor, range }) => { editor.chain().focus().deleteRange(range).setHorizontalRule().run() } },
   {
