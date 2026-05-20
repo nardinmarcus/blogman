@@ -42,7 +42,7 @@ AI_MODEL = "gpt-4o-mini"
 WORKERS_AI_MODEL = "@cf/meta/llama-3.1-8b-instruct"
 # Optional enhancement flags. Leave unset/disabled for open-source or low-cost deployments.
 # ENABLE_BACKGROUND_JOBS = "true"
-# ENABLE_WORKERS_AI = "true"
+ENABLE_WORKERS_AI = "true"
 # ENABLE_VECTOR_SEARCH = "true"
 # ENABLE_CF_IMAGE_PIPELINE = "true"
 

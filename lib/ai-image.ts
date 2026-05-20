@@ -263,7 +263,11 @@ function parseWorkersAiErrorMessage(
   return `HTTP ${resStatus}: ${resStatusText}`
 }
 
-export function resolveWorkersAiImageSize(
+function roundToMultipleOf8(n: number): number {
+  return Math.round(n / 8) * 8
+}
+
+export function resolveWorkersAiCompatImageSize(
   aspectRatio: AIImageAspectRatio,
   resolution: AIImageResolution,
 ) {
@@ -274,19 +278,19 @@ export function resolveWorkersAiImageSize(
     .map((item) => Number(item))
 
   if (!Number.isFinite(ratioWidth) || !Number.isFinite(ratioHeight) || ratioWidth <= 0 || ratioHeight <= 0) {
-    return { width: sizeTier, height: Math.round(sizeTier * 9 / 16) }
+    return { width: roundToMultipleOf8(sizeTier), height: roundToMultipleOf8(sizeTier * 9 / 16) }
   }
 
   if (ratioWidth >= ratioHeight) {
     return {
-      width: sizeTier,
-      height: Math.max(512, Math.round(sizeTier * ratioHeight / ratioWidth)),
+      width: roundToMultipleOf8(sizeTier),
+      height: roundToMultipleOf8(Math.max(512, sizeTier * ratioHeight / ratioWidth)),
     }
   }
 
   return {
-    width: Math.max(512, Math.round(sizeTier * ratioWidth / ratioHeight)),
-    height: sizeTier,
+    width: roundToMultipleOf8(Math.max(512, sizeTier * ratioWidth / ratioHeight)),
+    height: roundToMultipleOf8(sizeTier),
   }
 }
 
@@ -907,7 +911,7 @@ export async function generateEditorImage(
           throw new Error('当前图片模型通道暂不支持参考图生成，请切换到 OpenAI 兼容图片模型')
         }
 
-        const { width, height } = resolveWorkersAiImageSize(requestedAspectRatio, requestedResolution)
+        const { width, height } = resolveWorkersAiCompatImageSize(requestedAspectRatio, requestedResolution)
         const rawResult = await runWorkersAiCompatImageRequest(
           {
             apiKey: profile.api_key,

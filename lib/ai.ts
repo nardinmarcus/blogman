@@ -82,20 +82,21 @@ function getDisabledConfig(reason: string): ResolvedConfig {
 }
 
 function resolveEnv(env?: AIEnv): ResolvedConfig {
-  const externalApiKey = env?.AI_API_KEY || process.env.AI_API_KEY || ''
+  // 本地开发优先用 process.env（.env.local），生产环境用 Cloudflare env
+  const externalApiKey = process.env.AI_API_KEY || env?.AI_API_KEY || ''
 
   if (externalApiKey) {
     return {
       strategy: 'external-provider',
       apiKey: externalApiKey,
-      baseURL: env?.AI_BASE_URL || process.env.AI_BASE_URL || DEFAULT_EXTERNAL_BASE_URL,
-      model: env?.AI_MODEL || process.env.AI_MODEL || DEFAULT_EXTERNAL_MODEL,
+      baseURL: process.env.AI_BASE_URL || env?.AI_BASE_URL || DEFAULT_EXTERNAL_BASE_URL,
+      model: process.env.AI_MODEL || env?.AI_MODEL || DEFAULT_EXTERNAL_MODEL,
       temperature: 0.7,
       maxTokens: 2000,
     }
   }
 
-  if (env?.WORKERS_AI && readFlag(env?.ENABLE_WORKERS_AI || process.env.ENABLE_WORKERS_AI)) {
+  if (env?.WORKERS_AI && readFlag(process.env.ENABLE_WORKERS_AI || env?.ENABLE_WORKERS_AI)) {
     return {
       strategy: 'workers-ai',
       binding: env.WORKERS_AI,
@@ -187,13 +188,11 @@ function createTextStream(output: string): ReadableStream<Uint8Array> {
 async function runWorkersAiText(
   config: Extract<ResolvedConfig, { strategy: 'workers-ai' }>,
   messages: Array<{ role: 'system' | 'user'; content: string }>,
-  response_format?: { type: 'json_object' },
 ): Promise<string> {
   const result = await config.binding.run(config.model, {
     messages,
     max_tokens: config.maxTokens,
     temperature: config.temperature,
-    ...(response_format ? { response_format } : {}),
   })
 
   return extractWorkersAiText(result)
@@ -479,7 +478,6 @@ export async function processPost(
       let resultText = ''
 
       if (resolved.strategy === 'workers-ai') {
-        // Workers AI JSON Mode is compatible with `response_format`, but does not support streaming.
         resultText = await runWorkersAiText(
           {
             ...resolved,
@@ -487,7 +485,6 @@ export async function processPost(
             maxTokens: Math.min(resolved.maxTokens, 2000),
           },
           messages,
-          { type: 'json_object' },
         )
       } else {
         const client = getClientFromConfig(resolved)

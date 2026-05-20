@@ -6,7 +6,7 @@ import type { GeneratedEditorImage } from '@/lib/ai-image'
 import {
   extractWorkersAiImageAsset,
   generateEditorImage,
-  resolveWorkersAiImageSize,
+  resolveWorkersAiCompatImageSize,
   runWorkersAiCompatImageRequest,
 } from '@/lib/ai-image'
 import {
@@ -118,7 +118,6 @@ async function runTextGenerator(
       messages,
       max_tokens: config.maxTokens,
       temperature: config.temperature,
-      response_format: { type: 'json_object' },
       ...requestOptions,
     })
     const primary = getWorkersAiAssistantPayload(result)
@@ -472,7 +471,7 @@ async function generateWorkersAiCover(
   input: GeneratePostCoverInput,
 ) {
   const prompt = buildCoverPrompt(generator, input)
-  const { width, height } = resolveWorkersAiImageSize(generator.aspect_ratio, generator.resolution)
+  const { width, height } = resolveWorkersAiCompatImageSize(generator.aspect_ratio, generator.resolution)
 
   let rawResult: unknown
   let model = generator.workers_model || DEFAULT_IMAGE_WORKERS_MODEL

@@ -173,7 +173,12 @@ export async function GET(
       }
 
       const headers = new Headers()
-      object.writeHttpMetadata(headers)
+      const meta = object.httpMetadata
+      if (meta?.contentType) headers.set('content-type', meta.contentType)
+      if (meta?.contentEncoding) headers.set('content-encoding', meta.contentEncoding)
+      if (meta?.contentLanguage) headers.set('content-language', meta.contentLanguage)
+      if (meta?.contentDisposition) headers.set('content-disposition', meta.contentDisposition)
+      if (meta?.cacheControl) headers.set('cache-control', meta.cacheControl)
       headers.set('Content-Range', `bytes ${start}-${end}/${totalSize}`)
       headers.set('Content-Length', String(length))
       headers.set('Accept-Ranges', 'bytes')
@@ -191,7 +196,13 @@ export async function GET(
   }
 
   const headers = new Headers()
-  object.writeHttpMetadata(headers)
+  const meta = object.httpMetadata
+  if (meta?.contentType) headers.set('content-type', meta.contentType)
+  if (meta?.contentEncoding) headers.set('content-encoding', meta.contentEncoding)
+  if (meta?.contentLanguage) headers.set('content-language', meta.contentLanguage)
+  if (meta?.contentDisposition) headers.set('content-disposition', meta.contentDisposition)
+  if (meta?.cacheControl) headers.set('cache-control', meta.cacheControl)
+  if (meta?.cacheExpiry) headers.set('cache-expiry', meta.cacheExpiry.toISOString())
   headers.set('etag', object.httpEtag)
   headers.set('cache-control', 'public, max-age=31536000, immutable')
   headers.set('Accept-Ranges', 'bytes')
