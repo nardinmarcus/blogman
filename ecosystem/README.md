@@ -6,7 +6,7 @@
 
 - [`chrome-clipper`](./chrome-clipper/README.md)：浏览器网页剪藏，直接进入博客草稿箱
 - [`obsidian-publisher`](./obsidian-publisher/README.md)：从 Obsidian 一键发布到博客
-- [`qiaomu-blog-publish-skill`](./qiaomu-blog-publish-skill/README.md)：从 Claude Skill / 命令工作流直接发布
+- [`namoo-blog-publisher`](./namoo-blog-publisher/README.md)：从 Claude Skill / 命令工作流直接发布
 
 ## 统一接入方式
 

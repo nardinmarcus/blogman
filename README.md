@@ -34,7 +34,7 @@ External publishing tools that all route back to the same blog backend:
 
 - [`ecosystem/chrome-clipper`](ecosystem/chrome-clipper/) — Web page clipping to blog drafts
 - [`ecosystem/obsidian-publisher`](ecosystem/obsidian-publisher/) — One-click publish from Obsidian
-- [`ecosystem/qiaomu-blog-publish-skill`](ecosystem/qiaomu-blog-publish-skill/) — Claude Skill / CLI publish workflow
+- [`ecosystem/namoo-blog-publisher`](ecosystem/namoo-blog-publisher/) — Claude Skill / CLI publish workflow
 
 ## Deploy to Cloudflare
 
