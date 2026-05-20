@@ -130,7 +130,7 @@ export function getAiRuntimeEnv(env?: Partial<CloudflareEnv> | null): AIEnv {
 }
 
 function getClientFromConfig(config: Extract<ResolvedConfig, { strategy: 'external-provider' }>) {
-  return new OpenAI({ apiKey: config.apiKey, baseURL: config.baseURL })
+  return new OpenAI({ apiKey: config.apiKey, baseURL: config.baseURL, timeout: 30_000 })
 }
 
 function extractWorkersAiPayload(result: unknown): unknown {
@@ -182,42 +182,6 @@ function createTextStream(output: string): ReadableStream<Uint8Array> {
       controller.close()
     },
   })
-}
-
-async function collectStreamText(
-  stream: AsyncIterable<{
-    choices?: Array<{
-      delta?: {
-        content?: string | null
-        reasoning_content?: string | null
-      }
-      finish_reason?: string | null
-    }>
-  }>,
-) {
-  let content = ''
-  let reasoning = ''
-  let finishReason = ''
-
-  for await (const chunk of stream) {
-    const choice = chunk.choices?.[0]
-    const delta = choice?.delta || {}
-    if (typeof delta.content === 'string') {
-      content += delta.content
-    }
-    if (typeof delta.reasoning_content === 'string') {
-      reasoning += delta.reasoning_content
-    }
-    if (choice?.finish_reason) {
-      finishReason = choice.finish_reason
-    }
-  }
-
-  return {
-    content: content.trim(),
-    reasoning: reasoning.trim(),
-    finishReason,
-  }
 }
 
 async function runWorkersAiText(
@@ -316,8 +280,8 @@ export async function resolveConfig(env?: AIEnv, db?: D1Database, profileId?: nu
           }
         }
       }
-    } catch {
-      // DB 读取失败，降级到环境变量
+    } catch (error) {
+      console.error('[ai] resolveConfig DB 读取失败，降级到环境变量:', error)
     }
   }
 
@@ -453,27 +417,25 @@ export async function transformEditorSelectionStream(
   }
 
   const client = getClientFromConfig(config)
-  const primaryStream = await client.chat.completions.create({
+  const primaryResponse = await client.chat.completions.create({
     model: config.model,
     messages,
     temperature,
     max_tokens: config.maxTokens,
-    stream: true,
   })
-  const primary = await collectStreamText(primaryStream)
+  const primary = getExternalAssistantPayload(primaryResponse)
   if (primary.content) {
     return createTextStream(primary.content)
   }
 
   if (shouldRetryAssistantPayload(primary)) {
-    const retryStream = await client.chat.completions.create({
+    const retryResponse = await client.chat.completions.create({
       model: config.model,
       messages: retryMessages,
       temperature,
       max_tokens: Math.min(Math.max(config.maxTokens * 3, 512), 2048),
-      stream: true,
     })
-    const retried = await collectStreamText(retryStream)
+    const retried = getExternalAssistantPayload(retryResponse)
     if (retried.content) {
       return createTextStream(retried.content)
     }

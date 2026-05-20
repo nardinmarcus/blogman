@@ -18,23 +18,21 @@ vi.mock('openai', () => ({
 
 import { transformEditorSelectionStream } from '@/lib/ai'
 
-function buildStream(chunks: Array<{ content?: string; reasoning_content?: string; finish_reason?: string | null }>) {
+function buildResponse(options: {
+  content?: string
+  reasoning_content?: string
+  finish_reason?: string | null
+}) {
   return {
-    async *[Symbol.asyncIterator]() {
-      for (const chunk of chunks) {
-        yield {
-          choices: [
-            {
-              delta: {
-                ...(chunk.content !== undefined ? { content: chunk.content } : {}),
-                ...(chunk.reasoning_content !== undefined ? { reasoning_content: chunk.reasoning_content } : {}),
-              },
-              finish_reason: chunk.finish_reason ?? null,
-            },
-          ],
-        }
-      }
-    },
+    choices: [
+      {
+        message: {
+          ...(options.content !== undefined ? { content: options.content } : {}),
+          ...(options.reasoning_content !== undefined ? { reasoning_content: options.reasoning_content } : {}),
+        },
+        finish_reason: options.finish_reason ?? null,
+      },
+    ],
   }
 }
 
@@ -58,16 +56,16 @@ describe('ai transformEditorSelectionStream', () => {
     vi.clearAllMocks()
   })
 
-  it('retries when the provider streams reasoning only before the final answer', async () => {
+  it('retries when the provider returns reasoning only before the final answer', async () => {
     mocks.createCompletion
-      .mockResolvedValueOnce(buildStream([
-        { reasoning_content: '分析问题中', finish_reason: null },
-        { reasoning_content: '继续分析', finish_reason: 'length' },
-      ]))
-      .mockResolvedValueOnce(buildStream([
-        { content: '处理后的最终答案', finish_reason: null },
-        { content: '', finish_reason: 'stop' },
-      ]))
+      .mockResolvedValueOnce(buildResponse({
+        reasoning_content: '分析问题中',
+        finish_reason: 'length',
+      }))
+      .mockResolvedValueOnce(buildResponse({
+        content: '处理后的最终答案',
+        finish_reason: 'stop',
+      }))
 
     const stream = await transformEditorSelectionStream('原始文本', 'custom', {
       customPrompt: '请润色这段文本',
