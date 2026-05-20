@@ -63,7 +63,7 @@ export class PublishModal extends Modal {
     this.injectStyles();
 
     contentEl.empty();
-    contentEl.createEl("h2", { text: "发布到 Qiaomu Blog" });
+    contentEl.createEl("h2", { text: "发布到 Namoo Blog" });
 
     const loadingEl = contentEl.createDiv({
       cls: "qmblog-center-view",
@@ -172,7 +172,7 @@ export class PublishModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
 
-    contentEl.createEl("h2", { text: "发布到 Qiaomu Blog" });
+    contentEl.createEl("h2", { text: "发布到 Namoo Blog" });
 
     // Title
     new Setting(contentEl)
@@ -273,7 +273,7 @@ export class PublishModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
 
-    contentEl.createEl("h2", { text: "发布到 Qiaomu Blog" });
+    contentEl.createEl("h2", { text: "发布到 Namoo Blog" });
 
     const wrapper = contentEl.createDiv({ cls: "qmblog-center-view" });
     wrapper.createDiv({ cls: "qmblog-spinner" });

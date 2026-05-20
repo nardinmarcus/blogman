@@ -24,9 +24,9 @@ export class QmblogSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     // Header
-    containerEl.createEl("h1", { text: "Qiaomu Blog Publisher" });
+    containerEl.createEl("h1", { text: "Namoo Blog" });
     containerEl.createEl("p", {
-      text: "将 Obsidian 笔记发布到你自己的 Qiaomu Blog",
+      text: "将 Obsidian 笔记发布到 Namoo Blog",
       cls: "setting-item-description",
     });
 
@@ -104,10 +104,10 @@ export class QmblogSettingTab extends PluginSettingTab {
     usageDesc.innerHTML = `
       <ul style="margin: 8px 0; padding-left: 20px; line-height: 1.8;">
         <li>点击左侧栏 <strong>上传图标</strong> 发布当前笔记</li>
-        <li>使用命令面板搜索 <strong>「发布到 Qiaomu Blog」</strong></li>
+        <li>使用命令面板搜索 <strong>「发布到 Namoo Blog」</strong></li>
         <li>在编辑器中 <strong>右键菜单</strong> 选择发布</li>
         <li>在文件管理器中 <strong>右键文件</strong> 选择发布</li>
-        <li>点击底部状态栏 <strong>「Qiaomu Blog」</strong> 快速发布</li>
+        <li>点击底部状态栏 <strong>「Namoo Blog」</strong> 快速发布</li>
       </ul>
     `;
   }

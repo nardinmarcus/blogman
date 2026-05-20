@@ -1,10 +1,9 @@
 {
-  "id": "qiaomu-blog-publisher",
-  "name": "Qiaomu Blog Publisher",
+  "id": "namoo-blog",
+  "name": "Namoo Blog",
   "version": "1.0.0",
   "minAppVersion": "1.0.0",
-  "description": "一键发布笔记到 Qiaomu Blog 草稿",
-  "author": "joeseesun",
-  "authorUrl": "https://github.com/joeseesun",
+  "description": "一键发布笔记到 Namoo Blog",
+  "author": "Namoo",
   "isDesktopOnly": false
 }
