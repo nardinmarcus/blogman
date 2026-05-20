@@ -109,6 +109,24 @@ npm run preview
 | `npm run verify:quick` | Lint + test + build |
 | `npm run verify` | Full verification pipeline |
 
+## Sync from Upstream
+
+This repo is a fork of [qiaomu-blog-opensource](https://github.com/joeseesun/qiaomu-blog-opensource). To pull the latest changes:
+
+```bash
+# Add upstream remote (first time only)
+git remote add upstream https://github.com/joeseesun/qiaomu-blog-opensource.git
+
+# Fetch and merge
+git fetch upstream
+git merge upstream/main
+
+# Resolve conflicts if any, then push
+git push
+```
+
+**Note:** After merging, cookie/session keys and localStorage prefixes may differ if upstream changed them. Clear browser cache and re-login if needed.
+
 ## License
 
 [MIT](LICENSE)
