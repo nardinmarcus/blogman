@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Qiaomu Blog Clipper",
+  "name": "Namoo Blog Clipper",
   "version": "1.0.0",
-  "description": "一键剪藏网页到 Qiaomu Blog 草稿",
+  "description": "一键剪藏网页到 Namoo Blog 草稿",
   "permissions": ["activeTab", "storage", "scripting"],
   "host_permissions": ["<all_urls>"],
   "action": {

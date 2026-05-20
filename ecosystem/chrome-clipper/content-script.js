@@ -1,5 +1,5 @@
 /**
- * Qiaomu Blog Clipper - Content Script
+ * Namoo Blog Clipper - Content Script
  * Injected into the active tab to extract article content via Readability,
  * then convert to Markdown via Turndown.
  * Returns { title, markdown, images, url } back to the caller.
