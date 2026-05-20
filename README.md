@@ -28,32 +28,6 @@ Open-source blog system built on Next.js 16 + Cloudflare Workers + D1 + R2. Not 
 - API Token support for external integrations
 - Optional: background jobs, Workers AI, vector search, Cloudflare image pipeline
 
-## Screenshots
-
-### Homepage Themes
-
-![Homepage themes](docs/screenshots/home-themes.webp)
-
-### Editor
-
-![Editor overview](docs/screenshots/editor-overview.webp)
-
-### Ask AI / Bubble Menu
-
-![Ask AI](docs/screenshots/ask-ai.png)
-
-### Admin Settings
-
-![Admin settings](docs/screenshots/admin-settings.webp)
-
-### Publish States
-
-![Publish states](docs/screenshots/publish-states.png)
-
-### AI Image Provider
-
-![Image provider](docs/screenshots/image-provider.png)
-
 ## Ecosystem
 
 External publishing tools that all route back to the same blog backend:
