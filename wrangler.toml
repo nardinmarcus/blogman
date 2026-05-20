@@ -23,6 +23,8 @@ service = "blogman"
 
 [[d1_databases]]
 binding = "DB"
+database_name = "blogman-db"
+database_id = "5d1cadcf-e10e-4245-b07d-16c64754f00d"
 
 [[r2_buckets]]
 binding = "IMAGES"
