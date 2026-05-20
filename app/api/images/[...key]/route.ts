@@ -1,9 +1,19 @@
 import { NextRequest } from 'next/server'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 
+type R2HttpMetadata = {
+  contentType?: string
+  contentEncoding?: string
+  contentLanguage?: string
+  contentDisposition?: string
+  cacheControl?: string
+  cacheExpiry?: Date
+}
+
 type StoredObject = {
   body: ReadableStream | null
   httpEtag: string
+  httpMetadata: R2HttpMetadata
   size: number
   writeHttpMetadata: (headers: Headers) => void
   range?: (range: { offset: number; length?: number }) => ReadableStream
