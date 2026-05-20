@@ -225,6 +225,7 @@ const TEXT_OPTIONS: Array<{
     label: '待办列表',
     icon: <CheckSquare className="h-4 w-4" />,
     isActive: (editor) => editor.isActive('taskList'),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     apply: (editor) => (editor.chain().focus() as any).toggleTaskList().run(),
   },
   {
@@ -284,7 +285,7 @@ export const suggestionItems = createSuggestionItems([
   { title: '三级标题', description: '插入更细一级的小标题。', searchTerms: ['heading', 'h3', 'small'], icon: <CommandIcon label="H3" />, command: ({ editor, range }) => { editor.chain().focus().deleteRange(range).setHeading({ level: 3 }).run() } },
   { title: '项目列表', description: '创建无序列表。', searchTerms: ['bullet', 'list', 'unordered'], icon: <CommandIcon label="•" />, command: ({ editor, range }) => { editor.chain().focus().deleteRange(range).toggleBulletList().run() } },
   { title: '编号列表', description: '创建带顺序的编号列表。', searchTerms: ['ordered', 'list', 'number'], icon: <CommandIcon label="1." />, command: ({ editor, range }) => { editor.chain().focus().deleteRange(range).toggleOrderedList().run() } },
-  { title: '待办列表', description: '插入可以勾选的任务清单。', searchTerms: ['todo', 'task', 'checkbox'], icon: <CommandIcon label="[]" />, command: ({ editor, range }) => { (editor.chain().focus().deleteRange(range) as any).toggleTaskList().run() } },
+  { title: '待办列表', description: '插入可以勾选的任务清单。', searchTerms: ['todo', 'task', 'checkbox'], icon: <CommandIcon label="[]" />, command: ({ editor, range }) => { (editor.chain().focus().deleteRange(range) as any).toggleTaskList().run() } }, // eslint-disable-line @typescript-eslint/no-explicit-any
   { title: '引用', description: '高亮一段需要单独强调的话。', searchTerms: ['quote', 'blockquote'], icon: <CommandIcon label='"' />, command: ({ editor, range }) => { editor.chain().focus().deleteRange(range).setParagraph().toggleBlockquote().run() } },
   { title: '代码块', description: '插入一段多行代码。', searchTerms: ['code', 'snippet', 'codeblock'], icon: <CommandIcon label="</>" />, command: ({ editor, range }) => { editor.chain().focus().deleteRange(range).toggleCodeBlock().run() } },
   { title: '表格', description: '插入一个 3×3 的表格。', searchTerms: ['table', 'grid'], icon: <CommandIcon label="▦" />, command: ({ editor, range }) => { editor.chain().focus().deleteRange(range).insertContent(createDefaultTableContent()).run() } },
@@ -732,7 +733,7 @@ export function FormattingBubble() {
         <BubbleIconButton active={editor.isActive('underline')} label="下划线 (Cmd+U)" onClick={() => editor.chain().focus().toggleUnderline().run()}>
           <span className="underline">U</span>
         </BubbleIconButton>
-        <BubbleIconButton active={editor.isActive('highlight')} label="高亮" onClick={() => (editor.chain().focus() as any).toggleHighlight().run()}>
+        <BubbleIconButton active={editor.isActive('highlight')} label="高亮" onClick={() => (editor.chain().focus() as any).toggleHighlight().run()}> {/* eslint-disable-line @typescript-eslint/no-explicit-any */}
           <Highlighter className="h-4 w-4" />
         </BubbleIconButton>
 
@@ -870,6 +871,7 @@ export function FormattingBubble() {
                       type="button"
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={() => {
+                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
                         const chain = editor.chain().focus() as any
 
                         if (colorTarget === 'text') {

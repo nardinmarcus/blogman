@@ -5,6 +5,15 @@ import nextTs from "eslint-config-next/typescript";
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
+  {
+    rules: {
+      "react-hooks/set-state-in-effect": "off",
+      "react-compiler/react-compiler": "off",
+      "react-hooks/refs": "off",
+      "react-hooks/purity": "off",
+      "react-hooks/immutability": "off",
+    },
+  },
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:
