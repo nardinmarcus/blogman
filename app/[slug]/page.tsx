@@ -8,6 +8,7 @@ import { SiteFooter } from '@/components/SiteFooter'
 import { FrontPostAdminBoundary } from '@/components/FrontPostAdminBoundary'
 import { PasswordPrompt } from '@/components/PasswordPrompt'
 import { DownloadMarkdown } from '@/components/DownloadMarkdown'
+import { CopyArticleLink } from '@/components/CopyArticleLink'
 import { TwitterEmbedsEnhancer } from '@/components/TwitterEmbedsEnhancer'
 import { getSiteHeaderData } from '@/lib/site'
 import { getRelatedPosts } from '@/lib/related-content'
@@ -182,6 +183,11 @@ export default async function PostPage({
     ? await getRelatedPosts(db, env, post, 3).catch(() => ({ strategy: 'fts' as const, source: 'rules' as const, results: [] }))
     : { strategy: 'fts' as const, source: 'rules' as const, results: [] }
   const contentContainerId = `post-content-${post.slug}`
+  const baseUrl = getSiteUrl()
+  const canonicalUrl = `${baseUrl}/${post.slug}`
+  const explicitCoverImage = post.cover_image
+    ? resolvePostCoverImage(post, { baseUrl })
+    : ''
 
   return (
     <div className="min-h-screen bg-[var(--background)] flex flex-col">
@@ -195,7 +201,6 @@ export default async function PostPage({
 
       <main className="page-main mx-auto w-full max-w-3xl px-4 sm:px-6 flex-1 py-8 sm:py-12">
         {searchIndexable && (() => {
-          const baseUrl = getSiteUrl()
           const ogImage = resolvePostCoverImage(post, { baseUrl })
           const jsonLd = {
             '@context': 'https://schema.org',
@@ -207,8 +212,8 @@ export default async function PostPage({
             publisher: { '@type': 'Organization', name: 'Namoo', url: baseUrl, logo: { '@type': 'ImageObject', url: `${baseUrl}/icon-512.png` } },
             datePublished: new Date(post.published_at * 1000).toISOString(),
             dateModified: new Date(post.updated_at * 1000).toISOString(),
-            mainEntityOfPage: { '@type': 'WebPage', '@id': `${baseUrl}/${post.slug}` },
-            url: `${baseUrl}/${post.slug}`,
+            mainEntityOfPage: { '@type': 'WebPage', '@id': canonicalUrl },
+            url: canonicalUrl,
           }
           const breadcrumbLd = {
             '@context': 'https://schema.org',
@@ -218,7 +223,7 @@ export default async function PostPage({
               ...(post.category && activeCategorySlug
                 ? [{ '@type': 'ListItem', position: 2, name: post.category, item: `${baseUrl}/category/${activeCategorySlug}` }]
                 : []),
-              { '@type': 'ListItem', position: post.category ? 3 : 2, name: post.title, item: `${baseUrl}/${post.slug}` },
+              { '@type': 'ListItem', position: post.category ? 3 : 2, name: post.title, item: canonicalUrl },
             ],
           }
           return (
@@ -276,9 +281,23 @@ export default async function PostPage({
                 <span>{post.view_count} 次阅读</span>
                 <span aria-hidden>·</span>
                 <span>约 {readingMinutes} 分钟</span>
+              </div>
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <CopyArticleLink url={canonicalUrl} />
                 <DownloadMarkdown title={post.title} html={post.html} />
               </div>
             </header>
+
+            {explicitCoverImage ? (
+              <div className="mb-8 overflow-hidden rounded-2xl border border-[var(--editor-line)] bg-[var(--editor-panel)] shadow-sm sm:mb-10">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={explicitCoverImage}
+                  alt={post.title}
+                  className="aspect-[16/9] w-full object-cover"
+                />
+              </div>
+            ) : null}
 
             <div
               id={contentContainerId}

@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
-import { Eye, Link2, Edit, Pin, PinOff, EyeOff, Eye as EyeIcon, Lock, Unlock, Check, FileText, Trash2 } from 'lucide-react'
+import { Eye, Link2, Edit, Pin, PinOff, EyeOff, Eye as EyeIcon, Lock, Unlock, Check, FileText, Trash2, MoreHorizontal } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import { useToast } from '@/components/Toast'
 import { Modal } from '@/components/Modal'
@@ -14,6 +14,7 @@ import { getSiteUrl } from '@/lib/site-config'
 interface PostRowProps {
   post: PostWithTags
   categories: string[]
+  preferMenuUp?: boolean
 }
 
 function formatDate(ts: number) {
@@ -31,13 +32,14 @@ function formatDate(ts: number) {
   })
 }
 
-export function PostRow({ post, categories }: PostRowProps) {
+export function PostRow({ post, categories, preferMenuUp = false }: PostRowProps) {
   const [showPasswordModal, setShowPasswordModal] = useState(false)
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [showPermanentModal, setShowPermanentModal] = useState(false)
   const [showPinModal, setShowPinModal] = useState(false)
   const [showHiddenModal, setShowHiddenModal] = useState(false)
   const [showStatusModal, setShowStatusModal] = useState(false)
+  const [showMoreMenu, setShowMoreMenu] = useState(false)
   const [loading, setLoading] = useState(false)
 
   const router = useRouter()
@@ -50,6 +52,22 @@ export function PostRow({ post, categories }: PostRowProps) {
     : baseArticleUrl
 
   const isDeleted = post.status === 'deleted'
+  const statusLabel = isDeleted ? '已删除' : post.status === 'published' ? '已发布' : '草稿'
+  const statusChipClass = isDeleted
+    ? 'border-gray-200 bg-gray-100 text-gray-500'
+    : post.status === 'published'
+      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+      : 'border-amber-200 bg-amber-50 text-amber-700'
+  const menuButtonClass =
+    'flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium text-[var(--editor-ink)] transition-colors hover:bg-[var(--editor-soft)] disabled:cursor-not-allowed disabled:opacity-50'
+  const menuVerticalClass = preferMenuUp ? 'bottom-full mb-2' : 'top-full mt-2'
+  const desktopMenuClass = `absolute right-0 z-30 w-48 rounded-xl border border-[var(--editor-line)] bg-[var(--editor-panel)] p-1 shadow-xl ${menuVerticalClass}`
+  const mobileMenuClass = `absolute left-0 z-30 w-48 rounded-xl border border-[var(--editor-line)] bg-[var(--editor-panel)] p-1 shadow-xl ${menuVerticalClass}`
+
+  const handleMoreAction = (action: () => void) => {
+    setShowMoreMenu(false)
+    action()
+  }
 
   // 分类选项
   const categoryOptions = [
@@ -258,7 +276,7 @@ export function PostRow({ post, categories }: PostRowProps) {
   return (
     <>
       {/* 桌面端 */}
-      <div className="hidden md:grid grid-cols-[50px_1fr_120px_90px_200px] gap-3 px-5 py-3 hover:bg-[var(--editor-panel)] transition-colors items-center">
+      <div className="hidden md:grid grid-cols-[50px_1fr_120px_90px_150px] gap-3 px-5 py-3 hover:bg-[var(--editor-panel)] transition-colors items-center">
         {/* 状态列 */}
         <div className="flex flex-col items-center gap-1.5">
           {/* 状态圆点 */}
@@ -288,12 +306,36 @@ export function PostRow({ post, categories }: PostRowProps) {
 
         {/* 标题列 */}
         <div className="min-w-0">
-          <Link
-            href={`/editor?edit=${post.slug}`}
-            className="font-medium text-[var(--editor-ink)] hover:text-[var(--editor-accent)] transition-colors line-clamp-1 block"
-          >
-            {post.title}
-          </Link>
+          <div className="flex min-w-0 items-center gap-2">
+            <Link
+              href={`/editor?edit=${post.slug}`}
+              className="block min-w-0 truncate font-medium text-[var(--editor-ink)] transition-colors hover:text-[var(--editor-accent)]"
+            >
+              {post.title}
+            </Link>
+            <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusChipClass}`}>
+              {statusLabel}
+            </span>
+          </div>
+          {(post.is_pinned === 1 || post.password || post.is_hidden === 1) && (
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {post.is_pinned === 1 && (
+                <span className="rounded-full bg-[var(--editor-accent)]/8 px-2 py-0.5 text-[10px] font-medium text-[var(--editor-accent)]">
+                  置顶
+                </span>
+              )}
+              {post.password && (
+                <span className="rounded-full bg-[var(--editor-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--editor-muted)]">
+                  加密
+                </span>
+              )}
+              {post.is_hidden === 1 && (
+                <span className="rounded-full bg-[var(--editor-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--editor-muted)]">
+                  链接访问
+                </span>
+              )}
+            </div>
+          )}
           {post.description && (
             <p className="text-xs text-[var(--editor-muted)] line-clamp-1 leading-relaxed mt-0.5">
               {post.description}
@@ -328,6 +370,7 @@ export function PostRow({ post, categories }: PostRowProps) {
           {isDeleted ? (
             <>
               <button
+                type="button"
                 onClick={handleRestore}
                 disabled={loading}
                 className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
@@ -336,6 +379,7 @@ export function PostRow({ post, categories }: PostRowProps) {
                 <Check className="w-4 h-4 text-emerald-600" />
               </button>
               <button
+                type="button"
                 onClick={() => setShowPermanentModal(true)}
                 disabled={loading}
                 className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
@@ -347,6 +391,7 @@ export function PostRow({ post, categories }: PostRowProps) {
           ) : (
             <>
               <button
+                type="button"
                 onClick={handleView}
                 className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors"
                 title="查看文章"
@@ -354,6 +399,7 @@ export function PostRow({ post, categories }: PostRowProps) {
                 <Eye className="w-4 h-4 text-[var(--stone-gray)]" />
               </button>
               <button
+                type="button"
                 onClick={handleCopyLink}
                 className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors"
                 title="复制链接"
@@ -367,61 +413,83 @@ export function PostRow({ post, categories }: PostRowProps) {
               >
                 <Edit className="w-4 h-4 text-[var(--stone-gray)]" />
               </Link>
-              <button
-                onClick={() => setShowPinModal(true)}
-                disabled={loading}
-                className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
-                title={post.is_pinned === 1 ? '取消置顶' : '置顶'}
-              >
-                {post.is_pinned === 1 ? (
-                  <PinOff className="w-4 h-4 text-[var(--editor-accent)]" />
-                ) : (
-                  <Pin className="w-4 h-4 text-[var(--stone-gray)]" />
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setShowMoreMenu((value) => !value)}
+                  disabled={loading}
+                  aria-expanded={showMoreMenu}
+                  aria-label="更多操作"
+                  className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
+                  title="更多操作"
+                >
+                  <MoreHorizontal className="w-4 h-4 text-[var(--stone-gray)]" />
+                </button>
+                {showMoreMenu && (
+                  <div className={desktopMenuClass}>
+                    <button
+                      type="button"
+                      onClick={() => handleMoreAction(() => setShowPinModal(true))}
+                      disabled={loading}
+                      className={menuButtonClass}
+                    >
+                      {post.is_pinned === 1 ? (
+                        <PinOff className="w-4 h-4 text-[var(--editor-accent)]" />
+                      ) : (
+                        <Pin className="w-4 h-4 text-[var(--stone-gray)]" />
+                      )}
+                      <span>{post.is_pinned === 1 ? '取消置顶' : '置顶文章'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleMoreAction(() => setShowHiddenModal(true))}
+                      disabled={loading}
+                      className={menuButtonClass}
+                    >
+                      {post.is_hidden === 1 ? (
+                        <EyeOff className="w-4 h-4 text-[var(--stone-gray)]" />
+                      ) : (
+                        <EyeIcon className="w-4 h-4 text-[var(--stone-gray)]" />
+                      )}
+                      <span>{post.is_hidden === 1 ? '取消隐藏' : '隐藏文章'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleMoreAction(() => setShowPasswordModal(true))}
+                      className={menuButtonClass}
+                    >
+                      {post.password ? (
+                        <Lock className="w-4 h-4 text-[var(--editor-accent)]" />
+                      ) : (
+                        <Unlock className="w-4 h-4 text-[var(--stone-gray)]" />
+                      )}
+                      <span>{post.password ? '管理密码' : '设置密码'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleMoreAction(() => setShowStatusModal(true))}
+                      disabled={loading}
+                      className={menuButtonClass}
+                    >
+                      {post.status === 'published' ? (
+                        <FileText className="w-4 h-4 text-amber-500" />
+                      ) : (
+                        <Check className="w-4 h-4 text-emerald-600" />
+                      )}
+                      <span>{post.status === 'published' ? '转为草稿' : '发布文章'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleMoreAction(() => setShowDeleteModal(true))}
+                      disabled={loading}
+                      className={`${menuButtonClass} text-rose-600 hover:bg-rose-50`}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      <span>删除文章</span>
+                    </button>
+                  </div>
                 )}
-              </button>
-              <button
-                onClick={() => setShowHiddenModal(true)}
-                disabled={loading}
-                className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
-                title={post.is_hidden === 1 ? '取消隐藏' : '隐藏'}
-              >
-                {post.is_hidden === 1 ? (
-                  <EyeOff className="w-4 h-4 text-[var(--stone-gray)]" />
-                ) : (
-                  <EyeIcon className="w-4 h-4 text-[var(--stone-gray)]" />
-                )}
-              </button>
-              <button
-                onClick={() => setShowPasswordModal(true)}
-                className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors"
-                title={post.password ? '管理密码' : '设置密码'}
-              >
-                {post.password ? (
-                  <Lock className="w-4 h-4 text-[var(--editor-accent)]" />
-                ) : (
-                  <Unlock className="w-4 h-4 text-[var(--stone-gray)]" />
-                )}
-              </button>
-              <button
-                onClick={() => setShowStatusModal(true)}
-                disabled={loading}
-                className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
-                title={post.status === 'published' ? '转为草稿' : '发布'}
-              >
-                {post.status === 'published' ? (
-                  <FileText className="w-4 h-4 text-amber-500" />
-                ) : (
-                  <Check className="w-4 h-4 text-emerald-600" />
-                )}
-              </button>
-              <button
-                onClick={() => setShowDeleteModal(true)}
-                disabled={loading}
-                className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
-                title="删除"
-              >
-                <Trash2 className="w-4 h-4 text-rose-500" />
-              </button>
+              </div>
             </>
           )}
         </div>
@@ -449,12 +517,38 @@ export function PostRow({ post, categories }: PostRowProps) {
           </div>
 
           {/* 标题 */}
-          <Link
-            href={`/editor?edit=${post.slug}`}
-            className="font-medium text-[var(--editor-ink)] hover:text-[var(--editor-accent)] transition-colors flex-1 line-clamp-2"
-          >
-            {post.title}
-          </Link>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <Link
+                href={`/editor?edit=${post.slug}`}
+                className="min-w-0 flex-1 line-clamp-2 font-medium text-[var(--editor-ink)] transition-colors hover:text-[var(--editor-accent)]"
+              >
+                {post.title}
+              </Link>
+              <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusChipClass}`}>
+                {statusLabel}
+              </span>
+            </div>
+            {(post.is_pinned === 1 || post.password || post.is_hidden === 1) && (
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {post.is_pinned === 1 && (
+                  <span className="rounded-full bg-[var(--editor-accent)]/8 px-2 py-0.5 text-[10px] font-medium text-[var(--editor-accent)]">
+                    置顶
+                  </span>
+                )}
+                {post.password && (
+                  <span className="rounded-full bg-[var(--editor-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--editor-muted)]">
+                    加密
+                  </span>
+                )}
+                {post.is_hidden === 1 && (
+                  <span className="rounded-full bg-[var(--editor-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--editor-muted)]">
+                    链接访问
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         {post.description && (
@@ -484,6 +578,7 @@ export function PostRow({ post, categories }: PostRowProps) {
           {isDeleted ? (
             <>
               <button
+                type="button"
                 onClick={handleRestore}
                 disabled={loading}
                 className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
@@ -492,6 +587,7 @@ export function PostRow({ post, categories }: PostRowProps) {
                 <Check className="w-4 h-4 text-emerald-600" />
               </button>
               <button
+                type="button"
                 onClick={() => setShowPermanentModal(true)}
                 disabled={loading}
                 className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
@@ -502,30 +598,105 @@ export function PostRow({ post, categories }: PostRowProps) {
             </>
           ) : (
             <>
-              <button onClick={handleView} className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors">
+              <button
+                type="button"
+                onClick={handleView}
+                className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors"
+                aria-label="查看文章"
+              >
                 <Eye className="w-4 h-4 text-[var(--stone-gray)]" />
               </button>
-              <button onClick={handleCopyLink} className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors">
+              <button
+                type="button"
+                onClick={handleCopyLink}
+                className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors"
+                aria-label="复制链接"
+              >
                 <Link2 className="w-4 h-4 text-[var(--stone-gray)]" />
               </button>
-              <Link href={`/editor?edit=${post.slug}`} className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors">
+              <Link
+                href={`/editor?edit=${post.slug}`}
+                className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors"
+                aria-label="编辑"
+              >
                 <Edit className="w-4 h-4 text-[var(--stone-gray)]" />
               </Link>
-              <button onClick={() => setShowPinModal(true)} disabled={loading} className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50">
-                {post.is_pinned === 1 ? <PinOff className="w-4 h-4 text-[var(--editor-accent)]" /> : <Pin className="w-4 h-4 text-[var(--stone-gray)]" />}
-              </button>
-              <button onClick={() => setShowHiddenModal(true)} disabled={loading} className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50">
-                {post.is_hidden === 1 ? <EyeOff className="w-4 h-4 text-[var(--stone-gray)]" /> : <EyeIcon className="w-4 h-4 text-[var(--stone-gray)]" />}
-              </button>
-              <button onClick={() => setShowPasswordModal(true)} className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors">
-                {post.password ? <Lock className="w-4 h-4 text-[var(--editor-accent)]" /> : <Unlock className="w-4 h-4 text-[var(--stone-gray)]" />}
-              </button>
-              <button onClick={() => setShowStatusModal(true)} disabled={loading} className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50">
-                {post.status === 'published' ? <FileText className="w-4 h-4 text-amber-500" /> : <Check className="w-4 h-4 text-emerald-600" />}
-              </button>
-              <button onClick={() => setShowDeleteModal(true)} disabled={loading} className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50">
-                <Trash2 className="w-4 h-4 text-rose-500" />
-              </button>
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setShowMoreMenu((value) => !value)}
+                  disabled={loading}
+                  aria-expanded={showMoreMenu}
+                  aria-label="更多操作"
+                  className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
+                >
+                  <MoreHorizontal className="w-4 h-4 text-[var(--stone-gray)]" />
+                </button>
+                {showMoreMenu && (
+                  <div className={mobileMenuClass}>
+                    <button
+                      type="button"
+                      onClick={() => handleMoreAction(() => setShowPinModal(true))}
+                      disabled={loading}
+                      className={menuButtonClass}
+                    >
+                      {post.is_pinned === 1 ? (
+                        <PinOff className="w-4 h-4 text-[var(--editor-accent)]" />
+                      ) : (
+                        <Pin className="w-4 h-4 text-[var(--stone-gray)]" />
+                      )}
+                      <span>{post.is_pinned === 1 ? '取消置顶' : '置顶文章'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleMoreAction(() => setShowHiddenModal(true))}
+                      disabled={loading}
+                      className={menuButtonClass}
+                    >
+                      {post.is_hidden === 1 ? (
+                        <EyeOff className="w-4 h-4 text-[var(--stone-gray)]" />
+                      ) : (
+                        <EyeIcon className="w-4 h-4 text-[var(--stone-gray)]" />
+                      )}
+                      <span>{post.is_hidden === 1 ? '取消隐藏' : '隐藏文章'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleMoreAction(() => setShowPasswordModal(true))}
+                      className={menuButtonClass}
+                    >
+                      {post.password ? (
+                        <Lock className="w-4 h-4 text-[var(--editor-accent)]" />
+                      ) : (
+                        <Unlock className="w-4 h-4 text-[var(--stone-gray)]" />
+                      )}
+                      <span>{post.password ? '管理密码' : '设置密码'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleMoreAction(() => setShowStatusModal(true))}
+                      disabled={loading}
+                      className={menuButtonClass}
+                    >
+                      {post.status === 'published' ? (
+                        <FileText className="w-4 h-4 text-amber-500" />
+                      ) : (
+                        <Check className="w-4 h-4 text-emerald-600" />
+                      )}
+                      <span>{post.status === 'published' ? '转为草稿' : '发布文章'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleMoreAction(() => setShowDeleteModal(true))}
+                      disabled={loading}
+                      className={`${menuButtonClass} text-rose-600 hover:bg-rose-50`}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      <span>删除文章</span>
+                    </button>
+                  </div>
+                )}
+              </div>
             </>
           )}
         </div>

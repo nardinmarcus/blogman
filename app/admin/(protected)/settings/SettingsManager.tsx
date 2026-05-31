@@ -86,6 +86,7 @@ export function SettingsManager({
     {
       id: 'nav',
       label: '导航设置',
+      group: '站点',
       content: (
         <div className="space-y-4">
           {msg && (
@@ -104,11 +105,13 @@ export function SettingsManager({
     {
       id: 'categories',
       label: '分类设置',
+      group: '站点',
       content: <CategoryManager initialCategories={initialCategories} />,
     },
     {
       id: 'code',
       label: '自定义代码',
+      group: '站点',
       content: (
         <div className="space-y-4">
           {msg && (
@@ -130,6 +133,7 @@ export function SettingsManager({
     {
       id: 'theme',
       label: '主题管理',
+      group: '外观',
       content: (
         <ThemeManager
           initialTheme={normalizeTheme(initialDefaultTheme)}
@@ -142,36 +146,43 @@ export function SettingsManager({
     {
       id: 'tokens',
       label: '第三方发布',
+      group: '发布',
       content: <ThirdPartyPublishingManager />,
     },
     {
       id: 'ai-provider',
       label: 'AI 模型',
+      group: 'AI',
       content: <AiProviderManager />,
     },
     {
       id: 'ai-actions',
       label: 'AI 操作',
+      group: 'AI',
       content: <AiActionsManager />,
     },
     {
       id: 'ai-image-provider',
       label: '图片模型',
+      group: 'AI',
       content: <AiImageProviderManager />,
     },
     {
       id: 'ai-image-actions',
       label: '图片提示',
+      group: 'AI',
       content: <AiImageActionsManager />,
     },
     {
       id: 'ai-post-generators',
       label: '文章生成',
+      group: 'AI',
       content: <AiPostGeneratorsManager />,
     },
     {
       id: 'runtime',
       label: '运行环境',
+      group: '运行',
       content: <RuntimeCapabilitiesPanel capabilities={initialRuntimeCapabilities} />,
     },
   ]

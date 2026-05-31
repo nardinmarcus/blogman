@@ -166,6 +166,11 @@ export function ImageGenerationModal({
     }))
   }, [profiles])
 
+  const selectedProfile = useMemo(
+    () => profiles.find((profile) => profile.id === selectedProfileId) || null,
+    [profiles, selectedProfileId],
+  )
+
   const canGenerate = Boolean(prompt.trim() || contextText.trim())
 
   const syncHistoryItems = useCallback(() => {
@@ -380,9 +385,14 @@ export function ImageGenerationModal({
 
     if (generationMode === 'background') {
       setGenerating(true)
+      const promptLabel = prompt.trim()
+        || selectedActionConfig?.label
+        || '自定义图片'
 
       startBackgroundTask({
         toast,
+        startedMessage: `「${promptLabel}」生成中…`,
+        successMessage: `「${promptLabel}」已生成，可在最近生成里查看`,
         errorPrefix: '图片生成失败',
         run: requestImage,
         onSuccess: (image) => {
@@ -413,7 +423,7 @@ export function ImageGenerationModal({
     } finally {
       setGenerating(false)
     }
-  }, [canGenerate, closeOnGenerate, generating, generationMode, onClose, requestImage, storeHistoryItem, toast])
+  }, [canGenerate, closeOnGenerate, generating, generationMode, onClose, prompt, requestImage, selectedActionConfig, storeHistoryItem, toast])
 
   if (!open) return null
 
@@ -429,6 +439,11 @@ export function ImageGenerationModal({
           <div className="flex items-start justify-between gap-4 border-b border-[var(--editor-line)] px-5 py-4">
             <div className="min-w-0">
               <div className="text-base font-semibold text-[var(--editor-ink)]">生成图片</div>
+              <div className="mt-1 truncate text-xs text-[var(--editor-muted)]">
+                {selectedProfile
+                  ? `${selectedProfile.name} · ${selectedProfile.model}`
+                  : '选择图片模型后开始生成'}
+              </div>
             </div>
             <button
               type="button"

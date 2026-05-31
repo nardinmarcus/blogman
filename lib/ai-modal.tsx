@@ -318,14 +318,24 @@ export function AIModal({
   }, [hasSelectionContext, initialContext, isOpen])
 
   const applyAiAction = (actionKey: string, customInput?: string, actionLabel?: string) => {
-    if (!effectiveInputText || aiLoadingRef.current) return
+    if (!effectiveInputText) {
+      toast.error('没有可处理的文本，请重新选中文本后再试')
+      return
+    }
+    if (aiLoadingRef.current) {
+      toast.info('AI 正在处理上一条请求')
+      return
+    }
 
     const promptLabel = actionLabel || customInput || '自定义提问'
 
     requestClose()
+    aiLoadingRef.current = true
 
     startBackgroundTask({
       toast,
+      startedMessage: `「${promptLabel}」处理中…`,
+      successMessage: `「${promptLabel}」处理完成，可在历史生成中查看`,
       errorPrefix: 'AI 处理失败',
       run: async () => {
         const res = await fetch('/api/editor/ai', {
@@ -361,6 +371,9 @@ export function AIModal({
       },
       onSuccess: (output) => {
         storeHistoryItem(output, promptLabel)
+      },
+      onSettled: () => {
+        aiLoadingRef.current = false
       },
     })
   }

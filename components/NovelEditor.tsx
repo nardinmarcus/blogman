@@ -122,6 +122,13 @@ type DraftMetaState = {
 
 type MetaGenerationTarget = 'summary' | 'tags' | 'slug' | 'cover'
 
+const METADATA_TARGET_LABEL: Record<MetaGenerationTarget, string> = {
+  summary: '摘要',
+  tags: '标签',
+  slug: 'Slug',
+  cover: '封面',
+}
+
 export function NovelEditor({ initialData }: NovelEditorProps = {}) {
   // ── Core state ──
   const [draftReady, setDraftReady] = useState(false)
@@ -647,6 +654,7 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
     const editor = editorRef.current
     const normalizedTitle = latestTitleRef.current.trim() || title.trim()
     const content = editor?.getText({ blockSeparator: '\n\n' }).trim() || ''
+    const targetLabel = METADATA_TARGET_LABEL[target]
 
     if (!normalizedTitle && !content) {
       setFeedback({ type: 'error', message: '先写标题或正文，再生成内容。' })
@@ -663,6 +671,8 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
 
     startBackgroundTask({
       toast,
+      startedMessage: `正在生成${targetLabel}…`,
+      successMessage: `${targetLabel}已更新`,
       errorPrefix: 'AI 生成失败',
       run: async () => {
         const res = await fetch('/api/editor/ai-post-metadata', {
@@ -944,6 +954,8 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
     { key: 'encrypted' as const, label: '加密访问', desc: '需要密码才能查看', Icon: Lock },
     { key: 'unlisted' as const, label: '链接访问', desc: '不在首页显示，但可通过链接访问', Icon: Link2 },
   ]
+  const activeStatusConfig = STATUS_CONFIG.find((item) => item.key === publishStatus) ?? STATUS_CONFIG[0]
+  const ActiveStatusIcon = activeStatusConfig.Icon
 
   // ── Save status display ──
   const saveStatusText = saveState === 'saved' ? `已保存 · ${relativeTime(lastSavedAt)}` :
@@ -1286,6 +1298,28 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
                 </button>
               </div>
 
+              <div className="rounded-xl border border-[var(--editor-line)] bg-[var(--editor-panel)] p-3">
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--editor-soft)] text-[var(--editor-accent)]">
+                    <ActiveStatusIcon className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-[var(--editor-ink)]">{activeStatusConfig.label}</div>
+                    <div className={`mt-0.5 truncate text-xs ${saveStatusColor}`}>{saveStatusText}</div>
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                  <div className="rounded-lg bg-[var(--editor-soft)] px-2.5 py-2">
+                    <div className="text-[var(--stone-gray)]">字数</div>
+                    <div className="mt-0.5 font-medium text-[var(--editor-ink)] tabular-nums">{charCount.toLocaleString()}</div>
+                  </div>
+                  <div className="rounded-lg bg-[var(--editor-soft)] px-2.5 py-2">
+                    <div className="text-[var(--stone-gray)]">阅读</div>
+                    <div className="mt-0.5 font-medium text-[var(--editor-ink)]">{calcReadTime(charCount)}</div>
+                  </div>
+                </div>
+              </div>
+
               {/* Tags */}
               <div>
                 <div className="mb-2 flex items-center justify-between gap-2">
@@ -1294,11 +1328,12 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
                     type="button"
                     onClick={() => void handleGenerateMetadata('tags')}
                     disabled={isMetadataTargetPending('tags')}
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--editor-line)] bg-[var(--editor-panel)] text-[var(--stone-gray)] transition hover:border-[var(--editor-accent)]/40 hover:text-[var(--editor-accent)] disabled:cursor-not-allowed disabled:opacity-50"
+                    className="inline-flex h-7 items-center gap-1 rounded-lg border border-[var(--editor-line)] bg-[var(--editor-panel)] px-2 text-[11px] font-medium text-[var(--stone-gray)] transition hover:border-[var(--editor-accent)]/40 hover:text-[var(--editor-accent)] disabled:cursor-not-allowed disabled:opacity-50"
                     title="AI 生成标签"
                     aria-label="AI 生成标签"
                   >
                     {isMetadataTargetPending('tags') ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <WandSparkles className="h-3.5 w-3.5" />}
+                    <span>{isMetadataTargetPending('tags') ? '生成中' : tags.length > 0 ? '重生成' : '生成'}</span>
                   </button>
                 </div>
                 <div className="flex flex-wrap gap-1.5 mb-2">
@@ -1336,11 +1371,12 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
                     type="button"
                     onClick={() => void handleGenerateMetadata('summary')}
                     disabled={isMetadataTargetPending('summary')}
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--editor-line)] bg-[var(--editor-panel)] text-[var(--stone-gray)] transition hover:border-[var(--editor-accent)]/40 hover:text-[var(--editor-accent)] disabled:cursor-not-allowed disabled:opacity-50"
+                    className="inline-flex h-7 items-center gap-1 rounded-lg border border-[var(--editor-line)] bg-[var(--editor-panel)] px-2 text-[11px] font-medium text-[var(--stone-gray)] transition hover:border-[var(--editor-accent)]/40 hover:text-[var(--editor-accent)] disabled:cursor-not-allowed disabled:opacity-50"
                     title="AI 生成摘要"
                     aria-label="AI 生成摘要"
                   >
                     {isMetadataTargetPending('summary') ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <WandSparkles className="h-3.5 w-3.5" />}
+                    <span>{isMetadataTargetPending('summary') ? '生成中' : description ? '重生成' : '生成'}</span>
                   </button>
                 </div>
                 <textarea
@@ -1365,11 +1401,12 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
                     type="button"
                     onClick={() => void handleGenerateMetadata('cover')}
                     disabled={isMetadataTargetPending('cover')}
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--editor-line)] bg-[var(--editor-panel)] text-[var(--stone-gray)] transition hover:border-[var(--editor-accent)]/40 hover:text-[var(--editor-accent)] disabled:cursor-not-allowed disabled:opacity-50"
+                    className="inline-flex h-7 items-center gap-1 rounded-lg border border-[var(--editor-line)] bg-[var(--editor-panel)] px-2 text-[11px] font-medium text-[var(--stone-gray)] transition hover:border-[var(--editor-accent)]/40 hover:text-[var(--editor-accent)] disabled:cursor-not-allowed disabled:opacity-50"
                     title="AI 生成封面"
                     aria-label="AI 生成封面"
                   >
                     {isMetadataTargetPending('cover') ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <WandSparkles className="h-3.5 w-3.5" />}
+                    <span>{isMetadataTargetPending('cover') ? '生成中' : coverImage ? '重生成' : '生成'}</span>
                   </button>
                 </div>
                 {coverImage ? (
@@ -1425,11 +1462,12 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
                     type="button"
                     onClick={() => void handleGenerateMetadata('slug')}
                     disabled={isMetadataTargetPending('slug')}
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--editor-line)] bg-[var(--editor-panel)] text-[var(--stone-gray)] transition hover:border-[var(--editor-accent)]/40 hover:text-[var(--editor-accent)] disabled:cursor-not-allowed disabled:opacity-50"
+                    className="inline-flex h-7 items-center gap-1 rounded-lg border border-[var(--editor-line)] bg-[var(--editor-panel)] px-2 text-[11px] font-medium text-[var(--stone-gray)] transition hover:border-[var(--editor-accent)]/40 hover:text-[var(--editor-accent)] disabled:cursor-not-allowed disabled:opacity-50"
                     title="AI 生成 slug"
                     aria-label="AI 生成 slug"
                   >
                     {isMetadataTargetPending('slug') ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <WandSparkles className="h-3.5 w-3.5" />}
+                    <span>{isMetadataTargetPending('slug') ? '生成中' : slug ? '重生成' : '生成'}</span>
                   </button>
                 </div>
                 <div className="flex items-center gap-2">

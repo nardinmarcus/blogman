@@ -198,11 +198,11 @@ export function ProviderTemplateModal({
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30" onClick={onClose}>
       <div
-        className="mx-4 w-full max-w-xl rounded-xl border border-[var(--editor-line)] bg-[var(--editor-panel)] p-6 shadow-xl"
+        className="mx-4 flex max-h-[80vh] w-full max-w-xl flex-col rounded-xl border border-[var(--editor-line)] bg-[var(--editor-panel)] p-6 shadow-xl"
         onClick={(event) => event.stopPropagation()}
       >
         <h3 className="mb-4 text-lg font-semibold text-[var(--editor-ink)]">快捷模板</h3>
-        <div className="space-y-4">
+        <div className="space-y-4 overflow-y-auto pr-1">
           {groups.map((group) => (
             <div key={group.category}>
               <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--editor-muted)]">

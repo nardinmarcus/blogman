@@ -1,6 +1,7 @@
 import { getPosts, searchPosts, getCategories } from '@/lib/db'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import Link from 'next/link'
+import { FileText, PenLine } from 'lucide-react'
 import { PostRow } from './PostRow'
 import { FilterBar } from './FilterBar'
 
@@ -85,15 +86,10 @@ export default async function AdminPostsPage({
       />
 
       {posts.length === 0 ? (
-        <div className="bg-[var(--editor-panel)] rounded-xl border border-[var(--editor-line)] p-20 text-center">
+        <div className="bg-[var(--editor-panel)] rounded-2xl border border-[var(--editor-line)] p-16 text-center">
           <div className="max-w-xs mx-auto">
-            <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-[var(--editor-soft)] flex items-center justify-center">
-              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-[var(--stone-gray)]">
-                <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"></path>
-                <polyline points="14 2 14 8 20 8"></polyline>
-                <line x1="12" y1="18" x2="12" y2="12"></line>
-                <line x1="9" y1="15" x2="15" y2="15"></line>
-              </svg>
+            <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-[var(--editor-soft)] flex items-center justify-center text-[var(--stone-gray)]">
+              <FileText className="h-8 w-8" strokeWidth={1.5} />
             </div>
             <p className="text-[var(--editor-muted)] mb-2">
               {q ? '未找到匹配的文章' : '还没有任何文章'}
@@ -104,17 +100,18 @@ export default async function AdminPostsPage({
             {!q && (
               <Link
                 href="/editor"
-                className="inline-flex items-center gap-1.5 text-sm text-[var(--editor-accent)] hover:underline underline-offset-2 font-medium"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--editor-accent)] px-4 py-2 text-sm font-semibold text-white transition hover:brightness-105"
               >
-                写第一篇文章 →
+                <PenLine className="h-4 w-4" />
+                写第一篇文章
               </Link>
             )}
           </div>
         </div>
       ) : (
-        <div className="bg-[var(--editor-panel)] rounded-xl border border-[var(--editor-line)] overflow-hidden">
+        <div className="overflow-visible rounded-xl border border-[var(--editor-line)] bg-[var(--editor-panel)]">
           {/* 表头 */}
-          <div className="hidden md:grid grid-cols-[50px_1fr_120px_90px_200px] gap-3 px-5 py-3.5 border-b border-[var(--editor-line)] bg-[var(--editor-soft)]">
+          <div className="hidden rounded-t-xl border-b border-[var(--editor-line)] bg-[var(--editor-soft)] px-5 py-3.5 md:grid md:grid-cols-[50px_1fr_120px_90px_150px] gap-3">
             <span className="text-xs font-semibold text-[var(--editor-muted)] uppercase tracking-wide text-center">
               状态
             </span>
@@ -134,8 +131,13 @@ export default async function AdminPostsPage({
 
           {/* 文章列表 */}
           <div className="divide-y divide-[var(--editor-line)]">
-            {posts.map((post) => (
-              <PostRow key={post.slug} post={post} categories={dbCategories} />
+            {posts.map((post, index) => (
+              <PostRow
+                key={post.slug}
+                post={post}
+                categories={dbCategories}
+                preferMenuUp={posts.length > 1 && index >= posts.length - 2}
+              />
             ))}
           </div>
         </div>
