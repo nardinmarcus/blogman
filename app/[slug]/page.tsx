@@ -10,11 +10,13 @@ import { PasswordPrompt } from '@/components/PasswordPrompt'
 import { DownloadMarkdown } from '@/components/DownloadMarkdown'
 import { CopyArticleLink } from '@/components/CopyArticleLink'
 import { TwitterEmbedsEnhancer } from '@/components/TwitterEmbedsEnhancer'
+import { ArticleOutline } from '@/components/ArticleOutline'
 import { getSiteHeaderData } from '@/lib/site'
 import { getRelatedPosts } from '@/lib/related-content'
 import { getPublicContentCacheNamespace } from '@/lib/cache'
 import { getSiteUrl } from '@/lib/site-config'
 import { resolvePostCoverImage } from '@/lib/default-cover-images'
+import { buildArticleOutline } from '@/lib/article-outline'
 
 // Cloudflare Workers 缓存策略
 export const revalidate = 86400 // 24小时缓存
@@ -188,6 +190,7 @@ export default async function PostPage({
   const explicitCoverImage = post.cover_image
     ? resolvePostCoverImage(post, { baseUrl })
     : ''
+  const articleOutline = buildArticleOutline(post.html)
 
   return (
     <div className="min-h-screen bg-[var(--background)] flex flex-col">
@@ -199,7 +202,7 @@ export default async function PostPage({
         stickyOnMobile={false}
       />
 
-      <main className="page-main mx-auto w-full max-w-3xl px-4 sm:px-6 flex-1 py-8 sm:py-12">
+      <main className="page-main mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8 flex-1 py-8 sm:py-12">
         {searchIndexable && (() => {
           const ogImage = resolvePostCoverImage(post, { baseUrl })
           const jsonLd = {
@@ -244,121 +247,127 @@ export default async function PostPage({
           viewCount={post.view_count}
           content={post.content}
         >
-          <article>
-            <header className="mb-10 sm:mb-12">
-              <h1
+          <div className="article-reading-layout">
+            <aside className="article-reading-aside">
+              <ArticleOutline items={articleOutline.items} />
+            </aside>
+
+            <article className="article-reading-main">
+              <header className="mb-10 sm:mb-12">
+                <h1
+                  data-admin-edit-trigger
+                  className="article-display-title text-2xl sm:text-3xl lg:text-4xl font-bold text-[var(--editor-ink)] leading-snug mb-4 sm:mb-5"
+                >
+                  {post.title}
+                </h1>
+                <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--stone-gray)]">
+                  {post.category && (
+                    <>
+                      {activeCategorySlug ? (
+                        <Link
+                          href={`/category/${activeCategorySlug}`}
+                          className="px-2 py-0.5 rounded-full bg-[var(--editor-accent)]/8 text-[var(--editor-accent)] font-medium border border-[var(--editor-accent)]/15 hover:bg-[var(--editor-accent)]/12 transition-colors"
+                        >
+                          {post.category}
+                        </Link>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded-full bg-[var(--editor-accent)]/8 text-[var(--editor-accent)] font-medium border border-[var(--editor-accent)]/15">
+                          {post.category}
+                        </span>
+                      )}
+                      <span aria-hidden>·</span>
+                    </>
+                  )}
+                  <time>
+                    {new Date(post.published_at * 1000).toLocaleDateString('zh-CN', {
+                      year: 'numeric',
+                      month: 'short',
+                      day: 'numeric',
+                    })}
+                  </time>
+                  <span aria-hidden>·</span>
+                  <span>{post.view_count} 次阅读</span>
+                  <span aria-hidden>·</span>
+                  <span>约 {readingMinutes} 分钟</span>
+                </div>
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <CopyArticleLink url={canonicalUrl} />
+                  <DownloadMarkdown title={post.title} html={post.html} />
+                </div>
+              </header>
+
+              {explicitCoverImage ? (
+                <div className="mb-8 overflow-hidden rounded-2xl border border-[var(--editor-line)] bg-[var(--editor-panel)] shadow-sm sm:mb-10">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={explicitCoverImage}
+                    alt={post.title}
+                    className="aspect-[16/9] w-full object-cover"
+                  />
+                </div>
+              ) : null}
+
+              <div
+                id={contentContainerId}
                 data-admin-edit-trigger
-                className="article-display-title text-2xl sm:text-3xl lg:text-4xl font-bold text-[var(--editor-ink)] leading-snug mb-4 sm:mb-5"
-              >
-                {post.title}
-              </h1>
-              <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--stone-gray)]">
-                {post.category && (
-                  <>
-                    {activeCategorySlug ? (
-                      <Link
-                        href={`/category/${activeCategorySlug}`}
-                        className="px-2 py-0.5 rounded-full bg-[var(--editor-accent)]/8 text-[var(--editor-accent)] font-medium border border-[var(--editor-accent)]/15 hover:bg-[var(--editor-accent)]/12 transition-colors"
-                      >
-                        {post.category}
-                      </Link>
-                    ) : (
-                      <span className="px-2 py-0.5 rounded-full bg-[var(--editor-accent)]/8 text-[var(--editor-accent)] font-medium border border-[var(--editor-accent)]/15">
-                        {post.category}
-                      </span>
-                    )}
-                    <span aria-hidden>·</span>
-                  </>
-                )}
-                <time>
-                  {new Date(post.published_at * 1000).toLocaleDateString('zh-CN', {
-                    year: 'numeric',
-                    month: 'short',
-                    day: 'numeric',
-                  })}
-                </time>
-                <span aria-hidden>·</span>
-                <span>{post.view_count} 次阅读</span>
-                <span aria-hidden>·</span>
-                <span>约 {readingMinutes} 分钟</span>
-              </div>
-              <div className="mt-4 flex flex-wrap items-center gap-2">
-                <CopyArticleLink url={canonicalUrl} />
-                <DownloadMarkdown title={post.title} html={post.html} />
-              </div>
-            </header>
+                className="rich-content"
+                dangerouslySetInnerHTML={{ __html: articleOutline.html }}
+              />
+              <TwitterEmbedsEnhancer containerId={contentContainerId} html={post.html} />
 
-            {explicitCoverImage ? (
-              <div className="mb-8 overflow-hidden rounded-2xl border border-[var(--editor-line)] bg-[var(--editor-panel)] shadow-sm sm:mb-10">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={explicitCoverImage}
-                  alt={post.title}
-                  className="aspect-[16/9] w-full object-cover"
-                />
-              </div>
-            ) : null}
-
-            <div
-              id={contentContainerId}
-              data-admin-edit-trigger
-              className="rich-content"
-              dangerouslySetInnerHTML={{ __html: post.html }}
-            />
-            <TwitterEmbedsEnhancer containerId={contentContainerId} html={post.html} />
-
-            {related.results.length > 0 && (
-              <section className="mt-14 sm:mt-16 border-t border-[var(--editor-line)] pt-8 sm:pt-10">
-                <div className="flex items-center justify-between gap-3 mb-5">
-                  <div>
-                    <h2 className="text-lg sm:text-xl font-semibold text-[var(--editor-ink)]">继续阅读</h2>
-                    <p className="text-xs text-[var(--stone-gray)] mt-1">
-                      {related.source === 'vectorize' ? '基于向量召回' : '基于全文检索与主题相似度'}
-                    </p>
+              {related.results.length > 0 && (
+                <section className="mt-14 sm:mt-16 border-t border-[var(--editor-line)] pt-8 sm:pt-10">
+                  <div className="flex items-center justify-between gap-3 mb-5">
+                    <div>
+                      <h2 className="text-lg sm:text-xl font-semibold text-[var(--editor-ink)]">继续阅读</h2>
+                      <p className="text-xs text-[var(--stone-gray)] mt-1">
+                        {related.source === 'vectorize' ? '基于向量召回' : '基于全文检索与主题相似度'}
+                      </p>
+                    </div>
                   </div>
-                </div>
-                <div className="grid gap-4 sm:grid-cols-3">
-                  {related.results.map((item) => {
-                    const itemCategorySlug = item.category ? categorySlugMap.get(item.category) : null
-                    return (
-                      <Link
-                        key={item.slug}
-                        href={`/${item.slug}`}
-                        className="group rounded-2xl border border-[var(--editor-line)] bg-[var(--editor-panel)]/55 p-4 transition-colors hover:border-[var(--editor-accent)]/35 hover:bg-[var(--editor-panel)]"
-                      >
-                        <div className="text-xs text-[var(--stone-gray)] mb-3 flex items-center gap-2 flex-wrap">
-                          {item.category && (
-                            itemCategorySlug ? (
-                              <span className="rounded-full border border-[var(--editor-accent)]/15 bg-[var(--editor-accent)]/8 px-2 py-0.5 text-[var(--editor-accent)]">
-                                {item.category}
-                              </span>
-                            ) : (
-                              <span>{item.category}</span>
-                            )
+                  <div className="grid gap-4 sm:grid-cols-3">
+                    {related.results.map((item) => {
+                      const itemCategorySlug = item.category ? categorySlugMap.get(item.category) : null
+                      return (
+                        <Link
+                          key={item.slug}
+                          href={`/${item.slug}`}
+                          className="group rounded-2xl border border-[var(--editor-line)] bg-[var(--editor-panel)]/55 p-4 transition-colors hover:border-[var(--editor-accent)]/35 hover:bg-[var(--editor-panel)]"
+                        >
+                          <div className="text-xs text-[var(--stone-gray)] mb-3 flex items-center gap-2 flex-wrap">
+                            {item.category && (
+                              itemCategorySlug ? (
+                                <span className="rounded-full border border-[var(--editor-accent)]/15 bg-[var(--editor-accent)]/8 px-2 py-0.5 text-[var(--editor-accent)]">
+                                  {item.category}
+                                </span>
+                              ) : (
+                                <span>{item.category}</span>
+                              )
+                            )}
+                            <time>
+                              {new Date(item.published_at * 1000).toLocaleDateString('zh-CN', {
+                                year: 'numeric',
+                                month: 'short',
+                                day: 'numeric',
+                              })}
+                            </time>
+                          </div>
+                          <h3 className="text-base font-semibold leading-snug text-[var(--editor-ink)] group-hover:text-[var(--editor-accent)] transition-colors">
+                            {item.title}
+                          </h3>
+                          {item.description && (
+                            <p className="mt-3 line-clamp-3 text-sm leading-relaxed text-[var(--editor-muted)]">
+                              {item.description}
+                            </p>
                           )}
-                          <time>
-                            {new Date(item.published_at * 1000).toLocaleDateString('zh-CN', {
-                              year: 'numeric',
-                              month: 'short',
-                              day: 'numeric',
-                            })}
-                          </time>
-                        </div>
-                        <h3 className="text-base font-semibold leading-snug text-[var(--editor-ink)] group-hover:text-[var(--editor-accent)] transition-colors">
-                          {item.title}
-                        </h3>
-                        {item.description && (
-                          <p className="mt-3 line-clamp-3 text-sm leading-relaxed text-[var(--editor-muted)]">
-                            {item.description}
-                          </p>
-                        )}
-                      </Link>
-                    )
-                  })}
-                </div>
-              </section>
-            )}
-          </article>
+                        </Link>
+                      )
+                    })}
+                  </div>
+                </section>
+              )}
+            </article>
+          </div>
         </FrontPostAdminBoundary>
       </main>
 
