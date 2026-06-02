@@ -18,7 +18,7 @@ vi.mock('@/lib/db', () => ({
 }))
 
 vi.mock('@/lib/admin-auth', () => ({
-  COOKIE_NAME: 'qmblog_admin',
+  COOKIE_NAME: 'blogman_admin',
   isAdminAuthenticated: mocks.isAdminAuthenticated,
 }))
 

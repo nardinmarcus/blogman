@@ -31,7 +31,7 @@ user_invocable: true
 **Token 读取优先级：**
 
 1. 环境变量 `NAMOO_BLOG_API_TOKEN`
-2. 环境变量 `NMBLOG_API_TOKEN`（兼容旧配置）
+2. 环境变量 `BLOGMAN_API_TOKEN`（项目名变量）
 3. 配置文件 `~/.claude/skills/namoo-blog-publish/config.json`
 
 如果没有 token，提示用户：

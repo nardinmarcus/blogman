@@ -26,7 +26,7 @@ export function generatePassword(): string {
 
 // 密码哈希（SHA-256 + 固定盐）
 // 注意：这是简化方案，生产环境建议使用 bcrypt/argon2
-const SALT = 'nmblog_salt_v1' // 固定盐，可以移到环境变量
+const SALT = 'blogman_salt_v1' // 固定盐，可以移到环境变量
 
 async function sha256Hex(input: string): Promise<string> {
   const encoder = new TextEncoder()

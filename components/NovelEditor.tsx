@@ -74,7 +74,7 @@ type SaveFeedback =
 type PublishStatus = 'public' | 'draft' | 'encrypted' | 'unlisted'
 type SaveState = 'saved' | 'dirty' | 'saving' | 'error'
 
-const SIDEBAR_KEY = 'nmblog:sidebar-open'
+const SIDEBAR_KEY = 'blogman:sidebar-open'
 const AUTOSAVE_DEBOUNCE_MS = 1500
 const AUTOSAVE_MAX_RETRY_DELAY_MS = 10000
 const SITE_DISPLAY_URL = getSiteDisplayUrl()

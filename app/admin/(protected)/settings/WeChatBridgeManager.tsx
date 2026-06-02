@@ -168,7 +168,7 @@ export function WeChatBridgeManager() {
           <div className="space-y-1">
             <h3 className="text-base font-semibold text-[var(--editor-ink)]">Bridge 连接</h3>
             <p className="text-sm text-[var(--editor-muted)]">
-              `nmblog` 只保存 bridge 地址和鉴权 token。多个公众号的 `AppID/Secret` 全部保存在 VPS bridge 上。
+              `blogman` 只保存 bridge 地址和鉴权 token。多个公众号的 `AppID/Secret` 全部保存在 VPS bridge 上。
             </p>
           </div>
 

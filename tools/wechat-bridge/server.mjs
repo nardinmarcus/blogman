@@ -11,7 +11,7 @@ import { promisify } from 'node:util'
 const HOST = process.env.HOST || '0.0.0.0'
 const PORT = Number(process.env.PORT || 8788)
 const BRIDGE_TOKEN = (process.env.BRIDGE_TOKEN || '').trim()
-const ACCOUNTS_FILE = process.env.WECHAT_ACCOUNTS_FILE || '/etc/qmblog-wechat-bridge/accounts.json'
+const ACCOUNTS_FILE = process.env.WECHAT_ACCOUNTS_FILE || '/etc/blogman-wechat-bridge/accounts.json'
 const REQUEST_BODY_LIMIT = 2.5 * 1024 * 1024
 const REMOTE_IMAGE_LIMIT = 1024 * 1024
 const COVER_IMAGE_LIMIT = 64 * 1024
@@ -328,7 +328,7 @@ async function fetchRemoteImageOnce(inputUrl, maxBytes) {
     const response = await fetch(url, {
       redirect: 'manual',
       signal: AbortSignal.timeout(20_000),
-      headers: { 'User-Agent': 'qmblog-wechat-bridge/1.0' },
+      headers: { 'User-Agent': 'blogman-wechat-bridge/1.0' },
     })
 
     if (response.status >= 300 && response.status < 400) {
@@ -435,7 +435,7 @@ function buildLocalTranscodePresets(kind) {
 }
 
 async function transcodeImageLocally(download, { kind, maxBytes }) {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'qmblog-wechat-bridge-'))
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'blogman-wechat-bridge-'))
   const inputPath = path.join(tempDir, 'input.bin')
   const outputPath = path.join(tempDir, 'output.jpg')
 
@@ -650,7 +650,7 @@ const server = http.createServer(async (req, res) => {
       const accounts = await loadAccounts().catch(() => [])
       return json(res, 200, {
         ok: true,
-        service: 'qmblog-wechat-bridge',
+        service: 'blogman-wechat-bridge',
         account_count: accounts.length,
       })
     }
@@ -681,5 +681,5 @@ const server = http.createServer(async (req, res) => {
 })
 
 server.listen(PORT, HOST, () => {
-  console.log(`qmblog-wechat-bridge listening on ${HOST}:${PORT}`)
+  console.log(`blogman-wechat-bridge listening on ${HOST}:${PORT}`)
 })

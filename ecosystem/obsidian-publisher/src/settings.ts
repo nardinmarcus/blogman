@@ -1,20 +1,20 @@
 import { App, Notice, PluginSettingTab, Setting, requestUrl } from "obsidian";
-import type QmblogPublisher from "./main";
+import type BlogmanPublisher from "./main";
 
-export interface QmblogSettings {
+export interface BlogmanSettings {
   apiUrl: string;
   apiToken: string;
 }
 
-export const DEFAULT_SETTINGS: QmblogSettings = {
+export const DEFAULT_SETTINGS: BlogmanSettings = {
   apiUrl: "https://your-domain.com",
   apiToken: "",
 };
 
-export class QmblogSettingTab extends PluginSettingTab {
-  plugin: QmblogPublisher;
+export class BlogmanSettingTab extends PluginSettingTab {
+  plugin: BlogmanPublisher;
 
-  constructor(app: App, plugin: QmblogPublisher) {
+  constructor(app: App, plugin: BlogmanPublisher) {
     super(app, plugin);
     this.plugin = plugin;
   }

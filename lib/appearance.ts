@@ -1,5 +1,5 @@
-export const THEME_STORAGE_KEY = 'nm_site_theme'
-export const THEME_CHANGE_EVENT = 'nm-theme-change'
+export const THEME_STORAGE_KEY = 'blogman_site_theme'
+export const THEME_CHANGE_EVENT = 'blogman-theme-change'
 
 export const THEME_OPTIONS = [
   {

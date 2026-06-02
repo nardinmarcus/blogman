@@ -5,7 +5,7 @@ const DEFAULT_POST_COVER_IMAGES = [
 ] as const
 const DEFAULT_SITE_COVER_IMAGE = DEFAULT_POST_COVER_IMAGES[0]
 
-const FALLBACK_COVER_SEED = 'nmblog-default-cover'
+const FALLBACK_COVER_SEED = 'blogman-default-cover'
 
 interface CoverSeedInput {
   slug?: string | null

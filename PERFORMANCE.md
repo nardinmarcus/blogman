@@ -79,7 +79,7 @@ export const revalidate = 60 // 或 300
 ```toml
 [[d1_databases]]
 binding = "DB"
-database_name = "qmblog-db"
+database_name = "blogman-db"
 database_id = "e0af8dca-153a-4f10-9925-b465f304c5c9"
 remote = false  # 开发时使用本地数据库
 ```
@@ -96,7 +96,7 @@ remote = false  # 开发时使用本地数据库
 将 `lib/db.ts` 中的 `ensureSchema()` 逻辑移到正式的迁移文件：
 
 ```bash
-wrangler d1 migrations create qmblog-db add_categories_table
+wrangler d1 migrations create blogman-db add_categories_table
 ```
 
 **优点**：

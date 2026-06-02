@@ -6,9 +6,9 @@ import {
   MarkdownView,
 } from "obsidian";
 import {
-  QmblogSettings,
+  BlogmanSettings,
   DEFAULT_SETTINGS,
-  QmblogSettingTab,
+  BlogmanSettingTab,
 } from "./settings";
 import { PublishModal, PublishOptions, PublishResult } from "./publish-modal";
 
@@ -33,8 +33,8 @@ interface PostResult {
   error?: string;
 }
 
-export default class QmblogPublisher extends Plugin {
-  settings: QmblogSettings = DEFAULT_SETTINGS;
+export default class BlogmanPublisher extends Plugin {
+  settings: BlogmanSettings = DEFAULT_SETTINGS;
   private statusBarEl: HTMLElement | null = null;
 
   async onload() {
@@ -89,7 +89,7 @@ export default class QmblogPublisher extends Plugin {
     );
 
     // Settings tab
-    this.addSettingTab(new QmblogSettingTab(this.app, this));
+    this.addSettingTab(new BlogmanSettingTab(this.app, this));
   }
 
   async loadSettings() {
@@ -363,7 +363,7 @@ export default class QmblogPublisher extends Plugin {
         src = src.slice(1, -1);
       }
 
-      // Skip URLs (http/https) and already-uploaded qmblog URLs
+      // Skip URLs (http/https) and already-uploaded blogman URLs
       if (src.startsWith("http://") || src.startsWith("https://")) {
         continue;
       }
@@ -415,7 +415,7 @@ export default class QmblogPublisher extends Plugin {
   }
 
   /**
-   * Find remote (non-qmblog) image URLs in markdown
+   * Find remote (non-blogman) image URLs in markdown
    */
   findRemoteImageRefs(
     content: string
@@ -430,7 +430,7 @@ export default class QmblogPublisher extends Plugin {
     while ((match = mdRegex.exec(content)) !== null) {
       const src = match[2].trim();
 
-      // Skip qmblog URLs - already hosted
+      // Skip blogman URLs - already hosted
       try {
         const url = new URL(src);
         if (url.host === apiHost) continue;
@@ -572,7 +572,7 @@ export default class QmblogPublisher extends Plugin {
   }
 
   /**
-   * Upload a file to qmblog R2 via /api/uploads
+   * Upload a file to blogman R2 via /api/uploads
    */
   async uploadFile(
     buffer: ArrayBuffer,
@@ -580,7 +580,7 @@ export default class QmblogPublisher extends Plugin {
     mimeType: string
   ): Promise<UploadResult> {
     // Build multipart form data manually for Obsidian's requestUrl
-    const boundary = "----ObsidianQmblog" + Date.now().toString(36);
+    const boundary = "----ObsidianBlogman" + Date.now().toString(36);
     const uint8 = new Uint8Array(buffer);
 
     // Build the multipart body

@@ -96,7 +96,7 @@ export function formatHistoryTime(timestamp: number) {
 }
 
 export function createHistoryStorageKey(scope: string) {
-  return `nmblog:ask-ai-history:${scope || DEFAULT_HISTORY_SCOPE}`
+  return `blogman:ask-ai-history:${scope || DEFAULT_HISTORY_SCOPE}`
 }
 
 export function extractTitleCandidate(markdown: string) {
