@@ -90,4 +90,65 @@ describe('/api/admin/posts/[slug] route', () => {
     expect(mocks.enqueueBackgroundJob).toHaveBeenCalledTimes(1)
     expect(body).toEqual({ success: true, slug: 'next_slug' })
   })
+
+  it('updates a post using frontmatter summary while storing clean markdown content', async () => {
+    mocks.parseJsonBody.mockResolvedValue({
+      slug: 'frontmatter-post',
+      title: 'Frontmatter Post',
+      content: `---
+summary: Admin route summary.
+---
+
+# Frontmatter Post
+
+Clean body.`,
+      description: '   ',
+    })
+
+    const request = {
+      cookies: {
+        get: vi.fn(() => ({ value: 'token' })),
+      },
+    } as never
+
+    await PUT(request, {
+      params: Promise.resolve({ slug: 'old-slug' }),
+    })
+
+    expect(mocks.updatePost).toHaveBeenCalledWith(
+      { kind: 'db' },
+      7,
+      expect.objectContaining({
+        slug: 'frontmatter-post',
+        content: '# Frontmatter Post\n\nClean body.',
+        description: 'Admin route summary.',
+      }),
+    )
+  })
+
+  it('does not clear description when updating metadata without content', async () => {
+    mocks.parseJsonBody.mockResolvedValue({
+      title: '只更新标题',
+      description: '   ',
+    })
+
+    const request = {
+      cookies: {
+        get: vi.fn(() => ({ value: 'token' })),
+      },
+    } as never
+
+    await PUT(request, {
+      params: Promise.resolve({ slug: 'old-slug' }),
+    })
+
+    const updates = mocks.updatePost.mock.calls[0][2]
+    expect(updates).toEqual(
+      expect.objectContaining({
+        title: '只更新标题',
+      }),
+    )
+    expect(updates.description).toBeUndefined()
+    expect(updates.content).toBeUndefined()
+  })
 })

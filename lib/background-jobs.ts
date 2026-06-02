@@ -1,7 +1,7 @@
 import { processPost, getAiRuntimeEnv } from '@/lib/ai'
 import { invalidatePublicContentCache } from '@/lib/cache'
 import { getPostAiSnapshot, updatePost } from '@/lib/db'
-import { buildAutoDescription } from '@/lib/post-utils'
+import { isAutoDescription } from '@/lib/post-utils'
 import { deletePostFromRelatedIndex, syncPostToRelatedIndex } from '@/lib/related-content'
 
 export type BackgroundJob =
@@ -57,7 +57,6 @@ async function runProcessPostAiJob(env: BackgroundJobEnv, postId: number) {
   if (!aiResult) return
 
   const updates: Parameters<typeof updatePost>[2] = {}
-  const autoDescription = buildAutoDescription(post.content)
 
   if (!post.category || post.category === '未分类') {
     updates.category = aiResult.category
@@ -67,7 +66,7 @@ async function runProcessPostAiJob(env: BackgroundJobEnv, postId: number) {
     updates.tags = aiResult.tags
   }
 
-  if (!post.description || post.description === autoDescription) {
+  if (!post.description || isAutoDescription(post.description, post.content)) {
     updates.description = aiResult.description
   }
 

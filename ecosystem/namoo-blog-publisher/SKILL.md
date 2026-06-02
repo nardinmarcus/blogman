@@ -76,6 +76,13 @@ curl -s "https://your-domain.com/api/admin/categories" \
 2. 第一条 `# Heading`
 3. 文件名
 
+摘要优先级：
+
+1. YAML frontmatter 的 `description`
+2. YAML frontmatter 的 `summary`
+3. YAML frontmatter 的 `excerpt`
+4. YAML frontmatter 的 `abstract`
+
 正文处理：
 
 - 去掉 frontmatter
@@ -129,6 +136,7 @@ curl -s -X POST "https://your-domain.com/api/posts" \
   -d '{
     "title": "The Title",
     "content": "Full processed Markdown content",
+    "description": "Optional summary from frontmatter",
     "category": "selected-category-or-empty",
     "status": "draft"
   }'

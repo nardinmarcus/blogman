@@ -193,6 +193,7 @@ export default class BlogmanPublisher extends Plugin {
 
     // 1. Strip YAML frontmatter from content for publishing
     const bodyContent = this.stripFrontmatter(content);
+    const description = this.extractDescription(content);
 
     // 2. Collect all media references (local + remote)
     const localRefs = this.findLocalMediaRefs(bodyContent, file);
@@ -277,7 +278,8 @@ export default class BlogmanPublisher extends Plugin {
       options.title,
       processedContent,
       options.status,
-      options.category
+      options.category,
+      description
     );
 
     if (postResult.success) {
@@ -306,7 +308,7 @@ export default class BlogmanPublisher extends Plugin {
    */
   extractTitle(content: string, file: TFile): string {
     // Try YAML frontmatter
-    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     if (fmMatch) {
       const titleMatch = fmMatch[1].match(/^title:\s*["']?(.+?)["']?\s*$/m);
       if (titleMatch) {
@@ -324,11 +326,64 @@ export default class BlogmanPublisher extends Plugin {
     return file.basename;
   }
 
+  extractDescription(content: string): string {
+    const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    if (!fmMatch) {
+      return "";
+    }
+
+    const lines = fmMatch[1].split(/\r?\n/);
+    const keys = new Set(["description", "summary", "excerpt", "abstract"]);
+
+    for (let index = 0; index < lines.length; index += 1) {
+      const field = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(lines[index]);
+      if (!field || !keys.has(field[1].trim().toLowerCase())) continue;
+
+      const rawValue = field[2].trim();
+      const value = /^[>|][-+]?$/.test(rawValue)
+        ? this.readFrontmatterBlock(lines, index, rawValue.startsWith(">") ? " " : "\n")
+        : rawValue
+          ? this.stripSymmetricQuotes(rawValue)
+          : this.readFrontmatterBlock(lines, index, " ");
+
+      const description = value.trim().replace(/\s+/g, " ").slice(0, 160);
+      if (description) return description;
+    }
+
+    return "";
+  }
+
+  readFrontmatterBlock(lines: string[], startIndex: number, separator: string): string {
+    const values: string[] = [];
+
+    for (let index = startIndex + 1; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (/^[A-Za-z0-9_-]+\s*:/.test(line)) break;
+      if (!line.trim()) continue;
+      if (!/^\s+/.test(line)) break;
+      values.push(line.trim());
+    }
+
+    return values.join(separator);
+  }
+
+  stripSymmetricQuotes(value: string): string {
+    const trimmed = value.trim();
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return trimmed.slice(1, -1).trim();
+    }
+
+    return trimmed;
+  }
+
   /**
    * Strip YAML frontmatter from content
    */
   stripFrontmatter(content: string): string {
-    return content.replace(/^---\n[\s\S]*?\n---\n*/, "");
+    return content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n*/, "");
   }
 
   /**
@@ -622,7 +677,8 @@ export default class BlogmanPublisher extends Plugin {
     title: string,
     content: string,
     status: "draft" | "published" = "draft",
-    category: string = ""
+    category: string = "",
+    description: string = ""
   ): Promise<PostResult> {
     const payload: Record<string, string> = {
       title,
@@ -631,6 +687,9 @@ export default class BlogmanPublisher extends Plugin {
     };
     if (category) {
       payload.category = category;
+    }
+    if (description) {
+      payload.description = description;
     }
 
     const response = await requestUrl({

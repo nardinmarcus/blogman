@@ -1,7 +1,12 @@
 import { deletePost, getPostBySlug, updatePost } from '@/lib/db'
 import { isAdminAuthenticated, COOKIE_NAME } from '@/lib/admin-auth'
 import { invalidatePublicContentCache } from '@/lib/cache'
-import { buildAutoDescription, normalizePostSlug } from '@/lib/post-utils'
+import {
+  buildAutoDescription,
+  extractMarkdownDescription,
+  normalizePostSlug,
+  stripMarkdownFrontmatter,
+} from '@/lib/post-utils'
 import { enqueueBackgroundJob } from '@/lib/background-jobs'
 import { getRouteContextWithDb, jsonError, jsonOk, parseJsonBody } from '@/lib/server/route-helpers'
 import type { NextRequest } from 'next/server'
@@ -72,14 +77,18 @@ export async function PUT(req: NextRequest, { params }: Ctx) {
       description?: string
     }>(req)
     const nextSlug = typeof nextSlugRaw === 'string' ? normalizePostSlug(nextSlugRaw) : ''
+    const rawContent = typeof content === 'string' ? content : ''
+    const normalizedContent = typeof content === 'string' ? stripMarkdownFrontmatter(content) : undefined
     const normalizedDescription = typeof description === 'string' && description.trim()
       ? description.trim()
-      : buildAutoDescription(typeof content === 'string' ? content : '')
+      : typeof content === 'string'
+        ? extractMarkdownDescription(rawContent) || buildAutoDescription(rawContent)
+        : undefined
 
     await updatePost(db, post.id, {
       slug: nextSlug || undefined,
       title,
-      content,
+      content: normalizedContent,
       html,
       category,
       status,

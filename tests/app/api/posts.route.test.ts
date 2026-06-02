@@ -99,6 +99,44 @@ describe('/api/posts route', () => {
     )
   })
 
+  it('creates a post using frontmatter summary while storing clean markdown content', async () => {
+    mocks.parseJsonBody.mockResolvedValue({
+      title: 'Claude design analysis',
+      content: `---
+title: Claude design analysis
+excerpt: A concise guide to the visual system behind Claude.com.
+---
+
+# Claude design analysis
+
+Claude.com uses warm editorial spacing.`,
+      category: 'AI教程',
+      status: 'published',
+    })
+    mocks.createPost.mockResolvedValue(43)
+
+    const response = await POST({} as never)
+    const body = await response.json()
+
+    expect(mocks.createPost).toHaveBeenCalledWith(
+      { kind: 'db' },
+      expect.objectContaining({
+        title: 'Claude design analysis',
+        content: '# Claude design analysis\n\nClaude.com uses warm editorial spacing.',
+        description: 'A concise guide to the visual system behind Claude.com.',
+        category: 'AI教程',
+        status: 'published',
+      }),
+    )
+    expect(body).toEqual(
+      expect.objectContaining({
+        success: true,
+        id: 43,
+        description: 'A concise guide to the visual system behind Claude.com.',
+      }),
+    )
+  })
+
   it('patches a post with fallback description and normalized next slug', async () => {
     mocks.parseJsonBody.mockResolvedValue({
       current_slug: 'old-slug',
@@ -126,5 +164,31 @@ describe('/api/posts route', () => {
       }),
     )
     expect(body).toEqual({ success: true, slug: 'new_slug' })
+  })
+
+  it('patches a post using frontmatter summary while storing clean markdown content', async () => {
+    mocks.parseJsonBody.mockResolvedValue({
+      current_slug: 'old-slug',
+      content: `---
+abstract: Patch route summary.
+---
+
+# Patch Route
+
+Clean body.`,
+      description: '   ',
+    })
+
+    const response = await PATCH({} as never)
+
+    expect(mocks.updatePostBySlug).toHaveBeenCalledWith(
+      { kind: 'db' },
+      'old-slug',
+      expect.objectContaining({
+        content: '# Patch Route\n\nClean body.',
+        description: 'Patch route summary.',
+      }),
+    )
+    expect(await response.json()).toEqual({ success: true, slug: 'old-slug' })
   })
 })

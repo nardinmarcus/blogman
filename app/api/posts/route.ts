@@ -5,7 +5,12 @@ import { nanoid } from 'nanoid'
 import { remark } from 'remark'
 import remarkGfm from 'remark-gfm'
 import remarkHtml from 'remark-html'
-import { buildAutoDescription, normalizePostSlug } from '@/lib/post-utils'
+import {
+  buildAutoDescription,
+  extractMarkdownDescription,
+  normalizePostSlug,
+  stripMarkdownFrontmatter,
+} from '@/lib/post-utils'
 import {
   ensureAuthenticatedRequest,
   getRouteContextWithDb,
@@ -27,7 +32,8 @@ export async function POST(req: NextRequest) {
 
     const payload = await parseJsonBody<Record<string, unknown>>(req)
     const title = typeof payload.title === 'string' ? payload.title.trim() : ''
-    const content = typeof payload.content === 'string' ? payload.content.trim() : ''
+    const rawContent = typeof payload.content === 'string' ? payload.content.trim() : ''
+    const content = stripMarkdownFrontmatter(rawContent).trim()
     const rawHtml = typeof payload.html === 'string' ? payload.html.trim() : ''
     const payloadCategory = typeof payload.category === 'string' ? payload.category.trim() : ''
     const customSlug = typeof payload.slug === 'string' ? normalizePostSlug(payload.slug) : ''
@@ -36,7 +42,7 @@ export async function POST(req: NextRequest) {
     const is_hidden = payload.is_hidden === 1 ? 1 : 0
     const description = typeof payload.description === 'string' && payload.description.trim()
       ? payload.description.trim()
-      : buildAutoDescription(content)
+      : extractMarkdownDescription(rawContent) || buildAutoDescription(content)
     const tags = Array.isArray(payload.tags)
       ? (payload.tags as unknown[])
         .filter((tag): tag is string => typeof tag === 'string')
@@ -150,12 +156,12 @@ export async function PATCH(req: NextRequest) {
     const updates: Record<string, unknown> = {}
     if (nextSlug && nextSlug !== currentSlug) updates.slug = nextSlug
     if (payload.title !== undefined) updates.title = payload.title
-    if (payload.content !== undefined) updates.content = payload.content
+    const rawContent = typeof payload.content === 'string' ? payload.content : ''
+    if (payload.content !== undefined) updates.content = stripMarkdownFrontmatter(rawContent)
     if (payload.html !== undefined) updates.html = payload.html
     if (payload.description !== undefined) {
       const rawDescription = typeof payload.description === 'string' ? payload.description.trim() : ''
-      const rawContent = typeof payload.content === 'string' ? payload.content : ''
-      updates.description = rawDescription || buildAutoDescription(rawContent)
+      updates.description = rawDescription || extractMarkdownDescription(rawContent) || buildAutoDescription(rawContent)
     }
     if (payload.category !== undefined) updates.category = payload.category
     if (payload.tags !== undefined) updates.tags = payload.tags
