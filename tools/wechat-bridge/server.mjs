@@ -17,6 +17,7 @@ const REMOTE_IMAGE_LIMIT = 1024 * 1024
 const COVER_IMAGE_LIMIT = 64 * 1024
 const FALLBACK_SOURCE_IMAGE_LIMIT = 20 * 1024 * 1024
 const FALLBACK_SOURCE_COVER_LIMIT = 10 * 1024 * 1024
+const WECHAT_DIGEST_MAX_LENGTH = 120
 const convertFile = promisify(execFile)
 const IMAGE_MAGICK_BIN = process.env.IMAGEMAGICK_CONVERT || 'convert'
 
@@ -46,6 +47,14 @@ function json(res, status, payload) {
 
 function toErrorMessage(error) {
   return error instanceof Error ? error.message : String(error)
+}
+
+function trimWechatDigest(input) {
+  const normalized = String(input || '').trim()
+  const chars = Array.from(normalized)
+  return chars.length > WECHAT_DIGEST_MAX_LENGTH
+    ? chars.slice(0, WECHAT_DIGEST_MAX_LENGTH).join('')
+    : normalized
 }
 
 async function loadAccounts() {
@@ -600,7 +609,7 @@ async function publishArticle(account, body) {
         {
           title,
           author: String(body?.author || '').trim(),
-          digest: String(body?.digest || '').trim(),
+          digest: trimWechatDigest(body?.digest),
           content: rewrittenContent,
           content_source_url: String(body?.content_source_url || '').trim(),
           thumb_media_id: thumbMediaId,

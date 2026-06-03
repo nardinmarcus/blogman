@@ -3,7 +3,7 @@ import { ensureAuthenticatedRequest, getRouteEnvWithDb, jsonError, jsonOk, parse
 import { assertWechatBridgeReady, fetchWechatBridgeJson, getWechatBridgeConfig } from '@/lib/wechat-bridge-config'
 import { resolvePostCoverImage } from '@/lib/default-cover-images'
 import { getSiteUrl } from '@/lib/site-config'
-import { WECHAT_DEFAULT_AUTHOR, WECHAT_DEFAULT_NEED_OPEN_COMMENT } from '@/lib/wechat-publish-defaults'
+import { WECHAT_DEFAULT_AUTHOR, WECHAT_DEFAULT_NEED_OPEN_COMMENT, trimWechatDigest } from '@/lib/wechat-publish-defaults'
 
 interface PublishWechatBody {
   account_id?: string
@@ -55,7 +55,7 @@ export async function POST(req: NextRequest) {
         title,
         content_html: contentHtml,
         author,
-        digest: (body.digest || '').trim(),
+        digest: trimWechatDigest(body.digest || ''),
         content_source_url: (body.content_source_url || '').trim(),
         cover_image_url: coverImageUrl,
         publish_now: Boolean(body.publish_now),

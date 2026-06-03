@@ -128,4 +128,27 @@ describe('/api/admin/wechat-publish route', () => {
     expect(forwarded.only_fans_can_comment).toBe(false)
     expect(forwarded.cover_image_url).toMatch(/^https:\/\/[^/]+\/default-covers\/nm-cover-[1-3]\.jpg$/)
   })
+
+  it('trims digest to the WeChat draft limit before forwarding', async () => {
+    const longDigest = 'a'.repeat(121)
+    mocks.parseJsonBody.mockResolvedValue({
+      account_id: 'main',
+      title: 'Long Digest Post',
+      content_html: '<p>Hello</p>',
+      digest: longDigest,
+    })
+    mocks.fetchWechatBridgeJson.mockResolvedValue({
+      success: true,
+      media_id: 'MEDIA_ID',
+    })
+
+    const response = await POST({} as never)
+    expect(response.status).toBe(200)
+
+    const [, , requestInit] = mocks.fetchWechatBridgeJson.mock.calls[0]
+    const forwarded = JSON.parse(String(requestInit.body))
+
+    expect(forwarded.digest).toHaveLength(120)
+    expect(forwarded.digest).toBe('a'.repeat(120))
+  })
 })

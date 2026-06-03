@@ -12,6 +12,8 @@ import {
   WECHAT_DEFAULT_AUTHOR,
   WECHAT_DEFAULT_NEED_OPEN_COMMENT,
   WECHAT_DEFAULT_ONLY_FANS_CAN_COMMENT,
+  WECHAT_DIGEST_MAX_LENGTH,
+  trimWechatDigest,
 } from '@/lib/wechat-publish-defaults'
 
 interface BridgeAccount {
@@ -45,7 +47,7 @@ export function WeChatPublishModal({
   const [accounts, setAccounts] = useState<BridgeAccount[]>([])
   const [selectedAccountId, setSelectedAccountId] = useState('')
   const [author, setAuthor] = useState(WECHAT_DEFAULT_AUTHOR)
-  const [digest, setDigest] = useState(defaultDigest)
+  const [digest, setDigest] = useState(() => trimWechatDigest(defaultDigest))
   const [sourceUrl, setSourceUrl] = useState(defaultSourceUrl)
   const [coverImageUrl, setCoverImageUrl] = useState(defaultCoverImageUrl)
   const [publishNow, setPublishNow] = useState(false)
@@ -84,7 +86,7 @@ export function WeChatPublishModal({
     if (!isOpen) return
 
     setAuthor(WECHAT_DEFAULT_AUTHOR)
-    setDigest(defaultDigest)
+    setDigest(trimWechatDigest(defaultDigest))
     setSourceUrl(defaultSourceUrl)
     setCoverImageUrl(defaultCoverImageUrl)
     setPublishNow(false)
@@ -118,7 +120,7 @@ export function WeChatPublishModal({
           title: normalizedTitle,
           content_html: exportedHtml,
           author: author.trim(),
-          digest: digest.trim(),
+          digest: trimWechatDigest(digest),
           content_source_url: sourceUrl.trim(),
           cover_image_url: finalCoverUrl,
           publish_now: publishNow,
@@ -233,11 +235,15 @@ export function WeChatPublishModal({
               </label>
               <textarea
                 value={digest}
-                onChange={(event) => setDigest(event.target.value)}
+                onChange={(event) => setDigest(trimWechatDigest(event.target.value))}
+                maxLength={WECHAT_DIGEST_MAX_LENGTH}
                 rows={3}
                 placeholder="默认使用文章描述，选填"
                 className="w-full rounded-lg border border-[var(--editor-line)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--editor-ink)] outline-none focus:border-[var(--editor-accent)]"
               />
+              <div className="text-right text-[10px] text-[var(--stone-gray)]">
+                {Array.from(digest).length}/{WECHAT_DIGEST_MAX_LENGTH}
+              </div>
             </div>
 
             <div className="space-y-2 md:col-span-2">
