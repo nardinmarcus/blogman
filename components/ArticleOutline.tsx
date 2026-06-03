@@ -56,7 +56,7 @@ function OutlineBranch({
         ) : (
           <span className="article-outline-toggle-placeholder" aria-hidden />
         )}
-        <a href={`#${encodeURIComponent(item.id)}`} className="article-outline-link">
+        <a href={`#${encodeURIComponent(item.id)}`} className="article-outline-link" title={item.title}>
           {item.title}
         </a>
       </div>

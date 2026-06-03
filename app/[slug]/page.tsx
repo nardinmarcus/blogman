@@ -191,6 +191,7 @@ export default async function PostPage({
     ? resolvePostCoverImage(post, { baseUrl })
     : ''
   const articleOutline = buildArticleOutline(post.html)
+  const hasArticleOutline = articleOutline.items.length > 0
 
   return (
     <div className="min-h-screen bg-[var(--background)] flex flex-col">
@@ -202,7 +203,7 @@ export default async function PostPage({
         stickyOnMobile={false}
       />
 
-      <main className="page-main mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8 flex-1 py-8 sm:py-12">
+      <main className="page-main article-page-main mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8 flex-1 py-8 sm:py-12">
         {searchIndexable && (() => {
           const ogImage = resolvePostCoverImage(post, { baseUrl })
           const jsonLd = {
@@ -247,10 +248,12 @@ export default async function PostPage({
           viewCount={post.view_count}
           content={post.content}
         >
-          <div className="article-reading-layout">
-            <aside className="article-reading-aside">
-              <ArticleOutline items={articleOutline.items} />
-            </aside>
+          <div className={`article-reading-layout${hasArticleOutline ? ' article-reading-layout-with-outline' : ''}`}>
+            {hasArticleOutline ? (
+              <aside className="article-reading-aside">
+                <ArticleOutline items={articleOutline.items} />
+              </aside>
+            ) : null}
 
             <article className="article-reading-main">
               <header className="mb-10 sm:mb-12">
