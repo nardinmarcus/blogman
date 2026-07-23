@@ -38,7 +38,7 @@ External publishing tools that all route back to the same blog backend:
 
 ## Deploy to Cloudflare
 
-Click the **Deploy to Cloudflare** button above. It auto-provisions D1, R2, and applies the database schema.
+Click the **Deploy to Cloudflare** button above. It auto-provisions D1 and R2, then applies pending D1 migrations through the fail-closed migration ledger.
 
 Secrets to configure:
 
@@ -108,6 +108,8 @@ npm run preview
 | `npm run test` | Run tests (Vitest) |
 | `npm run verify:quick` | Lint + test + build |
 | `npm run verify` | Full verification pipeline |
+
+Migration `plan`, `apply`, `status`, and `verify` usage is documented in [`db/MIGRATIONS.md`](db/MIGRATIONS.md).
 
 ## License
 

@@ -10,7 +10,6 @@ DB_NAME="${CF_D1_NAME:-qiaomu-blog-db}"
 R2_NAME="${CF_R2_NAME:-qiaomu-blog-images}"
 KV_NAME="${CF_KV_NAME:-qiaomu-blog-cache}"
 SITE_URL="${SITE_URL:-${NEXT_PUBLIC_SITE_URL:-https://your-domain.com}}"
-SEED_TEMPLATE_PATH="${REPO_ROOT}/db/seed-template.sql"
 WITH_KV=0
 
 for arg in "$@"; do
@@ -129,17 +128,12 @@ if [[ "${WITH_KV}" == "1" ]] && ! rg -q '^\[\[kv_namespaces\]\]' "${LOCAL_CONFIG
     -c "${LOCAL_CONFIG_PATH}"
 fi
 
-npx wrangler d1 execute DB \
+CANDIDATE_ID="${MIGRATION_CANDIDATE_ID:-$(git rev-parse HEAD)}"
+node "${REPO_ROOT}/scripts/migrations.mjs" apply \
+  --database DB \
   --remote \
-  --file="${REPO_ROOT}/db/schema.sql" \
-  -c "${LOCAL_CONFIG_PATH}"
-
-if [[ -f "${SEED_TEMPLATE_PATH}" ]]; then
-  npx wrangler d1 execute DB \
-    --remote \
-    --file="${SEED_TEMPLATE_PATH}" \
-    -c "${LOCAL_CONFIG_PATH}"
-fi
+  --config "${LOCAL_CONFIG_PATH}" \
+  --candidate "${CANDIDATE_ID}"
 
 cat <<EOF
 ✅ Cloudflare 基础资源初始化完成

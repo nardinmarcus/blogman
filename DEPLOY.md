@@ -38,7 +38,7 @@ npm run cf:init -- --site-url=https://your-domain.com
 npm run cf:init -- --site-url=https://your-domain.com --with-kv
 ```
 
-这一步会生成本地的 `wrangler.local.toml`，并自动写入真实 D1 / R2 / KV 绑定。
+这一步会生成本地的 `wrangler.local.toml`，自动写入真实 D1 / R2 / KV 绑定，并通过增量迁移账本初始化 D1。已有 current schema 会先验证再登记 baseline，不会重放整份 schema 或忽略错误。
 
 ### 4. 设置 secrets
 
@@ -61,6 +61,15 @@ npm run cf-typegen
 npm run build
 npm run deploy
 ```
+
+部署在上传 Worker 前按当前 Git commit 候选身份执行 pending migrations。任一迁移失败都会停止部署；可在部署前只读检查：
+
+```bash
+node scripts/migrations.mjs plan --database DB --remote --config wrangler.local.toml
+node scripts/migrations.mjs verify --database DB --remote --config wrangler.local.toml
+```
+
+完整迁移接口和前向修复规则见 [`db/MIGRATIONS.md`](db/MIGRATIONS.md)。
 
 ## 本地 Worker 预览
 

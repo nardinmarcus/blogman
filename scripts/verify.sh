@@ -18,8 +18,8 @@ echo "==> npm run test:run"
 npm run test:run
 
 if [[ "${MODE}" == "full" ]]; then
-  echo "==> npx @opennextjs/cloudflare@latest build"
-  npx @opennextjs/cloudflare@latest build
+  echo "==> npx opennextjs-cloudflare build"
+  npx opennextjs-cloudflare build
 else
   echo "==> npm run build"
   npm run build
