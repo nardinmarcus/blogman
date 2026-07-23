@@ -17,6 +17,9 @@ import { getPublicContentCacheNamespace } from '@/lib/cache'
 import { getSiteUrl } from '@/lib/site-config'
 import { resolvePostCoverImage } from '@/lib/default-cover-images'
 import { buildArticleOutline } from '@/lib/article-outline'
+import {
+  rethrowIfDatabaseMigrationRequired,
+} from '@/lib/database-errors'
 
 // Cloudflare Workers 缓存策略
 export const revalidate = 86400 // 24小时缓存
@@ -34,7 +37,10 @@ export async function generateMetadata({
 
     if (!env?.DB) return {}
 
-    const post = await getPostBySlug(env.DB, slug, getPublicContentCacheNamespace(env)).catch(() => null)
+    const post = await getPostBySlug(env.DB, slug, getPublicContentCacheNamespace(env)).catch((error) => {
+      rethrowIfDatabaseMigrationRequired(error)
+      return null
+    })
     if (!post || !isPubliclyAccessiblePost(post)) return {}
     const searchIndexable = isSearchIndexablePost(post)
 
@@ -74,7 +80,8 @@ export async function generateMetadata({
         images: [ogImage],
       },
     }
-  } catch {
+  } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
     return {}
   }
 }
@@ -98,7 +105,10 @@ export default async function PostPage({
   if (!env?.DB) notFound()
   const db = env!.DB
 
-  const post = await getPostBySlug(db, slug, getPublicContentCacheNamespace(env)).catch(() => null)
+  const post = await getPostBySlug(db, slug, getPublicContentCacheNamespace(env)).catch((error) => {
+    rethrowIfDatabaseMigrationRequired(error)
+    return null
+  })
   if (!post) notFound()
   if (!isPubliclyAccessiblePost(post)) notFound()
 
@@ -174,15 +184,22 @@ export default async function PostPage({
     }
   }
 
-  // 异步增加阅读计数，不阻塞渲染
-  void incrementViewCount(db, slug).catch(console.error)
+  try {
+    await incrementViewCount(db, slug)
+  } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
+    console.error(error)
+  }
 
   // 阅读时间估算（中文按 400 字/分钟）
   const textLength = post.content?.length || 0
   const readingMinutes = Math.max(1, Math.ceil(textLength / 400))
   const searchIndexable = isSearchIndexablePost(post)
   const related = !post.password
-    ? await getRelatedPosts(db, env, post, 3).catch(() => ({ strategy: 'fts' as const, source: 'rules' as const, results: [] }))
+    ? await getRelatedPosts(db, env, post, 3).catch((error) => {
+        rethrowIfDatabaseMigrationRequired(error)
+        return { strategy: 'fts' as const, source: 'rules' as const, results: [] }
+      })
     : { strategy: 'fts' as const, source: 'rules' as const, results: [] }
   const contentContainerId = `post-content-${post.slug}`
   const baseUrl = getSiteUrl()

@@ -4,7 +4,6 @@ import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import {
   WORKERS_AI_IMAGE_MODEL_SUGGESTIONS,
   WORKERS_AI_TEXT_MODEL_SUGGESTIONS,
-  ensureAiPostGeneratorInfrastructure,
   getAiPostGeneratorByTarget,
   listAiPostGenerators,
   type AiPostGeneratorProviderMode,
@@ -12,6 +11,7 @@ import {
 } from '@/lib/ai-post-generators'
 import { normalizeAiImageAspectRatio, normalizeAiImageResolution } from '@/lib/ai-image-options'
 import { clampMaxTokens, clampTemperature } from '@/lib/ai-provider-profiles'
+import { withDatabaseErrorResponse } from '@/lib/database-errors'
 
 interface UpdateGeneratorBody {
   target_key?: AiPostGeneratorTarget
@@ -38,7 +38,7 @@ function normalizeProviderMode(value: unknown): AiPostGeneratorProviderMode {
   return value === 'profile' ? 'profile' : 'workers_ai'
 }
 
-export async function GET(req: NextRequest) {
+async function getGenerators(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
@@ -48,7 +48,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
   }
 
-  const generators = await listAiPostGenerators(db, env)
+  const generators = await listAiPostGenerators(db)
   return NextResponse.json({
     generators,
     workers_ai: {
@@ -58,7 +58,7 @@ export async function GET(req: NextRequest) {
   })
 }
 
-export async function PUT(req: NextRequest) {
+async function updateGenerator(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
@@ -67,8 +67,6 @@ export async function PUT(req: NextRequest) {
   if (!db) {
     return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
   }
-
-  await ensureAiPostGeneratorInfrastructure(db, env)
 
   let body: UpdateGeneratorBody
   try {
@@ -82,7 +80,7 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ error: '缺少有效的 target_key' }, { status: 400 })
   }
 
-  const current = await getAiPostGeneratorByTarget(db, target, env)
+  const current = await getAiPostGeneratorByTarget(db, target)
   if (!current) {
     return NextResponse.json({ error: '生成器配置不存在' }, { status: 404 })
   }
@@ -168,6 +166,9 @@ export async function PUT(req: NextRequest) {
     ).run()
   }
 
-  const generator = await getAiPostGeneratorByTarget(db, target, env)
+  const generator = await getAiPostGeneratorByTarget(db, target)
   return NextResponse.json({ success: true, generator })
 }
+
+export const GET = withDatabaseErrorResponse(getGenerators)
+export const PUT = withDatabaseErrorResponse(updateGenerator)

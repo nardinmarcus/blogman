@@ -2,6 +2,7 @@ import type { MetadataRoute } from 'next'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { getPosts, getPublicCategories } from '@/lib/db'
 import { getSiteUrl } from '@/lib/site-config'
+import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 
 export const dynamic = 'force-dynamic'
 
@@ -39,6 +40,8 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
         }
       }
     }
-  } catch {}
+  } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
+  }
   return entries
 }

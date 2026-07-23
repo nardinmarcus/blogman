@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   authenticateRequest: vi.fn(),
   getAppCloudflareEnv: vi.fn(),
-  ensureAiPostGeneratorInfrastructure: vi.fn(),
   generatePostMetadata: vi.fn(),
   generatePostCover: vi.fn(),
 }))
@@ -17,7 +16,6 @@ vi.mock('@/lib/cloudflare', () => ({
 }))
 
 vi.mock('@/lib/ai-post-generators', () => ({
-  ensureAiPostGeneratorInfrastructure: mocks.ensureAiPostGeneratorInfrastructure,
   generatePostMetadata: mocks.generatePostMetadata,
   generatePostCover: mocks.generatePostCover,
 }))
@@ -32,7 +30,6 @@ describe('/api/editor/ai-post-metadata route', () => {
       IMAGES: { put: vi.fn() },
     })
     mocks.authenticateRequest.mockResolvedValue(true)
-    mocks.ensureAiPostGeneratorInfrastructure.mockResolvedValue(undefined)
   })
 
   it('returns 401 when the request is not authenticated', async () => {

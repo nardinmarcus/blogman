@@ -2,11 +2,11 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/admin-auth'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import {
-  ensureAiPostGeneratorInfrastructure,
   generatePostCover,
   generatePostMetadata,
   type AiPostGeneratorTarget,
 } from '@/lib/ai-post-generators'
+import { migrationRequiredResponse, withDatabaseErrorResponse } from '@/lib/database-errors'
 
 type ImageBucket = {
   put: (
@@ -36,7 +36,7 @@ function isValidTarget(value: unknown): value is AiPostGeneratorTarget {
   return typeof value === 'string' && ['summary', 'tags', 'slug', 'cover'].includes(value)
 }
 
-export async function POST(req: NextRequest) {
+async function post(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   const images = env?.IMAGES as ImageBucket | undefined
@@ -47,8 +47,6 @@ export async function POST(req: NextRequest) {
   if (!db) {
     return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
   }
-
-  await ensureAiPostGeneratorInfrastructure(db, env)
 
   let body: RequestBody
   try {
@@ -114,7 +112,11 @@ export async function POST(req: NextRequest) {
       value: result.value,
     })
   } catch (error) {
+    const response = migrationRequiredResponse(error)
+    if (response) return response
     const message = error instanceof Error ? error.message : 'AI 生成失败'
     return NextResponse.json({ error: message }, { status: 500 })
   }
 }
+
+export const POST = withDatabaseErrorResponse(post)

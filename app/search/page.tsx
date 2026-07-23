@@ -6,6 +6,7 @@ import { SiteFooter } from '@/components/SiteFooter'
 import type { SiteCategoryLink, SiteNavLink } from '@/lib/site'
 import { getSiteHeaderData } from '@/lib/site'
 import type { Theme } from '@/lib/appearance'
+import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 
 export const metadata = {
   title: '搜索结果',
@@ -46,6 +47,7 @@ export default async function SearchPage({
       }
     }
   } catch (e) {
+    rethrowIfDatabaseMigrationRequired(e)
     console.error('Search page error:', e)
   }
 

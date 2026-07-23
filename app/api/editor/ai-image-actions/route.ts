@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
-import { ensureAiImageConfigInfrastructure } from '@/lib/ai-image-config'
+import { migrationRequiredResponse } from '@/lib/database-errors'
 
 interface AiImageActionPublic {
   id: number
@@ -21,8 +21,6 @@ export async function GET() {
   }
 
   try {
-    await ensureAiImageConfigInfrastructure(db)
-
     const { results } = await db.prepare(`
       SELECT id, action_key, label, description, aspect_ratio, resolution, size, profile_id
       FROM ai_image_actions
@@ -31,7 +29,9 @@ export async function GET() {
     `).all<AiImageActionPublic>()
 
     return NextResponse.json({ actions: results })
-  } catch {
-    return NextResponse.json({ actions: [] })
+  } catch (error) {
+    const response = migrationRequiredResponse(error)
+    if (response) return response
+    throw error
   }
 }

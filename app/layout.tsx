@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { connection } from "next/server";
 import localFont from "next/font/local";
 import "./globals.css";
 import { GlobalShortcuts } from "@/components/GlobalShortcuts";
@@ -7,6 +8,7 @@ import { CustomJsInjector } from "@/components/CustomJsInjector";
 import { FONT_CONFIG, THEME_OPTIONS, THEME_STORAGE_KEY, normalizeTheme } from "@/lib/appearance";
 import { getAppCloudflareEnv } from "@/lib/cloudflare";
 import { getSetting } from "@/lib/db";
+import { rethrowIfDatabaseMigrationRequired } from "@/lib/database-errors";
 import { resolveDefaultSiteCoverImage } from "@/lib/default-cover-images";
 import { getSiteUrl, getSiteUrlObject } from "@/lib/site-config";
 
@@ -91,6 +93,8 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  await connection()
+
   let customJs = ''
   let bodyFont = ''
   let defaultTheme = 'default'
@@ -106,7 +110,9 @@ export default async function RootLayout({
       bodyFont = bodyFontValue || ''
       defaultTheme = normalizeTheme(defaultThemeValue)
     }
-  } catch {}
+  } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
+  }
 
   const font = FONT_CONFIG[bodyFont]
   const validThemes = THEME_OPTIONS.map((theme) => theme.id)

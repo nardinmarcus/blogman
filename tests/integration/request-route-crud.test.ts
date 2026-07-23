@@ -1,0 +1,277 @@
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { NextRequest } from 'next/server'
+import { Miniflare } from 'miniflare'
+
+const mocks = vi.hoisted(() => ({
+  authenticateRequest: vi.fn(),
+  isAdminAuthenticated: vi.fn(),
+  getAppCloudflareEnv: vi.fn(),
+  getAppCloudflareContext: vi.fn(),
+}))
+
+vi.mock('@/lib/admin-auth', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/admin-auth')>('@/lib/admin-auth')
+  return {
+    ...actual,
+    authenticateRequest: mocks.authenticateRequest,
+    isAdminAuthenticated: mocks.isAdminAuthenticated,
+  }
+})
+
+vi.mock('@/lib/cloudflare', () => ({
+  getAppCloudflareEnv: mocks.getAppCloudflareEnv,
+  getAppCloudflareContext: mocks.getAppCloudflareContext,
+}))
+
+import { DELETE as deleteToken, GET as getTokens, POST as createToken } from '@/app/api/admin/tokens/route'
+import {
+  DELETE as deleteTextProfile,
+  GET as getTextProfiles,
+  POST as createTextProfile,
+  PUT as updateTextProfile,
+} from '@/app/api/admin/ai-provider/route'
+import {
+  DELETE as deleteImageProfile,
+  GET as getImageProfiles,
+  POST as createImageProfile,
+  PUT as updateImageProfile,
+} from '@/app/api/admin/ai-image-provider/route'
+import { GET as getGenerators, PUT as updateGenerator } from '@/app/api/admin/ai-post-generators/route'
+import {
+  DELETE as deleteAdminPost,
+  GET as getAdminPost,
+  PUT as updateAdminPost,
+} from '@/app/api/admin/posts/[slug]/route'
+import {
+  DELETE as deleteCategory,
+  PATCH as updateCategory,
+  POST as createCategory,
+} from '@/app/api/admin/categories/route'
+
+const repoRoot = process.cwd()
+const wranglerPath = join(repoRoot, 'node_modules', '.bin', 'wrangler')
+const runnerPath = join(repoRoot, 'scripts', 'migrations.mjs')
+const ledgerMigrationsPath = join(repoRoot, 'db', 'ledger-migrations')
+const historicalMigrationsPath = join(repoRoot, 'db', 'migrations')
+const stateDirectories: string[] = []
+const miniflares: Miniflare[] = []
+
+function createState() {
+  const state = mkdtempSync(join(tmpdir(), 'blogman-route-crud-d1-'))
+  stateDirectories.push(state)
+  return state
+}
+
+function runD1(state: string, sql: string) {
+  const result = spawnSync(wranglerPath, [
+    'd1', 'execute', 'DB', '--local', '--persist-to', state,
+    '--config', join(repoRoot, 'wrangler.toml'), '--command', sql, '--json',
+  ], { cwd: repoRoot, encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(result.stdout || result.stderr)
+  return JSON.parse(result.stdout) as Array<{ results?: unknown[]; success?: boolean; meta?: Record<string, unknown> }>
+}
+
+function applyD1File(state: string, path: string) {
+  const result = spawnSync(wranglerPath, [
+    'd1', 'execute', 'DB', '--local', '--persist-to', state,
+    '--config', join(repoRoot, 'wrangler.toml'), '--file', path, '--json',
+  ], { cwd: repoRoot, encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(result.stdout || result.stderr)
+}
+
+function applyHistoricalAiSchemaFixture(state: string) {
+  applyD1File(state, join(ledgerMigrationsPath, '001_initial_schema.sql'))
+  runD1(state, 'DROP TABLE ai_actions; DROP TABLE ai_provider_profiles;')
+  applyD1File(state, join(historicalMigrationsPath, '002_add_ai_actions.sql'))
+  applyD1File(state, join(historicalMigrationsPath, '004_add_ai_provider_profiles.sql'))
+}
+
+function applyLedger(state: string) {
+  const result = spawnSync(process.execPath, [
+    runnerPath, 'apply', '--candidate', 'route-crud-fixture', '--database', 'DB', '--local',
+    '--persist-to', state, '--config', join(repoRoot, 'wrangler.toml'),
+  ], { cwd: repoRoot, encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(result.stderr || result.stdout)
+}
+
+function literal(value: unknown) {
+  if (value === null || value === undefined) return 'NULL'
+  if (typeof value === 'number') return String(value)
+  return `'${String(value).replaceAll("'", "''")}'`
+}
+
+function bindSql(sql: string, values: unknown[]) {
+  let index = 0
+  return sql.replace(/\?/g, () => literal(values[index++]))
+}
+
+function createDatabase(state: string): D1Database {
+  class Statement {
+    constructor(private readonly sql: string, private readonly values: unknown[] = []) {}
+    bind(...values: unknown[]) { return new Statement(this.sql, values) }
+    render() { return bindSql(this.sql, this.values) }
+    async all<T>() {
+      const result = runD1(state, this.render()).at(-1)
+      return { results: (result?.results || []) as T[], success: result?.success ?? true, meta: result?.meta || {} }
+    }
+    async first<T>() { return (await this.all<T>()).results[0] ?? null }
+    async run<T>() { return this.all<T>() }
+  }
+  return {
+    prepare(sql: string) { return new Statement(sql) },
+    async batch(statements: Statement[]) {
+      const results = []
+      for (const statement of statements) results.push(await statement.run())
+      return results
+    },
+  } as unknown as D1Database
+}
+
+function request(path: string, method: string, body?: unknown) {
+  return new NextRequest(`http://test.local${path}`, {
+    method,
+    headers: { Cookie: 'blogman_admin=session', Authorization: 'Bearer test', 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+}
+
+function query<T>(state: string, sql: string): T[] {
+  return (runD1(state, sql).at(-1)?.results || []) as T[]
+}
+
+afterEach(async () => {
+  for (const state of stateDirectories.splice(0)) rmSync(state, { recursive: true, force: true })
+  await Promise.all(miniflares.splice(0).map((miniflare) => miniflare.dispose()))
+})
+
+describe('real route CRUD on a ledger-migrated D1', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.authenticateRequest.mockResolvedValue(true)
+    mocks.isAdminAuthenticated.mockResolvedValue(true)
+  })
+
+  it('performs representative business mutations on the repository historical schema without schema or non-target seed drift', { timeout: 300_000 }, async () => {
+    const state = createState()
+    applyHistoricalAiSchemaFixture(state)
+    applyLedger(state)
+    const db = createDatabase(state)
+    const env = { DB: db, AI_CONFIG_ENCRYPTION_SECRET: '0123456789abcdef0123456789abcdef' }
+    mocks.getAppCloudflareEnv.mockResolvedValue(env)
+    mocks.getAppCloudflareContext.mockResolvedValue({ env, ctx: { waitUntil: vi.fn() } })
+    const schemaBefore = query(state, `
+      SELECT type, name, sql FROM sqlite_schema
+      WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY type, name
+    `)
+    const protectedSeedsBefore = query(state, `
+      SELECT 'setting' AS kind, key AS row_key, value AS value FROM site_settings
+      UNION ALL SELECT 'action', action_key, json_object('prompt', prompt, 'profile_id', profile_id, 'updated_at', updated_at) FROM ai_actions
+      UNION ALL SELECT 'image_action', action_key, json_object('prompt', prompt, 'profile_id', profile_id, 'updated_at', updated_at) FROM ai_image_actions
+      UNION ALL SELECT 'generator', target_key, json_object('prompt', prompt, 'text_profile_id', text_profile_id, 'image_profile_id', image_profile_id, 'updated_at', updated_at) FROM ai_post_generators WHERE target_key <> 'summary'
+      ORDER BY kind, row_key
+    `)
+
+    const createdTokenResponse = await createToken(request('/api/admin/tokens', 'POST', { name: 'Route token' }))
+    expect(createdTokenResponse.status).toBe(200)
+    const tokenId = query<{ id: number }>(state, "SELECT id FROM api_tokens WHERE name = 'Route token'")[0].id
+    expect((await getTokens(request('/api/admin/tokens', 'GET'))).status).toBe(200)
+    expect((await deleteToken(request('/api/admin/tokens', 'DELETE', { id: tokenId }))).status).toBe(200)
+    expect(query(state, "SELECT id FROM api_tokens WHERE name = 'Route token'")).toEqual([])
+
+    const textCreated = await createTextProfile(request('/api/admin/ai-provider', 'POST', {
+      name: 'Text route', base_url: 'https://text.example.com/v1', model: 'text-model', api_key: 'sk-text', is_default: true,
+    }))
+    expect(textCreated.status).toBe(200)
+    const textId = query<{ id: number }>(state, "SELECT id FROM ai_provider_profiles WHERE name = 'Text route'")[0].id
+    expect(query(state, `SELECT max_tokens FROM ai_provider_profiles WHERE id = ${textId}`)).toEqual([{ max_tokens: 2000 }])
+    expect((await getTextProfiles(request('/api/admin/ai-provider', 'GET'))).status).toBe(200)
+    expect((await updateTextProfile(request('/api/admin/ai-provider', 'PUT', {
+      id: textId, name: 'Text updated', base_url: 'https://text.example.com/v1', model: 'text-model-2', is_default: true,
+    }))).status).toBe(200)
+    expect(query(state, `SELECT name, model FROM ai_provider_profiles WHERE id = ${textId}`)).toEqual([{ name: 'Text updated', model: 'text-model-2' }])
+    expect((await deleteTextProfile(request('/api/admin/ai-provider', 'DELETE', { id: textId }))).status).toBe(200)
+
+    const imageCreated = await createImageProfile(request('/api/admin/ai-image-provider', 'POST', {
+      name: 'Image route', base_url: 'https://image.example.com/v1', model: 'image-model', api_key: 'sk-image', is_default: true,
+    }))
+    expect(imageCreated.status).toBe(200)
+    const imageId = query<{ id: number }>(state, "SELECT id FROM ai_image_provider_profiles WHERE name = 'Image route'")[0].id
+    expect((await getImageProfiles(request('/api/admin/ai-image-provider', 'GET'))).status).toBe(200)
+    expect((await updateImageProfile(request('/api/admin/ai-image-provider', 'PUT', {
+      id: imageId, name: 'Image updated', base_url: 'https://image.example.com/v1', model: 'image-model-2', is_default: true,
+    }))).status).toBe(200)
+    expect(query(state, `SELECT name, model FROM ai_image_provider_profiles WHERE id = ${imageId}`)).toEqual([{ name: 'Image updated', model: 'image-model-2' }])
+    expect((await deleteImageProfile(request('/api/admin/ai-image-provider', 'DELETE', { id: imageId }))).status).toBe(200)
+
+    expect((await getGenerators(request('/api/admin/ai-post-generators', 'GET'))).status).toBe(200)
+    expect((await updateGenerator(request('/api/admin/ai-post-generators', 'PUT', {
+      target_key: 'summary', prompt: '作者 route summary prompt', provider_mode: 'workers_ai', workers_model: '@cf/meta/llama-3.1-8b-instruct', temperature: 0, max_tokens: 1,
+    }))).status).toBe(200)
+    expect(query(state, "SELECT prompt, temperature, max_tokens FROM ai_post_generators WHERE target_key = 'summary'"))
+      .toEqual([{ prompt: '作者 route summary prompt', temperature: 0, max_tokens: 1 }])
+
+    expect((await createCategory(request('/api/admin/categories', 'POST', { name: 'Route Category', slug: 'route-category' }))).status).toBe(200)
+    expect((await updateCategory(request('/api/admin/categories', 'PATCH', { oldSlug: 'route-category', name: 'Route Renamed', slug: 'route-renamed' }))).status).toBe(200)
+    expect(query(state, "SELECT name, slug FROM categories WHERE slug = 'route-renamed'"))
+      .toEqual([{ name: 'Route Renamed', slug: 'route-renamed' }])
+    expect((await deleteCategory(request('/api/admin/categories', 'DELETE', { slug: 'route-renamed' }))).status).toBe(200)
+    expect(query(state, "SELECT slug FROM categories WHERE slug = 'route-renamed'")).toEqual([])
+
+    expect(query(state, `
+      SELECT type, name, sql FROM sqlite_schema
+      WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY type, name
+    `)).toEqual(schemaBefore)
+    expect(query(state, `
+      SELECT 'setting' AS kind, key AS row_key, value AS value FROM site_settings
+      UNION ALL SELECT 'action', action_key, json_object('prompt', prompt, 'profile_id', profile_id, 'updated_at', updated_at) FROM ai_actions
+      UNION ALL SELECT 'image_action', action_key, json_object('prompt', prompt, 'profile_id', profile_id, 'updated_at', updated_at) FROM ai_image_actions
+      UNION ALL SELECT 'generator', target_key, json_object('prompt', prompt, 'text_profile_id', text_profile_id, 'image_profile_id', image_profile_id, 'updated_at', updated_at) FROM ai_post_generators WHERE target_key <> 'summary'
+      ORDER BY kind, row_key
+    `)).toEqual(protectedSeedsBefore)
+  })
+
+  it('runs real admin article GET, PUT, and DELETE on a Cloudflare local D1 binding', async () => {
+    // Keep this binding focused on the article handler contract. The canonical
+    // posts_fts/posts_au objects are normalized-schema identical after A/B/C
+    // migration and fail the same update independently of #21. Loading them
+    // here would turn this route-boundary test into an unrelated FTS regression.
+    const miniflare = new Miniflare({
+      modules: true,
+      script: 'export default { fetch() { return new Response("ok") } }',
+      d1Databases: { DB: crypto.randomUUID() },
+    })
+    miniflares.push(miniflare)
+    const db = await miniflare.getD1Database('DB') as unknown as D1Database
+    await db.batch([
+      db.prepare(`CREATE TABLE posts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT UNIQUE NOT NULL, title TEXT NOT NULL,
+        content TEXT NOT NULL, html TEXT NOT NULL, description TEXT DEFAULT '', category TEXT DEFAULT '',
+        tags TEXT DEFAULT '[]', status TEXT DEFAULT 'draft', password TEXT, is_pinned INTEGER DEFAULT 0,
+        is_hidden INTEGER DEFAULT 0, cover_image TEXT, deleted_at INTEGER, published_at INTEGER DEFAULT (strftime('%s', 'now')),
+        created_at INTEGER DEFAULT (strftime('%s', 'now')), updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+        view_count INTEGER DEFAULT 0
+      )`),
+      db.prepare("INSERT INTO posts (slug, title, content, html, status) VALUES ('route-post', 'Original', 'body', '<p>body</p>', 'draft')"),
+    ])
+    const env = { DB: db }
+    mocks.getAppCloudflareEnv.mockResolvedValue(env)
+    mocks.getAppCloudflareContext.mockResolvedValue({ env, ctx: { waitUntil: vi.fn() } })
+    const schemaBefore = (await db.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all()).results
+    const postContext = { params: Promise.resolve({ slug: 'route-post' }) }
+
+    expect((await getAdminPost(request('/api/admin/posts/route-post', 'GET'), postContext)).status).toBe(200)
+    expect((await updateAdminPost(request('/api/admin/posts/route-post', 'PUT', {
+      title: 'Updated post', content: 'updated body', html: '<p>updated</p>', status: 'published',
+    }), postContext)).status).toBe(200)
+    expect(await db.prepare("SELECT title, content, status FROM posts WHERE slug = 'route-post'").first())
+      .toEqual({ title: 'Updated post', content: 'updated body', status: 'published' })
+    expect((await deleteAdminPost(request('/api/admin/posts/route-post', 'DELETE'), postContext)).status).toBe(200)
+    expect(await db.prepare("SELECT status FROM posts WHERE slug = 'route-post'").first()).toBeNull()
+    expect((await db.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all()).results)
+      .toEqual(schemaBefore)
+  })
+})

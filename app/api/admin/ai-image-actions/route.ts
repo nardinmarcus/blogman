@@ -2,8 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/admin-auth'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import {
-  ensureAiImageConfigInfrastructure,
-  ensureDefaultImageProfileId,
+  selectDefaultImageProfileId,
   type AIImageActionRow,
 } from '@/lib/ai-image-config'
 import {
@@ -14,16 +13,15 @@ import {
   normalizeAiImageAspectRatio,
   normalizeAiImageResolution,
 } from '@/lib/ai-image-options'
+import { withDatabaseErrorResponse } from '@/lib/database-errors'
 
-export async function GET(req: NextRequest) {
+async function getActions(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!db) return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
-
-  await ensureAiImageConfigInfrastructure(db)
 
   const { results } = await db.prepare(`
     SELECT id, action_key, label, description, prompt, aspect_ratio, resolution, size, quality, profile_id, sort_order, is_enabled, is_builtin,
@@ -35,15 +33,13 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({ actions: results })
 }
 
-export async function POST(req: NextRequest) {
+async function createAction(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!db) return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
-
-  await ensureAiImageConfigInfrastructure(db)
 
   const body = (await req.json()) as {
     action_key?: string
@@ -62,7 +58,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: '缺少必填字段' }, { status: 400 })
   }
 
-  const defaultProfileId = await ensureDefaultImageProfileId(db)
+  const defaultProfileId = await selectDefaultImageProfileId(db)
   const profileId = Number.isFinite(body.profile_id) && Number(body.profile_id) > 0
     ? Number(body.profile_id)
     : defaultProfileId
@@ -101,15 +97,13 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ success: true })
 }
 
-export async function PUT(req: NextRequest) {
+async function updateActionOrder(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!db) return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
-
-  await ensureAiImageConfigInfrastructure(db)
 
   const body = (await req.json()) as { items: Array<{ id: number; sort_order: number }> }
   if (!body.items?.length) {
@@ -126,3 +120,7 @@ export async function PUT(req: NextRequest) {
 
   return NextResponse.json({ success: true })
 }
+
+export const GET = withDatabaseErrorResponse(getActions)
+export const POST = withDatabaseErrorResponse(createAction)
+export const PUT = withDatabaseErrorResponse(updateActionOrder)

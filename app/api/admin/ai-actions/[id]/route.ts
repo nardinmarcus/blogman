@@ -2,12 +2,11 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/admin-auth'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import {
-  ensureAiConfigInfrastructure,
-  ensureDefaultProfileId,
-  resolveAiConfigSecret,
+  selectDefaultProfileId,
 } from '@/lib/ai-provider-profiles'
+import { withDatabaseErrorResponse } from '@/lib/database-errors'
 
-export async function PUT(
+async function updateAction(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -17,9 +16,6 @@ export async function PUT(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!db) return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
-  const secret = resolveAiConfigSecret(env as Record<string, unknown>)
-  await ensureAiConfigInfrastructure(db, secret)
-
   const { id } = await params
   const body = (await req.json()) as {
     action_key?: string
@@ -45,7 +41,7 @@ export async function PUT(
       sets.push('profile_id = ?')
       vals.push(Number(body.profile_id))
     } else {
-      const defaultProfileId = await ensureDefaultProfileId(db)
+      const defaultProfileId = await selectDefaultProfileId(db)
       sets.push('profile_id = ?')
       vals.push(defaultProfileId ?? null)
     }
@@ -73,7 +69,7 @@ export async function PUT(
   return NextResponse.json({ success: true })
 }
 
-export async function DELETE(
+async function deleteAction(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -83,9 +79,6 @@ export async function DELETE(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!db) return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
-  const secret = resolveAiConfigSecret(env as Record<string, unknown>)
-  await ensureAiConfigInfrastructure(db, secret)
-
   const { id } = await params
 
   const row = await db.prepare('SELECT id FROM ai_actions WHERE id = ?')
@@ -98,3 +91,6 @@ export async function DELETE(
   await db.prepare('DELETE FROM ai_actions WHERE id = ?').bind(Number(id)).run()
   return NextResponse.json({ success: true })
 }
+
+export const PUT = withDatabaseErrorResponse(updateAction)
+export const DELETE = withDatabaseErrorResponse(deleteAction)

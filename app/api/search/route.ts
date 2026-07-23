@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { searchPostsWithStrategy } from '@/lib/related-content'
+import { migrationRequiredResponse } from '@/lib/database-errors'
 
 export async function GET(req: NextRequest) {
   try {
@@ -32,6 +33,8 @@ export async function GET(req: NextRequest) {
     })
   } catch (error) {
     console.error('Search error:', error)
+    const response = migrationRequiredResponse(error)
+    if (response) return response
     return NextResponse.json({ results: [] })
   }
 }

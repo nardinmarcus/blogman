@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
-import { ensureAiConfigInfrastructure, resolveAiConfigSecret } from '@/lib/ai-provider-profiles'
+import { migrationRequiredResponse } from '@/lib/database-errors'
 
 interface AiActionPublic {
   id: number
@@ -18,16 +18,14 @@ export async function GET() {
   }
 
   try {
-    const secret = resolveAiConfigSecret(env as Record<string, unknown>)
-    await ensureAiConfigInfrastructure(db, secret)
-
     const { results } = await db.prepare(
       'SELECT id, action_key, label, description FROM ai_actions WHERE is_enabled = 1 ORDER BY sort_order ASC'
     ).all<AiActionPublic>()
 
     return NextResponse.json({ actions: results })
-  } catch {
-    // DB 表可能不存在（未迁移），返回空列表让前端 fallback
-    return NextResponse.json({ actions: [] })
+  } catch (error) {
+    const response = migrationRequiredResponse(error)
+    if (response) return response
+    throw error
   }
 }

@@ -6,6 +6,7 @@ import {
   jsonOk,
   parseJsonBody,
 } from '@/lib/server/route-helpers'
+import { migrationRequiredResponse } from '@/lib/database-errors'
 import type { NextRequest } from 'next/server'
 
 interface CreateCategoryBody {
@@ -23,6 +24,10 @@ interface DeleteCategoryBody {
   slug?: string
 }
 
+function categoryErrorResponse(error: unknown) {
+  return migrationRequiredResponse(error) || jsonError(String(error), 500)
+}
+
 export async function GET(req: NextRequest) {
   try {
     const route = await getRouteEnvWithDb('DB not available')
@@ -35,7 +40,7 @@ export async function GET(req: NextRequest) {
     const categories = await getCategories(route.db)
     return jsonOk({ categories })
   } catch (err) {
-    return jsonError(String(err), 500)
+    return categoryErrorResponse(err)
   }
 }
 
@@ -54,7 +59,7 @@ export async function POST(req: NextRequest) {
     await createCategory(route.db, name, slug)
     return jsonOk({ success: true })
   } catch (err) {
-    return jsonError(String(err), 500)
+    return categoryErrorResponse(err)
   }
 }
 
@@ -73,7 +78,7 @@ export async function PATCH(req: NextRequest) {
     await updateCategory(route.db, oldSlug, name, slug)
     return jsonOk({ success: true })
   } catch (err) {
-    return jsonError(String(err), 500)
+    return categoryErrorResponse(err)
   }
 }
 
@@ -92,6 +97,6 @@ export async function DELETE(req: NextRequest) {
     await deleteCategory(route.db, slug)
     return jsonOk({ success: true })
   } catch (err) {
-    return jsonError(String(err), 500)
+    return categoryErrorResponse(err)
   }
 }

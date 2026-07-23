@@ -6,6 +6,8 @@ import { LogoutButton } from './LogoutButton'
 import { PenLine, ExternalLink } from 'lucide-react'
 import { AdminFooter } from '@/components/AdminFooter'
 
+export const dynamic = 'force-dynamic'
+
 export default async function AdminProtectedLayout({
   children,
 }: {

@@ -9,6 +9,7 @@ import {
 } from '@/lib/post-utils'
 import { enqueueBackgroundJob } from '@/lib/background-jobs'
 import { getRouteContextWithDb, jsonError, jsonOk, parseJsonBody } from '@/lib/server/route-helpers'
+import { rethrowIfDatabaseMigrationRequired, withDatabaseErrorResponse } from '@/lib/database-errors'
 import type { NextRequest } from 'next/server'
 
 async function checkAuth(req: NextRequest): Promise<boolean> {
@@ -19,7 +20,7 @@ async function checkAuth(req: NextRequest): Promise<boolean> {
 type Ctx = { params: Promise<{ slug: string }> }
 
 // 获取单篇文章（编辑用）
-export async function GET(req: NextRequest, { params }: Ctx) {
+async function getPost(req: NextRequest, { params }: Ctx) {
   if (!(await checkAuth(req))) {
     return jsonError('Unauthorized', 401)
   }
@@ -35,7 +36,7 @@ export async function GET(req: NextRequest, { params }: Ctx) {
 }
 
 // 更新文章
-export async function PUT(req: NextRequest, { params }: Ctx) {
+async function updatePostRoute(req: NextRequest, { params }: Ctx) {
   if (!(await checkAuth(req))) {
     return jsonError('Unauthorized', 401)
   }
@@ -120,6 +121,7 @@ export async function PUT(req: NextRequest, { params }: Ctx) {
 
     return jsonOk({ success: true, slug: nextSlug || slug })
   } catch (err) {
+    rethrowIfDatabaseMigrationRequired(err)
     if (err instanceof Error && /UNIQUE constraint failed: posts\.slug/i.test(err.message)) {
       return jsonError('slug 已存在，请换一个', 409)
     }
@@ -129,7 +131,7 @@ export async function PUT(req: NextRequest, { params }: Ctx) {
 }
 
 // 删除文章
-export async function DELETE(req: NextRequest, { params }: Ctx) {
+async function deletePostRoute(req: NextRequest, { params }: Ctx) {
   if (!(await checkAuth(req))) {
     return jsonError('Unauthorized', 401)
   }
@@ -167,6 +169,7 @@ export async function DELETE(req: NextRequest, { params }: Ctx) {
 
     return jsonOk({ success: true })
   } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
     console.error('Delete post failed:', error)
     return jsonOk(
       {
@@ -177,3 +180,7 @@ export async function DELETE(req: NextRequest, { params }: Ctx) {
     )
   }
 }
+
+export const GET = withDatabaseErrorResponse(getPost)
+export const PUT = withDatabaseErrorResponse(updatePostRoute)
+export const DELETE = withDatabaseErrorResponse(deletePostRoute)

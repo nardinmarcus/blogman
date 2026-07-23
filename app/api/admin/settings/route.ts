@@ -3,6 +3,7 @@ import { isAdminAuthenticated, COOKIE_NAME } from '@/lib/admin-auth'
 import { getRouteEnvWithDb, jsonError, jsonOk, parseJsonBody } from '@/lib/server/route-helpers'
 import { cookies } from 'next/headers'
 import type { NextRequest } from 'next/server'
+import { migrationRequiredResponse } from '@/lib/database-errors'
 
 async function checkAuth() {
   const cookieStore = await cookies()
@@ -28,7 +29,7 @@ export async function GET(req: NextRequest) {
     return jsonOk({ key, value })
   } catch (error) {
     console.error('Get setting error:', error)
-    return jsonError(error instanceof Error ? error.message : '获取设置失败', 500)
+    return migrationRequiredResponse(error) || jsonError('获取设置失败', 500)
   }
 }
 
@@ -50,6 +51,6 @@ export async function POST(req: NextRequest) {
     return jsonOk({ success: true })
   } catch (error) {
     console.error('Set setting error:', error)
-    return jsonError(error instanceof Error ? error.message : '保存设置失败', 500)
+    return migrationRequiredResponse(error) || jsonError('保存设置失败', 500)
   }
 }

@@ -1,6 +1,6 @@
 import { getCacheKey } from '@/lib/cache'
 import { mapPostWithTags, parsePostTags } from '@/lib/repositories/post-mappers'
-import { ensureSchema, type Database } from '@/lib/repositories/schema'
+import type { Database } from '@/lib/repositories/schema'
 import type {
   CountRow,
   Post,
@@ -20,7 +20,6 @@ export async function getPosts(
   includeHidden = false,
   includeDeleted = false,
 ): Promise<PostWithTags[]> {
-  await ensureSchema(db)
   const conditions: string[] = []
   if (!includeDrafts) {
     conditions.push("status = 'published'")
@@ -57,8 +56,6 @@ export async function getPostBySlug(
   slug: string,
   kv?: KVNamespace,
 ): Promise<PostWithTags | null> {
-  await ensureSchema(db)
-
   if (kv) {
     try {
       const cacheKey = await getCacheKey(kv, `post:${slug}`)
@@ -101,8 +98,6 @@ export async function getPostAiSnapshot(
   tags: string[]
   deleted_at: number | null
 } | null> {
-  await ensureSchema(db)
-
   const post = await db
     .prepare('SELECT id, title, content, category, description, tags, deleted_at FROM posts WHERE id = ?')
     .bind(id)
@@ -133,7 +128,6 @@ export async function createPost(
     cover_image?: string | null
   },
 ): Promise<number> {
-  await ensureSchema(db)
   const category = data.category || '未分类'
 
   const result = await db
@@ -187,8 +181,6 @@ export async function updatePostBySlug(
     cover_image: string | null
   }>,
 ): Promise<void> {
-  await ensureSchema(db)
-
   const post = await db
     .prepare('SELECT id, category FROM posts WHERE slug = ?')
     .bind(slug)
@@ -220,8 +212,6 @@ export async function updatePost(
     cover_image: string | null
   }>,
 ): Promise<void> {
-  await ensureSchema(db)
-
   let oldCategory: string | null = null
   if (data.category !== undefined) {
     const post = await db
@@ -356,7 +346,6 @@ export async function getPostsCount(
   includeHidden = false,
   includeDeleted = false,
 ): Promise<number> {
-  await ensureSchema(db)
   const conditions: string[] = []
   if (!includeDrafts) {
     conditions.push("status = 'published'")

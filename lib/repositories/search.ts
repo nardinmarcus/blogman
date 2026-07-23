@@ -1,6 +1,7 @@
 import { mapPostWithTags } from '@/lib/repositories/post-mappers'
 import type { Database } from '@/lib/repositories/schema'
 import type { Post, PostWithTags } from '@/lib/repositories/types'
+import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 
 // 全文搜索（FTS5，回退 LIKE）
 export async function searchPosts(
@@ -34,7 +35,8 @@ export async function searchPosts(
       .bind(query, limit)
       .all<Post>()
     results = ftsResult.results
-  } catch {
+  } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
     const pattern = `%${query}%`
     const likeResult = await db
       .prepare(

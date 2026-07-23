@@ -18,6 +18,7 @@ import {
   jsonOk,
   parseJsonBody,
 } from '@/lib/server/route-helpers'
+import { migrationRequiredResponse } from '@/lib/database-errors'
 import type { NextRequest } from 'next/server'
 
 export async function POST(req: NextRequest) {
@@ -122,6 +123,8 @@ export async function POST(req: NextRequest) {
       cover_image: coverImage,
     })
   } catch (error) {
+    const migrationResponse = migrationRequiredResponse(error)
+    if (migrationResponse) return migrationResponse
     if (error instanceof Error && /UNIQUE constraint failed: posts\.slug/i.test(error.message)) {
       return jsonError('slug 已存在，请换一个', 409)
     }
@@ -181,6 +184,8 @@ export async function PATCH(req: NextRequest) {
 
     return jsonOk({ success: true, slug: nextSlug || currentSlug })
   } catch (error) {
+    const migrationResponse = migrationRequiredResponse(error)
+    if (migrationResponse) return migrationResponse
     if (error instanceof Error && /UNIQUE constraint failed: posts\.slug/i.test(error.message)) {
       return jsonError('slug 已存在，请换一个', 409)
     }

@@ -4,6 +4,10 @@
 import { nanoid } from 'nanoid'
 import { NextRequest } from 'next/server'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
+import {
+  getDatabaseMigrationRequiredError,
+  rethrowIfDatabaseMigrationRequired,
+} from '@/lib/database-errors'
 
 interface AdminAuthConfig {
   password: string
@@ -95,13 +99,17 @@ export async function verifyApiToken(db: D1Database, token: string): Promise<boo
       .bind(token)
       .first<ApiTokenRow>()
     if (!row || !row.is_active) return false
-    // 异步更新 last_used_at，不阻塞认证
-    db.prepare("UPDATE api_tokens SET last_used_at = strftime('%s', 'now') WHERE id = ?")
-      .bind(row.id)
-      .run()
-      .catch(() => {})
+    try {
+      await db.prepare("UPDATE api_tokens SET last_used_at = strftime('%s', 'now') WHERE id = ?")
+        .bind(row.id)
+        .run()
+    } catch (error) {
+      rethrowIfDatabaseMigrationRequired(error)
+    }
     return true
-  } catch {
+  } catch (error) {
+    const migrationError = getDatabaseMigrationRequiredError(error)
+    if (migrationError) throw migrationError
     return false
   }
 }

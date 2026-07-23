@@ -1,5 +1,6 @@
 import { normalizeTheme, type Theme } from '@/lib/appearance'
 import { getPublicCategories, getSetting } from '@/lib/db'
+import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 
 export interface SiteNavLink {
   label: string
@@ -45,7 +46,8 @@ export async function getSiteHeaderData(db: D1Database): Promise<{
       }))
 
     defaultTheme = normalizeTheme(themeValue)
-  } catch {
+  } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
     // Keep graceful fallback behavior for public pages
   }
 

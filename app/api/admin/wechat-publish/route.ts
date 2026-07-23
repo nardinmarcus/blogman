@@ -4,6 +4,7 @@ import { assertWechatBridgeReady, fetchWechatBridgeJson, getWechatBridgeConfig }
 import { resolvePostCoverImage } from '@/lib/default-cover-images'
 import { getSiteUrl } from '@/lib/site-config'
 import { WECHAT_DEFAULT_AUTHOR, WECHAT_DEFAULT_NEED_OPEN_COMMENT, trimWechatDigest } from '@/lib/wechat-publish-defaults'
+import { rethrowIfDatabaseMigrationRequired, withDatabaseErrorResponse } from '@/lib/database-errors'
 
 interface PublishWechatBody {
   account_id?: string
@@ -18,7 +19,7 @@ interface PublishWechatBody {
   only_fans_can_comment?: boolean
 }
 
-export async function POST(req: NextRequest) {
+async function publishWechat(req: NextRequest) {
   const route = await getRouteEnvWithDb('DB unavailable')
   if (!route.ok) return route.response
 
@@ -66,6 +67,9 @@ export async function POST(req: NextRequest) {
 
     return jsonOk(result)
   } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
     return jsonError(error instanceof Error ? error.message : '提交公众号发布失败', 500)
   }
 }
+
+export const POST = withDatabaseErrorResponse(publishWechat)

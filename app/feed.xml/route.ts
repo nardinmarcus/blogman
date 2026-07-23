@@ -1,5 +1,6 @@
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { getSiteUrl } from '@/lib/site-config'
+import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 
 const SITE_URL = getSiteUrl()
 const SITE_TITLE = 'Namoo'
@@ -41,7 +42,8 @@ export async function GET() {
         .all()
       posts = results as unknown as RssPost[]
     }
-  } catch {
+  } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
     // ignore
   }
 

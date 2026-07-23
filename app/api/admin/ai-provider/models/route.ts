@@ -3,7 +3,6 @@ import { authenticateRequest } from '@/lib/admin-auth'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import {
   decryptApiKey,
-  ensureAiConfigInfrastructure,
   normalizeBaseUrl,
   resolveAiConfigSecret,
 } from '@/lib/ai-provider-profiles'
@@ -14,6 +13,7 @@ import {
   fetchWorkersAiModels,
   type RawWorkersAiModelItem,
 } from '@/lib/workers-ai-models'
+import { rethrowIfDatabaseMigrationRequired, withDatabaseErrorResponse } from '@/lib/database-errors'
 
 type RawModelItem = RawWorkersAiModelItem
 
@@ -97,7 +97,7 @@ function filterCompatibleModels(items: RawModelItem[], provider: string, baseUrl
   return filtered.length > 0 ? filtered : items
 }
 
-export async function GET(req: NextRequest) {
+async function getModels(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
@@ -106,8 +106,6 @@ export async function GET(req: NextRequest) {
   if (!db) return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
 
   const secret = resolveAiConfigSecret(env as Record<string, unknown>)
-  await ensureAiConfigInfrastructure(db, secret)
-
   const requestUrl = new URL(req.url)
   const queryProvider = requestUrl.searchParams.get('provider')?.trim() || ''
   const queryBaseUrl = requestUrl.searchParams.get('base_url')?.trim() || ''
@@ -245,6 +243,7 @@ export async function GET(req: NextRequest) {
       ...(warnings.length > 0 ? { warning: warnings[0] } : {}),
     })
   } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
     const message = error instanceof Error ? error.message : '获取模型列表失败'
     if (fallbackModels.length > 0) {
       return NextResponse.json({
@@ -256,3 +255,5 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: message }, { status: 502 })
   }
 }
+
+export const GET = withDatabaseErrorResponse(getModels)

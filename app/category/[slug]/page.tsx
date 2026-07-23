@@ -7,6 +7,7 @@ import { SiteFooter } from '@/components/SiteFooter'
 import { Pagination } from '@/components/Pagination'
 import { getSiteHeaderData } from '@/lib/site'
 import { getSiteUrl } from '@/lib/site-config'
+import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 
 const PAGE_SIZE = 25
 const BASE_URL = getSiteUrl()
@@ -43,7 +44,8 @@ export async function generateMetadata({
         canonical: `${BASE_URL}/category/${slug}`,
       },
     }
-  } catch {
+  } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
     return {}
   }
 }

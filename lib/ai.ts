@@ -5,7 +5,6 @@ import {
   clampMaxTokens,
   clampTemperature,
   decryptApiKey,
-  ensureAiConfigInfrastructure,
   isWorkersAiBaseUrl,
   normalizeBaseUrl,
   resolveAiConfigSecret,
@@ -16,6 +15,7 @@ import {
   shouldRetryAssistantPayload,
 } from '@/lib/ai-post-generator/parsers'
 import { buildAutoDescription } from '@/lib/post-utils'
+import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 
 const DEFAULT_EXTERNAL_BASE_URL = 'https://api.siliconflow.cn/v1'
 const DEFAULT_EXTERNAL_MODEL = 'Qwen/Qwen2.5-7B-Instruct'
@@ -213,8 +213,6 @@ export async function resolveConfig(env?: AIEnv, db?: D1Database, profileId?: nu
   if (db) {
     try {
       const secret = resolveAiConfigSecret(env as Record<string, unknown> | undefined)
-      await ensureAiConfigInfrastructure(db, secret)
-
       const selected = Number.isFinite(profileId) && Number(profileId) > 0
         ? await db.prepare(`
             SELECT base_url, model, temperature, max_tokens, api_key_encrypted
@@ -255,31 +253,8 @@ export async function resolveConfig(env?: AIEnv, db?: D1Database, profileId?: nu
         }
       }
 
-      const [providerRow, keyRow] = await Promise.all([
-        db.prepare("SELECT value FROM site_settings WHERE key = 'ai_provider_config'").first<{ value: string }>(),
-        db.prepare("SELECT value FROM site_settings WHERE key = 'ai_provider_api_key'").first<{ value: string }>(),
-      ])
-
-      if (providerRow?.value && keyRow?.value) {
-        const cfg = JSON.parse(providerRow.value) as {
-          base_url?: string
-          model?: string
-          temperature?: number
-          max_tokens?: number
-        }
-
-        if (cfg.base_url && cfg.model) {
-          return {
-            strategy: 'external-provider',
-            apiKey: keyRow.value,
-            baseURL: normalizeBaseUrl(cfg.base_url),
-            model: cfg.model,
-            temperature: clampTemperature(Number(cfg.temperature)),
-            maxTokens: clampMaxTokens(Number(cfg.max_tokens)),
-          }
-        }
-      }
     } catch (error) {
+      rethrowIfDatabaseMigrationRequired(error)
       console.error('[ai] resolveConfig DB 读取失败，降级到环境变量:', error)
     }
   }

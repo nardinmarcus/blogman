@@ -1,5 +1,6 @@
 import { getCategories } from '@/lib/db'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
+import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 import { CategoryManager } from './CategoryManager'
 
 export const metadata = { title: '分类管理' }
@@ -12,6 +13,7 @@ export default async function CategoriesPage() {
     try {
       categories = await getCategories(env.DB)
     } catch (error) {
+      rethrowIfDatabaseMigrationRequired(error)
       console.error('Categories fetch error:', error)
     }
   }
@@ -28,4 +30,3 @@ export default async function CategoriesPage() {
     </div>
   )
 }
-

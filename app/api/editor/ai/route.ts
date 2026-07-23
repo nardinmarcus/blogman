@@ -2,9 +2,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/admin-auth'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { transformEditorSelectionStream, getAiRuntimeEnv } from '@/lib/ai'
-import { ensureAiConfigInfrastructure, resolveAiConfigSecret } from '@/lib/ai-provider-profiles'
+import { migrationRequiredResponse, withDatabaseErrorResponse } from '@/lib/database-errors'
 
-export async function POST(req: NextRequest) {
+async function post(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
@@ -13,9 +13,6 @@ export async function POST(req: NextRequest) {
   if (!db) {
     return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
   }
-
-  const secret = resolveAiConfigSecret(env as Record<string, unknown>)
-  await ensureAiConfigInfrastructure(db, secret)
 
   let body: { action?: string; text?: string; customPrompt?: string }
   try {
@@ -77,7 +74,11 @@ export async function POST(req: NextRequest) {
       },
     })
   } catch (error) {
+    const response = migrationRequiredResponse(error)
+    if (response) return response
     const message = error instanceof Error ? error.message : 'AI 处理失败'
     return NextResponse.json({ error: message }, { status: 500 })
   }
 }
+
+export const POST = withDatabaseErrorResponse(post)

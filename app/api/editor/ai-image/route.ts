@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/admin-auth'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { generateEditorImage } from '@/lib/ai-image'
-import { ensureAiImageConfigInfrastructure } from '@/lib/ai-image-config'
+import { migrationRequiredResponse, withDatabaseErrorResponse } from '@/lib/database-errors'
 
 type ImageBucket = {
   put: (
@@ -18,7 +18,7 @@ type ImageBucket = {
   ) => Promise<void>
 }
 
-export async function POST(req: NextRequest) {
+async function post(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   const images = env?.IMAGES as ImageBucket | undefined
@@ -32,8 +32,6 @@ export async function POST(req: NextRequest) {
   if (!images) {
     return NextResponse.json({ error: '图片存储未配置' }, { status: 500 })
   }
-
-  await ensureAiImageConfigInfrastructure(db)
 
   let body: {
     action?: string
@@ -82,7 +80,11 @@ export async function POST(req: NextRequest) {
       image: result,
     })
   } catch (error) {
+    const response = migrationRequiredResponse(error)
+    if (response) return response
     const message = error instanceof Error ? error.message : '图片生成失败'
     return NextResponse.json({ error: message }, { status: 500 })
   }
 }
+
+export const POST = withDatabaseErrorResponse(post)

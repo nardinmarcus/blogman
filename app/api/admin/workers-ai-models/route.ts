@@ -7,11 +7,11 @@ import {
 } from '@/lib/ai-post-generators'
 import {
   decryptApiKey,
-  ensureAiConfigInfrastructure,
   normalizeBaseUrl,
   resolveAiConfigSecret,
 } from '@/lib/ai-provider-profiles'
 import { extractCloudflareAccountId, fetchWorkersAiModels } from '@/lib/workers-ai-models'
+import { withDatabaseErrorResponse } from '@/lib/database-errors'
 
 interface WorkersAiProfileRow {
   id: number
@@ -25,7 +25,7 @@ function toModelOptions(ids: string[]) {
   return ids.map((id) => ({ id, name: id }))
 }
 
-export async function GET(req: NextRequest) {
+async function getModels(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
@@ -41,8 +41,6 @@ export async function GET(req: NextRequest) {
   const fallbackModels = kind === 'image' ? WORKERS_AI_IMAGE_MODEL_SUGGESTIONS : WORKERS_AI_TEXT_MODEL_SUGGESTIONS
 
   const secret = resolveAiConfigSecret(env as Record<string, unknown>)
-  await ensureAiConfigInfrastructure(db, secret)
-
   let selectedProfile: WorkersAiProfileRow | null = null
 
   if (Number.isFinite(requestedProfileId) && requestedProfileId > 0) {
@@ -122,3 +120,5 @@ export async function GET(req: NextRequest) {
     })
   }
 }
+
+export const GET = withDatabaseErrorResponse(getModels)

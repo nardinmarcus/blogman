@@ -6,8 +6,9 @@ import {
   getWechatBridgeConfig,
   type WechatBridgeAccount,
 } from '@/lib/wechat-bridge-config'
+import { rethrowIfDatabaseMigrationRequired, withDatabaseErrorResponse } from '@/lib/database-errors'
 
-export async function GET(req: NextRequest) {
+async function getWechatAccounts(req: NextRequest) {
   const route = await getRouteEnvWithDb('DB unavailable')
   if (!route.ok) return route.response
 
@@ -22,6 +23,9 @@ export async function GET(req: NextRequest) {
       accounts: response.accounts || [],
     })
   } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
     return jsonError(error instanceof Error ? error.message : '获取 bridge 账号列表失败', 500)
   }
 }
+
+export const GET = withDatabaseErrorResponse(getWechatAccounts)

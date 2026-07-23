@@ -5,6 +5,7 @@ import type { SiteCategoryLink, SiteNavLink } from '@/lib/site'
 import { getSiteHeaderData } from '@/lib/site'
 import { HomeClient } from '@/components/HomeClient'
 import { getSiteUrl } from '@/lib/site-config'
+import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 
 const PAGE_SIZE = 25
 const BASE_URL = getSiteUrl()
@@ -45,6 +46,7 @@ export default async function Home({
       defaultTheme = headerData.defaultTheme
     }
   } catch (e) {
+    rethrowIfDatabaseMigrationRequired(e)
     console.error('Homepage: failed to fetch posts', e)
   }
 

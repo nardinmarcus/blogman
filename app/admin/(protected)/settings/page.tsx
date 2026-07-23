@@ -1,6 +1,7 @@
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { getSetting, getCategories } from '@/lib/db'
 import { detectRuntimeCapabilities } from '@/lib/runtime-capabilities'
+import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 import { SettingsManager } from './SettingsManager'
 
 export const metadata = { title: '站点设置' }
@@ -23,7 +24,9 @@ export default async function SettingsPage() {
       defaultTheme = (await getSetting(env.DB, 'default_theme')) || ''
       categories = await getCategories(env.DB)
     }
-  } catch {}
+  } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
+  }
 
   return (
     <div className="space-y-6">

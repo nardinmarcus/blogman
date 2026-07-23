@@ -5,10 +5,10 @@ import {
   clampMaxTokens,
   clampTemperature,
   decryptApiKey,
-  ensureAiConfigInfrastructure,
   normalizeBaseUrl,
   resolveAiConfigSecret,
 } from '@/lib/ai-provider-profiles'
+import { rethrowIfDatabaseMigrationRequired, withDatabaseErrorResponse } from '@/lib/database-errors'
 
 function isGeminiBaseUrl(baseUrl: string): boolean {
   return /generativelanguage\.googleapis\.com/i.test(baseUrl)
@@ -94,7 +94,7 @@ function buildProviderErrorMessage(resStatus: number, resStatusText: string, raw
   return `HTTP ${resStatus}: ${resStatusText}`
 }
 
-export async function POST(req: NextRequest) {
+async function testProvider(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
@@ -106,8 +106,6 @@ export async function POST(req: NextRequest) {
   }
 
   const secret = resolveAiConfigSecret(env as Record<string, unknown>)
-  await ensureAiConfigInfrastructure(db, secret)
-
   const body = (await req.json()) as {
     profile_id?: number
     base_url?: string
@@ -211,9 +209,12 @@ export async function POST(req: NextRequest) {
       model: normalizedModel,
     })
   } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
     return NextResponse.json({
       success: false,
       error: error instanceof Error ? error.message : '连接失败',
     })
   }
 }
+
+export const POST = withDatabaseErrorResponse(testProvider)

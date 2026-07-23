@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { authenticateRequest } from '@/lib/admin-auth'
 import { nanoid } from 'nanoid'
+import { migrationRequiredResponse } from '@/lib/database-errors'
 
 type ImageBucket = {
   put: (
@@ -195,6 +196,8 @@ export async function POST(req: NextRequest) {
       variants,
     })
   } catch (error) {
+    const migrationResponse = migrationRequiredResponse(error)
+    if (migrationResponse) return migrationResponse
     console.error('Upload error:', error)
     return NextResponse.json(
       { error: '文件上传失败: ' + (error as Error).message },

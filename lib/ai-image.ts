@@ -2,7 +2,6 @@ import OpenAI from 'openai'
 import type { ImagesResponse } from 'openai/resources/images'
 import { nanoid } from 'nanoid'
 import {
-  ensureAiImageConfigInfrastructure,
   getDefaultImageActionSeed,
   resolveAiImageProfileConfig,
 } from '@/lib/ai-image-config'
@@ -875,8 +874,6 @@ export async function runWorkersAiCompatImageRequest(
 export async function generateEditorImage(
   input: GenerateEditorImageInput,
 ): Promise<GeneratedEditorImage> {
-  await ensureAiImageConfigInfrastructure(input.db)
-
   const secret = resolveAiConfigSecret(input.env as Record<string, unknown> | undefined)
   const action = await resolveImageAction(input.db, input.action)
   const seeded = getDefaultImageActionSeed(action?.action_key)

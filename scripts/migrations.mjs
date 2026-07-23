@@ -11,6 +11,19 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(scriptDirectory, '..')
 const defaultMigrationsDirectory = join(repoRoot, 'db', 'ledger-migrations')
 const defaultWranglerPath = join(repoRoot, 'node_modules', '.bin', 'wrangler')
+const persistentWriteOpcodes = new Set([
+  'OpenWrite',
+  'CreateBtree',
+  'Destroy',
+  'Clear',
+  'SetCookie',
+  'ParseSchema',
+  'DropTable',
+  'DropIndex',
+  'DropTrigger',
+  'VUpdate',
+  'Vacuum',
+])
 const ledgerSchemaObjects = [
   {
     type: 'table',
@@ -56,6 +69,101 @@ END`,
 
 function fail(message) {
   throw new Error(message)
+}
+
+function stripLeadingSqlComments(source) {
+  let remaining = source.trimStart()
+  while (remaining) {
+    if (remaining.startsWith('--')) {
+      const lineEnd = remaining.indexOf('\n')
+      if (lineEnd === -1) return ''
+      remaining = remaining.slice(lineEnd + 1).trimStart()
+      continue
+    }
+    if (remaining.startsWith('/*')) {
+      const commentEnd = remaining.indexOf('*/', 2)
+      if (commentEnd === -1) fail('Unterminated SQL block comment in sidecar query')
+      remaining = remaining.slice(commentEnd + 2).trimStart()
+      continue
+    }
+    break
+  }
+  return remaining
+}
+
+function splitSqlStatements(source) {
+  const statements = []
+  let statementStart = 0
+  let quote = null
+  let lineComment = false
+  let blockComment = false
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]
+    const next = source[index + 1]
+
+    if (lineComment) {
+      if (character === '\n') lineComment = false
+      continue
+    }
+    if (blockComment) {
+      if (character === '*' && next === '/') {
+        blockComment = false
+        index += 1
+      }
+      continue
+    }
+    if (quote) {
+      const closing = quote === '[' ? ']' : quote
+      if (character === closing) {
+        if (quote !== '[' && next === closing) {
+          index += 1
+        } else {
+          quote = null
+        }
+      }
+      continue
+    }
+    if (character === '-' && next === '-') {
+      lineComment = true
+      index += 1
+      continue
+    }
+    if (character === '/' && next === '*') {
+      blockComment = true
+      index += 1
+      continue
+    }
+    if (character === "'" || character === '"' || character === '`' || character === '[') {
+      quote = character
+      continue
+    }
+    if (character === ';') {
+      const statement = source.slice(statementStart, index).trim()
+      if (stripLeadingSqlComments(statement)) statements.push(statement)
+      statementStart = index + 1
+    }
+  }
+
+  if (quote || blockComment) fail('Unterminated SQL literal or comment in sidecar query')
+  const tail = source.slice(statementStart).trim()
+  if (stripLeadingSqlComments(tail)) statements.push(tail)
+  return statements
+}
+
+function validateReadOnlySidecarQueries(source, context, singleStatement = false) {
+  const statements = splitSqlStatements(source)
+  if (statements.length === 0) fail(`${context} must contain a read-only query`)
+  if (singleStatement && statements.length !== 1) {
+    fail(`${context} must contain exactly one read-only query`)
+  }
+  for (const statement of statements) {
+    const executable = stripLeadingSqlComments(statement)
+    if (!/^(select|with)\b/i.test(executable)) {
+      fail(`${context} must be a read-only SELECT or WITH query`)
+    }
+  }
+  return statements
 }
 
 function parseArguments(argv) {
@@ -107,7 +215,11 @@ function parseArguments(argv) {
 
 function loadMigrations(directory) {
   const fileNames = readdirSync(directory)
-    .filter((name) => name.endsWith('.sql') && !name.endsWith('.baseline.sql'))
+    .filter((name) => (
+      name.endsWith('.sql')
+      && !name.endsWith('.baseline.sql')
+      && !name.endsWith('.preflight.sql')
+    ))
     .sort()
   if (fileNames.length === 0) fail(`No migrations found in ${directory}`)
 
@@ -130,20 +242,39 @@ function loadMigrations(directory) {
     } catch (error) {
       if (error.code !== 'ENOENT') throw error
     }
+    const preflightPath = path.replace(/\.sql$/, '.preflight.sql')
+    let preflightSql = null
+    try {
+      preflightSql = readFileSync(preflightPath, 'utf8')
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+    const dataModulePath = path.replace(/\.sql$/, '.data.mjs')
+    let dataModuleSource = null
+    try {
+      dataModuleSource = readFileSync(dataModulePath, 'utf8')
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
     const declaration = /^-- migration-number: (\d{3})$/m.exec(sql)
     if (!declaration || Number(declaration[1]) !== number) {
       fail(`Migration declaration does not match filename: ${fileName}`)
     }
 
+    const checksum = createHash('sha256')
+      .update(sql)
+      .update(baselineSql === null ? '' : `\0${baselineSql}`)
+    if (preflightSql !== null) checksum.update(`\0preflight\0${preflightSql}`)
+    if (dataModuleSource !== null) checksum.update(`\0data\0${dataModuleSource}`)
+
     return {
       number,
       name: fileName.replace(/\.sql$/, ''),
-      checksum: createHash('sha256')
-        .update(sql)
-        .update(baselineSql === null ? '' : `\0${baselineSql}`)
-        .digest('hex'),
+      checksum: checksum.digest('hex'),
       sql,
       baselineSql,
+      preflightSql,
+      dataModuleSource,
     }
   })
 }
@@ -185,7 +316,7 @@ function createD1Client(options) {
     const temporaryDirectory = mkdtempSync(join(tmpdir(), 'blogman-migration-query-'))
     const path = join(temporaryDirectory, 'query.sql')
     try {
-      writeFileSync(path, sql)
+      writeFileSync(path, sql, { mode: 0o600 })
       return execute(['--file', path])
     } finally {
       rmSync(temporaryDirectory, { recursive: true, force: true })
@@ -199,6 +330,26 @@ function createD1Client(options) {
     },
     executeBatch(sql) {
       executeFile(sql)
+    },
+    queryReadOnly(sql, context, singleStatement = false) {
+      const statements = validateReadOnlySidecarQueries(sql, context, singleStatement)
+      try {
+        for (const statement of statements) {
+          const explainResponse = JSON.parse(executeFile(`EXPLAIN ${statement};`))
+          const writeOpcode = explainResponse
+            .flatMap((result) => result.results ?? [])
+            .find((row) => persistentWriteOpcodes.has(row.opcode))
+          if (writeOpcode) {
+            fail(`${context} must be read-only: SQLite opcode ${writeOpcode.opcode}`)
+          }
+        }
+        return statements.flatMap((statement) => {
+          const response = JSON.parse(executeFile(`${statement};`))
+          return response.flatMap((result) => result.results ?? [])
+        })
+      } catch (error) {
+        fail(`${context} must be read-only: ${error.message}`)
+      }
     },
   }
 }
@@ -285,14 +436,131 @@ VALUES (${migration.number}, ${sqlLiteral(migration.name)}, ${sqlLiteral(migrati
 `)
 }
 
-function validateCurrentSchema(client, migration) {
-  if (!migration.baselineSql) {
-    fail(`Existing schema cannot be baselined by migration ${migration.name}`)
+function parseBaselineCompatibility(migration) {
+  const marker = '-- migration-baseline-compatibility'
+  const directive = /^-- migration-baseline-allow-issues: (.+)$/gm
+  const allowedIssueSets = [...migration.sql.matchAll(directive)].map((match) => (
+    [...new Set(match[1].split(' | ').map((issue) => issue.trim()))].sort()
+  ))
+  const hasMarker = migration.sql.includes(marker)
+
+  if (allowedIssueSets.length === 0) {
+    if (hasMarker) fail(`Baseline compatibility marker has no allowed issues in ${migration.name}`)
+    return null
   }
-  const issues = client.query(migration.baselineSql)
+
+  if (!hasMarker) fail(`Baseline compatibility issues require a marker in ${migration.name}`)
+  if (!migration.baselineSql) fail(`Baseline compatibility requires a sidecar in ${migration.name}`)
+  return allowedIssueSets
+}
+
+function sameIssues(actual, expected) {
+  return actual.length === expected.length
+    && actual.every((issue, index) => issue === expected[index])
+}
+
+function validateCurrentSchema(client, migrations) {
+  const canonical = migrations[0]
+  if (!canonical.baselineSql) {
+    fail(`Existing schema cannot be baselined by migration ${canonical.name}`)
+  }
+  const canonicalIssues = client.queryReadOnly(
+    canonical.baselineSql,
+    `Migration baseline ${canonical.name}`,
+  )
+  const actualIssues = canonicalIssues.map((row) => String(row.issue)).sort()
+  const identityFailures = []
+  let audited = false
+  for (const migration of migrations.slice(1)) {
+    const allowedIssueSets = parseBaselineCompatibility(migration)
+    if (!allowedIssueSets) continue
+    if (actualIssues.length > 0
+      && !allowedIssueSets.some((allowedIssues) => sameIssues(actualIssues, allowedIssues))) continue
+
+    audited = true
+    const compatibilityIssues = client.queryReadOnly(
+      migration.baselineSql,
+      `Migration baseline compatibility ${migration.name}`,
+    )
+    identityFailures.push(...compatibilityIssues.map((row) => String(row.issue)))
+  }
+
+  if (identityFailures.length > 0) {
+    fail(`Existing schema identity does not match: ${[...new Set(identityFailures)].sort().join(', ')}`)
+  }
+  if (actualIssues.length === 0 || audited) return
+  fail(`Existing schema does not match ${canonical.name}: ${actualIssues.join(', ')}`)
+}
+
+function validateMigrationPreflight(client, migration) {
+  if (!migration.preflightSql) return
+  const issues = client.queryReadOnly(
+    migration.preflightSql,
+    `Migration preflight ${migration.name}`,
+  )
   if (issues.length > 0) {
-    fail(`Existing schema does not match ${migration.name}: ${issues.map((row) => row.issue).join(', ')}`)
+    fail(`Migration preflight failed for ${migration.name}: ${issues.map((row) => row.issue).join(', ')}`)
   }
+}
+
+function parseConditionalColumns(migration) {
+  const directive = /^-- migration-add-column-if-table-exists: ([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*) \| ([^;\r\n]+)$/gm
+  const columns = []
+  let match
+  while ((match = directive.exec(migration.sql)) !== null) {
+    columns.push({ table: match[1], column: match[2], definition: match[3].trim() })
+  }
+  return columns
+}
+
+function resolveMigrationSql(client, migration) {
+  const marker = '-- migration-conditional-schema'
+  const conditionalColumns = parseConditionalColumns(migration)
+  const hasMarker = migration.sql.includes(marker)
+  if (conditionalColumns.length === 0) {
+    if (hasMarker) fail(`Conditional schema marker has no directives in ${migration.name}`)
+    return migration.sql
+  }
+  if (!hasMarker) fail(`Conditional schema directives require a marker in ${migration.name}`)
+
+  const statements = []
+  for (const conditional of conditionalColumns) {
+    const tableExists = client.query(
+      `SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table' AND name = ${sqlLiteral(conditional.table)}`,
+    )
+    if (Number(tableExists[0]?.count) === 0) continue
+
+    const columns = client.query(`SELECT name FROM pragma_table_info(${sqlLiteral(conditional.table)})`)
+    if (columns.some((column) => column.name === conditional.column)) continue
+    statements.push(
+      `ALTER TABLE "${conditional.table}" ADD COLUMN "${conditional.column}" ${conditional.definition};`,
+    )
+  }
+
+  return migration.sql.replace(marker, statements.join('\n'))
+}
+
+async function prepareDataMigrationSql(client, migration) {
+  if (migration.dataModuleSource === null) return ''
+  const encodedSource = Buffer.from(migration.dataModuleSource, 'utf8').toString('base64')
+  const moduleUrl = `data:text/javascript;base64,${encodedSource}#${migration.checksum}`
+  const dataMigration = await import(moduleUrl)
+  if (typeof dataMigration.prepare !== 'function') {
+    fail(`Data migration must export prepare(): ${migration.name}`)
+  }
+
+  const sql = await dataMigration.prepare({
+    env: process.env,
+    query(statement) {
+      return client.queryReadOnly(
+        String(statement),
+        `Data migration query ${migration.name}`,
+        true,
+      )
+    },
+  })
+  if (typeof sql !== 'string') fail(`Data migration prepare() must return SQL: ${migration.name}`)
+  return sql.trim()
 }
 
 function validateLedger(migrations, ledger) {
@@ -322,7 +590,7 @@ function buildStatus(migrations, ledger, state, baselineFirst = false) {
   }
 }
 
-function applyMigrations(client, migrations, candidate) {
+async function applyMigrations(client, migrations, candidate) {
   const initialized = ledgerArtifactsExist(client)
   if (initialized) validateLedgerContract(client)
   const hadBusinessSchema = hasBusinessSchema(client)
@@ -330,7 +598,7 @@ function applyMigrations(client, migrations, candidate) {
   validateLedger(migrations, ledger)
   const shouldBaseline = ledger.length === 0 && hadBusinessSchema
 
-  if (shouldBaseline) validateCurrentSchema(client, migrations[0])
+  if (shouldBaseline) validateCurrentSchema(client, migrations)
   if (!initialized) {
     createLedger(client)
     validateLedgerContract(client)
@@ -342,7 +610,10 @@ function applyMigrations(client, migrations, candidate) {
   }
 
   for (const migration of migrations.slice(ledger.length)) {
-    client.executeBatch(`${migration.sql.trim()}\n
+    validateMigrationPreflight(client, migration)
+    const resolvedSql = resolveMigrationSql(client, migration)
+    const dataSql = await prepareDataMigrationSql(client, migration)
+    client.executeBatch(`${dataSql}\n${resolvedSql.trim()}\n
 INSERT INTO migration_ledger (number, name, checksum, candidate_id)
 VALUES (${migration.number}, ${sqlLiteral(migration.name)}, ${sqlLiteral(migration.checksum)}, ${sqlLiteral(candidate)});
 `)
@@ -351,7 +622,7 @@ VALUES (${migration.number}, ${sqlLiteral(migration.name)}, ${sqlLiteral(migrati
   return buildStatus(migrations, readLedger(client, true), 'current')
 }
 
-function main() {
+async function main() {
   const options = parseArguments(process.argv.slice(2))
   const migrations = loadMigrations(options.migrationsDirectory)
   const client = createD1Client(options)
@@ -362,7 +633,7 @@ function main() {
 
   let result
   if (options.command === 'apply') {
-    result = applyMigrations(client, migrations, options.candidate)
+    result = await applyMigrations(client, migrations, options.candidate)
   } else if (options.command === 'verify') {
     const pending = migrations.slice(ledger.length)
     if (pending.length > 0) {
@@ -375,7 +646,7 @@ function main() {
   } else {
     const state = ledger.length === migrations.length ? 'current' : 'pending'
     const baselineFirst = ledger.length === 0 && hasBusinessSchema(client)
-    if (baselineFirst) validateCurrentSchema(client, migrations[0])
+    if (baselineFirst) validateCurrentSchema(client, migrations)
     result = buildStatus(migrations, ledger, state, baselineFirst)
   }
 
@@ -383,7 +654,7 @@ function main() {
 }
 
 try {
-  main()
+  await main()
 } catch (error) {
   process.stderr.write(`${error.message}\n`)
   process.exitCode = 1

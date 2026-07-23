@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { normalizeTheme } from '@/lib/appearance'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { getSetting } from '@/lib/db'
+import { migrationRequiredResponse } from '@/lib/database-errors'
 
 export async function GET() {
   try {
@@ -19,7 +20,9 @@ export async function GET() {
       { font: font || '', defaultTheme: normalizeTheme(defaultTheme) },
       { headers: { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300' } }
     )
-  } catch {
+  } catch (error) {
+    const response = migrationRequiredResponse(error)
+    if (response) return response
     return NextResponse.json({ font: '', defaultTheme: 'default' })
   }
 }

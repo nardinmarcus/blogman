@@ -1,5 +1,6 @@
 import { getPosts, searchPosts, getCategories } from '@/lib/db'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
+import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 import Link from 'next/link'
 import { FileText, PenLine } from 'lucide-react'
 import { PostRow } from './PostRow'
@@ -26,6 +27,7 @@ export default async function AdminPostsPage({
         sourcePosts = await getPosts(env.DB, 200, 0, true, true, true, true) // includeDrafts, includeEncrypted, includeHidden, includeDeleted
       }
     } catch (error) {
+      rethrowIfDatabaseMigrationRequired(error)
       console.error('Posts fetch error:', error)
     }
   }
@@ -36,7 +38,9 @@ export default async function AdminPostsPage({
     try {
       const cats = await getCategories(env.DB)
       dbCategories = cats.map(c => c.name).filter(n => n !== '未分类')
-    } catch {}
+    } catch (error) {
+      rethrowIfDatabaseMigrationRequired(error)
+    }
   }
 
   // 从文章数据提取分类（用于 FilterBar 筛选）

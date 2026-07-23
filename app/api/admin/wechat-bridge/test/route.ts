@@ -2,13 +2,14 @@ import type { NextRequest } from 'next/server'
 import { ensureAuthenticatedRequest, getRouteEnvWithDb, jsonError, jsonOk, parseJsonBody } from '@/lib/server/route-helpers'
 import { fetchWechatBridgeJson, getWechatBridgeConfig, type WechatBridgeAccount } from '@/lib/wechat-bridge-config'
 import { normalizeBaseUrl } from '@/lib/ai-provider-profiles'
+import { rethrowIfDatabaseMigrationRequired, withDatabaseErrorResponse } from '@/lib/database-errors'
 
 interface BridgeTestBody {
   base_url?: string
   token?: string
 }
 
-export async function POST(req: NextRequest) {
+async function testWechatBridge(req: NextRequest) {
   const route = await getRouteEnvWithDb('DB unavailable')
   if (!route.ok) return route.response
 
@@ -35,6 +36,9 @@ export async function POST(req: NextRequest) {
       accounts: accountsResponse.accounts || [],
     })
   } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
     return jsonError(error instanceof Error ? error.message : '测试 bridge 连接失败', 500)
   }
 }
+
+export const POST = withDatabaseErrorResponse(testWechatBridge)

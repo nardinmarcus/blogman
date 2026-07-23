@@ -2,8 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/admin-auth'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import {
-  ensureAiImageConfigInfrastructure,
-  ensureDefaultImageProfileId,
+  selectDefaultImageProfileId,
 } from '@/lib/ai-image-config'
 import {
   deriveLegacyQualityFromResolution,
@@ -13,8 +12,9 @@ import {
   normalizeAiImageAspectRatio,
   normalizeAiImageResolution,
 } from '@/lib/ai-image-options'
+import { withDatabaseErrorResponse } from '@/lib/database-errors'
 
-export async function PUT(
+async function updateAction(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -24,8 +24,6 @@ export async function PUT(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!db) return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
-
-  await ensureAiImageConfigInfrastructure(db)
 
   const { id } = await params
   const body = (await req.json()) as {
@@ -106,7 +104,7 @@ export async function PUT(
       sets.push('profile_id = ?')
       values.push(Number(body.profile_id))
     } else {
-      const defaultProfileId = await ensureDefaultImageProfileId(db)
+      const defaultProfileId = await selectDefaultImageProfileId(db)
       sets.push('profile_id = ?')
       values.push(defaultProfileId ?? null)
     }
@@ -139,7 +137,7 @@ export async function PUT(
   return NextResponse.json({ success: true })
 }
 
-export async function DELETE(
+async function deleteAction(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -149,8 +147,6 @@ export async function DELETE(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!db) return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
-
-  await ensureAiImageConfigInfrastructure(db)
 
   const { id } = await params
   const row = await db.prepare('SELECT id FROM ai_image_actions WHERE id = ?')
@@ -164,3 +160,6 @@ export async function DELETE(
   await db.prepare('DELETE FROM ai_image_actions WHERE id = ?').bind(Number(id)).run()
   return NextResponse.json({ success: true })
 }
+
+export const PUT = withDatabaseErrorResponse(updateAction)
+export const DELETE = withDatabaseErrorResponse(deleteAction)

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/admin-auth'
 import { getAppCloudflareContext, getAppCloudflareEnv } from '@/lib/cloudflare'
+import { migrationRequiredResponse } from '@/lib/database-errors'
 
 export type RouteDbEnv = Partial<CloudflareEnv> & { DB: D1Database }
 
@@ -90,8 +91,14 @@ export async function ensureAuthenticatedRequest(
   db?: D1Database,
   unauthorizedMessage = 'Unauthorized',
 ) {
-  if (!(await authenticateRequest(req, db))) {
-    return jsonError(unauthorizedMessage, 401)
+  try {
+    if (!(await authenticateRequest(req, db))) {
+      return jsonError(unauthorizedMessage, 401)
+    }
+  } catch (error) {
+    const response = migrationRequiredResponse(error)
+    if (response) return response
+    throw error
   }
   return null
 }

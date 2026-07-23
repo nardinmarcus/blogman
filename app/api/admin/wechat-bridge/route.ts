@@ -1,6 +1,7 @@
 import type { NextRequest } from 'next/server'
 import { ensureAuthenticatedRequest, getRouteEnvWithDb, jsonError, jsonOk, parseJsonBody } from '@/lib/server/route-helpers'
 import { getWechatBridgePublicConfig, saveWechatBridgeConfig } from '@/lib/wechat-bridge-config'
+import { rethrowIfDatabaseMigrationRequired, withDatabaseErrorResponse } from '@/lib/database-errors'
 
 interface SaveWechatBridgeBody {
   enabled?: boolean
@@ -8,7 +9,7 @@ interface SaveWechatBridgeBody {
   token?: string
 }
 
-export async function GET(req: NextRequest) {
+async function getWechatBridge(req: NextRequest) {
   const route = await getRouteEnvWithDb('DB unavailable')
   if (!route.ok) return route.response
 
@@ -19,7 +20,7 @@ export async function GET(req: NextRequest) {
   return jsonOk({ config })
 }
 
-export async function PUT(req: NextRequest) {
+async function updateWechatBridge(req: NextRequest) {
   const route = await getRouteEnvWithDb('DB unavailable')
   if (!route.ok) return route.response
 
@@ -42,6 +43,10 @@ export async function PUT(req: NextRequest) {
 
     return jsonOk({ success: true, config })
   } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
     return jsonError(error instanceof Error ? error.message : '保存 bridge 配置失败', 500)
   }
 }
+
+export const GET = withDatabaseErrorResponse(getWechatBridge)
+export const PUT = withDatabaseErrorResponse(updateWechatBridge)

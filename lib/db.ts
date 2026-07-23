@@ -1,4 +1,4 @@
-export { getDB, ensureSchema, type Database } from '@/lib/repositories/schema'
+export { getDB, type Database } from '@/lib/repositories/schema'
 export {
   isPubliclyAccessiblePost,
   isSearchIndexablePost,

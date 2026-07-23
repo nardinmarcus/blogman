@@ -1,22 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { isAdminAuthenticated, COOKIE_NAME, generateApiToken } from '@/lib/admin-auth'
-
-// 确保 api_tokens 表存在
-async function ensureTokensTable(db: D1Database) {
-  try {
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS api_tokens (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        token TEXT UNIQUE NOT NULL,
-        name TEXT NOT NULL,
-        created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-        last_used_at INTEGER,
-        is_active INTEGER DEFAULT 1
-      )
-    `).run()
-  } catch { /* table already exists */ }
-}
+import { withDatabaseErrorResponse } from '@/lib/database-errors'
 
 // Token 管理只允许 Cookie 认证（后台管理操作）
 async function requireCookieAuth(req: NextRequest): Promise<boolean> {
@@ -25,7 +10,7 @@ async function requireCookieAuth(req: NextRequest): Promise<boolean> {
 }
 
 // GET: 列出所有 Token（不返回完整 token，只返回前缀）
-export async function GET(req: NextRequest) {
+async function getTokens(req: NextRequest) {
   if (!(await requireCookieAuth(req))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
@@ -34,8 +19,6 @@ export async function GET(req: NextRequest) {
   if (!env?.DB) {
     return NextResponse.json({ error: '数据库未配置' }, { status: 500 })
   }
-
-  await ensureTokensTable(env.DB)
 
   const { results } = await env.DB
     .prepare(`SELECT id, name, created_at, last_used_at, is_active,
@@ -47,7 +30,7 @@ export async function GET(req: NextRequest) {
 }
 
 // POST: 创建新 Token
-export async function POST(req: NextRequest) {
+async function createToken(req: NextRequest) {
   if (!(await requireCookieAuth(req))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
@@ -56,8 +39,6 @@ export async function POST(req: NextRequest) {
   if (!env?.DB) {
     return NextResponse.json({ error: '数据库未配置' }, { status: 500 })
   }
-
-  await ensureTokensTable(env.DB)
 
   const { name } = (await req.json()) as { name?: string }
   if (!name || typeof name !== 'string' || !name.trim()) {
@@ -76,7 +57,7 @@ export async function POST(req: NextRequest) {
 }
 
 // DELETE: 删除 Token
-export async function DELETE(req: NextRequest) {
+async function deleteToken(req: NextRequest) {
   if (!(await requireCookieAuth(req))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
@@ -98,3 +79,7 @@ export async function DELETE(req: NextRequest) {
 
   return NextResponse.json({ success: true })
 }
+
+export const GET = withDatabaseErrorResponse(getTokens)
+export const POST = withDatabaseErrorResponse(createToken)
+export const DELETE = withDatabaseErrorResponse(deleteToken)

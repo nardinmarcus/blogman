@@ -2,13 +2,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/admin-auth'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import {
-  ensureAiImageConfigInfrastructure,
   resolveAiImageProfileConfig,
 } from '@/lib/ai-image-config'
 import {
   AI_IMAGE_PROVIDER_MAP,
 } from '@/lib/ai-image-provider-presets'
 import { normalizeBaseUrl, resolveAiConfigSecret } from '@/lib/ai-provider-profiles'
+import { rethrowIfDatabaseMigrationRequired, withDatabaseErrorResponse } from '@/lib/database-errors'
 
 type RawModelItem =
   | string
@@ -77,15 +77,13 @@ function buildModels(items: RawModelItem[]) {
     .map((id) => ({ id, name: id }))
 }
 
-export async function GET(req: NextRequest) {
+async function getModels(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!db) return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
-
-  await ensureAiImageConfigInfrastructure(db)
 
   const requestUrl = new URL(req.url)
   const queryProvider = requestUrl.searchParams.get('provider')?.trim() || ''
@@ -172,6 +170,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ models, source: 'provider' })
   } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
     const message = error instanceof Error ? error.message : '获取模型列表失败'
     if (fallbackModels.length > 0) {
       return NextResponse.json({
@@ -183,3 +182,5 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: message }, { status: 502 })
   }
 }
+
+export const GET = withDatabaseErrorResponse(getModels)

@@ -7,6 +7,9 @@ declare interface D1PreparedStatement {
 
 declare interface D1Database {
   prepare(query: string): D1PreparedStatement
+  batch<T = Record<string, unknown>>(
+    statements: D1PreparedStatement[],
+  ): Promise<Array<{ results: T[]; meta: { last_row_id: number } }>>
 }
 
 declare interface KVNamespace {

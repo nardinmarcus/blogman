@@ -4,15 +4,15 @@ import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import {
   clampMaxTokens,
   clampTemperature,
+  batchTextProfileMutation,
   encryptApiKey,
-  ensureAiConfigInfrastructure,
-  ensureDefaultProfileId,
   mapProfileRow,
   maskApiKey,
   normalizeBaseUrl,
   resolveAiConfigSecret,
   type AIProviderProfileRow,
 } from '@/lib/ai-provider-profiles'
+import { withDatabaseErrorResponse } from '@/lib/database-errors'
 
 interface SaveProfileBody {
   id?: number
@@ -68,7 +68,7 @@ async function listProfiles(db: D1Database) {
   return { profiles, defaultProfileId }
 }
 
-export async function GET(req: NextRequest) {
+async function getProfiles(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
@@ -76,14 +76,12 @@ export async function GET(req: NextRequest) {
   }
   if (!db) return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
 
-  const secret = resolveAiConfigSecret(env as Record<string, unknown>)
-  await ensureAiConfigInfrastructure(db, secret)
   const { profiles, defaultProfileId } = await listProfiles(db)
 
   return NextResponse.json({ profiles, default_profile_id: defaultProfileId })
 }
 
-export async function POST(req: NextRequest) {
+async function createProfile(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
@@ -92,7 +90,6 @@ export async function POST(req: NextRequest) {
   if (!db) return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
 
   const secret = resolveAiConfigSecret(env as Record<string, unknown>)
-  await ensureAiConfigInfrastructure(db, secret)
 
   const body = (await req.json()) as SaveProfileBody
   const payload = buildProfilePayload(body)
@@ -104,11 +101,13 @@ export async function POST(req: NextRequest) {
   const encrypted = rawApiKey ? await encryptApiKey(rawApiKey, secret) : ''
   const masked = rawApiKey ? maskApiKey(rawApiKey) : ''
 
+  const mutationStatements: D1PreparedStatement[] = []
   if (body.is_default) {
-    await db.prepare('UPDATE ai_provider_profiles SET is_default = 0').run()
+    mutationStatements.push(db.prepare('UPDATE ai_provider_profiles SET is_default = 0'))
   }
 
-  const result = await db.prepare(`
+  const insertIndex = mutationStatements.length
+  mutationStatements.push(db.prepare(`
     INSERT INTO ai_provider_profiles (
       name, provider, provider_name, provider_type, provider_category, api_key_url,
       base_url, model, temperature, max_tokens, api_key_encrypted, api_key_masked,
@@ -128,14 +127,10 @@ export async function POST(req: NextRequest) {
     encrypted,
     masked,
     body.is_default ? 1 : 0,
-  ).run()
+  ))
 
-  const insertedId = result.meta.last_row_id
-
-  const defaultId = await ensureDefaultProfileId(db)
-  if (defaultId) {
-    await db.prepare('UPDATE ai_actions SET profile_id = ? WHERE profile_id IS NULL').bind(defaultId).run()
-  }
+  const results = await batchTextProfileMutation(db, mutationStatements)
+  const insertedId = results[insertIndex].meta.last_row_id
 
   const row = await db.prepare(`
     SELECT id, name, provider, provider_name, provider_type, provider_category, api_key_url,
@@ -147,7 +142,7 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ success: true, profile: row ? mapProfileRow(row) : null })
 }
 
-export async function PUT(req: NextRequest) {
+async function updateProfile(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
@@ -156,7 +151,6 @@ export async function PUT(req: NextRequest) {
   if (!db) return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
 
   const secret = resolveAiConfigSecret(env as Record<string, unknown>)
-  await ensureAiConfigInfrastructure(db, secret)
 
   const body = (await req.json()) as SaveProfileBody
   const id = Number(body.id)
@@ -164,9 +158,9 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ error: '缺少有效的配置 ID' }, { status: 400 })
   }
 
-  const exists = await db.prepare('SELECT id, api_key_masked, is_default FROM ai_provider_profiles WHERE id = ?')
+  const exists = await db.prepare('SELECT id FROM ai_provider_profiles WHERE id = ?')
     .bind(id)
-    .first<{ id: number; api_key_masked: string; is_default: number }>()
+    .first<{ id: number }>()
   if (!exists) {
     return NextResponse.json({ error: '配置不存在' }, { status: 404 })
   }
@@ -178,17 +172,10 @@ export async function PUT(req: NextRequest) {
 
   const rawApiKey = (body.api_key || '').trim()
   const encrypted = rawApiKey ? await encryptApiKey(rawApiKey, secret) : null
-  const masked = rawApiKey ? maskApiKey(rawApiKey) : exists.api_key_masked
 
-  const nextIsDefault =
-    body.is_default === true
-      ? 1
-      : body.is_default === false
-        ? 0
-        : exists.is_default
-
-  if (nextIsDefault === 1) {
-    await db.prepare('UPDATE ai_provider_profiles SET is_default = 0').run()
+  const mutationStatements: D1PreparedStatement[] = []
+  if (body.is_default === true) {
+    mutationStatements.push(db.prepare('UPDATE ai_provider_profiles SET is_default = 0'))
   }
 
   const sets = [
@@ -202,9 +189,6 @@ export async function PUT(req: NextRequest) {
     'model = ?',
     'temperature = ?',
     'max_tokens = ?',
-    'api_key_masked = ?',
-    'is_default = ?',
-    "updated_at = strftime('%s', 'now')",
   ]
   const values: Array<string | number> = [
     payload.name,
@@ -217,23 +201,24 @@ export async function PUT(req: NextRequest) {
     payload.model,
     payload.temperature,
     payload.max_tokens,
-    masked,
-    nextIsDefault,
   ]
 
   if (encrypted !== null) {
-    sets.splice(10, 0, 'api_key_encrypted = ?')
-    values.splice(10, 0, encrypted)
+    sets.push('api_key_encrypted = ?', 'api_key_masked = ?')
+    values.push(encrypted, maskApiKey(rawApiKey))
   }
+  if (body.is_default !== undefined) {
+    sets.push('is_default = ?')
+    values.push(body.is_default ? 1 : 0)
+  }
+  sets.push("updated_at = strftime('%s', 'now')")
 
   values.push(id)
 
-  await db.prepare(`UPDATE ai_provider_profiles SET ${sets.join(', ')} WHERE id = ?`).bind(...values).run()
-
-  const defaultId = await ensureDefaultProfileId(db)
-  if (defaultId) {
-    await db.prepare('UPDATE ai_actions SET profile_id = ? WHERE profile_id IS NULL').bind(defaultId).run()
-  }
+  mutationStatements.push(
+    db.prepare(`UPDATE ai_provider_profiles SET ${sets.join(', ')} WHERE id = ?`).bind(...values),
+  )
+  await batchTextProfileMutation(db, mutationStatements)
 
   const row = await db.prepare(`
     SELECT id, name, provider, provider_name, provider_type, provider_category, api_key_url,
@@ -245,16 +230,13 @@ export async function PUT(req: NextRequest) {
   return NextResponse.json({ success: true, profile: row ? mapProfileRow(row) : null })
 }
 
-export async function DELETE(req: NextRequest) {
+async function deleteProfile(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!db) return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
-
-  const secret = resolveAiConfigSecret(env as Record<string, unknown>)
-  await ensureAiConfigInfrastructure(db, secret)
 
   const body = (await req.json()) as { id?: number }
   const id = Number(body.id)
@@ -269,16 +251,16 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ error: '配置不存在' }, { status: 404 })
   }
 
-  await db.prepare('DELETE FROM ai_provider_profiles WHERE id = ?').bind(id).run()
-
-  const fallbackId = await ensureDefaultProfileId(db)
-  if (fallbackId) {
-    await db.prepare('UPDATE ai_actions SET profile_id = ? WHERE profile_id = ? OR profile_id IS NULL')
-      .bind(fallbackId, id)
-      .run()
-  } else {
-    await db.prepare('UPDATE ai_actions SET profile_id = NULL WHERE profile_id = ?').bind(id).run()
-  }
+  await batchTextProfileMutation(
+    db,
+    [db.prepare('DELETE FROM ai_provider_profiles WHERE id = ?').bind(id)],
+    id,
+  )
 
   return NextResponse.json({ success: true })
 }
+
+export const GET = withDatabaseErrorResponse(getProfiles)
+export const POST = withDatabaseErrorResponse(createProfile)
+export const PUT = withDatabaseErrorResponse(updateProfile)
+export const DELETE = withDatabaseErrorResponse(deleteProfile)

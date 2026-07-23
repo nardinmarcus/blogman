@@ -4,7 +4,6 @@ const mocks = vi.hoisted(() => ({
   createCompletion: vi.fn(),
   workersRun: vi.fn(),
   getAiPostGeneratorByTarget: vi.fn(),
-  ensureAiPostGeneratorInfrastructure: vi.fn(),
   listAiPostGenerators: vi.fn(),
   resolveAiProfileConfig: vi.fn(),
   resolveAiImageProfileConfig: vi.fn(),
@@ -23,7 +22,6 @@ vi.mock('openai', () => ({
 }))
 
 vi.mock('@/lib/ai-post-generator/storage', () => ({
-  ensureAiPostGeneratorInfrastructure: mocks.ensureAiPostGeneratorInfrastructure,
   getAiPostGeneratorByTarget: mocks.getAiPostGeneratorByTarget,
   listAiPostGenerators: mocks.listAiPostGenerators,
 }))

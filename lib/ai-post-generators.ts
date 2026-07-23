@@ -48,7 +48,6 @@ import {
 } from '@/lib/ai-post-generator/prompts'
 import { buildTextGenerationRequestOptions } from '@/lib/ai-post-generator/request-options'
 import {
-  ensureAiPostGeneratorInfrastructure,
   getAiPostGeneratorByTarget,
   listAiPostGenerators,
 } from '@/lib/ai-post-generator/storage'
@@ -67,7 +66,6 @@ export type {
   GeneratePostMetadataInput,
 } from '@/lib/ai-post-generator/types'
 export {
-  ensureAiPostGeneratorInfrastructure,
   getAiPostGeneratorByTarget,
   listAiPostGenerators,
   WORKERS_AI_IMAGE_MODEL_SUGGESTIONS,
@@ -400,7 +398,7 @@ async function resolveTextRuntime(
 export async function generatePostMetadata(
   input: GeneratePostMetadataInput,
 ) {
-  const generator = await getAiPostGeneratorByTarget(input.db, input.target, input.env)
+  const generator = await getAiPostGeneratorByTarget(input.db, input.target)
   if (!generator || generator.is_enabled !== 1) {
     throw new Error('当前字段未启用 AI 生成')
   }
@@ -544,7 +542,7 @@ async function generateWorkersAiCover(
 export async function generatePostCover(
   input: GeneratePostCoverInput,
 ): Promise<{ generator: AiPostGeneratorRow; image: GeneratedEditorImage }> {
-  const generator = await getAiPostGeneratorByTarget(input.db, 'cover', input.env)
+  const generator = await getAiPostGeneratorByTarget(input.db, 'cover')
   if (!generator || generator.is_enabled !== 1) {
     throw new Error('当前封面生成功能未启用')
   }

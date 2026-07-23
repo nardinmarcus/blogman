@@ -19,67 +19,6 @@ export interface AIProviderProfileRow {
 const DEFAULT_TEMPERATURE = 0.7
 const DEFAULT_MAX_TOKENS = 2000
 const ENCRYPTION_PREFIX = 'enc:v1'
-const DEFAULT_PROFILE_NAME = '默认配置'
-
-interface DefaultActionSeed {
-  action_key: string
-  label: string
-  description: string
-  prompt: string
-  temperature: number
-  sort_order: number
-}
-
-const DEFAULT_ACTIONS: DefaultActionSeed[] = [
-  {
-    action_key: 'improve',
-    label: '润色',
-    description: '让表达更顺更自然',
-    prompt: '你是专业的中文写作助手。对下面的文字进行润色，让表达更顺畅自然，保持原意、语气和信息密度不变，直接返回润色后的文字，不要解释。',
-    temperature: 0.6,
-    sort_order: 10,
-  },
-  {
-    action_key: 'shorten',
-    label: '缩写',
-    description: '压缩成更短版本',
-    prompt: '你是专业的中文写作助手。在不丢失核心意思的前提下，把下面的文字压缩得更简短精炼，直接返回结果，不要解释。',
-    temperature: 0.6,
-    sort_order: 20,
-  },
-  {
-    action_key: 'expand',
-    label: '扩写',
-    description: '补充为更完整表述',
-    prompt: '你是专业的中文写作助手。对下面的文字进行扩写，让表达更完整自然，保持原有风格和语气，直接返回结果，不要解释。',
-    temperature: 0.6,
-    sort_order: 30,
-  },
-  {
-    action_key: 'summarize',
-    label: '总结',
-    description: '提炼为清晰摘要',
-    prompt: '你是专业的中文写作助手。把下面的文字总结为简洁清晰的摘要，直接返回结果，不要解释。',
-    temperature: 0.6,
-    sort_order: 40,
-  },
-  {
-    action_key: 'translate_zh',
-    label: '译成中文',
-    description: '翻成简体中文',
-    prompt: '你是专业翻译。把下面的内容翻译成简体中文，保持原文风格，直接返回翻译结果，不要解释。',
-    temperature: 0.2,
-    sort_order: 50,
-  },
-  {
-    action_key: 'translate_en',
-    label: '译成英文',
-    description: '翻成自然英文',
-    prompt: '你是专业翻译。把下面的内容翻译成自然流畅的英文，保持原文风格，直接返回翻译结果，不要解释。',
-    temperature: 0.2,
-    sort_order: 60,
-  },
-]
 
 const keyCache = new Map<string, Promise<CryptoKey>>()
 
@@ -223,152 +162,66 @@ export async function decryptApiKey(value: string, secret: string): Promise<stri
   }
 }
 
-export async function ensureAiProviderProfilesTable(db: D1Database): Promise<void> {
-  await db.prepare(`
-    CREATE TABLE IF NOT EXISTS ai_provider_profiles (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      provider TEXT NOT NULL DEFAULT 'custom',
-      provider_name TEXT NOT NULL DEFAULT '',
-      provider_type TEXT NOT NULL DEFAULT 'openai_compatible',
-      provider_category TEXT NOT NULL DEFAULT '',
-      api_key_url TEXT NOT NULL DEFAULT '',
-      base_url TEXT NOT NULL,
-      model TEXT NOT NULL,
-      temperature REAL NOT NULL DEFAULT 0.7,
-      max_tokens INTEGER NOT NULL DEFAULT 2000,
-      api_key_encrypted TEXT NOT NULL DEFAULT '',
-      api_key_masked TEXT NOT NULL DEFAULT '',
-      is_default INTEGER NOT NULL DEFAULT 0,
-      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-      updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
-    )
-  `).run()
-}
-
-async function ensureAiActionsTable(db: D1Database): Promise<void> {
-  await db.prepare(`
-    CREATE TABLE IF NOT EXISTS ai_actions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      action_key TEXT UNIQUE NOT NULL,
-      label TEXT NOT NULL,
-      description TEXT NOT NULL,
-      prompt TEXT NOT NULL,
-      temperature REAL DEFAULT 0.6,
-      sort_order INTEGER DEFAULT 0,
-      is_enabled INTEGER DEFAULT 1,
-      is_builtin INTEGER DEFAULT 1,
-      profile_id INTEGER,
-      created_at INTEGER DEFAULT (strftime('%s', 'now')),
-      updated_at INTEGER DEFAULT (strftime('%s', 'now'))
-    )
-  `).run()
-
-  const tableInfo = await db.prepare('PRAGMA table_info(ai_actions)').all<{ name: string }>()
-  const hasProfileId = (tableInfo.results || []).some(col => col.name === 'profile_id')
-  if (!hasProfileId) {
-    await db.prepare('ALTER TABLE ai_actions ADD COLUMN profile_id INTEGER').run()
-  }
-
-  const countRow = await db.prepare('SELECT COUNT(*) as count FROM ai_actions').first<{ count: number }>()
-  if ((countRow?.count ?? 0) > 0) return
-
-  for (const seed of DEFAULT_ACTIONS) {
-    await db.prepare(
-      'INSERT INTO ai_actions (action_key, label, description, prompt, temperature, sort_order, is_builtin) VALUES (?, ?, ?, ?, ?, ?, 1)'
-    ).bind(
-      seed.action_key,
-      seed.label,
-      seed.description,
-      seed.prompt,
-      seed.temperature,
-      seed.sort_order,
-    ).run()
-  }
-}
-
-export async function ensureDefaultProfileId(db: D1Database): Promise<number | null> {
+export async function selectDefaultProfileId(db: D1Database): Promise<number | null> {
   const defaultRow = await db.prepare('SELECT id FROM ai_provider_profiles WHERE is_default = 1 ORDER BY id ASC LIMIT 1').first<{ id: number }>()
   if (defaultRow?.id) return defaultRow.id
 
   const firstRow = await db.prepare('SELECT id FROM ai_provider_profiles ORDER BY id ASC LIMIT 1').first<{ id: number }>()
-  if (!firstRow?.id) return null
-
-  await db.prepare('UPDATE ai_provider_profiles SET is_default = 0').run()
-  await db.prepare("UPDATE ai_provider_profiles SET is_default = 1, updated_at = strftime('%s', 'now') WHERE id = ?")
-    .bind(firstRow.id)
-    .run()
-
-  return firstRow.id
+  return firstRow?.id ?? null
 }
 
-async function migrateLegacyConfigIfNeeded(db: D1Database, secret: string): Promise<void> {
-  const profileCount = await db.prepare('SELECT COUNT(*) as count FROM ai_provider_profiles').first<{ count: number }>()
-  if ((profileCount?.count ?? 0) > 0) return
+export function buildTextProfileReconciliationStatements(
+  db: D1Database,
+  removedProfileId?: number,
+): D1PreparedStatement[] {
+  const removed = Number.isFinite(removedProfileId) ? Number(removedProfileId) : null
+  const actionWhere = removed === null ? 'profile_id IS NULL' : 'profile_id IS NULL OR profile_id = ?'
+  const generatorWhere = removed === null
+    ? 'text_profile_id IS NULL'
+    : 'text_profile_id IS NULL OR text_profile_id = ?'
 
-  const [cfgRow, keyRow] = await Promise.all([
-    db.prepare("SELECT value FROM site_settings WHERE key = 'ai_provider_config'").first<{ value: string }>(),
-    db.prepare("SELECT value FROM site_settings WHERE key = 'ai_provider_api_key'").first<{ value: string }>(),
+  return [
+    db.prepare(`
+      UPDATE ai_provider_profiles
+      SET is_default = 1, updated_at = strftime('%s', 'now')
+      WHERE id = (SELECT id FROM ai_provider_profiles ORDER BY id ASC LIMIT 1)
+        AND NOT EXISTS (SELECT 1 FROM ai_provider_profiles WHERE is_default = 1)
+    `),
+    db.prepare(`
+      UPDATE ai_actions
+      SET profile_id = (
+        SELECT id FROM ai_provider_profiles ORDER BY is_default DESC, id ASC LIMIT 1
+      )
+      WHERE ${actionWhere}
+    `).bind(...(removed === null ? [] : [removed])),
+    db.prepare(`
+      UPDATE ai_post_generators
+      SET text_profile_id = (
+        SELECT id FROM ai_provider_profiles ORDER BY is_default DESC, id ASC LIMIT 1
+      )
+      WHERE target_key IN ('summary', 'tags', 'slug')
+        AND (${generatorWhere})
+    `).bind(...(removed === null ? [] : [removed])),
+  ]
+}
+
+export async function batchTextProfileMutation(
+  db: D1Database,
+  mutationStatements: D1PreparedStatement[],
+  removedProfileId?: number,
+) {
+  return db.batch([
+    ...mutationStatements,
+    ...buildTextProfileReconciliationStatements(db, removedProfileId),
   ])
-
-  if (!cfgRow?.value) return
-
-  let cfg: {
-    provider?: string
-    provider_name?: string
-    provider_type?: string
-    provider_category?: string
-    api_key_url?: string
-    base_url?: string
-    model?: string
-    temperature?: number
-    max_tokens?: number
-    api_key_masked?: string
-  } | null = null
-
-  try {
-    cfg = JSON.parse(cfgRow.value)
-  } catch {
-    cfg = null
-  }
-
-  if (!cfg?.base_url || !cfg?.model) return
-
-  const rawKey = (keyRow?.value || '').trim()
-  const encryptedKey = rawKey ? await encryptApiKey(rawKey, secret) : ''
-  const masked = rawKey ? maskApiKey(rawKey) : (cfg.api_key_masked || '')
-
-  await db.prepare(`
-    INSERT INTO ai_provider_profiles (
-      name, provider, provider_name, provider_type, provider_category, api_key_url,
-      base_url, model, temperature, max_tokens,
-      api_key_encrypted, api_key_masked, is_default, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, strftime('%s', 'now'), strftime('%s', 'now'))
-  `).bind(
-    DEFAULT_PROFILE_NAME,
-    cfg.provider || 'custom',
-    cfg.provider_name || '',
-    cfg.provider_type || 'openai_compatible',
-    cfg.provider_category || '',
-    cfg.api_key_url || '',
-    normalizeBaseUrl(cfg.base_url),
-    cfg.model,
-    clampTemperature(Number(cfg.temperature)),
-    clampMaxTokens(Number(cfg.max_tokens)),
-    encryptedKey,
-    masked,
-  ).run()
 }
 
-export async function ensureAiConfigInfrastructure(db: D1Database, secret: string): Promise<void> {
-  await ensureAiProviderProfilesTable(db)
-  await ensureAiActionsTable(db)
-  await migrateLegacyConfigIfNeeded(db, secret)
-
-  const defaultProfileId = await ensureDefaultProfileId(db)
-  if (defaultProfileId) {
-    await db.prepare('UPDATE ai_actions SET profile_id = ? WHERE profile_id IS NULL').bind(defaultProfileId).run()
-  }
+export async function reconcileTextProfileReferencesAfterMutation(
+  db: D1Database,
+  removedProfileId?: number,
+): Promise<number | null> {
+  await db.batch(buildTextProfileReconciliationStatements(db, removedProfileId))
+  return selectDefaultProfileId(db)
 }
 
 export async function resolveAiProfileConfig(
@@ -391,8 +244,6 @@ export async function resolveAiProfileConfig(
   api_key_masked: string
   is_default: number
 } | null> {
-  await ensureAiConfigInfrastructure(db, secret)
-
   const selected = Number.isFinite(profileId) && Number(profileId) > 0
     ? await db.prepare(`
         SELECT *

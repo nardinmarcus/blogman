@@ -38,9 +38,26 @@ node scripts/migrations.mjs apply \
 3. 只做 additive 变更，并让同一文件内的全部语句构成一个可原子提交的 migration。
 4. migration 一旦在任何环境登记成功，禁止修改、改号、删除或重排；修复必须新增前向 migration。
 
+Migration 可以带两个同编号 companion：
+
+- `NNN_name.preflight.sql`：在该 migration 的任何写入前只读验证可兼容的已有 schema 形状；返回任意 `issue` 行都会 fail-closed。
+- `NNN_name.data.mjs`：为必须使用运行时 secret 的一次性数据迁移生成 SQL。模块每次只能执行一条 `SELECT` / `WITH` 查询，生成的 SQL 与主 migration 及账本登记在同一批次提交。
+
+主 SQL、baseline、preflight 与 data sidecar 都参与账本 checksum；已应用后任一文件发生变化都会被 `verify` 拒绝。Runner 在加载 migration 时绑定 checksum 覆盖的 data sidecar 原始字节，后续只执行这份已校验内容，不会按路径重新读取，从而避免校验后替换。Runner 会先拆分并验证全部 sidecar 查询，再通过 SQLite `EXPLAIN` 拒绝持久写 opcode；直接 `PRAGMA`、写型 CTE 和多语句 data query 都会在主 migration 批次前 fail-closed。条件加列由主 SQL 中声明的受限 directive 驱动，runner 先检查真实表/列形状，再把需要的 additive `ALTER TABLE ... ADD COLUMN` 注入同一个原子批次；不得用失败重试或吞错判断 schema。
+
 `db/migrations` 保存引入账本前的历史补丁，不是当前 runner 的输入。`001_initial_schema.sql` 是新空库的 canonical baseline；其中的初始 seed 只随空库 migration 执行一次。已有 current schema 只有在 `001_initial_schema.baseline.sql` 的 DDL 语义检查全部通过后才会被明确登记，不会重放业务 schema 或 seed。
 
 Legacy baseline 不把 `categories`、`site_settings`、`ai_actions`、`ai_post_generators` 等可变业务行当作 schema checksum。用户已修改或删除的数据会原样保留；只有列类型、约束、索引、触发器、FTS 等不可变 DDL 事实参与 baseline 判断。
+
+`002_add_ai_image_configuration` 收编图像 provider/action schema，兼容 absent、已知 legacy 缺列和 current-full 三种形状。legacy 的 `size` / `quality` 能映射时优先保留实际值，只有 `auto` 或未知值才按已知内置 `action_key` 使用 canonical fallback；其他作者字段不覆盖，已存在表也不会恢复被删除的默认 action。
+
+`003_migrate_runtime_ai_configuration` 一次性完成旧 AI 配置加密迁移、已知 generator prompt 升级、空缺 built-in 字段补全、默认 profile 与当时已有列的 NULL 引用回填。它不恢复作者删除的 generator，不覆盖自定义非空 prompt/label/description，也保留合法的 generator 数值边界（`temperature` 0–2、`max_tokens` 1–32768），只修复可确定的无效值。它不删除 legacy settings。只有在尚无 provider profile 且存在 legacy config 时才要求 secret：优先 `AI_CONFIG_ENCRYPTION_SECRET`，兼容回退到 `ADMIN_TOKEN_SALT`，所选值必须至少 32 字符；无效 JSON、短值或全缺都会 fail-closed，绝不使用硬编码 secret。
+
+`004_complete_historical_text_ai_schema` 收编旧请求期 `ai_actions.profile_id` 补列与 NULL 引用回填。建账前会对 A/B/C base identity 做同一套只读审计：A 是 `schema.sql` 产生的 `profile_id` 位于 timestamps 前且 provider `DEFAULT 2000`；B 是历史迁移产生的无 `profile_id` 且 `DEFAULT 1200`；C 是旧 ensure 在 B 上追加 `profile_id`，因此该列位于 timestamps 后。三者都只允许无约束的普通尾部扩展列（`NOT NULL` 扩展列必须有非 NULL default），并拒绝目标表的列序/类型/default/约束、FK、generated/hidden、STRICT/WITHOUT ROWID、附着索引或 trigger 漂移；无关表和对象不受影响。历史表的 1200 default 保留以避免重建，作者已有 profile/action 行和非 NULL 引用不覆盖；应用 CRUD 始终显式写入 `max_tokens`，省略时使用 2000。缺列却为 2000 或其他非仓库产物均在创建 ledger 前 fail-closed。
+
+应用账本后，真实请求路径不得执行 DDL、schema ensure、默认 seed 或 migration runner。缺表/缺列统一归类为 `DATABASE_MIGRATION_REQUIRED`，API 返回固定 503；修复只能新增下一条前向 migration。
+
+Provider 的 POST、PUT、DELETE 属于显式业务命令。每次 text/image profile 写入、默认项选择、action 引用和 post generator 引用对账必须通过同一个 D1 `batch` 原子提交；任一对账语句失败时整组 profile/default/reference 写入全部回滚。GET、resolve 与其他读取路径不得承担这些补偿写入。
 
 ## 失败与回退
 

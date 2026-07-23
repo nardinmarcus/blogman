@@ -2,10 +2,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/admin-auth'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import {
-  ensureAiConfigInfrastructure,
-  ensureDefaultProfileId,
-  resolveAiConfigSecret,
+  selectDefaultProfileId,
 } from '@/lib/ai-provider-profiles'
+import { withDatabaseErrorResponse } from '@/lib/database-errors'
 
 interface AiActionRow {
   id: number
@@ -20,16 +19,13 @@ interface AiActionRow {
   is_builtin: number
 }
 
-export async function GET(req: NextRequest) {
+async function getActions(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!db) return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
-
-  const secret = resolveAiConfigSecret(env as Record<string, unknown>)
-  await ensureAiConfigInfrastructure(db, secret)
 
   const { results } = await db.prepare(
     'SELECT id, action_key, label, description, prompt, temperature, profile_id, sort_order, is_enabled, is_builtin FROM ai_actions ORDER BY sort_order ASC'
@@ -38,7 +34,7 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({ actions: results })
 }
 
-export async function POST(req: NextRequest) {
+async function createAction(req: NextRequest) {
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
   if (!(await authenticateRequest(req, db))) {
@@ -61,9 +57,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: '缺少必填字段' }, { status: 400 })
   }
 
-  const secret = resolveAiConfigSecret(env as Record<string, unknown>)
-  await ensureAiConfigInfrastructure(db, secret)
-  const defaultProfileId = await ensureDefaultProfileId(db)
+  const defaultProfileId = await selectDefaultProfileId(db)
   const profileId = Number.isFinite(body.profile_id) && Number(body.profile_id) > 0
     ? Number(body.profile_id)
     : defaultProfileId
@@ -94,7 +88,7 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ success: true })
 }
 
-export async function PUT(req: NextRequest) {
+async function updateActionOrder(req: NextRequest) {
   // 批量更新 sort_order (reorder)
   const env = await getAppCloudflareEnv()
   const db = env?.DB as D1Database | undefined
@@ -102,9 +96,6 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!db) return NextResponse.json({ error: 'DB unavailable' }, { status: 500 })
-  const secret = resolveAiConfigSecret(env as Record<string, unknown>)
-  await ensureAiConfigInfrastructure(db, secret)
-
   const body = (await req.json()) as { items: Array<{ id: number; sort_order: number }> }
   if (!body.items?.length) {
     return NextResponse.json({ error: '缺少排序数据' }, { status: 400 })
@@ -117,3 +108,7 @@ export async function PUT(req: NextRequest) {
 
   return NextResponse.json({ success: true })
 }
+
+export const GET = withDatabaseErrorResponse(getActions)
+export const POST = withDatabaseErrorResponse(createAction)
+export const PUT = withDatabaseErrorResponse(updateActionOrder)
