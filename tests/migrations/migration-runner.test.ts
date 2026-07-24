@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { decryptApiKey } from '@/lib/ai-provider-profiles'
 import { DEFAULT_GENERATORS, LEGACY_PROMPT_VARIANTS } from '@/lib/ai-post-generator/constants'
@@ -1118,6 +1119,77 @@ ORDER BY key
       { number: 3, name: '003_migrate_runtime_ai_configuration' },
       { number: 4, name: '004_complete_historical_text_ai_schema' },
       { number: 5, name: '005_fix_posts_fts_sync' },
+    ])
+  })
+
+  it('rejects legacy AI settings mutated after data preparation without registering stale ledger data', { timeout: 300_000 }, () => {
+    const stateDirectory = createD1State()
+    const migrationsDirectory = createMigrationsDirectory(stateDirectory)
+    applyCurrentSchemaFixture(stateDirectory)
+    copyCanonicalMigrationSet(migrationsDirectory)
+    queryD1(stateDirectory, `
+INSERT INTO site_settings (key, value) VALUES
+  ('ai_provider_config', '{"base_url":"https://generation-a.example.com/v1","model":"generation-a"}'),
+  ('ai_provider_api_key', 'sk-generation-a');
+`)
+    const canonicalDataUrl = pathToFileURL(
+      join(canonicalMigrationsPath, '003_migrate_runtime_ai_configuration.data.mjs'),
+    ).href
+    writeFileSync(
+      join(migrationsDirectory, '003_migrate_runtime_ai_configuration.data.mjs'),
+      `import { spawnSync } from 'node:child_process'
+import { readdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { prepare as prepareCanonical } from ${JSON.stringify(canonicalDataUrl)}
+
+export async function prepare(context) {
+  const sql = await prepareCanonical(context)
+  const d1Directory = join(${JSON.stringify(stateDirectory)}, 'v3', 'd1', 'miniflare-D1DatabaseObject')
+  const databaseName = readdirSync(d1Directory).find((name) => name.endsWith('.sqlite') && name !== 'metadata.sqlite')
+  if (!databaseName) throw new Error('Local D1 SQLite file not found')
+  const result = spawnSync('sqlite3', [
+    join(d1Directory, databaseName),
+    ${JSON.stringify(`UPDATE site_settings
+SET value = CASE key
+  WHEN 'ai_provider_config' THEN '{"base_url":"https://generation-b.example.com/v1","model":"generation-b"}'
+  WHEN 'ai_provider_api_key' THEN 'sk-generation-b'
+END
+WHERE key IN ('ai_provider_config', 'ai_provider_api_key');`)},
+  ], { encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(result.stdout || result.stderr)
+  return sql
+}
+`,
+    )
+    vi.stubEnv('AI_CONFIG_ENCRYPTION_SECRET', '0123456789abcdef0123456789abcdef')
+
+    const result = runMigrationCommand(
+      stateDirectory,
+      'apply',
+      '--candidate',
+      'legacy-ai-provider-cas',
+      '--migrations-dir',
+      migrationsDirectory,
+    )
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('Legacy AI provider settings changed after migration preparation')
+    expect(result.stderr).not.toContain('sk-generation-a')
+    expect(result.stderr).not.toContain('sk-generation-b')
+    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM ai_provider_profiles'))
+      .toEqual([{ count: 0 }])
+    expect(queryD1(stateDirectory, 'SELECT number FROM migration_ledger ORDER BY number'))
+      .toEqual([{ number: 1 }, { number: 2 }])
+    expect(queryD1(stateDirectory, `
+SELECT key, value FROM site_settings
+WHERE key IN ('ai_provider_config', 'ai_provider_api_key')
+ORDER BY key
+`)).toEqual([
+      { key: 'ai_provider_api_key', value: 'sk-generation-b' },
+      {
+        key: 'ai_provider_config',
+        value: '{"base_url":"https://generation-b.example.com/v1","model":"generation-b"}',
+      },
     ])
   })
 

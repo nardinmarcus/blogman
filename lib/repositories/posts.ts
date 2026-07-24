@@ -1,4 +1,3 @@
-import { getCacheKey } from '@/lib/cache'
 import { throwDatabaseMigrationRequired } from '@/lib/database-errors'
 import { mapPostWithTags, parsePostTags } from '@/lib/repositories/post-mappers'
 import type { Database } from '@/lib/repositories/schema'
@@ -55,47 +54,27 @@ export async function getPosts(
 export async function getPostBySlug(
   db: Database,
   slug: string,
-  kv?: KVNamespace,
+  _kv?: KVNamespace,
 ): Promise<PostWithTags | null> {
-  if (kv) {
-    try {
-      await db.prepare(`
+  void _kv
+  let post: Post | null
+  try {
+    post = await db
+      .prepare(`
         SELECT id, slug, title, content, html, description, category, tags, status,
                password, is_pinned, is_hidden, cover_image, deleted_at, published_at,
-               created_at, updated_at, view_count
-        FROM posts LIMIT 0
-      `).all()
-    } catch (error) {
-      throwDatabaseMigrationRequired(error)
-    }
-
-    try {
-      const cacheKey = await getCacheKey(kv, `post:${slug}`)
-      const cached = await kv.get(cacheKey, 'json')
-      if (cached) {
-        return cached as PostWithTags
-      }
-    } catch {
-      // 缓存读取失败，继续查询数据库
-    }
+               updated_at, view_count
+        FROM posts WHERE slug = ?
+      `)
+      .bind(slug)
+      .first<Post>()
+  } catch (error) {
+    throwDatabaseMigrationRequired(error)
   }
-
-  const post = await db
-    .prepare('SELECT * FROM posts WHERE slug = ?')
-    .bind(slug)
-    .first<Post>()
 
   if (!post) return null
 
-  const result = mapPostWithTags(post)
-
-  if (kv) {
-    getCacheKey(kv, `post:${slug}`)
-      .then((cacheKey) => kv.put(cacheKey, JSON.stringify(result), { expirationTtl: 3600 }))
-      .catch(() => {})
-  }
-
-  return result
+  return mapPostWithTags(post)
 }
 
 export async function getPostAiSnapshot(

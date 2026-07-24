@@ -4,6 +4,30 @@ function sqlLiteral(value) {
   return `'${String(value).replaceAll("'", "''")}'`
 }
 
+function legacyValueComparisonSql(key, value) {
+  const currentValue = `(SELECT value FROM site_settings WHERE key = ${sqlLiteral(key)})`
+  if (value === null || value === undefined) return `${currentValue} IS NULL`
+  const expectedHex = Buffer.from(String(value), 'utf8').toString('hex').toUpperCase()
+  return `hex(${currentValue}) = ${sqlLiteral(expectedHex)}`
+}
+
+function legacyStateGuardSql(state) {
+  return `
+CREATE TABLE __blogman_migration_003_value_guard (
+  verified INTEGER NOT NULL,
+  CONSTRAINT "Legacy AI provider settings changed after migration preparation"
+    CHECK(verified = 1)
+);
+INSERT INTO __blogman_migration_003_value_guard (verified)
+SELECT CASE WHEN
+  (SELECT COUNT(*) FROM ai_provider_profiles) = ${state.profileCount}
+  AND ${legacyValueComparisonSql('ai_provider_config', state.configValue)}
+  AND ${legacyValueComparisonSql('ai_provider_api_key', state.apiKeyValue)}
+THEN 1 ELSE 0 END;
+DROP TABLE __blogman_migration_003_value_guard;
+`.trim()
+}
+
 function requireString(value, field) {
   if (typeof value !== 'string' || !value.trim()) {
     throw new Error(`Legacy AI provider config is missing ${field}`)
@@ -53,15 +77,23 @@ function encryptApiKey(value, secret) {
 }
 
 export async function prepare({ env, query }) {
-  const existingProfiles = query('SELECT COUNT(*) AS count FROM ai_provider_profiles')
-  if (Number(existingProfiles[0]?.count) > 0) return ''
-
-  const configRows = query("SELECT value FROM site_settings WHERE key = 'ai_provider_config'")
-  if (!configRows[0]?.value) return ''
+  const stateRows = query(`
+SELECT
+  (SELECT COUNT(*) FROM ai_provider_profiles) AS profile_count,
+  (SELECT value FROM site_settings WHERE key = 'ai_provider_config') AS config_value,
+  (SELECT value FROM site_settings WHERE key = 'ai_provider_api_key') AS api_key_value
+`)
+  const state = {
+    profileCount: Number(stateRows[0]?.profile_count ?? 0),
+    configValue: stateRows[0]?.config_value ?? null,
+    apiKeyValue: stateRows[0]?.api_key_value ?? null,
+  }
+  const guardSql = legacyStateGuardSql(state)
+  if (state.profileCount > 0 || !state.configValue) return guardSql
 
   let config
   try {
-    config = JSON.parse(configRows[0].value)
+    config = JSON.parse(state.configValue)
   } catch {
     throw new Error('Legacy AI provider config is invalid JSON')
   }
@@ -77,14 +109,14 @@ export async function prepare({ env, query }) {
 
   const baseUrl = requireString(config.base_url, 'base_url').replace(/\/+$/, '')
   const model = requireString(config.model, 'model')
-  const keyRows = query("SELECT value FROM site_settings WHERE key = 'ai_provider_api_key'")
-  const rawApiKey = optionalString(keyRows[0]?.value)
+  const rawApiKey = optionalString(state.apiKeyValue)
   const encryptedApiKey = encryptApiKey(rawApiKey, secret)
   const maskedApiKey = rawApiKey
     ? maskApiKey(rawApiKey)
     : optionalString(config.api_key_masked)
 
-  return `
+  return `${guardSql}
+
 INSERT INTO ai_provider_profiles (
   name, provider, provider_name, provider_type, provider_category, api_key_url,
   base_url, model, temperature, max_tokens,

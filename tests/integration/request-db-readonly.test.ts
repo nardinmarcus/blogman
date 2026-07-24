@@ -299,6 +299,76 @@ ORDER BY kind, row_key
     })
   })
 
+  it('accepts a KV hit on the canonical ledger posts schema', { timeout: 120_000 }, async () => {
+    const stateDirectory = createD1State()
+    applyLedger(stateDirectory)
+    queryD1(stateDirectory, `
+INSERT INTO posts (slug, title, content, html, status)
+VALUES ('canonical-kv', 'Canonical title', 'canonical body', '<p>canonical body</p>', 'published');
+`)
+    const db = createWranglerD1Database(stateDirectory)
+    const kv = {
+      async get(key: string) {
+        if (key === 'cache:version') return null
+        return {
+          id: 1,
+          slug: 'canonical-kv',
+          title: 'Canonical title',
+          content: 'canonical body',
+          html: '<p>canonical body</p>',
+          tags: [],
+          status: 'published',
+        }
+      },
+      async put() {},
+    } as unknown as KVNamespace
+
+    await expect(getPostBySlug(db, 'canonical-kv', kv)).resolves.toEqual(
+      expect.objectContaining({ slug: 'canonical-kv', title: 'Canonical title', status: 'published' }),
+    )
+  })
+
+  it('keeps the current D1 post row authoritative over stale KV existence and visibility state', { timeout: 120_000 }, async () => {
+    const stateDirectory = createD1State()
+    applyLedger(stateDirectory)
+    queryD1(stateDirectory, `
+INSERT INTO posts (slug, title, content, html, status, password, is_hidden)
+VALUES ('stale-kv', 'Current draft', 'current body', '<p>current body</p>', 'draft', 'new-password', 1);
+`)
+    const db = createWranglerD1Database(stateDirectory)
+    const kv = {
+      async get(key: string) {
+        if (key === 'cache:version') return null
+        return {
+          id: 1,
+          slug: 'stale-kv',
+          title: 'Stale published title',
+          content: 'stale body',
+          html: '<p>stale body</p>',
+          tags: [],
+          status: 'published',
+          password: null,
+          is_hidden: 0,
+          deleted_at: null,
+        }
+      },
+      async put() {},
+    } as unknown as KVNamespace
+
+    await expect(getPostBySlug(db, 'stale-kv', kv)).resolves.toEqual(
+      expect.objectContaining({
+        title: 'Current draft',
+        content: 'current body',
+        status: 'draft',
+        password: 'new-password',
+        is_hidden: 1,
+      }),
+    )
+
+    queryD1(stateDirectory, "DELETE FROM posts WHERE slug = 'stale-kv'")
+    await expect(getPostBySlug(db, 'stale-kv', kv)).resolves.toBeNull()
+  })
+
   it('forward-migrates the versioned schema and seed fixture while preserving custom and deleted rows across domain reads', { timeout: 150_000 }, async () => {
     const stateDirectory = createD1State()
     applyD1File(stateDirectory, join(repoRoot, 'db', 'schema.sql'))
