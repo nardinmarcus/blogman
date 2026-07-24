@@ -54,6 +54,7 @@ function copyCanonicalMigrationSet(directory: string): void {
     '003_migrate_runtime_ai_configuration.data.mjs',
     '004_complete_historical_text_ai_schema.sql',
     '004_complete_historical_text_ai_schema.baseline.sql',
+    '005_fix_posts_fts_sync.sql',
   ]) {
     writeFileSync(
       join(directory, name),
@@ -290,10 +291,11 @@ describe('D1 migration runner', () => {
       { number: 2, candidate_id: 'test-candidate-empty' },
       { number: 3, candidate_id: 'test-candidate-empty' },
       { number: 4, candidate_id: 'test-candidate-empty' },
+      { number: 5, candidate_id: 'test-candidate-empty' },
     ])
   })
 
-  it('baselines an existing current schema without changing business schema, seed, or data', { timeout: 300_000 }, () => {
+  it('baselines an existing current schema without changing unrelated schema, seed, or data', { timeout: 300_000 }, () => {
     const stateDirectory = createD1State()
     applyCurrentSchemaFixture(stateDirectory)
     queryD1(stateDirectory, `
@@ -305,7 +307,7 @@ VALUES ('kept', 'Kept', 'body', '<p>body</p>', 'draft');
 `)
     const schemaBefore = queryD1<{ type: string; name: string; sql: string | null }>(
       stateDirectory,
-      "SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+      "SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ('posts_au', 'posts_ad') ORDER BY type, name",
     )
     const seedBefore = queryD1(
       stateDirectory,
@@ -323,6 +325,7 @@ VALUES ('kept', 'Kept', 'body', '<p>body</p>', 'draft');
       expect.objectContaining({ number: 2, action: 'apply' }),
       expect.objectContaining({ number: 3, action: 'apply' }),
       expect.objectContaining({ number: 4, action: 'apply' }),
+      expect.objectContaining({ number: 5, action: 'apply' }),
     ])
 
     const result = runMigrationCommand(
@@ -357,6 +360,7 @@ VALUES ('kept', 'Kept', 'body', '<p>body</p>', 'draft');
       { number: 2, candidate_id: 'test-candidate-current' },
       { number: 3, candidate_id: 'test-candidate-current' },
       { number: 4, candidate_id: 'test-candidate-current' },
+      { number: 5, candidate_id: 'test-candidate-current' },
     ])
   })
 
@@ -410,6 +414,7 @@ FROM ai_actions ORDER BY id
       { number: 2, name: '002_add_ai_image_configuration' },
       { number: 3, name: '003_migrate_runtime_ai_configuration' },
       { number: 4, name: '004_complete_historical_text_ai_schema' },
+      { number: 5, name: '005_fix_posts_fts_sync' },
     ])
     expect(queryD1(stateDirectory, `
 SELECT action_key, label, description, prompt, temperature, sort_order,
@@ -436,7 +441,7 @@ FROM ai_actions ORDER BY id
     )
     expect(repeated.stderr).toBe('')
     expect(repeated.status).toBe(0)
-    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 4 }])
+    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 5 }])
   })
 
   it('accepts the repository historical text AI schema after old runtime ensure and preserves author references', { timeout: 300_000 }, () => {
@@ -473,6 +478,7 @@ FROM ai_actions WHERE action_key = 'improve'
       { number: 2, name: '002_add_ai_image_configuration' },
       { number: 3, name: '003_migrate_runtime_ai_configuration' },
       { number: 4, name: '004_complete_historical_text_ai_schema' },
+      { number: 5, name: '005_fix_posts_fts_sync' },
     ])
     expect(queryD1(stateDirectory, 'SELECT * FROM ai_provider_profiles ORDER BY id')).toEqual(profilesBefore)
     expect(queryD1(stateDirectory, `
@@ -493,7 +499,7 @@ FROM ai_actions WHERE action_key = 'improve'
     )
     expect(repeated.stderr).toBe('')
     expect(repeated.status).toBe(0)
-    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 4 }])
+    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 5 }])
     expect(queryD1(stateDirectory, 'SELECT * FROM ai_provider_profiles ORDER BY id')).toEqual(profilesBefore)
   })
 
@@ -773,6 +779,7 @@ BEGIN SELECT 1; END;
       { number: 2, candidate_id: 'mutable-data-baseline' },
       { number: 3, candidate_id: 'mutable-data-baseline' },
       { number: 4, candidate_id: 'mutable-data-baseline' },
+      { number: 5, candidate_id: 'mutable-data-baseline' },
     ])
   })
 
@@ -907,6 +914,7 @@ ORDER BY action_key
       { number: 2, name: '002_add_ai_image_configuration' },
       { number: 3, name: '003_migrate_runtime_ai_configuration' },
       { number: 4, name: '004_complete_historical_text_ai_schema' },
+      { number: 5, name: '005_fix_posts_fts_sync' },
     ])
   })
 
@@ -990,7 +998,25 @@ CREATE TABLE ai_image_actions (
   updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 `)
-    const schemaBefore = queryD1(stateDirectory, "SELECT sql FROM sqlite_schema WHERE name = 'ai_image_actions'")
+    queryD1(stateDirectory, `
+UPDATE ai_actions SET prompt = 'author-owned prompt' WHERE action_key = 'improve';
+INSERT INTO posts (slug, title, content, html, status)
+VALUES ('author-owned', 'Author title', 'Author body', '<p>Author body</p>', 'draft');
+`)
+    const schemaBefore = queryD1(
+      stateDirectory,
+      "SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY type, name",
+    )
+    const authorRowsBefore = queryD1(stateDirectory, `
+SELECT 'action' AS kind, action_key AS row_key, prompt AS value
+FROM ai_actions WHERE action_key = 'improve'
+UNION ALL
+SELECT 'post', slug, json_object('title', title, 'content', content, 'status', status)
+FROM posts WHERE slug = 'author-owned'
+ORDER BY kind, row_key
+`)
+
+    const plan = runMigrationCommand(stateDirectory, 'plan')
 
     const result = runMigrationCommand(
       stateDirectory,
@@ -999,13 +1025,28 @@ CREATE TABLE ai_image_actions (
       'bad-image-schema',
     )
 
+    expect(plan.status).toBe(1)
     expect(result.status).toBe(1)
-    expect(result.stderr).toContain('Migration preflight failed for 002_add_ai_image_configuration')
-    expect(result.stderr).toContain('column ai_image_actions.prompt incompatible')
-    expect(queryD1(stateDirectory, "SELECT sql FROM sqlite_schema WHERE name = 'ai_image_actions'"))
+    expect(plan.stderr).toBe(result.stderr)
+    expect(plan.stderr).toContain('Migration preflight failed for 002_add_ai_image_configuration')
+    expect(plan.stderr).toContain('column ai_image_actions.prompt incompatible')
+    expect(queryD1(
+      stateDirectory,
+      "SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY type, name",
+    ))
       .toEqual(schemaBefore)
-    expect(queryD1(stateDirectory, 'SELECT number FROM migration_ledger ORDER BY number'))
-      .toEqual([{ number: 1 }])
+    expect(queryD1(stateDirectory, `
+SELECT 'action' AS kind, action_key AS row_key, prompt AS value
+FROM ai_actions WHERE action_key = 'improve'
+UNION ALL
+SELECT 'post', slug, json_object('title', title, 'content', content, 'status', status)
+FROM posts WHERE slug = 'author-owned'
+ORDER BY kind, row_key
+`)).toEqual(authorRowsBefore)
+    expect(queryD1(
+      stateDirectory,
+      "SELECT COUNT(*) AS count FROM sqlite_schema WHERE name LIKE 'migration_ledger%'",
+    )).toEqual([{ count: 0 }])
   })
 
   it('migrates legacy AI provider settings once with an explicit encryption secret', { timeout: 300_000 }, async () => {
@@ -1076,6 +1117,7 @@ ORDER BY key
       { number: 2, name: '002_add_ai_image_configuration' },
       { number: 3, name: '003_migrate_runtime_ai_configuration' },
       { number: 4, name: '004_complete_historical_text_ai_schema' },
+      { number: 5, name: '005_fix_posts_fts_sync' },
     ])
   })
 
@@ -1155,6 +1197,7 @@ WHERE key = 'ai_provider_config';
       { number: 2 },
       { number: 3 },
       { number: 4 },
+      { number: 5 },
     ])
     expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM ai_provider_profiles')).toEqual([{ count: 1 }])
 
@@ -1449,6 +1492,7 @@ FROM ai_post_generators WHERE target_key = 'summary'
         { number: 2, name: '002_add_ai_image_configuration' },
         { number: 3, name: '003_migrate_runtime_ai_configuration' },
         { number: 4, name: '004_complete_historical_text_ai_schema' },
+        { number: 5, name: '005_fix_posts_fts_sync' },
       ],
     })
     expect(status.status).toBe(0)
@@ -1645,6 +1689,7 @@ FROM migration_ledger WHERE number = 1;
       { number: 2, candidate_id: 'guard-original' },
       { number: 3, candidate_id: 'guard-original' },
       { number: 4, candidate_id: 'guard-original' },
+      { number: 5, candidate_id: 'guard-original' },
     ])
   })
 
@@ -1715,13 +1760,24 @@ CREATE TABLE migration_ledger (
       'CREATE VIEW migration_ledger AS SELECT 1 AS number, \'view\' AS name, \'checksum\' AS checksum, \'now\' AS applied_at, \'candidate\' AS candidate_id',
     )
 
+    const schemaBefore = queryD1(
+      stateDirectory,
+      "SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+    )
     const plan = runMigrationCommand(stateDirectory, 'plan')
     const status = runMigrationCommand(stateDirectory, 'status')
+    const apply = runMigrationCommand(stateDirectory, 'apply', '--candidate', 'same-name-view')
 
     expect(plan.status).toBe(1)
     expect(plan.stderr).toContain('Migration ledger contract drift: table migration_ledger')
     expect(status.status).toBe(1)
-    expect(status.stderr).toContain('Migration ledger contract drift: table migration_ledger')
+    expect(status.stderr).toBe(plan.stderr)
+    expect(apply.status).toBe(1)
+    expect(apply.stderr).toBe(plan.stderr)
+    expect(queryD1(
+      stateDirectory,
+      "SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+    )).toEqual(schemaBefore)
   })
 
   it('fails closed for a case-variant ledger artifact name', { timeout: 300_000 }, () => {
@@ -2082,6 +2138,68 @@ export async function prepare({ query }) {
         'SELECT number, name, checksum, applied_at, candidate_id FROM migration_ledger ORDER BY number',
       )).toEqual(ledgerBefore)
     }
+  })
+
+  it('captures the schema guard before the final per-migration preflight', () => {
+    const runnerSource = readFileSync(runnerPath, 'utf8')
+    const applyStart = runnerSource.indexOf('async function applyMigrations')
+    const applyEnd = runnerSource.indexOf('\nasync function main()', applyStart)
+    const applySource = runnerSource.slice(applyStart, applyEnd)
+
+    expect(applySource.indexOf('let fingerprint = readSchemaFingerprint(client)'))
+      .toBeLessThan(applySource.indexOf('validateMigrationPreflight(client, migration)'))
+  })
+
+  it('atomically rejects affected-schema drift between preflight and migration writes', { timeout: 300_000 }, () => {
+    const stateDirectory = createD1State()
+    const migrationsDirectory = createMigrationsDirectory(stateDirectory)
+    writeMigration(
+      migrationsDirectory,
+      1,
+      'guarded_object',
+      'CREATE TABLE IF NOT EXISTS guarded_object (id INTEGER PRIMARY KEY);',
+    )
+    writeFileSync(
+      join(migrationsDirectory, '001_guarded_object.preflight.sql'),
+      `SELECT 'guarded_object has incompatible identity' AS issue
+FROM sqlite_schema
+WHERE lower(name) = 'guarded_object' AND type <> 'table';
+`,
+    )
+    writeFileSync(
+      join(migrationsDirectory, '001_guarded_object.data.mjs'),
+      `import { spawnSync } from 'node:child_process'
+import { readdirSync } from 'node:fs'
+import { join } from 'node:path'
+export async function prepare() {
+  const d1Directory = join(${JSON.stringify(stateDirectory)}, 'v3', 'd1', 'miniflare-D1DatabaseObject')
+  const databaseName = readdirSync(d1Directory).find((name) => name.endsWith('.sqlite') && name !== 'metadata.sqlite')
+  if (!databaseName) throw new Error('Local D1 SQLite file not found')
+  const result = spawnSync('sqlite3', [
+    join(d1Directory, databaseName),
+    'CREATE VIEW guarded_object AS SELECT 1 AS id',
+  ], { encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(result.stdout || result.stderr)
+  return ''
+}
+`,
+    )
+
+    const apply = runMigrationCommand(
+      stateDirectory,
+      'apply',
+      '--candidate',
+      'schema-drift',
+      '--migrations-dir',
+      migrationsDirectory,
+    )
+
+    expect(apply.status).toBe(1)
+    expect(apply.stderr).toContain('Database schema changed after migration preflight')
+    expect(queryD1(
+      stateDirectory,
+      "SELECT type, name FROM sqlite_schema WHERE name IN ('guarded_object', 'migration_ledger') ORDER BY name",
+    )).toEqual([{ type: 'view', name: 'guarded_object' }])
   })
 
   it('rolls back an intentionally failed migration, leaves it unregistered, and stops later migrations', { timeout: 300_000 }, () => {

@@ -11,6 +11,7 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(scriptDirectory, '..')
 const defaultMigrationsDirectory = join(repoRoot, 'db', 'ledger-migrations')
 const defaultWranglerPath = join(repoRoot, 'node_modules', '.bin', 'wrangler')
+const schemaGuardName = '__blogman_migration_schema_guard'
 const persistentWriteOpcodes = new Set([
   'OpenWrite',
   'CreateBtree',
@@ -414,8 +415,8 @@ function readLedger(client, initialized) {
   )
 }
 
-function createLedger(client) {
-  client.executeBatch(ledgerSchemaObjects.map(({ sql }) => `${sql};`).join('\n'))
+function ledgerCreationSql() {
+  return ledgerSchemaObjects.map(({ sql }) => `${sql};`).join('\n')
 }
 
 function hasBusinessSchema(client) {
@@ -429,11 +430,11 @@ WHERE name NOT LIKE 'sqlite_%'
   return Number(rows[0]?.count) > 0
 }
 
-function insertLedgerRow(client, migration, candidate) {
-  client.executeBatch(`
+function ledgerInsertSql(migration, candidate) {
+  return `
 INSERT INTO migration_ledger (number, name, checksum, candidate_id)
 VALUES (${migration.number}, ${sqlLiteral(migration.name)}, ${sqlLiteral(migration.checksum)}, ${sqlLiteral(candidate)});
-`)
+`
 }
 
 function parseBaselineCompatibility(migration) {
@@ -590,7 +591,64 @@ function buildStatus(migrations, ledger, state, baselineFirst = false) {
   }
 }
 
+function validateBeforeWrites(client, migrations, ledger) {
+  const shouldBaseline = ledger.length === 0 && hasBusinessSchema(client)
+  if (shouldBaseline) validateCurrentSchema(client, migrations)
+
+  const pendingStart = ledger.length + (shouldBaseline ? 1 : 0)
+  for (const migration of migrations.slice(pendingStart)) {
+    validateMigrationPreflight(client, migration)
+  }
+
+  return shouldBaseline
+}
+
+function readSchemaFingerprint(client) {
+  const rows = client.query(`
+SELECT json_group_array(json_object(
+  'type', type,
+  'name', name,
+  'tbl_name', tbl_name,
+  'sql', sql
+)) AS fingerprint
+FROM (
+  SELECT type, name, tbl_name, sql
+  FROM sqlite_schema
+  WHERE lower(name) <> ${sqlLiteral(schemaGuardName)}
+    AND lower(tbl_name) <> ${sqlLiteral(schemaGuardName)}
+  ORDER BY type, name, tbl_name
+)
+`)
+  return String(rows[0]?.fingerprint ?? '[]')
+}
+
+function schemaFingerprintGuardSql(expectedFingerprint) {
+  return `
+CREATE TABLE ${schemaGuardName} (
+  fingerprint TEXT NOT NULL,
+  CONSTRAINT "Database schema changed after migration preflight"
+    CHECK(fingerprint = ${sqlLiteral(expectedFingerprint)})
+);
+INSERT INTO ${schemaGuardName} (fingerprint)
+SELECT json_group_array(json_object(
+  'type', type,
+  'name', name,
+  'tbl_name', tbl_name,
+  'sql', sql
+))
+FROM (
+  SELECT type, name, tbl_name, sql
+  FROM sqlite_schema
+  WHERE lower(name) <> ${sqlLiteral(schemaGuardName)}
+    AND lower(tbl_name) <> ${sqlLiteral(schemaGuardName)}
+  ORDER BY type, name, tbl_name
+);
+DROP TABLE ${schemaGuardName};
+`
+}
+
 async function applyMigrations(client, migrations, candidate) {
+  let fingerprint = readSchemaFingerprint(client)
   const initialized = ledgerArtifactsExist(client)
   if (initialized) validateLedgerContract(client)
   const hadBusinessSchema = hasBusinessSchema(client)
@@ -599,26 +657,35 @@ async function applyMigrations(client, migrations, candidate) {
   const shouldBaseline = ledger.length === 0 && hadBusinessSchema
 
   if (shouldBaseline) validateCurrentSchema(client, migrations)
-  if (!initialized) {
-    createLedger(client)
-    validateLedgerContract(client)
-  }
-
+  let initializationSql = initialized ? '' : ledgerCreationSql()
+  let pendingStart = ledger.length
   if (shouldBaseline) {
-    insertLedgerRow(client, migrations[0], candidate)
-    ledger = readLedger(client, true)
+    initializationSql += `\n${ledgerInsertSql(migrations[0], candidate)}`
+    pendingStart = 1
   }
 
-  for (const migration of migrations.slice(ledger.length)) {
+  const pending = migrations.slice(pendingStart)
+  if (pending.length === 0 && initializationSql) {
+    client.executeBatch(`${schemaFingerprintGuardSql(fingerprint)}\n${initializationSql}`)
+    initializationSql = ''
+  }
+
+  for (const [index, migration] of pending.entries()) {
     validateMigrationPreflight(client, migration)
     const resolvedSql = resolveMigrationSql(client, migration)
     const dataSql = await prepareDataMigrationSql(client, migration)
-    client.executeBatch(`${dataSql}\n${resolvedSql.trim()}\n
-INSERT INTO migration_ledger (number, name, checksum, candidate_id)
-VALUES (${migration.number}, ${sqlLiteral(migration.name)}, ${sqlLiteral(migration.checksum)}, ${sqlLiteral(candidate)});
-`)
+    client.executeBatch([
+      schemaFingerprintGuardSql(fingerprint),
+      initializationSql,
+      dataSql,
+      resolvedSql.trim(),
+      ledgerInsertSql(migration, candidate),
+    ].filter(Boolean).join('\n'))
+    initializationSql = ''
+    if (index + 1 < pending.length) fingerprint = readSchemaFingerprint(client)
   }
 
+  validateLedgerContract(client)
   return buildStatus(migrations, readLedger(client, true), 'current')
 }
 
@@ -630,6 +697,11 @@ async function main() {
   if (initialized) validateLedgerContract(client)
   const ledger = readLedger(client, initialized)
   validateLedger(migrations, ledger)
+
+  let baselineFirst = false
+  if (options.command === 'plan' || options.command === 'apply') {
+    baselineFirst = validateBeforeWrites(client, migrations, ledger)
+  }
 
   let result
   if (options.command === 'apply') {
@@ -645,8 +717,6 @@ async function main() {
     result = buildStatus(migrations, ledger, state)
   } else {
     const state = ledger.length === migrations.length ? 'current' : 'pending'
-    const baselineFirst = ledger.length === 0 && hasBusinessSchema(client)
-    if (baselineFirst) validateCurrentSchema(client, migrations)
     result = buildStatus(migrations, ledger, state, baselineFirst)
   }
 

@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest } from 'next/server'
-import { Miniflare } from 'miniflare'
 
 const mocks = vi.hoisted(() => ({
   authenticateRequest: vi.fn(),
@@ -51,6 +50,7 @@ import {
   PATCH as updateCategory,
   POST as createCategory,
 } from '@/app/api/admin/categories/route'
+import { POST as createPost } from '@/app/api/posts/route'
 
 const repoRoot = process.cwd()
 const wranglerPath = join(repoRoot, 'node_modules', '.bin', 'wrangler')
@@ -58,7 +58,6 @@ const runnerPath = join(repoRoot, 'scripts', 'migrations.mjs')
 const ledgerMigrationsPath = join(repoRoot, 'db', 'ledger-migrations')
 const historicalMigrationsPath = join(repoRoot, 'db', 'migrations')
 const stateDirectories: string[] = []
-const miniflares: Miniflare[] = []
 
 function createState() {
   const state = mkdtempSync(join(tmpdir(), 'blogman-route-crud-d1-'))
@@ -143,9 +142,8 @@ function query<T>(state: string, sql: string): T[] {
   return (runD1(state, sql).at(-1)?.results || []) as T[]
 }
 
-afterEach(async () => {
+afterEach(() => {
   for (const state of stateDirectories.splice(0)) rmSync(state, { recursive: true, force: true })
-  await Promise.all(miniflares.splice(0).map((miniflare) => miniflare.dispose()))
 })
 
 describe('real route CRUD on a ledger-migrated D1', () => {
@@ -234,44 +232,37 @@ describe('real route CRUD on a ledger-migrated D1', () => {
     `)).toEqual(protectedSeedsBefore)
   })
 
-  it('runs real admin article GET, PUT, and DELETE on a Cloudflare local D1 binding', async () => {
-    // Keep this binding focused on the article handler contract. The canonical
-    // posts_fts/posts_au objects are normalized-schema identical after A/B/C
-    // migration and fail the same update independently of #21. Loading them
-    // here would turn this route-boundary test into an unrelated FTS regression.
-    const miniflare = new Miniflare({
-      modules: true,
-      script: 'export default { fetch() { return new Response("ok") } }',
-      d1Databases: { DB: crypto.randomUUID() },
-    })
-    miniflares.push(miniflare)
-    const db = await miniflare.getD1Database('DB') as unknown as D1Database
-    await db.batch([
-      db.prepare(`CREATE TABLE posts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT UNIQUE NOT NULL, title TEXT NOT NULL,
-        content TEXT NOT NULL, html TEXT NOT NULL, description TEXT DEFAULT '', category TEXT DEFAULT '',
-        tags TEXT DEFAULT '[]', status TEXT DEFAULT 'draft', password TEXT, is_pinned INTEGER DEFAULT 0,
-        is_hidden INTEGER DEFAULT 0, cover_image TEXT, deleted_at INTEGER, published_at INTEGER DEFAULT (strftime('%s', 'now')),
-        created_at INTEGER DEFAULT (strftime('%s', 'now')), updated_at INTEGER DEFAULT (strftime('%s', 'now')),
-        view_count INTEGER DEFAULT 0
-      )`),
-      db.prepare("INSERT INTO posts (slug, title, content, html, status) VALUES ('route-post', 'Original', 'body', '<p>body</p>', 'draft')"),
-    ])
+  it('runs article CRUD and keeps FTS synchronized on the canonical ledger schema', { timeout: 180_000 }, async () => {
+    const state = createState()
+    applyLedger(state)
+    const db = createDatabase(state)
     const env = { DB: db }
     mocks.getAppCloudflareEnv.mockResolvedValue(env)
     mocks.getAppCloudflareContext.mockResolvedValue({ env, ctx: { waitUntil: vi.fn() } })
-    const schemaBefore = (await db.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all()).results
+    const schemaBefore = query(state, "SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name")
     const postContext = { params: Promise.resolve({ slug: 'route-post' }) }
 
+    expect((await createPost(request('/api/posts', 'POST', {
+      slug: 'route-post', title: 'Original title', content: 'original searchable body',
+      html: '<p>original searchable body</p>', status: 'draft',
+    }))).status).toBe(200)
+    expect(query(state, "SELECT rowid, title, content FROM posts_fts WHERE posts_fts MATCH 'original'"))
+      .toEqual([{ rowid: 1, title: 'Original title', content: 'original searchable body' }])
     expect((await getAdminPost(request('/api/admin/posts/route-post', 'GET'), postContext)).status).toBe(200)
     expect((await updateAdminPost(request('/api/admin/posts/route-post', 'PUT', {
-      title: 'Updated post', content: 'updated body', html: '<p>updated</p>', status: 'published',
+      title: 'Updated title', content: 'updated searchable body', html: '<p>updated searchable body</p>', status: 'published',
     }), postContext)).status).toBe(200)
-    expect(await db.prepare("SELECT title, content, status FROM posts WHERE slug = 'route-post'").first())
-      .toEqual({ title: 'Updated post', content: 'updated body', status: 'published' })
+    expect(query(state, "SELECT title, content, status FROM posts WHERE slug = 'route-post'"))
+      .toEqual([{ title: 'Updated title', content: 'updated searchable body', status: 'published' }])
+    expect(query(state, "SELECT rowid, title, content FROM posts_fts WHERE posts_fts MATCH 'updated'"))
+      .toEqual([{ rowid: 1, title: 'Updated title', content: 'updated searchable body' }])
+    expect(query(state, "SELECT rowid FROM posts_fts WHERE posts_fts MATCH 'original'"))
+      .toEqual([])
     expect((await deleteAdminPost(request('/api/admin/posts/route-post', 'DELETE'), postContext)).status).toBe(200)
-    expect(await db.prepare("SELECT status FROM posts WHERE slug = 'route-post'").first()).toBeNull()
-    expect((await db.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all()).results)
+    expect(query(state, "SELECT status FROM posts WHERE slug = 'route-post'")).toEqual([])
+    expect(query(state, "SELECT rowid FROM posts_fts WHERE posts_fts MATCH 'updated'"))
+      .toEqual([])
+    expect(query(state, "SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"))
       .toEqual(schemaBefore)
   })
 })

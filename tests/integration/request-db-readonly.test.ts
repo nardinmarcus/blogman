@@ -22,7 +22,7 @@ import {
   DatabaseMigrationRequiredError,
   migrationRequiredResponse,
 } from '@/lib/database-errors'
-import { getPosts, getSetting } from '@/lib/db'
+import { getPostBySlug, getPosts, getSetting } from '@/lib/db'
 import { getSiteHeaderData } from '@/lib/site'
 
 const repoRoot = process.cwd()
@@ -263,6 +263,40 @@ ORDER BY kind, row_key
     expect(body).not.toContain('nm_token_must_not_leak')
     expect(body).not.toContain('sk-must-not-fallback')
     expect(body).not.toContain('site_settings')
+  })
+
+  it('does not let a KV hit hide a missing posts schema', { timeout: 60_000 }, async () => {
+    const stateDirectory = createD1State()
+    const db = createWranglerD1Database(stateDirectory)
+    const kv = {
+      async get(key: string) {
+        if (key === 'cache:version') return null
+        return {
+          id: 1,
+          slug: 'cached-post',
+          title: 'Cached title',
+          content: 'cached body',
+          html: '<p>cached body</p>',
+          tags: [],
+          status: 'published',
+        }
+      },
+      async put() {},
+    } as unknown as KVNamespace
+
+    let error: unknown
+    try {
+      await getPostBySlug(db, 'cached-post', kv)
+    } catch (caught) {
+      error = caught
+    }
+    expect(error).toBeInstanceOf(DatabaseMigrationRequiredError)
+    const response = migrationRequiredResponse(error)
+    expect(response?.status).toBe(503)
+    await expect(response?.json()).resolves.toEqual({
+      error: '数据库结构未就绪，请先运行账本迁移',
+      code: 'DATABASE_MIGRATION_REQUIRED',
+    })
   })
 
   it('forward-migrates the versioned schema and seed fixture while preserving custom and deleted rows across domain reads', { timeout: 150_000 }, async () => {

@@ -1,4 +1,5 @@
 import { getCacheKey } from '@/lib/cache'
+import { throwDatabaseMigrationRequired } from '@/lib/database-errors'
 import { mapPostWithTags, parsePostTags } from '@/lib/repositories/post-mappers'
 import type { Database } from '@/lib/repositories/schema'
 import type {
@@ -57,6 +58,17 @@ export async function getPostBySlug(
   kv?: KVNamespace,
 ): Promise<PostWithTags | null> {
   if (kv) {
+    try {
+      await db.prepare(`
+        SELECT id, slug, title, content, html, description, category, tags, status,
+               password, is_pinned, is_hidden, cover_image, deleted_at, published_at,
+               created_at, updated_at, view_count
+        FROM posts LIMIT 0
+      `).all()
+    } catch (error) {
+      throwDatabaseMigrationRequired(error)
+    }
+
     try {
       const cacheKey = await getCacheKey(kv, `post:${slug}`)
       const cached = await kv.get(cacheKey, 'json')
