@@ -13,7 +13,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { createServer } from 'node:net'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -136,14 +136,32 @@ function assertCandidateEvidenceShape(evidence) {
   assertExactKeys(evidence.build, ['sha256'])
   assertExactKeys(evidence.cloudflare, ['deployment_id', 'version_id'])
   assertExactKeys(evidence.migration, [
-    'state', 'candidate_id', 'set_sha256', 'report_sha256',
+    'state', 'candidate_id', 'set_sha256', 'report_sha256', 'verification_report_sha256',
   ])
   assertExactKeys(evidence.backup, [
     'backup_id', 'verify_report_sha256', 'restore_report_sha256',
   ])
-  for (const name of ['reconciliation', 'smoke', 'rollout', 'tests', 'observation']) {
+  for (const name of ['reconciliation', 'rollout', 'tests', 'observation']) {
     assertExactKeys(evidence[name], ['report_sha256'])
   }
+  assertExactKeys(evidence.smoke, ['report_sha256', 'runtime_report_sha256'])
+}
+
+function assertPreMigrationEvidenceShape(evidence) {
+  assertExactKeys(evidence, [
+    'format', 'candidate_id', 'lockfile', 'build', 'cloudflare', 'migration',
+    'backup', 'reconciliation', 'smoke', 'tests',
+  ])
+  assertExactKeys(evidence.lockfile, ['sha256', 'wrangler', 'opennextjs_cloudflare'])
+  assertExactKeys(evidence.build, ['sha256'])
+  assertExactKeys(evidence.cloudflare, ['uploaded_version_id'])
+  assertExactKeys(evidence.migration, ['set_sha256', 'verification_report_sha256'])
+  assertExactKeys(evidence.backup, [
+    'backup_id', 'verify_report_sha256', 'restore_report_sha256',
+  ])
+  assertExactKeys(evidence.reconciliation, ['report_sha256'])
+  assertExactKeys(evidence.smoke, ['runtime_report_sha256'])
+  assertExactKeys(evidence.tests, ['report_sha256'])
 }
 
 function assertReportShape(name, report) {
@@ -154,15 +172,29 @@ function assertReportShape(name, report) {
     assertExactKeys(report.target, ['mode', 'isolated'])
   } else if (name === 'migration-report') {
     assertExactKeys(report, ['format', 'state', 'candidate_id', 'migration_set_sha256'])
-  } else if (name === 'reconciliation-report') {
+  } else if (name === 'migration-verification-report') {
+    assertExactKeys(report, ['state', 'applied', 'pending'])
+    if (!Array.isArray(report.applied) || !Array.isArray(report.pending)) {
+      fail('Evidence has an unsupported shape')
+    }
+    for (const applied of report.applied) {
+      assertExactKeys(applied, ['number', 'name', 'checksum', 'applied_at', 'candidate_id'])
+    }
+  } else if (name === 'reconciliation-report' || name === 'observation-start-reconciliation-report') {
     assertExactKeys(report, ['state', 'checks'])
     assertExactKeys(report.checks, [
       'schema', 'migration_ledger', 'post_count', 'post_status', 'post_content',
     ])
-  } else if (name === 'smoke-report') {
+  } else if (name === 'smoke-report' || name === 'observation-start-smoke-report') {
     assertExactKeys(report, [
       'state', 'candidate_id', 'build_sha256', 'deployment_id', 'version_id',
     ])
+  } else if (name === 'smoke-runtime-report') {
+    assertExactKeys(report, [
+      'state', 'target', 'runtime', 'requests', 'reconciliation', 'report_sha256',
+    ])
+    if (!Array.isArray(report.requests)) fail('Evidence has an unsupported shape')
+    for (const request of report.requests) assertExactKeys(request, ['name', 'status'])
   } else if (name === 'rollout-report') {
     assertExactKeys(report, ['format', 'state', 'controls'])
     assertExactKeys(report.controls, ['producer', 'authority', 'executors'])
@@ -172,6 +204,24 @@ function assertReportShape(name, report) {
   } else if (name === 'observation-report') {
     assertExactKeys(report, [
       'format', 'state', 'required_hours', 'started_at', 'ended_at',
+      'start', 'end', 'anomaly_audit',
+    ])
+    if (report.start !== null) {
+      assertExactKeys(report.start, [
+        'observed_at', 'smoke_report_sha256', 'reconciliation_report_sha256',
+      ])
+    }
+    if (report.end !== null) {
+      assertExactKeys(report.end, [
+        'observed_at', 'smoke_report_sha256', 'reconciliation_report_sha256',
+      ])
+    }
+    if (report.anomaly_audit !== null) {
+      assertExactKeys(report.anomaly_audit, ['report_sha256'])
+    }
+  } else if (name === 'anomaly-report') {
+    assertExactKeys(report, [
+      'format', 'state', 'checked_at', 'high_priority_open',
     ])
   }
 }
@@ -184,6 +234,66 @@ function migrationSetSha256() {
       .sort()
       .map((name) => ({ name, sha256: sha256(readFileSync(join(directory, name))) })),
   )
+}
+
+function migrationCatalog() {
+  const result = spawnSync(process.execPath, [migrationRunnerPath, 'catalog'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  })
+  if (result.status !== 0) fail('Unable to load canonical migration catalog')
+  try {
+    const report = JSON.parse(result.stdout)
+    if (
+      report?.format !== 'blogman-migration-catalog/v1'
+      || !Array.isArray(report?.migrations)
+    ) {
+      fail('Invalid canonical migration catalog')
+    }
+    return report.migrations
+  } catch {
+    fail('Invalid canonical migration catalog')
+  }
+}
+
+function migrationVerificationPassed(report, candidateId) {
+  const migrations = migrationCatalog()
+  return report?.state === 'verified'
+    && Array.isArray(report?.applied)
+    && report.applied.length === migrations.length
+    && report.applied.every((row, index) => (
+      row?.number === migrations[index]?.number
+      && row?.name === migrations[index]?.name
+      && row?.checksum === migrations[index]?.checksum
+      && typeof row?.applied_at === 'string'
+      && row.applied_at.length > 0
+      && row?.candidate_id === candidateId
+    ))
+    && Array.isArray(report?.pending)
+    && report.pending.length === 0
+}
+
+function smokeRuntimePassed(report) {
+  if (!report || typeof report !== 'object') return false
+  const { report_sha256: reportSha256, ...payload } = report
+  return report.state === 'passed'
+    && report.target === 'external-local-d1-persist'
+    && report.runtime === 'workerd'
+    && report.reconciliation === 'matched'
+    && JSON.stringify(report.requests) === JSON.stringify([
+      { name: 'search', status: 200 },
+      { name: 'appearance', status: 200 },
+    ])
+    && reportSha256 === canonicalHash(payload)
+}
+
+function testReportPassed(report) {
+  return report?.format === 'blogman-test-report/v1'
+    && report?.state === 'passed'
+    && report?.exit_code === 0
+    && report?.failed === 0
+    && Number.isInteger(report?.passed)
+    && report.passed > 0
 }
 
 function d1CommandArgs(options) {
@@ -312,6 +422,19 @@ function verifyBackup(options) {
   }
 }
 
+function findWranglerD1Files(directory) {
+  const files = []
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name)
+    if (entry.isDirectory()) {
+      files.push(...findWranglerD1Files(path))
+    } else if (entry.isFile() && entry.name.endsWith('.sqlite')) {
+      files.push(path)
+    }
+  }
+  return files
+}
+
 function restoreBackup(options) {
   if (!options.get('local') || options.get('remote')) {
     fail('Backup restore requires --local and never accepts --remote')
@@ -331,11 +454,23 @@ function restoreBackup(options) {
   const backup = verifiedBackup(required(options, 'manifest'))
   const database = required(options, 'database')
   const config = resolve(required(options, 'config'))
+  const initialize = spawnSync(wranglerPath, [
+    'd1', 'execute', database, '--local', '--persist-to', persistTo,
+    '--config', config, '--command', 'SELECT 1', '--json',
+  ], { cwd: repoRoot, encoding: 'utf8' })
+  if (initialize.status !== 0) fail('Backup restore could not initialize local D1')
+
+  const databaseFiles = findWranglerD1Files(persistTo)
+    .filter((path) => basename(path) !== 'metadata.sqlite')
+  if (databaseFiles.length !== 1) {
+    fail('Backup restore could not identify one isolated local D1 file')
+  }
   for (const [index, artifact] of backup.artifacts.entries()) {
-    const result = spawnSync(wranglerPath, [
-      'd1', 'execute', database, '--local', '--persist-to', persistTo,
-      '--config', config, '--file', artifact.path, '--json',
-    ], { cwd: repoRoot, encoding: 'utf8' })
+    const result = spawnSync('sqlite3', ['-bail', databaseFiles[0]], {
+      cwd: repoRoot,
+      input: readFileSync(artifact.path),
+      encoding: 'utf8',
+    })
     if (result.status !== 0) {
       fail(`Backup restore failed for artifact ${index + 1}`)
     }
@@ -449,6 +584,123 @@ function compareReconciliation(options) {
   }
 }
 
+function verifyPreMigrationCandidate(options) {
+  let evidenceBytes
+  let evidence
+  let lockfileBytes
+  let lockfile
+  try {
+    evidenceBytes = readFileSync(resolve(required(options, 'evidence')))
+    evidence = JSON.parse(evidenceBytes.toString('utf8'))
+    lockfileBytes = readFileSync(resolve(required(options, 'lockfile')))
+    lockfile = JSON.parse(lockfileBytes.toString('utf8'))
+  } catch {
+    fail('Pre-migration evidence or lockfile is not valid JSON')
+  }
+  if (evidence?.format !== 'blogman-pre-migration-candidate/v1') {
+    fail('Unsupported pre-migration evidence format')
+  }
+  assertNoSensitiveFields(evidence)
+  assertPreMigrationEvidenceShape(evidence)
+  const readReport = (optionName) => {
+    let bytes
+    let report
+    try {
+      bytes = readFileSync(resolve(required(options, optionName)))
+      report = JSON.parse(bytes.toString('utf8'))
+    } catch {
+      fail(`Pre-migration ${optionName} is not valid JSON`)
+    }
+    assertNoSensitiveFields(report)
+    assertReportShape(optionName, report)
+    return { bytes, report }
+  }
+  const backupReport = readReport('backup-report')
+  const restoreReport = readReport('restore-report')
+  const migrationVerificationReport = readReport('migration-verification-report')
+  const reconciliationReport = readReport('reconciliation-report')
+  const smokeRuntimeReport = readReport('smoke-runtime-report')
+  const testReport = readReport('test-report')
+
+  const candidateId = required(options, 'candidate')
+  const versionId = required(options, 'version')
+  const buildSha256 = sha256(readFileSync(resolve(required(options, 'build'))))
+  const wranglerVersion = lockfile?.packages?.['node_modules/wrangler']?.version
+  const openNextVersion = lockfile?.packages?.['node_modules/@opennextjs/cloudflare']?.version
+  const failures = []
+  const mismatch = (condition, name) => {
+    if (condition) failures.push(name)
+  }
+
+  mismatch(evidence.candidate_id !== candidateId, 'candidate_identity')
+  mismatch(!isCandidateId(candidateId) || !isCandidateId(evidence.candidate_id), 'candidate_format')
+  mismatch(evidence.lockfile?.sha256 !== sha256(lockfileBytes), 'lockfile_identity')
+  mismatch(evidence.lockfile?.wrangler !== wranglerVersion, 'wrangler_toolchain')
+  mismatch(evidence.lockfile?.opennextjs_cloudflare !== openNextVersion, 'opennext_toolchain')
+  mismatch(evidence.build?.sha256 !== buildSha256, 'build_identity')
+  mismatch(evidence.cloudflare?.uploaded_version_id !== versionId, 'uploaded_version_identity')
+  mismatch(evidence.migration?.set_sha256 !== migrationSetSha256(), 'migration_set_identity')
+  mismatch(
+    evidence.migration?.verification_report_sha256
+      !== sha256(migrationVerificationReport.bytes),
+    'migration_verification_identity',
+  )
+  mismatch(
+    !migrationVerificationPassed(migrationVerificationReport.report, candidateId),
+    'migration_verification_state',
+  )
+  mismatch(
+    evidence.backup?.verify_report_sha256 !== sha256(backupReport.bytes),
+    'backup_report_identity',
+  )
+  mismatch(
+    backupReport.report?.state !== 'verified'
+      || backupReport.report?.backup_id !== evidence.backup?.backup_id
+      || !Number.isInteger(backupReport.report?.artifact_count)
+      || backupReport.report?.artifact_count < 1
+      || !/^sha256:[a-f0-9]{64}$/.test(evidence.backup?.backup_id || ''),
+    'backup_state',
+  )
+  mismatch(
+    evidence.backup?.restore_report_sha256 !== sha256(restoreReport.bytes),
+    'restore_report_identity',
+  )
+  mismatch(
+    restoreReport.report?.state !== 'restored'
+      || restoreReport.report?.backup_id !== evidence.backup?.backup_id
+      || restoreReport.report?.target?.mode !== 'local'
+      || restoreReport.report?.target?.isolated !== true,
+    'restore_state',
+  )
+  mismatch(
+    evidence.reconciliation?.report_sha256 !== sha256(reconciliationReport.bytes),
+    'reconciliation_report_identity',
+  )
+  mismatch(
+    reconciliationReport.report?.state !== 'matched'
+      || Object.keys(reconciliationReport.report?.checks || {}).length !== 5
+      || Object.values(reconciliationReport.report?.checks || {})
+        .some((value) => value !== 'matched'),
+    'reconciliation_state',
+  )
+  mismatch(
+    evidence.smoke?.runtime_report_sha256 !== sha256(smokeRuntimeReport.bytes),
+    'smoke_runtime_identity',
+  )
+  mismatch(!smokeRuntimePassed(smokeRuntimeReport.report), 'smoke_runtime_state')
+  mismatch(evidence.tests?.report_sha256 !== sha256(testReport.bytes), 'test_report_identity')
+  mismatch(!testReportPassed(testReport.report), 'test_report_state')
+
+  return failures.length === 0
+    ? {
+        state: 'verified',
+        phase: 'pre-migration',
+        candidate_id: candidateId,
+        evidence_sha256: sha256(evidenceBytes),
+      }
+    : { state: 'invalid', failures }
+}
+
 function verifyCandidate(options) {
   const evidencePath = resolve(required(options, 'evidence'))
   let evidence
@@ -484,11 +736,22 @@ function verifyCandidate(options) {
   const backupReport = readReport('backup-report')
   const restoreReport = readReport('restore-report')
   const migrationReport = readReport('migration-report')
+  const migrationVerificationReport = readReport('migration-verification-report')
   const reconciliationReport = readReport('reconciliation-report')
   const smokeReport = readReport('smoke-report')
+  const smokeRuntimeReport = readReport('smoke-runtime-report')
   const rolloutReport = readReport('rollout-report')
   const testReport = readReport('test-report')
   const observationReport = readReport('observation-report')
+  const observationStartSmokeReport = observationReport.report?.start === null
+    ? null
+    : readReport('observation-start-smoke-report')
+  const observationStartReconciliationReport = observationReport.report?.start === null
+    ? null
+    : readReport('observation-start-reconciliation-report')
+  const anomalyReport = observationReport.report?.anomaly_audit === null
+    ? null
+    : readReport('anomaly-report')
 
   const candidateId = required(options, 'candidate')
   const deploymentId = required(options, 'deployment')
@@ -526,6 +789,15 @@ function verifyCandidate(options) {
       || migrationReport.report?.migration_set_sha256 !== migrationSetSha256()
       || migrationReport.report?.migration_set_sha256 !== evidence.migration?.set_sha256,
     'migration_report_state',
+  )
+  mismatch(
+    evidence.migration?.verification_report_sha256
+      !== sha256(migrationVerificationReport.bytes),
+    'migration_verification_identity',
+  )
+  mismatch(
+    !migrationVerificationPassed(migrationVerificationReport.report, candidateId),
+    'migration_verification_state',
   )
   mismatch(
     evidence.backup?.verify_report_sha256 !== sha256(backupReport.bytes),
@@ -568,6 +840,11 @@ function verifyCandidate(options) {
   mismatch(smokeReport.report?.build_sha256 !== buildSha256, 'smoke_build_identity')
   mismatch(smokeReport.report?.deployment_id !== deploymentId, 'smoke_deployment_identity')
   mismatch(smokeReport.report?.version_id !== versionId, 'smoke_version_identity')
+  mismatch(
+    evidence.smoke?.runtime_report_sha256 !== sha256(smokeRuntimeReport.bytes),
+    'smoke_runtime_identity',
+  )
+  mismatch(!smokeRuntimePassed(smokeRuntimeReport.report), 'smoke_runtime_state')
   mismatch(evidence.rollout?.report_sha256 !== sha256(rolloutReport.bytes), 'rollout_report_identity')
   mismatch(
     rolloutReport.report?.format !== 'blogman-rollout-state/v1'
@@ -582,12 +859,7 @@ function verifyCandidate(options) {
   )
   mismatch(evidence.tests?.report_sha256 !== sha256(testReport.bytes), 'test_report_identity')
   mismatch(
-    testReport.report?.format !== 'blogman-test-report/v1'
-      || testReport.report?.state !== 'passed'
-      || testReport.report?.exit_code !== 0
-      || testReport.report?.failed !== 0
-      || !Number.isInteger(testReport.report?.passed)
-      || testReport.report?.passed < 1,
+    !testReportPassed(testReport.report),
     'test_report_state',
   )
   mismatch(
@@ -605,7 +877,16 @@ function verifyCandidate(options) {
       )
       || (
         observationReport.report?.state === 'pending'
-        && observationReport.report?.ended_at !== null
+        && (
+          observationReport.report?.ended_at !== null
+          || observationReport.report?.end !== null
+          || observationReport.report?.anomaly_audit !== null
+          || (
+            observationReport.report?.started_at === null
+              ? observationReport.report?.start !== null
+              : observationReport.report?.start === null
+          )
+        )
       )
       || (
         observationReport.report?.state === 'complete'
@@ -615,10 +896,76 @@ function verifyCandidate(options) {
           || Date.parse(observationReport.report.ended_at)
             - Date.parse(observationReport.report.started_at)
               < observationReport.report.required_hours * 60 * 60 * 1000
+          || observationReport.report?.start === null
+          || observationReport.report?.end === null
+          || observationReport.report?.anomaly_audit === null
         )
       ),
     'observation_report_state',
   )
+  if (observationReport.report?.start !== null) {
+    const start = observationReport.report.start
+    mismatch(
+      !isIsoTimestamp(start?.observed_at)
+        || start?.observed_at !== observationReport.report?.started_at
+        || !isSha256(start?.smoke_report_sha256)
+        || !isSha256(start?.reconciliation_report_sha256),
+      'observation_start_state',
+    )
+    mismatch(
+      start?.smoke_report_sha256 !== sha256(observationStartSmokeReport.bytes),
+      'observation_start_smoke_identity',
+    )
+    mismatch(
+      observationStartSmokeReport.report?.state !== 'passed'
+        || observationStartSmokeReport.report?.candidate_id !== candidateId
+        || observationStartSmokeReport.report?.build_sha256 !== buildSha256
+        || observationStartSmokeReport.report?.deployment_id !== deploymentId
+        || observationStartSmokeReport.report?.version_id !== versionId,
+      'observation_start_smoke_state',
+    )
+    mismatch(
+      start?.reconciliation_report_sha256
+        !== sha256(observationStartReconciliationReport.bytes),
+      'observation_start_reconciliation_identity',
+    )
+    mismatch(
+      observationStartReconciliationReport.report?.state !== 'matched'
+        || Object.keys(observationStartReconciliationReport.report?.checks || {}).length !== 5
+        || Object.values(observationStartReconciliationReport.report?.checks || {})
+          .some((value) => value !== 'matched'),
+      'observation_start_reconciliation_state',
+    )
+  }
+  if (observationReport.report?.end !== null) {
+    const end = observationReport.report.end
+    mismatch(
+      !isIsoTimestamp(end?.observed_at)
+        || Date.parse(end?.observed_at) - Date.parse(observationReport.report?.started_at)
+          < observationReport.report.required_hours * 60 * 60 * 1000
+        || Date.parse(end?.observed_at) > Date.parse(observationReport.report?.ended_at)
+        || end?.smoke_report_sha256 !== sha256(smokeReport.bytes)
+        || end?.reconciliation_report_sha256 !== sha256(reconciliationReport.bytes),
+      'observation_end_state',
+    )
+  }
+  if (observationReport.report?.anomaly_audit !== null) {
+    mismatch(
+      observationReport.report.anomaly_audit?.report_sha256 !== sha256(anomalyReport.bytes),
+      'observation_anomaly_identity',
+    )
+    mismatch(
+      anomalyReport.report?.format !== 'blogman-anomaly-audit/v1'
+        || anomalyReport.report?.state !== 'clear'
+        || !isIsoTimestamp(anomalyReport.report?.checked_at)
+        || anomalyReport.report?.high_priority_open !== 0
+        || Date.parse(anomalyReport.report?.checked_at)
+          < Date.parse(observationReport.report?.end?.observed_at)
+        || Date.parse(anomalyReport.report?.checked_at)
+          > Date.parse(observationReport.report?.ended_at),
+      'observation_anomaly_state',
+    )
+  }
 
   return failures.length === 0
     ? {
@@ -994,7 +1341,9 @@ async function main() {
   } else if (domain === 'candidate') {
     report = action === 'verify'
       ? verifyCandidate(options)
-      : fail('Expected candidate action: verify')
+      : action === 'verify-pre-migration'
+        ? verifyPreMigrationCandidate(options)
+        : fail('Expected candidate action: verify or verify-pre-migration')
   } else if (domain === 'rollout') {
     report = action === 'set'
       ? rolloutSet(options)

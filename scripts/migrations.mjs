@@ -169,8 +169,8 @@ function validateReadOnlySidecarQueries(source, context, singleStatement = false
 
 function parseArguments(argv) {
   const [command, ...tokens] = argv
-  if (!['plan', 'apply', 'status', 'verify'].includes(command)) {
-    fail('Usage: migrations.mjs <plan|apply|status|verify> [options]')
+  if (!['catalog', 'plan', 'apply', 'status', 'verify'].includes(command)) {
+    fail('Usage: migrations.mjs <catalog|plan|apply|status|verify> [options]')
   }
 
   const options = {
@@ -203,7 +203,8 @@ function parseArguments(argv) {
     else fail(`Unknown option: ${token}`)
   }
 
-  if (!options.mode) fail('Choose exactly one of --local or --remote')
+  if (command !== 'catalog' && !options.mode) fail('Choose exactly one of --local or --remote')
+  if (command === 'catalog' && options.mode) fail('catalog does not accept --local or --remote')
   if (options.mode === '--remote' && options.persistTo) {
     fail('--persist-to can only be used with --local')
   }
@@ -692,6 +693,13 @@ async function applyMigrations(client, migrations, candidate) {
 async function main() {
   const options = parseArguments(process.argv.slice(2))
   const migrations = loadMigrations(options.migrationsDirectory)
+  if (options.command === 'catalog') {
+    process.stdout.write(`${JSON.stringify({
+      format: 'blogman-migration-catalog/v1',
+      migrations: migrations.map(({ number, name, checksum }) => ({ number, name, checksum })),
+    }, null, 2)}\n`)
+    return
+  }
   const client = createD1Client(options)
   const initialized = ledgerArtifactsExist(client)
   if (initialized) validateLedgerContract(client)

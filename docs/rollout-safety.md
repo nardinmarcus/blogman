@@ -39,7 +39,7 @@ npm run rollout:safety -- backup restore \
   --config wrangler.toml
 ```
 
-`verify` 检查格式、路径边界、重复 artifact、字节数、artifact SHA-256、稳定 backup ID、required table 声明和敏感字段。`restore` 按清单顺序导入真实 Cloudflare local D1，并在结束前核对 required tables；“SQL 成功执行”本身不算恢复完成。
+`verify` 检查格式、路径边界、重复 artifact、字节数、artifact SHA-256、稳定 backup ID、required table 声明和敏感字段。`restore` 先由 Wrangler 初始化隔离 local D1，再用本机 `sqlite3` 按清单顺序导入 artifact，避免生产导出中的大单条 INSERT 被 Wrangler file import 以 `SQLITE_TOOBIG` 拒绝；最后重新由 Wrangler 核对 required tables。“SQL 成功执行”本身不算恢复完成，缺少 `sqlite3`、不能唯一定位隔离 D1 文件或任一 artifact 失败都会 fail-closed。
 
 ## 2. Schema 与数据对账
 
@@ -79,18 +79,36 @@ npm run rollout:safety -- request smoke \
 
 ## 4. 候选证据
 
+生产 migration `apply` 前使用独立的 `blogman-pre-migration-candidate/v1` 合同。它只绑定 commit、lockfile/toolchain、build、已上传但未承载流量的 Cloudflare version、备份/隔离恢复、原始 local migration verify、原始 Workerd smoke、D1 对账和测试报告；不含 deployment、production smoke、rollout 或 observation 字段。因此它只能由专用命令验证，不能被正式 `candidate verify`、`rollout set` 或 `rollout status` 当成生产候选：
+
+```bash
+npm run rollout:safety -- candidate verify-pre-migration \
+  --evidence /private/evidence/pre-migration-candidate.json \
+  --candidate "$(git rev-parse HEAD)" --lockfile package-lock.json \
+  --build /private/evidence/open-next-build.tar \
+  --version "${UPLOADED_CLOUDFLARE_VERSION_ID}" \
+  --backup-report /private/evidence/backup-report.json \
+  --restore-report /private/evidence/restore-report.json \
+  --migration-verification-report /private/evidence/local-migration-verify.json \
+  --reconciliation-report /private/evidence/local-reconciliation.json \
+  --smoke-runtime-report /private/evidence/restored-request-smoke.json \
+  --test-report /private/evidence/test-report.json
+```
+
+只有 `state=verified, phase=pre-migration` 才允许进入生产 apply。该格式没有可伪造的 deployment placeholder，也不能解锁 rollout control。验证器通过 migration runner 的只读 `catalog` 输出逐条交叉检查 raw verify 中的 migration number、name 和 canonical checksum；旧 verify report 不能与新的 migration set 拼接通过。
+
 候选文件格式为 `blogman-rollout-candidate/v1`，绑定：
 
 - 40 位 Git commit；
 - `package-lock.json` SHA-256，以及 lockfile 中 Wrangler 与 `@opennextjs/cloudflare` 版本；
 - 不可变 build bundle/archive SHA-256；
 - Cloudflare deployment ID 和 version ID；
-- 实际 `db/ledger-migrations` SQL、baseline/preflight SQL 与 `*.data.mjs` sidecar 文件名及内容组成的 migration-set SHA-256，以及 candidate-bound migration report；
+- 实际 `db/ledger-migrations` SQL、baseline/preflight SQL 与 `*.data.mjs` sidecar 文件名及内容组成的 migration-set SHA-256，以及 candidate-bound migration summary 和原始 migration verify report；
 - backup verify 与 isolated restore 两份报告（同一 backup ID）；
-- reconciliation 与 production smoke 报告；
+- reconciliation、原始本地 Workerd smoke 与 production smoke 报告；
 - producer、authority、各 executor 的 rollout 状态快照；
 - 退出码、通过/失败计数明确的测试报告；
-- 至少 24 小时要求的观察窗口报告（`pending` 或 `complete` 状态均绑定进候选，批次推进仍必须满足 #19 的完成门槛）。
+- 至少 24 小时要求的观察窗口报告（`pending` 或 `complete` 状态均绑定进候选，批次推进仍必须满足 #19 的完成门槛）。观察开始后必须绑定开始 smoke 与 D1 对账；完成时还必须绑定结束 smoke、结束 D1 对账和高优异常为零的脱敏审计。
 
 Production smoke 报告还必须重复记录同一 candidate、build、deployment 和 version。Cloudflare deployment/version 应从部署结果及 `wrangler deployments list --json` / `wrangler versions list --json` 读取，不能手填另一个候选的值。
 
@@ -105,12 +123,54 @@ npm run rollout:safety -- candidate verify \
   --backup-report /private/evidence/backup-report.json \
   --restore-report /private/evidence/restore-report.json \
   --migration-report /private/evidence/migration-report.json \
+  --migration-verification-report /private/evidence/production-migration-verify.json \
   --reconciliation-report /private/evidence/reconciliation-report.json \
   --smoke-report /private/evidence/production-smoke.json \
+  --smoke-runtime-report /private/evidence/restored-request-smoke.json \
   --rollout-report /private/evidence/rollout-state.json \
   --test-report /private/evidence/test-report.json \
   --observation-report /private/evidence/observation-window.json
 ```
+
+观察尚未开始时，报告使用 `pending`、`started_at=null`，且 `start`、`end`、`anomaly_audit` 均为 `null`。开始观察时仍为 `pending`，但 `started_at` 与 `start.observed_at` 必须相同，并绑定开始时的 same-version smoke 与 D1 对账：
+
+```json
+{
+  "format": "blogman-observation-window/v1",
+  "state": "pending",
+  "required_hours": 24,
+  "started_at": "2026-07-25T00:00:00.000Z",
+  "ended_at": null,
+  "start": {
+    "observed_at": "2026-07-25T00:00:00.000Z",
+    "smoke_report_sha256": "<64 hex>",
+    "reconciliation_report_sha256": "<64 hex>"
+  },
+  "end": null,
+  "anomaly_audit": null
+}
+```
+
+完成观察时，`end` 绑定候选主 `--smoke-report` 与 `--reconciliation-report`；`start` 通过两个附加报告参数保留开始证据；异常报告只记录检查时间、是否 clear 和未解决高优异常数，不记录原始日志、请求或内容：
+
+```bash
+npm run rollout:safety -- candidate verify \
+  <全部候选参数> \
+  --observation-start-smoke-report /private/evidence/observation-start-smoke.json \
+  --observation-start-reconciliation-report /private/evidence/observation-start-reconciliation.json \
+  --anomaly-report /private/evidence/observation-anomaly-audit.json
+```
+
+```json
+{
+  "format": "blogman-anomaly-audit/v1",
+  "state": "clear",
+  "checked_at": "2026-07-26T01:00:00.000Z",
+  "high_priority_open": 0
+}
+```
+
+`complete` 必须同时满足：结束 smoke/D1 对账的实际采集时间不早于 `started_at + required_hours`；`ended_at >= anomaly.checked_at >= end.observed_at`；开始和结束 smoke 都绑定同一 candidate/build/deployment/version；开始和结束 D1 对账都为 matched；异常审计为 clear 且未解决高优异常数为 0。时间到达本身不会通过验证。
 
 任何实际文件哈希、migration set、内部状态或 candidate/build/deployment/version 交叉绑定不一致都会返回 `state=invalid`。候选及其绑定报告使用完整必需字段合同和严格 allowlist；未知/缺失字段、错误类型或枚举、无效时间戳、敏感字段名以及任意字段中的凭据样式字符串都会被拒绝且不会回显原值。
 

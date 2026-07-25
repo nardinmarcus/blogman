@@ -27,6 +27,10 @@ function sha256(value: string | Buffer) {
   return createHash('sha256').update(value).digest('hex')
 }
 
+function canonicalHash(value: unknown) {
+  return sha256(JSON.stringify(value))
+}
+
 function migrationSetSha256() {
   const directory = join(repoRoot, 'db', 'ledger-migrations')
   return sha256(JSON.stringify(
@@ -35,6 +39,19 @@ function migrationSetSha256() {
       .sort()
       .map((name) => ({ name, sha256: sha256(readFileSync(join(directory, name))) })),
   ))
+}
+
+function migrationCatalog() {
+  const result = spawnSync(process.execPath, [migrationRunnerPath, 'catalog'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  })
+  if (result.status !== 0) throw new Error(result.stderr || result.stdout)
+  return JSON.parse(result.stdout).migrations as Array<{
+    number: number
+    name: string
+    checksum: string
+  }>
 }
 
 function runRolloutSafety(args: string[], environment: Record<string, string> = {}) {
@@ -102,6 +119,34 @@ VALUES ('restored-post', 'Restored title', 'restored private body', '<p>restored
   return { manifestPath, sqlPath }
 }
 
+function createLargeStatementBackupPackage() {
+  const backupDirectory = temporaryDirectory('blogman-rollout-large-backup-')
+  const privatePayload = `large-private-${'x'.repeat(2_000_000)}`
+  const sql = `
+CREATE TABLE posts (
+  id INTEGER PRIMARY KEY,
+  slug TEXT NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  html TEXT NOT NULL,
+  status TEXT NOT NULL
+);
+INSERT INTO posts VALUES (1, 'large-post', 'Large post', '${privatePayload}', '<p>large</p>', 'draft');
+`
+  const digest = sha256(sql)
+  const sqlPath = join(backupDirectory, 'large-backup.sql')
+  const manifestPath = join(backupDirectory, 'manifest.json')
+  writeFileSync(sqlPath, sql)
+  writeFileSync(manifestPath, `${JSON.stringify({
+    format: 'blogman-d1-backup/v1',
+    backup_id: `sha256:${digest}`,
+    source: { database_id: 'large-local-fixture', captured_at: '2026-07-25T00:00:00.000Z' },
+    required_tables: ['posts'],
+    artifacts: [{ path: 'large-backup.sql', bytes: Buffer.byteLength(sql), sha256: digest }],
+  })}\n`)
+  return { manifestPath, privatePayload }
+}
+
 function createCandidateEvidence() {
   const directory = temporaryDirectory('blogman-rollout-candidate-')
   const buildPath = join(directory, 'worker-bundle.js')
@@ -115,11 +160,16 @@ function createCandidateEvidence() {
   const backupReportPath = join(directory, 'backup-verify-report.json')
   const restoreReportPath = join(directory, 'backup-restore-report.json')
   const migrationReportPath = join(directory, 'migration-report.json')
+  const migrationVerificationReportPath = join(directory, 'migration-verification-report.json')
   const rolloutReportPath = join(directory, 'rollout-report.json')
   const testReportPath = join(directory, 'test-report.json')
   const observationReportPath = join(directory, 'observation-report.json')
+  const observationStartSmokeReportPath = join(directory, 'observation-start-smoke-report.json')
+  const observationStartReconciliationReportPath = join(directory, 'observation-start-reconciliation-report.json')
+  const anomalyReportPath = join(directory, 'anomaly-report.json')
   const reconciliationReportPath = join(directory, 'reconciliation-report.json')
   const smokeReportPath = join(directory, 'smoke-report.json')
+  const smokeRuntimeReportPath = join(directory, 'smoke-runtime-report.json')
   writeFileSync(backupReportPath, `${JSON.stringify({
     state: 'verified',
     backup_id: `sha256:${'b'.repeat(64)}`,
@@ -135,6 +185,16 @@ function createCandidateEvidence() {
     state: 'verified',
     candidate_id: candidateId,
     migration_set_sha256: migrationSetSha256(),
+  })}\n`)
+  const migrations = migrationCatalog()
+  writeFileSync(migrationVerificationReportPath, `${JSON.stringify({
+    state: 'verified',
+    applied: migrations.map((migration) => ({
+      ...migration,
+      applied_at: '2026-07-25 00:00:00',
+      candidate_id: candidateId,
+    })),
+    pending: [],
   })}\n`)
   writeFileSync(rolloutReportPath, `${JSON.stringify({
     format: 'blogman-rollout-state/v1',
@@ -154,17 +214,41 @@ function createCandidateEvidence() {
     required_hours: 24,
     started_at: null,
     ended_at: null,
+    start: null,
+    end: null,
+    anomaly_audit: null,
   })}\n`)
-  writeFileSync(reconciliationReportPath, `${JSON.stringify({
+  const reconciliationReport = {
     state: 'matched',
     checks: { schema: 'matched', migration_ledger: 'matched', post_count: 'matched', post_status: 'matched', post_content: 'matched' },
-  })}\n`)
-  writeFileSync(smokeReportPath, `${JSON.stringify({
+  }
+  writeFileSync(reconciliationReportPath, `${JSON.stringify(reconciliationReport)}\n`)
+  writeFileSync(observationStartReconciliationReportPath, `${JSON.stringify(reconciliationReport)}\n`)
+  const smokeReport = {
     state: 'passed',
     candidate_id: candidateId,
     build_sha256: buildSha256,
     deployment_id: deploymentId,
     version_id: versionId,
+  }
+  writeFileSync(smokeReportPath, `${JSON.stringify(smokeReport)}\n`)
+  const smokeRuntimeReport = {
+    state: 'passed',
+    target: 'external-local-d1-persist',
+    runtime: 'workerd',
+    requests: [{ name: 'search', status: 200 }, { name: 'appearance', status: 200 }],
+    reconciliation: 'matched',
+  }
+  writeFileSync(smokeRuntimeReportPath, `${JSON.stringify({
+    ...smokeRuntimeReport,
+    report_sha256: canonicalHash(smokeRuntimeReport),
+  })}\n`)
+  writeFileSync(observationStartSmokeReportPath, `${JSON.stringify(smokeReport)}\n`)
+  writeFileSync(anomalyReportPath, `${JSON.stringify({
+    format: 'blogman-anomaly-audit/v1',
+    state: 'clear',
+    checked_at: '2026-07-26T01:00:00.000Z',
+    high_priority_open: 0,
   })}\n`)
   const evidence = {
     format: 'blogman-rollout-candidate/v1',
@@ -181,6 +265,7 @@ function createCandidateEvidence() {
       candidate_id: candidateId,
       set_sha256: migrationSetSha256(),
       report_sha256: sha256(readFileSync(migrationReportPath)),
+      verification_report_sha256: sha256(readFileSync(migrationVerificationReportPath)),
     },
     backup: {
       backup_id: `sha256:${'b'.repeat(64)}`,
@@ -188,7 +273,10 @@ function createCandidateEvidence() {
       restore_report_sha256: sha256(readFileSync(restoreReportPath)),
     },
     reconciliation: { report_sha256: sha256(readFileSync(reconciliationReportPath)) },
-    smoke: { report_sha256: sha256(readFileSync(smokeReportPath)) },
+    smoke: {
+      report_sha256: sha256(readFileSync(smokeReportPath)),
+      runtime_report_sha256: sha256(readFileSync(smokeRuntimeReportPath)),
+    },
     rollout: { report_sha256: sha256(readFileSync(rolloutReportPath)) },
     tests: { report_sha256: sha256(readFileSync(testReportPath)) },
     observation: { report_sha256: sha256(readFileSync(observationReportPath)) },
@@ -196,17 +284,22 @@ function createCandidateEvidence() {
   const evidencePath = join(directory, 'candidate.json')
   writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`)
   return {
+    anomalyReportPath,
     backupReportPath,
     buildPath,
     candidateId,
     deploymentId,
     evidencePath,
     migrationReportPath,
+    migrationVerificationReportPath,
     observationReportPath,
+    observationStartReconciliationReportPath,
+    observationStartSmokeReportPath,
     reconciliationReportPath,
     restoreReportPath,
     rolloutReportPath,
     smokeReportPath,
+    smokeRuntimeReportPath,
     testReportPath,
     versionId,
   }
@@ -223,11 +316,64 @@ function candidateVerificationOptions(candidate: ReturnType<typeof createCandida
     '--backup-report', candidate.backupReportPath,
     '--restore-report', candidate.restoreReportPath,
     '--migration-report', candidate.migrationReportPath,
+    '--migration-verification-report', candidate.migrationVerificationReportPath,
     '--reconciliation-report', candidate.reconciliationReportPath,
     '--smoke-report', candidate.smokeReportPath,
+    '--smoke-runtime-report', candidate.smokeRuntimeReportPath,
     '--rollout-report', candidate.rolloutReportPath,
     '--test-report', candidate.testReportPath,
     '--observation-report', candidate.observationReportPath,
+    '--observation-start-smoke-report', candidate.observationStartSmokeReportPath,
+    '--observation-start-reconciliation-report', candidate.observationStartReconciliationReportPath,
+    '--anomaly-report', candidate.anomalyReportPath,
+  ]
+}
+
+function createPreMigrationEvidence() {
+  const candidate = createCandidateEvidence()
+  const lockfileBytes = readFileSync(join(repoRoot, 'package-lock.json'))
+  const lockfile = JSON.parse(lockfileBytes.toString('utf8'))
+  const evidencePath = join(temporaryDirectory('blogman-pre-migration-candidate-'), 'candidate.json')
+  writeFileSync(evidencePath, `${JSON.stringify({
+    format: 'blogman-pre-migration-candidate/v1',
+    candidate_id: candidate.candidateId,
+    lockfile: {
+      sha256: sha256(lockfileBytes),
+      wrangler: lockfile.packages['node_modules/wrangler'].version,
+      opennextjs_cloudflare: lockfile.packages['node_modules/@opennextjs/cloudflare'].version,
+    },
+    build: { sha256: sha256(readFileSync(candidate.buildPath)) },
+    cloudflare: { uploaded_version_id: candidate.versionId },
+    migration: {
+      set_sha256: migrationSetSha256(),
+      verification_report_sha256: sha256(readFileSync(candidate.migrationVerificationReportPath)),
+    },
+    backup: {
+      backup_id: `sha256:${'b'.repeat(64)}`,
+      verify_report_sha256: sha256(readFileSync(candidate.backupReportPath)),
+      restore_report_sha256: sha256(readFileSync(candidate.restoreReportPath)),
+    },
+    reconciliation: { report_sha256: sha256(readFileSync(candidate.reconciliationReportPath)) },
+    smoke: { runtime_report_sha256: sha256(readFileSync(candidate.smokeRuntimeReportPath)) },
+    tests: { report_sha256: sha256(readFileSync(candidate.testReportPath)) },
+  }, null, 2)}\n`)
+  return { candidate, evidencePath }
+}
+
+function preMigrationVerificationOptions(value: ReturnType<typeof createPreMigrationEvidence>) {
+  const { candidate } = value
+  return [
+    '--evidence', value.evidencePath,
+    '--candidate', candidate.candidateId,
+    '--lockfile', join(repoRoot, 'package-lock.json'),
+    '--build', candidate.buildPath,
+    '--version', candidate.versionId,
+    '--backup-report', candidate.backupReportPath,
+    '--restore-report', candidate.restoreReportPath,
+    '--migration-verification-report', candidate.migrationVerificationReportPath,
+    '--reconciliation-report', candidate.reconciliationReportPath,
+    '--smoke-runtime-report', candidate.smokeRuntimeReportPath,
+    '--test-report', candidate.testReportPath,
   ]
 }
 
@@ -238,6 +384,28 @@ afterEach(() => {
 })
 
 describe('rollout safety CLI', () => {
+  it('verifies a dedicated pre-migration packet that cannot satisfy the production candidate contract', () => {
+    const value = createPreMigrationEvidence()
+    const verified = runRolloutSafety([
+      'candidate', 'verify-pre-migration', ...preMigrationVerificationOptions(value),
+    ])
+    expect(verified.status, verified.stderr).toBe(0)
+    expect(JSON.parse(verified.stdout)).toMatchObject({
+      state: 'verified',
+      phase: 'pre-migration',
+      candidate_id: value.candidate.candidateId,
+    })
+
+    const finalCandidateAttempt = runRolloutSafety([
+      'candidate', 'verify',
+      ...candidateVerificationOptions(value.candidate).map((option) => (
+        option === value.candidate.evidencePath ? value.evidencePath : option
+      )),
+    ])
+    expect(finalCandidateAttempt.status).toBe(1)
+    expect(finalCandidateAttempt.stderr).toContain('Unsupported candidate evidence format')
+  })
+
   it('verifies a stable backup identity and restores it into an explicit isolated local D1 target', { timeout: 120_000 }, () => {
     const { manifestPath } = createValidBackupPackage()
     const persistTo = temporaryDirectory('blogman-rollout-restored-')
@@ -264,6 +432,25 @@ describe('rollout safety CLI', () => {
     expect(`${verify.stdout}${verify.stderr}${restore.stdout}${restore.stderr}`)
       .not.toMatch(/restored private body|restore-password/)
     expect(queryD1(persistTo, 'SELECT COUNT(*) AS count FROM posts')).toEqual([{ count: 1 }])
+  })
+
+  it('restores a production-sized single SQL statement into Wrangler-initialized local D1', { timeout: 120_000 }, () => {
+    const { manifestPath, privatePayload } = createLargeStatementBackupPackage()
+    const persistTo = temporaryDirectory('blogman-rollout-large-restored-')
+    const restore = runRolloutSafety([
+      'backup', 'restore', '--manifest', manifestPath,
+      '--database', 'DB', '--local', '--persist-to', persistTo,
+      '--config', join(repoRoot, 'wrangler.toml'),
+    ])
+
+    expect(restore.status, restore.stderr).toBe(0)
+    expect(JSON.parse(restore.stdout)).toMatchObject({
+      state: 'restored',
+      target: { mode: 'local', isolated: true },
+    })
+    expect(`${restore.stdout}${restore.stderr}`).not.toContain(privatePayload)
+    expect(queryD1(persistTo, 'SELECT length(content) AS length FROM posts'))
+      .toEqual([{ length: privatePayload.length }])
   })
 
   it('fails closed for corrupted bytes and hash-valid backups missing a required table', { timeout: 120_000 }, () => {
@@ -427,7 +614,7 @@ VALUES ('extra-post', 'Extra', 'extra private content', '<p>extra private conten
     })
 
     const mismatches: Array<[string, string, string[]]> = [
-      ['--candidate', 'dddddddddddddddddddddddddddddddddddddddd', ['candidate_identity', 'migration_report_state', 'smoke_candidate_identity']],
+      ['--candidate', 'dddddddddddddddddddddddddddddddddddddddd', ['candidate_identity', 'migration_report_state', 'migration_verification_state', 'smoke_candidate_identity']],
       ['--deployment', 'deployment-other', ['deployment_identity', 'smoke_deployment_identity']],
       ['--version', '99999999-2222-4333-8444-555555555555', ['version_identity', 'smoke_version_identity']],
     ]
@@ -487,6 +674,60 @@ VALUES ('extra-post', 'Extra', 'extra private content', '<p>extra private conten
       failures: ['restore_report_identity', 'restore_state'],
     })
 
+    const changedSources = createCandidateEvidence()
+    const sourceCommon = candidateVerificationOptions(changedSources)
+    const migrationVerification = JSON.parse(
+      readFileSync(changedSources.migrationVerificationReportPath, 'utf8'),
+    )
+    migrationVerification.state = 'pending'
+    writeFileSync(
+      changedSources.migrationVerificationReportPath,
+      `${JSON.stringify(migrationVerification)}\n`,
+    )
+    const changedMigrationVerification = runRolloutSafety([
+      'candidate', 'verify', ...sourceCommon,
+    ])
+    expect(changedMigrationVerification.status).toBe(1)
+    expect(JSON.parse(changedMigrationVerification.stdout)).toMatchObject({
+      state: 'invalid',
+      failures: ['migration_verification_identity', 'migration_verification_state'],
+    })
+
+    const staleMigration = createCandidateEvidence()
+    const staleEvidence = JSON.parse(readFileSync(staleMigration.evidencePath, 'utf8'))
+    const staleVerification = JSON.parse(
+      readFileSync(staleMigration.migrationVerificationReportPath, 'utf8'),
+    )
+    staleVerification.applied[0].checksum = sha256('stale migration bytes')
+    writeFileSync(
+      staleMigration.migrationVerificationReportPath,
+      `${JSON.stringify(staleVerification)}\n`,
+    )
+    staleEvidence.migration.verification_report_sha256 = sha256(
+      readFileSync(staleMigration.migrationVerificationReportPath),
+    )
+    writeFileSync(staleMigration.evidencePath, `${JSON.stringify(staleEvidence)}\n`)
+    const staleMigrationResult = runRolloutSafety([
+      'candidate', 'verify', ...candidateVerificationOptions(staleMigration),
+    ])
+    expect(staleMigrationResult.status).toBe(1)
+    expect(JSON.parse(staleMigrationResult.stdout)).toMatchObject({
+      state: 'invalid',
+      failures: ['migration_verification_state'],
+    })
+
+    const changedRuntime = createCandidateEvidence()
+    const runtimeCommon = candidateVerificationOptions(changedRuntime)
+    const runtimeReport = JSON.parse(readFileSync(changedRuntime.smokeRuntimeReportPath, 'utf8'))
+    runtimeReport.requests[0].status = 500
+    writeFileSync(changedRuntime.smokeRuntimeReportPath, `${JSON.stringify(runtimeReport)}\n`)
+    const changedSmokeRuntime = runRolloutSafety(['candidate', 'verify', ...runtimeCommon])
+    expect(changedSmokeRuntime.status).toBe(1)
+    expect(JSON.parse(changedSmokeRuntime.stdout)).toMatchObject({
+      state: 'invalid',
+      failures: ['smoke_runtime_identity', 'smoke_runtime_state'],
+    })
+
     const incomplete = createCandidateEvidence()
     const incompleteEvidence = JSON.parse(readFileSync(incomplete.evidencePath, 'utf8'))
     writeFileSync(incomplete.reconciliationReportPath, `${JSON.stringify({
@@ -512,6 +753,9 @@ VALUES ('extra-post', 'Extra', 'extra private content', '<p>extra private conten
       required_hours: 24,
       started_at: 'ordinary private body must not be evidence',
       ended_at: null,
+      start: null,
+      end: null,
+      anomaly_audit: null,
     })}\n`)
     observationEvidence.observation.report_sha256 = sha256(
       readFileSync(invalidObservation.observationReportPath),
@@ -524,6 +768,92 @@ VALUES ('extra-post', 'Extra', 'extra private content', '<p>extra private conten
     expect(JSON.parse(observationResult.stdout)).toMatchObject({
       state: 'invalid',
       failures: ['observation_report_state'],
+    })
+  })
+
+  it('binds a complete observation to start/end same-version smoke, D1 reconciliation, and a clear anomaly audit', () => {
+    const candidate = createCandidateEvidence()
+    const evidence = JSON.parse(readFileSync(candidate.evidencePath, 'utf8'))
+    writeFileSync(candidate.observationReportPath, `${JSON.stringify({
+      format: 'blogman-observation-window/v1',
+      state: 'complete',
+      required_hours: 24,
+      started_at: '2026-07-25T00:00:00.000Z',
+      ended_at: '2026-07-26T01:00:00.000Z',
+      start: {
+        observed_at: '2026-07-25T00:00:00.000Z',
+        smoke_report_sha256: sha256(readFileSync(candidate.observationStartSmokeReportPath)),
+        reconciliation_report_sha256: sha256(readFileSync(candidate.observationStartReconciliationReportPath)),
+      },
+      end: {
+        observed_at: '2026-07-26T00:30:00.000Z',
+        smoke_report_sha256: sha256(readFileSync(candidate.smokeReportPath)),
+        reconciliation_report_sha256: sha256(readFileSync(candidate.reconciliationReportPath)),
+      },
+      anomaly_audit: {
+        report_sha256: sha256(readFileSync(candidate.anomalyReportPath)),
+      },
+    })}\n`)
+    evidence.observation.report_sha256 = sha256(readFileSync(candidate.observationReportPath))
+    writeFileSync(candidate.evidencePath, `${JSON.stringify(evidence)}\n`)
+
+    const complete = runRolloutSafety([
+      'candidate', 'verify', ...candidateVerificationOptions(candidate),
+    ])
+    expect(complete.status, complete.stderr).toBe(0)
+
+    writeFileSync(candidate.observationStartSmokeReportPath, `${JSON.stringify({
+      state: 'passed',
+      candidate_id: candidate.candidateId,
+      build_sha256: sha256('different build'),
+      deployment_id: candidate.deploymentId,
+      version_id: candidate.versionId,
+    })}\n`)
+    const changedStart = runRolloutSafety([
+      'candidate', 'verify', ...candidateVerificationOptions(candidate),
+    ])
+    expect(changedStart.status).toBe(1)
+    expect(JSON.parse(changedStart.stdout)).toMatchObject({
+      state: 'invalid',
+      failures: ['observation_start_smoke_identity', 'observation_start_smoke_state'],
+    })
+
+    writeFileSync(candidate.observationStartSmokeReportPath, readFileSync(candidate.smokeReportPath))
+    writeFileSync(candidate.anomalyReportPath, `${JSON.stringify({
+      format: 'blogman-anomaly-audit/v1',
+      state: 'blocked',
+      checked_at: '2026-07-26T01:00:00.000Z',
+      high_priority_open: 1,
+    })}\n`)
+    const blockedAnomaly = runRolloutSafety([
+      'candidate', 'verify', ...candidateVerificationOptions(candidate),
+    ])
+    expect(blockedAnomaly.status).toBe(1)
+    expect(JSON.parse(blockedAnomaly.stdout)).toMatchObject({
+      state: 'invalid',
+      failures: ['observation_anomaly_identity', 'observation_anomaly_state'],
+    })
+
+    writeFileSync(candidate.anomalyReportPath, `${JSON.stringify({
+      format: 'blogman-anomaly-audit/v1',
+      state: 'clear',
+      checked_at: '2026-07-25T01:00:00.000Z',
+      high_priority_open: 0,
+    })}\n`)
+    const earlyObservation = JSON.parse(readFileSync(candidate.observationReportPath, 'utf8'))
+    earlyObservation.end.observed_at = '2026-07-25T01:00:00.000Z'
+    earlyObservation.anomaly_audit.report_sha256 = sha256(readFileSync(candidate.anomalyReportPath))
+    writeFileSync(candidate.observationReportPath, `${JSON.stringify(earlyObservation)}\n`)
+    evidence.observation.report_sha256 = sha256(readFileSync(candidate.observationReportPath))
+    writeFileSync(candidate.evidencePath, `${JSON.stringify(evidence)}\n`)
+
+    const earlyEndEvidence = runRolloutSafety([
+      'candidate', 'verify', ...candidateVerificationOptions(candidate),
+    ])
+    expect(earlyEndEvidence.status).toBe(1)
+    expect(JSON.parse(earlyEndEvidence.stdout)).toMatchObject({
+      state: 'invalid',
+      failures: ['observation_end_state'],
     })
   })
 
