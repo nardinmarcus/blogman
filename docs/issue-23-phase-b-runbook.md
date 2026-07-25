@@ -130,10 +130,10 @@ jq -n \
       {path:"rebuild-fts.sql",bytes:$fts_bytes,sha256:$fts_sha}
     ]}' > "$BACKUP_DIR/manifest.json"
 
-npm run rollout:safety -- backup verify --manifest "$BACKUP_DIR/manifest.json" \
+node scripts/rollout-safety.mjs backup verify --manifest "$BACKUP_DIR/manifest.json" \
   > "$REPORT_DIR/backup-report.json"
 
-npm run rollout:safety -- reconcile capture \
+node scripts/rollout-safety.mjs reconcile capture \
   --database "$DATABASE" --remote --config "$CONFIG" \
   > "$REPORT_DIR/production-before.json"
 
@@ -148,10 +148,10 @@ Expected result: `backup-report.state=verified`; plan accepts the current schema
 Classification: local/private writes only; no production mutation.
 
 ```bash
-npm run rollout:safety -- backup restore --manifest "$BACKUP_DIR/manifest.json" \
+node scripts/rollout-safety.mjs backup restore --manifest "$BACKUP_DIR/manifest.json" \
   --database "$DATABASE" --local --persist-to "$RESTORE_A" --config wrangler.toml \
   > "$REPORT_DIR/restore-a-report.json"
-npm run rollout:safety -- backup restore --manifest "$BACKUP_DIR/manifest.json" \
+node scripts/rollout-safety.mjs backup restore --manifest "$BACKUP_DIR/manifest.json" \
   --database "$DATABASE" --local --persist-to "$RESTORE_B" --config wrangler.toml \
   > "$REPORT_DIR/restore-b-report.json"
 
@@ -162,16 +162,16 @@ node scripts/migrations.mjs apply --database "$DATABASE" --local --persist-to "$
 node scripts/migrations.mjs verify --database "$DATABASE" --local --persist-to "$RESTORE_A" --config wrangler.toml \
   > "$REPORT_DIR/local-verify.json"
 
-npm run rollout:safety -- request smoke \
+node scripts/rollout-safety.mjs request smoke \
   --database "$DATABASE" --local --persist-to "$RESTORE_A" --config wrangler.toml \
   > "$REPORT_DIR/restored-workerd-smoke.json"
-npm run rollout:safety -- reconcile capture \
+node scripts/rollout-safety.mjs reconcile capture \
   --database "$DATABASE" --local --persist-to "$RESTORE_A" --config wrangler.toml \
   > "$REPORT_DIR/expected-production-after.json"
 
 node scripts/migrations.mjs apply --database "$DATABASE" --local --persist-to "$RESTORE_B" --config wrangler.toml \
   --candidate "$EXPECTED_CANDIDATE" > "$REPORT_DIR/local-apply-b.json"
-npm run rollout:safety -- reconcile compare \
+node scripts/rollout-safety.mjs reconcile compare \
   --expected "$REPORT_DIR/expected-production-after.json" \
   --database "$DATABASE" --local --persist-to "$RESTORE_B" --config wrangler.toml \
   > "$REPORT_DIR/restore-reproducibility.json"
@@ -182,7 +182,10 @@ Expected result: both restores bind the same backup ID; local apply/verify reach
 Run the focused gate and static checks. The full repository Vitest is intentionally excluded from this release command because the prior attempt exceeded 25 minutes; it must not be reported as passed.
 
 ```bash
-perl -e 'alarm 900; exec @ARGV' npm run test:run -- tests/scripts/rollout-safety.test.ts
+perl -e 'alarm 900; exec @ARGV' npm run test:run -- \
+  tests/scripts/rollout-safety.test.ts \
+  tests/scripts/rollout-safety-parser.test.ts \
+  tests/scripts/rollout-evidence-capture.test.ts
 npm run lint
 ./node_modules/.bin/tsc --noEmit
 node --check scripts/rollout-safety.mjs
@@ -192,7 +195,7 @@ git diff --check
 Create a redacted test summary only after all five commands exit 0:
 
 ```bash
-jq -n '{format:"blogman-test-report/v1",state:"passed",exit_code:0,passed:15,failed:0}' \
+jq -n '{format:"blogman-test-report/v1",state:"passed",exit_code:0,passed:26,failed:0}' \
   > "$REPORT_DIR/test-report.json"
 ```
 
@@ -241,7 +244,7 @@ jq -n \
     smoke:{runtime_report_sha256:$smoke_runtime},tests:{report_sha256:$tests}}' \
   > "$REPORT_DIR/pre-migration-candidate.json"
 
-npm run rollout:safety -- candidate verify-pre-migration \
+node scripts/rollout-safety.mjs candidate verify-pre-migration \
   --evidence "$REPORT_DIR/pre-migration-candidate.json" \
   --candidate "$EXPECTED_CANDIDATE" --lockfile package-lock.json \
   --build "$REPORT_DIR/open-next-build.zip" \
@@ -343,7 +346,7 @@ run_production_smoke
   > "$REPORT_DIR/deployment-after-smoke.json"
 cmp "$REPORT_DIR/deployment-after.json" "$REPORT_DIR/deployment-after-smoke.json"
 
-npm run rollout:safety -- reconcile compare \
+node scripts/rollout-safety.mjs reconcile compare \
   --expected "$REPORT_DIR/expected-production-after.json" \
   --database "$DATABASE" --remote --config "$CONFIG" \
   > "$REPORT_DIR/reconciliation-report.json"
@@ -422,7 +425,7 @@ write_candidate
 Then verify:
 
 ```bash
-npm run rollout:safety -- candidate verify \
+node scripts/rollout-safety.mjs candidate verify \
   --evidence "$REPORT_DIR/candidate.json" \
   --candidate "$EXPECTED_CANDIDATE" --lockfile package-lock.json \
   --build "$REPORT_DIR/open-next-build.zip" \
@@ -440,7 +443,7 @@ npm run rollout:safety -- candidate verify \
   --observation-start-smoke-report "$REPORT_DIR/observation-start-smoke.json" \
   --observation-start-reconciliation-report "$REPORT_DIR/observation-start-reconciliation.json"
 
-npm run rollout:safety -- rollout status \
+node scripts/rollout-safety.mjs rollout status \
   --evidence "$REPORT_DIR/candidate.json" \
   --candidate "$EXPECTED_CANDIDATE" --lockfile package-lock.json \
   --build "$REPORT_DIR/open-next-build.zip" \
@@ -478,7 +481,7 @@ cmp "$REPORT_DIR/deployment-after.json" "$REPORT_DIR/deployment-observation-end-
 
 run_production_smoke
 
-npm run rollout:safety -- reconcile compare \
+node scripts/rollout-safety.mjs reconcile compare \
   --expected "$REPORT_DIR/expected-production-after.json" \
   --database "$DATABASE" --remote --config "$CONFIG" \
   > "$REPORT_DIR/reconciliation-report.json"
@@ -538,7 +541,7 @@ Regenerate only the report hashes in `candidate.json` with `write_candidate`, th
 
 ```bash
 write_candidate
-npm run rollout:safety -- candidate verify \
+node scripts/rollout-safety.mjs candidate verify \
   --evidence "$REPORT_DIR/candidate.json" \
   --candidate "$EXPECTED_CANDIDATE" --lockfile package-lock.json \
   --build "$REPORT_DIR/open-next-build.zip" \

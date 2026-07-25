@@ -29,11 +29,11 @@
 ```
 
 ```bash
-npm run rollout:safety -- backup verify --manifest /private/backup/manifest.json \
+node scripts/rollout-safety.mjs backup verify --manifest /private/backup/manifest.json \
   > /private/evidence/backup-report.json
 
 RESTORED_D1_DIR="$(mktemp -d)"
-npm run rollout:safety -- backup restore \
+node scripts/rollout-safety.mjs backup restore \
   --manifest /private/backup/manifest.json \
   --database DB --local --persist-to "${RESTORED_D1_DIR}" \
   --config wrangler.toml
@@ -44,12 +44,12 @@ npm run rollout:safety -- backup restore \
 ## 2. Schema 与数据对账
 
 ```bash
-npm run rollout:safety -- reconcile capture \
+node scripts/rollout-safety.mjs reconcile capture \
   --database DB --local --persist-to "${RESTORED_D1_DIR}" \
   --config wrangler.toml \
   > /private/evidence/before.json
 
-npm run rollout:safety -- reconcile compare \
+node scripts/rollout-safety.mjs reconcile compare \
   --expected /private/evidence/before.json \
   --database DB --local --persist-to "${RESTORED_D1_DIR}" \
   --config wrangler.toml \
@@ -69,7 +69,7 @@ npm run rollout:safety -- reconcile compare \
 ## 3. 外部 restored D1 request smoke
 
 ```bash
-npm run rollout:safety -- request smoke \
+node scripts/rollout-safety.mjs request smoke \
   --database DB --local --persist-to "${RESTORED_D1_DIR}" \
   --config wrangler.toml \
   > /private/evidence/restored-request-smoke.json
@@ -82,7 +82,7 @@ npm run rollout:safety -- request smoke \
 生产 migration `apply` 前使用独立的 `blogman-pre-migration-candidate/v1` 合同。它只绑定 commit、lockfile/toolchain、build、已上传但未承载流量的 Cloudflare version、备份/隔离恢复、原始 local migration verify、原始 Workerd smoke、D1 对账和测试报告；不含 deployment、production smoke、rollout 或 observation 字段。因此它只能由专用命令验证，不能被正式 `candidate verify`、`rollout set` 或 `rollout status` 当成生产候选：
 
 ```bash
-npm run rollout:safety -- candidate verify-pre-migration \
+node scripts/rollout-safety.mjs candidate verify-pre-migration \
   --evidence /private/evidence/pre-migration-candidate.json \
   --candidate "$(git rev-parse HEAD)" --lockfile package-lock.json \
   --build /private/evidence/open-next-build.tar \
@@ -113,7 +113,7 @@ npm run rollout:safety -- candidate verify-pre-migration \
 Production smoke 报告还必须重复记录同一 candidate、build、deployment 和 version。Cloudflare deployment/version 应从部署结果及 `wrangler deployments list --json` / `wrangler versions list --json` 读取，不能手填另一个候选的值。
 
 ```bash
-npm run rollout:safety -- candidate verify \
+node scripts/rollout-safety.mjs candidate verify \
   --evidence /private/evidence/candidate.json \
   --candidate "$(git rev-parse HEAD)" \
   --lockfile package-lock.json \
@@ -154,7 +154,7 @@ npm run rollout:safety -- candidate verify \
 完成观察时，`end` 绑定候选主 `--smoke-report` 与 `--reconciliation-report`；`start` 通过两个附加报告参数保留开始证据；异常报告只记录检查时间、是否 clear 和未解决高优异常数，不记录原始日志、请求或内容：
 
 ```bash
-npm run rollout:safety -- candidate verify \
+node scripts/rollout-safety.mjs candidate verify \
   <全部候选参数> \
   --observation-start-smoke-report /private/evidence/observation-start-smoke.json \
   --observation-start-reconciliation-report /private/evidence/observation-start-reconciliation.json \
@@ -179,7 +179,7 @@ npm run rollout:safety -- candidate verify \
 控制键只有三类：`producer`、`authority`、`executor:<name>`。状态变更写入 current control，并追加不可更新、不可删除、不可 replace 的 audit event：
 
 ```bash
-npm run rollout:safety -- rollout set \
+node scripts/rollout-safety.mjs rollout set \
   --control authority --enabled true \
   --operation-id authority-on-20260725-001 \
   --actor release-operator --reason "batch 1 evidence complete" \
@@ -191,7 +191,7 @@ npm run rollout:safety -- rollout set \
 相同 operation ID 与相同载荷重放返回 `unchanged`；同 ID 不同载荷失败。开启前会重新执行 candidate verify 和实际 migration `verify`，不能复用进程内缓存。停用是非对称的安全操作：candidate 或 migration 证据失效时仍可写入关闭控制和不可变 audit event，并以 `evidence_state=invalid|unavailable` 标明当时证据状态；非法或敏感的 candidate 参数不会持久化或回显，只记录安全的 `candidate_id=unavailable`。停用路径不能借此开启任何控制。
 
 ```bash
-npm run rollout:safety -- rollout status \
+node scripts/rollout-safety.mjs rollout status \
   <全部 candidate verify 参数> \
   --database DB --local --persist-to "${RESTORED_D1_DIR}" \
   --config wrangler.toml
