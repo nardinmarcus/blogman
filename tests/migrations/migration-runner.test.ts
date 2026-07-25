@@ -56,6 +56,7 @@ function copyCanonicalMigrationSet(directory: string): void {
     '004_complete_historical_text_ai_schema.sql',
     '004_complete_historical_text_ai_schema.baseline.sql',
     '005_fix_posts_fts_sync.sql',
+    '006_add_rollout_safety_controls.sql',
   ]) {
     writeFileSync(
       join(directory, name),
@@ -293,6 +294,7 @@ describe('D1 migration runner', () => {
       { number: 3, candidate_id: 'test-candidate-empty' },
       { number: 4, candidate_id: 'test-candidate-empty' },
       { number: 5, candidate_id: 'test-candidate-empty' },
+      { number: 6, candidate_id: 'test-candidate-empty' },
     ])
   })
 
@@ -327,6 +329,7 @@ VALUES ('kept', 'Kept', 'body', '<p>body</p>', 'draft');
       expect.objectContaining({ number: 3, action: 'apply' }),
       expect.objectContaining({ number: 4, action: 'apply' }),
       expect.objectContaining({ number: 5, action: 'apply' }),
+      expect.objectContaining({ number: 6, action: 'apply' }),
     ])
 
     const result = runMigrationCommand(
@@ -362,6 +365,7 @@ VALUES ('kept', 'Kept', 'body', '<p>body</p>', 'draft');
       { number: 3, candidate_id: 'test-candidate-current' },
       { number: 4, candidate_id: 'test-candidate-current' },
       { number: 5, candidate_id: 'test-candidate-current' },
+      { number: 6, candidate_id: 'test-candidate-current' },
     ])
   })
 
@@ -416,6 +420,7 @@ FROM ai_actions ORDER BY id
       { number: 3, name: '003_migrate_runtime_ai_configuration' },
       { number: 4, name: '004_complete_historical_text_ai_schema' },
       { number: 5, name: '005_fix_posts_fts_sync' },
+      { number: 6, name: '006_add_rollout_safety_controls' },
     ])
     expect(queryD1(stateDirectory, `
 SELECT action_key, label, description, prompt, temperature, sort_order,
@@ -442,7 +447,7 @@ FROM ai_actions ORDER BY id
     )
     expect(repeated.stderr).toBe('')
     expect(repeated.status).toBe(0)
-    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 5 }])
+    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 6 }])
   })
 
   it('accepts the repository historical text AI schema after old runtime ensure and preserves author references', { timeout: 300_000 }, () => {
@@ -480,6 +485,7 @@ FROM ai_actions WHERE action_key = 'improve'
       { number: 3, name: '003_migrate_runtime_ai_configuration' },
       { number: 4, name: '004_complete_historical_text_ai_schema' },
       { number: 5, name: '005_fix_posts_fts_sync' },
+      { number: 6, name: '006_add_rollout_safety_controls' },
     ])
     expect(queryD1(stateDirectory, 'SELECT * FROM ai_provider_profiles ORDER BY id')).toEqual(profilesBefore)
     expect(queryD1(stateDirectory, `
@@ -500,7 +506,7 @@ FROM ai_actions WHERE action_key = 'improve'
     )
     expect(repeated.stderr).toBe('')
     expect(repeated.status).toBe(0)
-    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 5 }])
+    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 6 }])
     expect(queryD1(stateDirectory, 'SELECT * FROM ai_provider_profiles ORDER BY id')).toEqual(profilesBefore)
   })
 
@@ -781,6 +787,7 @@ BEGIN SELECT 1; END;
       { number: 3, candidate_id: 'mutable-data-baseline' },
       { number: 4, candidate_id: 'mutable-data-baseline' },
       { number: 5, candidate_id: 'mutable-data-baseline' },
+      { number: 6, candidate_id: 'mutable-data-baseline' },
     ])
   })
 
@@ -916,6 +923,7 @@ ORDER BY action_key
       { number: 3, name: '003_migrate_runtime_ai_configuration' },
       { number: 4, name: '004_complete_historical_text_ai_schema' },
       { number: 5, name: '005_fix_posts_fts_sync' },
+      { number: 6, name: '006_add_rollout_safety_controls' },
     ])
   })
 
@@ -1119,6 +1127,7 @@ ORDER BY key
       { number: 3, name: '003_migrate_runtime_ai_configuration' },
       { number: 4, name: '004_complete_historical_text_ai_schema' },
       { number: 5, name: '005_fix_posts_fts_sync' },
+      { number: 6, name: '006_add_rollout_safety_controls' },
     ])
   })
 
@@ -1270,6 +1279,7 @@ WHERE key = 'ai_provider_config';
       { number: 3 },
       { number: 4 },
       { number: 5 },
+      { number: 6 },
     ])
     expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM ai_provider_profiles')).toEqual([{ count: 1 }])
 
@@ -1565,6 +1575,7 @@ FROM ai_post_generators WHERE target_key = 'summary'
         { number: 3, name: '003_migrate_runtime_ai_configuration' },
         { number: 4, name: '004_complete_historical_text_ai_schema' },
         { number: 5, name: '005_fix_posts_fts_sync' },
+        { number: 6, name: '006_add_rollout_safety_controls' },
       ],
     })
     expect(status.status).toBe(0)
@@ -1762,6 +1773,7 @@ FROM migration_ledger WHERE number = 1;
       { number: 3, candidate_id: 'guard-original' },
       { number: 4, candidate_id: 'guard-original' },
       { number: 5, candidate_id: 'guard-original' },
+      { number: 6, candidate_id: 'guard-original' },
     ])
   })
 

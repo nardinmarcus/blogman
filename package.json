@@ -16,6 +16,7 @@
     "worktree:prune": "git worktree prune",
     "cf-typegen": "bash scripts/cf-typegen.sh",
     "cf:init": "bash scripts/cf-init.sh",
+    "rollout:safety": "node scripts/rollout-safety.mjs",
     "start": "next start",
     "lint": "eslint"
   },
