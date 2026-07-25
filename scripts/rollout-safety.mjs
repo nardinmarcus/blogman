@@ -19,6 +19,8 @@ import { fileURLToPath } from 'node:url'
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const wranglerPath = join(repoRoot, 'node_modules', '.bin', 'wrangler')
 const migrationRunnerPath = join(repoRoot, 'scripts', 'migrations.mjs')
+// The measured production response was 1,554,995 bytes; 4 MiB keeps headroom bounded.
+export const D1_EVIDENCE_MAX_BUFFER_BYTES = 4 * 1024 * 1024
 
 function fail(message) {
   throw new Error(message)
@@ -312,9 +314,17 @@ function d1CommandArgs(options) {
 }
 
 function queryD1(options, sql, evidenceName) {
-  const result = spawnSync(wranglerPath, [
+  return runD1EvidenceQuery(wranglerPath, [
     'd1', 'execute', ...d1CommandArgs(options), '--command', sql, '--json',
-  ], { cwd: repoRoot, encoding: 'utf8' })
+  ], evidenceName)
+}
+
+export function runD1EvidenceQuery(command, args, evidenceName) {
+  const result = spawnSync(command, args, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    maxBuffer: D1_EVIDENCE_MAX_BUFFER_BYTES,
+  })
   if (result.status !== 0) fail(`Unable to capture ${evidenceName} evidence`)
   return parseD1QueryResponse(result.stdout, evidenceName)
 }
