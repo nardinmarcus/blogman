@@ -316,11 +316,27 @@ function queryD1(options, sql, evidenceName) {
     'd1', 'execute', ...d1CommandArgs(options), '--command', sql, '--json',
   ], { cwd: repoRoot, encoding: 'utf8' })
   if (result.status !== 0) fail(`Unable to capture ${evidenceName} evidence`)
+  return parseD1QueryResponse(result.stdout, evidenceName)
+}
+
+export function parseD1QueryResponse(stdout, evidenceName) {
+  let response
   try {
-    return JSON.parse(result.stdout).at(-1)?.results || []
+    response = JSON.parse(stdout)
   } catch {
     fail(`Invalid ${evidenceName} evidence response`)
   }
+  const queryResult = Array.isArray(response) ? response.at(-1) : response
+  if (
+    !queryResult
+    || typeof queryResult !== 'object'
+    || Array.isArray(queryResult)
+    || queryResult.success !== true
+    || !Array.isArray(queryResult.results)
+  ) {
+    fail(`Invalid ${evidenceName} evidence response`)
+  }
+  return queryResult.results
 }
 
 function executeD1Batch(options, sql, evidenceName) {
@@ -1363,9 +1379,11 @@ async function main() {
   }
 }
 
-try {
-  await main()
-} catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : 'Rollout safety command failed'}\n`)
-  process.exitCode = 1
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    await main()
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : 'Rollout safety command failed'}\n`)
+    process.exitCode = 1
+  }
 }
