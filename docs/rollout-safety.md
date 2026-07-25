@@ -9,6 +9,29 @@
 - 旧备份不能恢复到已有文件的 persist 目录。新事实出现后只能停用 producer/authority/executor 并前向修复，不能用旧备份覆盖、down migration 或清空新表。
 - Cloudflare D1 不支持导出包含 FTS5 virtual table 的数据库。备份包可按恢复顺序列出多个 SQL artifact，例如常规表导出和候选绑定的 FTS/index/trigger 重建脚本；每个 artifact 都必须有字节数和 SHA-256。
 
+### 私有生产导出封装
+
+生产 D1 导出只能通过一次性私有封装执行，禁止直接运行 `wrangler d1 export` 或继承父进程 stdio：
+
+```bash
+node scripts/rollout-safety.mjs backup export \
+  --run-root /private/evidence/export-candidate-successor-1 \
+  --database DB --remote --config /private/wrangler.toml \
+  > /private/evidence/reports/export-report.json
+```
+
+`--run-root` 必须是仓库外尚不存在的绝对路径。命令在启动 Wrangler 前原子创建 mode `0700` 的 run root，并固定七张普通表；已存在的 root 一律拒绝，失败后也不能删除或复用它来重试。Wrangler stdout/stderr 直接写入 root 内 `0600` 文件描述符；`WRANGLER_LOG_PATH` 也被强制覆盖为同一私有目录内预建的 `0600` debug 文件，因此三种原始输出都不会进入父进程内存、终端、工具输出或 Wrangler 默认日志位置，并在成功或失败时统一覆盖删除。导出子进程有不可放宽的 300 秒上限，超时会被终止且不会重试。命令还要求 SQL 非空、权限精确为 `0600`，并用私有临时 SQLite 校验 SQL 可执行、普通表集合精确匹配、列名集合及 `type/notnull/default/pk/hidden` 语义精确匹配，只允许冻结的 Issue #21 text-AI A/B/C 变体（`ai_actions.profile_id` 的位置/存在性与获准的 `max_tokens` 默认值配对）。这里不宣称覆盖全部 UNIQUE/FK/CHECK/index 约束；后续 candidate migration plan 仍是这些冻结兼容规则的权威。成功只输出 `blogman-d1-private-export/v1` 脱敏 JSON；子进程失败/超时、空/畸形 SQL、权限或 schema 不符时只保留 `attempt_count=1` 的脱敏失败报告，并立即覆盖删除原始 SQL。私有目录的清理与销毁按实际递归枚举结果执行并复查为空，包括未知 debug 文件和 SQLite sidecar，而不是依赖固定文件名清单。
+
+成功的 SQL 仅保留到双隔离恢复和 pre-migration candidate 全部验收通过。任一中途失败由 runbook 的 `EXIT` trap 调用相同销毁命令；成功验收后也必须显式调用：
+
+```bash
+node scripts/rollout-safety.mjs backup dispose \
+  --run-root /private/evidence/export-candidate-successor-1 \
+  > /private/evidence/reports/export-dispose-report.json
+```
+
+`dispose` 只接受已经确认子进程终态的 `failed|captured` attempt，递归覆盖删除 raw SQL 和私有目录内所有残留 capture/validation/sidecar 文件，并在实际复查为空后才输出 `raw_artifacts_remaining=0` 的脱敏报告。若报告仍为 `started`，子进程状态未知，命令会拒绝生成销毁证明；该 root 必须原地隔离，不能读取、移动、删除或复用。无论哪种状态，attempt root 都不能成为第二次 export。
+
 ## 1. 备份验证与隔离恢复
 
 备份目录包含 `manifest.json` 和一个或多个相对路径 SQL artifact：

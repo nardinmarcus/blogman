@@ -2,7 +2,7 @@
 
 This runbook starts only after a separate production-write approval. It binds one immutable candidate to one backup, migration set, OpenNext build, Cloudflare version/deployment, same-version smoke, D1 reconciliation, rollout snapshot, test report, and a real observation window of at least 24 hours.
 
-Do not persist article bodies, HTML, tokens, passwords, Bridge/AI credentials, signed URLs, raw HTTP bodies, or raw Cloudflare responses. Keep the evidence root outside the repository with mode `0700`.
+Do not persist article bodies, HTML, tokens, passwords, Bridge/AI credentials, signed URLs, raw HTTP bodies, or raw Cloudflare responses in evidence or reports. The one temporary private SQL backup necessarily contains application rows; it is never evidence, stays `0600` inside the one-attempt `0700` export run root, and must be destroyed at the lifecycle boundary below. Keep the evidence root outside the repository with mode `0700`.
 
 ## Approval boundary
 
@@ -22,10 +22,10 @@ No approval in this packet includes a down migration, backup overwrite of produc
 
 ```bash
 set -euo pipefail
+umask 077
 REPO=/absolute/path/to/the/clean/candidate-checkout
 CONFIG=/absolute/path/to/the/operator-owned/production-wrangler.toml
 EVIDENCE_ROOT=/private/blogman-b1/issue-23
-BACKUP_DIR="$EVIDENCE_ROOT/backup"
 REPORT_DIR="$EVIDENCE_ROOT/reports"
 RESTORE_A="$EVIDENCE_ROOT/restore-a"
 RESTORE_B="$EVIDENCE_ROOT/restore-b"
@@ -33,6 +33,8 @@ DATABASE=DB
 EXPECTED_CANDIDATE=<approved-40-hex-commit>
 EXPECTED_BASELINE_DEPLOYMENT=<approved-read-only-deployment-id>
 EXPECTED_BASELINE_VERSION=<approved-read-only-version-id>
+EXPORT_RUN_ROOT="$EVIDENCE_ROOT/export-$EXPECTED_CANDIDATE-successor-1"
+BACKUP_DIR="$EXPORT_RUN_ROOT/backup"
 PUBLIC_ORIGIN=<approved-public-origin>
 ADMIN_COOKIE_FILE=<operator-owned-private-cookie-file>
 SMOKE_ARTICLE_SLUG=<approved-existing-article-slug>
@@ -41,11 +43,26 @@ SMOKE_ARTICLE_SLUG=<approved-existing-article-slug>
 Create the private directories, then move into the candidate checkout:
 
 ```bash
-install -d -m 0700 "$EVIDENCE_ROOT" "$BACKUP_DIR" "$REPORT_DIR" "$RESTORE_A" "$RESTORE_B"
+install -d -m 0700 "$EVIDENCE_ROOT" "$REPORT_DIR" "$RESTORE_A" "$RESTORE_B"
+test ! -e "$EXPORT_RUN_ROOT"
 cd "$REPO"
 ```
 
-Every command below stops on a non-zero exit. Do not continue by hand after a failed gate.
+Every command below stops on a non-zero exit. Do not continue by hand after a failed gate. `EXPORT_RUN_ROOT` is an approved one-attempt identity: the export command creates it atomically with mode `0700`, and an existing root is a hard stop before Wrangler starts. Never rename, remove, or replace it to obtain a retry; a successor attempt requires a new candidate, approval, and run root.
+
+Install the failure cleanup before the export. It never echoes captured output. It certifies disposal only after the synchronous wrapper has recorded the child terminal state as `failed` or `captured`:
+
+```bash
+dispose_private_export() {
+  if test -f "$EXPORT_RUN_ROOT/export-report.json" && test ! -f "$EXPORT_RUN_ROOT/dispose-report.json"; then
+    node scripts/rollout-safety.mjs backup dispose --run-root "$EXPORT_RUN_ROOT" \
+      > "$REPORT_DIR/export-dispose-report.json"
+  fi
+}
+trap dispose_private_export EXIT
+```
+
+If the process is externally interrupted while the report remains `state=started`, `dispose` refuses to claim cleanup because the child terminal state is unknown. Quarantine that root without reading or moving its private files; do not delete or reuse it, do not retry, and obtain a new candidate, approval, and successor run root after controlled incident handling.
 
 The smoke helper retains status only; every response body is discarded:
 
@@ -100,15 +117,18 @@ Stop if the checkout is dirty, the candidate differs, `main` and `origin/main` d
 Classification: production read-only. This is the first operation requiring explicit production access approval. Cloudflare D1 cannot export an FTS5 virtual table, so export the seven regular application tables once and pair it with the candidate-bound FTS reconstruction artifact already proven by Issue #21.
 
 ```bash
-./node_modules/.bin/wrangler d1 export "$DATABASE" --remote --skip-confirmation \
-  --table posts --table categories --table site_settings --table ai_actions \
-  --table ai_provider_profiles --table ai_post_generators --table api_tokens \
-  --output "$BACKUP_DIR/regular-tables.sql" -c "$CONFIG"
+node scripts/rollout-safety.mjs backup export \
+  --run-root "$EXPORT_RUN_ROOT" --database "$DATABASE" --remote --config "$CONFIG" \
+  > "$REPORT_DIR/export-report.json"
+
+jq -e '.format == "blogman-d1-private-export/v1" and .state == "captured" and .attempt_count == 1' \
+  "$REPORT_DIR/export-report.json" >/dev/null
+cmp "$REPORT_DIR/export-report.json" "$EXPORT_RUN_ROOT/export-report.json"
 
 sed -n '28,46p' db/ledger-migrations/001_initial_schema.sql > "$BACKUP_DIR/rebuild-fts.sql"
 printf '\nINSERT INTO posts_fts(posts_fts) VALUES (\x27rebuild\x27);\n' >> "$BACKUP_DIR/rebuild-fts.sql"
 
-REGULAR_SHA256=$(shasum -a 256 "$BACKUP_DIR/regular-tables.sql" | awk '{print $1}')
+REGULAR_SHA256=$(jq -er .artifact.sha256 "$REPORT_DIR/export-report.json")
 FTS_SHA256=$(shasum -a 256 "$BACKUP_DIR/rebuild-fts.sql" | awk '{print $1}')
 BACKUP_DIGEST=$(cat "$BACKUP_DIR/regular-tables.sql" "$BACKUP_DIR/rebuild-fts.sql" | shasum -a 256 | awk '{print $1}')
 DATABASE_ID=$(jq -r .uuid "$REPORT_DIR/d1-info-before.json")
@@ -119,7 +139,7 @@ jq -n \
   --arg database_id "$DATABASE_ID" \
   --arg captured_at "$CAPTURED_AT" \
   --arg regular_sha "$REGULAR_SHA256" \
-  --argjson regular_bytes "$(wc -c < "$BACKUP_DIR/regular-tables.sql" | tr -d ' ')" \
+  --argjson regular_bytes "$(jq -er .artifact.bytes "$REPORT_DIR/export-report.json")" \
   --arg fts_sha "$FTS_SHA256" \
   --argjson fts_bytes "$(wc -c < "$BACKUP_DIR/rebuild-fts.sql" | tr -d ' ')" \
   '{format:"blogman-d1-backup/v1",backup_id:$backup_id,
@@ -141,7 +161,7 @@ node scripts/migrations.mjs plan --database "$DATABASE" --remote --config "$CONF
   > "$REPORT_DIR/production-plan-before.json"
 ```
 
-Expected result: `backup-report.state=verified`; plan accepts the current schema and lists only the expected pending migrations. Stop on export/config mismatch, a second export attempt, backup identity failure, unsupported schema, or any unexpected pending migration. The export is private and is deleted only after all evidence is accepted.
+Expected result: the export report is sanitized and `state=captured, attempt_count=1`; Wrangler stdout/stderr and the explicitly private `WRANGLER_LOG_PATH` debug capture have already been overwritten and unlinked; no default Wrangler debug log was used; `backup-report.state=verified`; plan accepts the current schema and lists only the expected pending migrations. The child is terminated after at most 300 seconds. The wrapper imports the SQL only inside its private root and checks the exact seven-table column-name set plus `type/notnull/default/pk/hidden` semantics, allowing only the frozen Issue #21 text-AI A/B/C variants (`ai_actions.profile_id` position/presence paired with the approved `max_tokens` default). This is a column-semantics contract; the later candidate migration plan remains the authority for the frozen UNIQUE/FK/CHECK/index compatibility rules. Stop on export/config mismatch, timeout, a second export attempt, output permissions other than `0600`, empty/malformed SQL, wrong exported table schema, backup identity failure, unsupported schema, or any unexpected pending migration. Never invoke `wrangler d1 export` directly or use inherited stdio/default debug logging.
 
 ## 3. Two isolated restores and local candidate verification
 
@@ -185,7 +205,8 @@ Run the focused gate and static checks. The full repository Vitest is intentiona
 perl -e 'alarm 900; exec @ARGV' npm run test:run -- \
   tests/scripts/rollout-safety.test.ts \
   tests/scripts/rollout-safety-parser.test.ts \
-  tests/scripts/rollout-evidence-capture.test.ts
+  tests/scripts/rollout-evidence-capture.test.ts \
+  tests/scripts/rollout-safety-export.test.ts
 npm run lint
 ./node_modules/.bin/tsc --noEmit
 node --check scripts/rollout-safety.mjs
@@ -195,7 +216,7 @@ git diff --check
 Create a redacted test summary only after all five commands exit 0:
 
 ```bash
-jq -n '{format:"blogman-test-report/v1",state:"passed",exit_code:0,passed:26,failed:0}' \
+jq -n '{format:"blogman-test-report/v1",state:"passed",exit_code:0,passed:43,failed:0}' \
   > "$REPORT_DIR/test-report.json"
 ```
 
@@ -259,9 +280,15 @@ node scripts/rollout-safety.mjs candidate verify-pre-migration \
 
 jq -e '.state == "verified" and .phase == "pre-migration"' \
   "$REPORT_DIR/pre-migration-candidate-verify.json" >/dev/null
+
+dispose_private_export
+trap - EXIT
+test ! -e "$BACKUP_DIR/regular-tables.sql"
+jq -e '.state == "disposed" and .attempt_count == 1 and .raw_artifacts_remaining == 0' \
+  "$REPORT_DIR/export-dispose-report.json" >/dev/null
 ```
 
-Stop before production `apply` unless the dedicated verifier returns `state=verified, phase=pre-migration`, the uploaded version is unchanged, and every input hash still matches. Any edit to the commit, lockfile, build, backup, restore, migration set, local migration verification, Workerd smoke, reconciliation, or test report requires a new upload and a new pre-migration packet.
+Stop before production `apply` unless the dedicated verifier returns `state=verified, phase=pre-migration`, the uploaded version is unchanged, every input hash still matches, and private export disposal is verified. Disposal is the prescribed success lifecycle boundary because both isolated restores and the immutable pre-migration packet have accepted the backup. On every ordinary earlier shell failure after the wrapper records `failed` or `captured`, the `EXIT` trap disposes the raw SQL; the wrapper itself disposes it immediately when export or local validation fails. A `started` report is indeterminate and must remain quarantined rather than being falsely certified. Any edit to the commit, lockfile, build, backup, restore, migration set, local migration verification, Workerd smoke, reconciliation, or test report requires a new upload and a new pre-migration packet.
 
 ## 5. Ledgered production migration
 

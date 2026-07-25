@@ -3,12 +3,21 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
   statSync,
+  unlinkSync,
+  writeSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -21,6 +30,16 @@ const wranglerPath = join(repoRoot, 'node_modules', '.bin', 'wrangler')
 const migrationRunnerPath = join(repoRoot, 'scripts', 'migrations.mjs')
 // The measured production response was 1,554,995 bytes; 4 MiB keeps headroom bounded.
 export const D1_EVIDENCE_MAX_BUFFER_BYTES = 4 * 1024 * 1024
+export const D1_PRIVATE_EXPORT_TIMEOUT_MS = 300_000
+export const D1_PRIVATE_EXPORT_TABLES = [
+  'posts',
+  'categories',
+  'site_settings',
+  'ai_actions',
+  'ai_provider_profiles',
+  'ai_post_generators',
+  'api_tokens',
+]
 
 function fail(message) {
   throw new Error(message)
@@ -47,6 +66,12 @@ function required(options, name) {
   const value = options.get(name)
   if (!value) fail(`Missing required option --${name}`)
   return value
+}
+
+function assertOnlyOptions(options, allowedNames) {
+  for (const name of options.keys()) {
+    if (!allowedNames.includes(name)) fail(`Unsupported option --${name}`)
+  }
 }
 
 function sha256(value) {
@@ -446,6 +471,341 @@ function verifyBackup(options) {
     backup_id: backup.backupId,
     artifact_count: backup.artifacts.length,
   }
+}
+
+function assertPrivateRunRoot(runRootValue) {
+  if (!isAbsolute(runRootValue)) fail('Private D1 export requires an absolute --run-root')
+  const runRoot = resolve(runRootValue)
+  const relativeToRepo = relative(repoRoot, runRoot)
+  if (relativeToRepo === '' || (!relativeToRepo.startsWith('..') && !isAbsolute(relativeToRepo))) {
+    fail('Private D1 export run root must be outside the repository')
+  }
+  return runRoot
+}
+
+function secureDeleteFile(path) {
+  if (!existsSync(path)) return
+  const entry = lstatSync(path)
+  if (entry.isSymbolicLink()) {
+    unlinkSync(path)
+    return
+  }
+  if (!entry.isFile()) fail('Private D1 export cleanup found a non-file entry')
+  const size = statSync(path).size
+  const descriptor = openSync(path, 'r+')
+  try {
+    const zeroes = Buffer.alloc(Math.min(Math.max(size, 1), 64 * 1024))
+    for (let offset = 0; offset < size; offset += zeroes.length) {
+      writeSync(descriptor, zeroes, 0, Math.min(zeroes.length, size - offset), offset)
+    }
+    fsyncSync(descriptor)
+  } finally {
+    closeSync(descriptor)
+  }
+  unlinkSync(path)
+}
+
+function privateFiles(directory) {
+  if (!existsSync(directory)) return []
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name)
+    return entry.isDirectory() ? privateFiles(path) : [path]
+  })
+}
+
+function secureDeletePrivateFiles(privateDirectory) {
+  const files = privateFiles(privateDirectory)
+  return secureDeleteFiles(files) && privateFiles(privateDirectory).length === 0
+}
+
+function secureDeleteFiles(paths) {
+  let failed = false
+  for (const path of paths) {
+    try {
+      secureDeleteFile(path)
+    } catch {
+      failed = true
+    }
+  }
+  return !failed
+}
+
+function writeExportReport(path, report) {
+  assertNoSensitiveFields(report)
+  writeFileSync(path, `${JSON.stringify(report)}\n`, { flag: 'w', mode: 0o600 })
+}
+
+function runPrivately(command, args, {
+  stdin = 'ignore',
+  stdoutPath,
+  stderrPath,
+  env = process.env,
+  timeout,
+}) {
+  const stdout = openSync(stdoutPath, 'wx', 0o600)
+  const stderr = openSync(stderrPath, 'wx', 0o600)
+  const input = stdin === 'ignore' ? 'ignore' : openSync(stdin, 'r')
+  try {
+    return spawnSync(command, args, {
+      cwd: repoRoot,
+      env,
+      ...(timeout ? { timeout, killSignal: 'SIGKILL' } : {}),
+      stdio: [input, stdout, stderr],
+    })
+  } finally {
+    if (typeof input === 'number') closeSync(input)
+    closeSync(stdout)
+    closeSync(stderr)
+  }
+}
+
+function validatePrivateExport(sqlPath, privateDirectory, expectedTables) {
+  const databasePath = join(privateDirectory, 'validation.sqlite')
+  const referencePath = join(privateDirectory, 'reference.sqlite')
+  const importStdout = join(privateDirectory, 'validation-import.stdout')
+  const importStderr = join(privateDirectory, 'validation-import.stderr')
+  const schemaStdout = join(privateDirectory, 'validation-schema.stdout')
+  const schemaStderr = join(privateDirectory, 'validation-schema.stderr')
+  writeFileSync(databasePath, '', { flag: 'wx', mode: 0o600 })
+  writeFileSync(referencePath, '', { flag: 'wx', mode: 0o600 })
+  const imported = runPrivately('sqlite3', ['-bail', databasePath], {
+    stdin: sqlPath,
+    stdoutPath: importStdout,
+    stderrPath: importStderr,
+  })
+  if (imported.status !== 0) fail('Private D1 export SQL is malformed')
+  const referenced = runPrivately('sqlite3', ['-bail', referencePath], {
+    stdin: join(repoRoot, 'db', 'schema.sql'),
+    stdoutPath: join(privateDirectory, 'reference-import.stdout'),
+    stderrPath: join(privateDirectory, 'reference-import.stderr'),
+  })
+  if (referenced.status !== 0) fail('Private D1 export reference schema validation failed')
+  const tableQuery = "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+  const schema = runPrivately('sqlite3', ['-noheader', databasePath, tableQuery], {
+    stdoutPath: schemaStdout,
+    stderrPath: schemaStderr,
+  })
+  if (schema.status !== 0) fail('Private D1 export schema validation failed')
+  const actualTables = readFileSync(schemaStdout, 'utf8').trim().split('\n').filter(Boolean)
+  const requiredTables = [...expectedTables].sort()
+  if (JSON.stringify(actualTables) !== JSON.stringify(requiredTables)) {
+    fail('Private D1 export schema does not match the required tables')
+  }
+
+  const columnQuery = `
+SELECT tables.name, columns.cid, columns.name, upper(columns.type), columns."notnull",
+       coalesce(columns.dflt_value, '<NULL>'), columns.pk, columns.hidden
+FROM pragma_table_list AS tables
+JOIN pragma_table_xinfo(tables.name) AS columns
+WHERE tables.type = 'table'
+  AND tables.name IN (${expectedTables.map((table) => `'${table}'`).join(', ')})
+ORDER BY tables.name, columns.cid`
+  const actualColumnsPath = join(privateDirectory, 'validation-columns.stdout')
+  const actualColumnsErrorPath = join(privateDirectory, 'validation-columns.stderr')
+  const referenceColumnsPath = join(privateDirectory, 'reference-columns.stdout')
+  const referenceColumnsErrorPath = join(privateDirectory, 'reference-columns.stderr')
+  const actualColumnResult = runPrivately('sqlite3', ['-noheader', databasePath, columnQuery], {
+    stdoutPath: actualColumnsPath,
+    stderrPath: actualColumnsErrorPath,
+  })
+  const referenceColumnResult = runPrivately('sqlite3', ['-noheader', referencePath, columnQuery], {
+    stdoutPath: referenceColumnsPath,
+    stderrPath: referenceColumnsErrorPath,
+  })
+  if (actualColumnResult.status !== 0 || referenceColumnResult.status !== 0) {
+    fail('Private D1 export column validation failed')
+  }
+  const parseColumns = (path) => readFileSync(path, 'utf8').trim().split('\n').filter(Boolean)
+    .map((line) => line.split('|'))
+  const actualColumns = parseColumns(actualColumnsPath)
+  const referenceColumns = parseColumns(referenceColumnsPath)
+  const semantic = (column) => column.slice(2)
+  const referenceColumnNames = new Set(referenceColumns.map((column) => `${column[0]}\0${column[2]}`))
+  for (const actual of actualColumns) {
+    if (!referenceColumnNames.has(`${actual[0]}\0${actual[2]}`)) {
+      fail('Private D1 export schema has an unexpected column')
+    }
+  }
+  const actionColumnNames = actualColumns
+    .filter((column) => column[0] === 'ai_actions')
+    .map((column) => column[2])
+  const actionVariantA = referenceColumns
+    .filter((column) => column[0] === 'ai_actions')
+    .map((column) => column[2])
+  const actionVariantB = actionVariantA.filter((name) => name !== 'profile_id')
+  const actionVariantC = [...actionVariantB, 'profile_id']
+  const actionVariant = [
+    ['A', actionVariantA],
+    ['B', actionVariantB],
+    ['C', actionVariantC],
+  ].find(([, columns]) => JSON.stringify(columns) === JSON.stringify(actionColumnNames))?.[0]
+  if (!actionVariant) {
+    fail('Private D1 export text AI column variant is not approved')
+  }
+  for (const reference of referenceColumns) {
+    const [table, , name] = reference
+    if (table === 'ai_actions' && name === 'profile_id') continue
+    const actual = actualColumns.find((column) => column[0] === table && column[2] === name)
+    if (!actual) fail('Private D1 export schema is missing a required column')
+    if (table === 'ai_provider_profiles' && name === 'max_tokens') {
+      if (JSON.stringify(semantic(actual).toSpliced(3, 1, '<ALLOWED>'))
+        !== JSON.stringify(semantic(reference).toSpliced(3, 1, '<ALLOWED>'))
+        || !['1200', '2000'].includes(actual[5])) {
+        fail('Private D1 export column semantics do not match the migration baseline')
+      }
+    } else if (JSON.stringify(semantic(actual)) !== JSON.stringify(semantic(reference))) {
+      fail('Private D1 export column semantics do not match the migration baseline')
+    }
+  }
+  const profile = actualColumns.find((column) => column[0] === 'ai_actions' && column[2] === 'profile_id')
+  const maxTokens = actualColumns.find(
+    (column) => column[0] === 'ai_provider_profiles' && column[2] === 'max_tokens',
+  )
+  const referenceProfile = referenceColumns.find(
+    (column) => column[0] === 'ai_actions' && column[2] === 'profile_id',
+  )
+  if (profile && JSON.stringify(semantic(profile)) !== JSON.stringify(semantic(referenceProfile))) {
+    fail('Private D1 export column semantics do not match the migration baseline')
+  }
+  const expectedMaxTokensDefault = actionVariant === 'A' ? '2000' : '1200'
+  if (maxTokens?.[5] !== expectedMaxTokensDefault) {
+    fail('Private D1 export text AI column variant is not approved')
+  }
+}
+
+export function capturePrivateD1Export({
+  runRoot: runRootValue,
+  database,
+  config,
+  command = wranglerPath,
+  commandArgsPrefix = [],
+  expectedTables = D1_PRIVATE_EXPORT_TABLES,
+  timeoutMs = D1_PRIVATE_EXPORT_TIMEOUT_MS,
+}) {
+  if (!database || typeof database !== 'string') fail('Private D1 export requires a database')
+  if (!config || !isAbsolute(config)) fail('Private D1 export requires an absolute config path')
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > D1_PRIVATE_EXPORT_TIMEOUT_MS) {
+    fail('Private D1 export timeout must be within the fixed maximum')
+  }
+  const runRoot = assertPrivateRunRoot(runRootValue)
+  try {
+    mkdirSync(runRoot, { mode: 0o700 })
+  } catch (error) {
+    if (error && typeof error === 'object' && error.code === 'EEXIST') {
+      fail('Private D1 export run root already exists; retries are forbidden')
+    }
+    fail('Unable to create the private D1 export run root')
+  }
+  chmodSync(runRoot, 0o700)
+  const backupDirectory = join(runRoot, 'backup')
+  const privateDirectory = join(runRoot, 'private')
+  mkdirSync(backupDirectory, { mode: 0o700 })
+  mkdirSync(privateDirectory, { mode: 0o700 })
+  const sqlPath = join(backupDirectory, 'regular-tables.sql')
+  const stdoutPath = join(privateDirectory, 'wrangler.stdout')
+  const stderrPath = join(privateDirectory, 'wrangler.stderr')
+  const debugPath = join(privateDirectory, 'wrangler.debug')
+  const reportPath = join(runRoot, 'export-report.json')
+  writeExportReport(reportPath, {
+    format: 'blogman-d1-private-export/v1',
+    state: 'started',
+    attempt_count: 1,
+  })
+
+  let captured = false
+  try {
+    writeFileSync(sqlPath, '', { flag: 'wx', mode: 0o600 })
+    writeFileSync(debugPath, '', { flag: 'wx', mode: 0o600 })
+    const result = runPrivately(command, [
+      ...commandArgsPrefix,
+      'd1', 'export', database, '--remote', '--skip-confirmation',
+      ...expectedTables.flatMap((table) => ['--table', table]),
+      '--output', sqlPath,
+      '--config', resolve(config),
+    ], {
+      stdoutPath,
+      stderrPath,
+      env: { ...process.env, WRANGLER_LOG_PATH: debugPath },
+      timeout: timeoutMs,
+    })
+    const debug = statSync(debugPath)
+    if (!debug.isFile() || (debug.mode & 0o777) !== 0o600) {
+      fail('Private D1 export debug log permissions are not 0600')
+    }
+    if (result.status !== 0) fail('Private D1 export subprocess failed')
+    const sql = statSync(sqlPath)
+    if (!sql.isFile() || sql.size === 0) fail('Private D1 export did not create non-empty SQL')
+    if ((sql.mode & 0o777) !== 0o600) fail('Private D1 export SQL permissions are not 0600')
+    validatePrivateExport(sqlPath, privateDirectory, expectedTables)
+    const report = {
+      format: 'blogman-d1-private-export/v1',
+      state: 'captured',
+      attempt_count: 1,
+      artifact: {
+        path: 'backup/regular-tables.sql',
+        bytes: sql.size,
+        sha256: sha256(readFileSync(sqlPath)),
+      },
+      required_tables: [...expectedTables],
+    }
+    writeExportReport(reportPath, report)
+    captured = true
+    return report
+  } catch (error) {
+    writeExportReport(reportPath, {
+      format: 'blogman-d1-private-export/v1',
+      state: 'failed',
+      attempt_count: 1,
+    })
+    throw error
+  } finally {
+    const capturesDeleted = secureDeletePrivateFiles(privateDirectory)
+    const sqlDeleted = captured && capturesDeleted ? true : secureDeleteFiles([sqlPath])
+    if (!capturesDeleted || !sqlDeleted) fail('Private D1 export cleanup failed')
+  }
+}
+
+export function disposePrivateD1Export({ runRoot: runRootValue }) {
+  const runRoot = assertPrivateRunRoot(runRootValue)
+  let runRootStat
+  let exportReport
+  try {
+    runRootStat = statSync(runRoot)
+    exportReport = JSON.parse(readFileSync(join(runRoot, 'export-report.json'), 'utf8'))
+  } catch {
+    fail('Private D1 export run root is not disposable')
+  }
+  if (!runRootStat.isDirectory() || (runRootStat.mode & 0o777) !== 0o700) {
+    fail('Private D1 export run root is not mode 0700')
+  }
+  assertNoSensitiveFields(exportReport)
+  if (
+    exportReport?.format !== 'blogman-d1-private-export/v1'
+    || exportReport?.attempt_count !== 1
+    || !['captured', 'failed'].includes(exportReport?.state)
+  ) {
+    fail('Private D1 export report cannot be disposed')
+  }
+  const privateDirectory = join(runRoot, 'private')
+  const privateDeleted = secureDeletePrivateFiles(privateDirectory)
+  const sqlDeleted = secureDeleteFiles([join(runRoot, 'backup', 'regular-tables.sql')])
+  if (!privateDeleted
+    || !sqlDeleted
+    || privateFiles(privateDirectory).length > 0
+    || existsSync(join(runRoot, 'backup', 'regular-tables.sql'))) {
+    fail('Private D1 export disposal failed')
+  }
+  const report = {
+    format: 'blogman-d1-private-export-disposal/v1',
+    state: 'disposed',
+    attempt_count: 1,
+    raw_artifacts_remaining: 0,
+  }
+  writeFileSync(join(runRoot, 'dispose-report.json'), `${JSON.stringify(report)}\n`, {
+    flag: 'wx',
+    mode: 0o600,
+  })
+  return report
 }
 
 function findWranglerD1Files(directory) {
@@ -1353,11 +1713,25 @@ async function main() {
   const options = parseOptions(args)
   let report
   if (domain === 'backup') {
-    report = action === 'verify'
-      ? verifyBackup(options)
-      : action === 'restore'
-        ? restoreBackup(options)
-        : fail('Expected backup action: verify or restore')
+    if (action === 'export') {
+      assertOnlyOptions(options, ['run-root', 'database', 'config', 'remote'])
+      if (!options.get('remote')) fail('Private D1 export requires --remote')
+    } else if (action === 'dispose') {
+      assertOnlyOptions(options, ['run-root'])
+    }
+    report = action === 'export'
+      ? capturePrivateD1Export({
+          runRoot: required(options, 'run-root'),
+          database: required(options, 'database'),
+          config: required(options, 'config'),
+        })
+      : action === 'dispose'
+        ? disposePrivateD1Export({ runRoot: required(options, 'run-root') })
+        : action === 'verify'
+          ? verifyBackup(options)
+          : action === 'restore'
+            ? restoreBackup(options)
+            : fail('Expected backup action: export, dispose, verify, or restore')
   } else if (domain === 'reconcile') {
     report = action === 'capture'
       ? captureReconciliation(options)
