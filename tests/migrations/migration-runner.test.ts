@@ -369,6 +369,32 @@ VALUES ('kept', 'Kept', 'body', '<p>body</p>', 'draft');
     ])
   })
 
+  it('accepts the approved production Text AI schema without legacy index definitions', { timeout: 300_000 }, () => {
+    const stateDirectory = createD1State()
+    applySqlFile(stateDirectory, currentSchemaPath)
+    queryD1(stateDirectory, `
+DROP INDEX idx_api_tokens_token;
+DROP INDEX idx_posts_category;
+DROP INDEX idx_posts_published;
+DROP INDEX idx_posts_slug;
+`)
+
+    const plan = runMigrationCommand(stateDirectory, 'plan')
+
+    expect(plan.stderr).toBe('')
+    expect(plan.status).toBe(0)
+    expect(readCommandOutput<{ pending: Array<{ number: number; action: string }> }>(plan).pending).toEqual([
+      expect.objectContaining({ number: 1, action: 'baseline' }),
+      expect.objectContaining({ number: 2, action: 'apply' }),
+      expect.objectContaining({ number: 3, action: 'apply' }),
+      expect.objectContaining({ number: 4, action: 'apply' }),
+      expect.objectContaining({ number: 5, action: 'apply' }),
+      expect.objectContaining({ number: 6, action: 'apply' }),
+    ])
+    expect(queryD1(stateDirectory, "SELECT COUNT(*) AS count FROM sqlite_schema WHERE name LIKE 'migration_ledger%'"))
+      .toEqual([{ count: 0 }])
+  })
+
   it('forward-migrates the repository historical text AI schema without changing author data', { timeout: 300_000 }, () => {
     const stateDirectory = createD1State()
     applyHistoricalAiSchemaFixture(stateDirectory)
