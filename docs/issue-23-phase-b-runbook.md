@@ -158,10 +158,11 @@ node scripts/rollout-safety.mjs reconcile capture \
   > "$REPORT_DIR/production-before.json"
 
 node scripts/migrations.mjs plan --database "$DATABASE" --remote --config "$CONFIG" \
+  --failure-report "$REPORT_DIR/production-plan-before-failure.json" \
   > "$REPORT_DIR/production-plan-before.json"
 ```
 
-Expected result: the export report is sanitized and `state=captured, attempt_count=1`; Wrangler stdout/stderr and the explicitly private `WRANGLER_LOG_PATH` debug capture have already been overwritten and unlinked; no default Wrangler debug log was used; `backup-report.state=verified`; plan accepts the current schema and lists only the expected pending migrations. The child is terminated after at most 300 seconds. The wrapper imports the SQL only inside its private root and checks the exact seven-table column-name set plus `type/notnull/default/pk/hidden` semantics, allowing only the frozen Issue #21 text-AI A/B/C variants (`ai_actions.profile_id` position/presence paired with the approved `max_tokens` default). This is a column-semantics contract; the later candidate migration plan remains the authority for the frozen UNIQUE/FK/CHECK/index compatibility rules. Stop on export/config mismatch, timeout, a second export attempt, output permissions other than `0600`, empty/malformed SQL, wrong exported table schema, backup identity failure, unsupported schema, or any unexpected pending migration. Never invoke `wrangler d1 export` directly or use inherited stdio/default debug logging.
+Expected result: the export report is sanitized and `state=captured, attempt_count=1`; Wrangler stdout/stderr and the explicitly private `WRANGLER_LOG_PATH` debug capture have already been overwritten and unlinked; no default Wrangler debug log was used; `backup-report.state=verified`; plan accepts the current schema and lists only the expected pending migrations. A successful plan removes its reserved failure-report path. With `--failure-report`, the migration runner itself executes every inner Wrangler query once inside a fresh mode-`0700` directory with pre-created mode-`0600` stdout, stderr, and forced `WRANGLER_LOG_PATH` files, enforces the fixed 300-second timeout with no retry, then recursively overwrites, removes, and verifies removal of that raw directory. On failure it preserves only the mode-`0600` `blogman-migration-failure/v1` report with fixed classification fields; `failure_domain` records the confirmed layer while `failure_hint` records only non-confirmed auth/network text signals. The report must never contain SQL, raw output, URLs, credentials, or response bodies. An existing failure-report path is a hard stop and must never be removed or reused to obtain another attempt. The export wrapper imports the SQL only inside its private root and checks the exact seven-table column-name set plus `type/notnull/default/pk/hidden` semantics, allowing only the frozen Issue #21 text-AI A/B/C variants (`ai_actions.profile_id` position/presence paired with the approved `max_tokens` default). This is a column-semantics contract; the later candidate migration plan remains the authority for the frozen UNIQUE/FK/CHECK/index compatibility rules. Stop on export/config mismatch, timeout, a second export attempt, output permissions other than `0600`, empty/malformed SQL, wrong exported table schema, backup identity failure, unsupported schema, or any unexpected pending migration. Never invoke `wrangler d1 export` directly or use inherited stdio/default debug logging.
 
 ## 3. Two isolated restores and local candidate verification
 
@@ -301,6 +302,7 @@ Classification: production D1 write. This is the first database mutation.
 cmp "$REPORT_DIR/deployment-before.json" "$REPORT_DIR/deployment-before-apply.json"
 
 node scripts/migrations.mjs plan --database "$DATABASE" --remote --config "$CONFIG" \
+  --failure-report "$REPORT_DIR/production-plan-final-failure.json" \
   > "$REPORT_DIR/production-plan-final.json"
 cmp "$REPORT_DIR/production-plan-before.json" "$REPORT_DIR/production-plan-final.json"
 

@@ -1,10 +1,26 @@
 #!/usr/bin/env node
 
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fchmodSync,
+  fsyncSync,
+  lstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  rmdirSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url))
@@ -25,6 +41,7 @@ const persistentWriteOpcodes = new Set([
   'VUpdate',
   'Vacuum',
 ])
+const privatePlanTimeoutMs = 300_000
 const ledgerSchemaObjects = [
   {
     type: 'table',
@@ -70,6 +87,197 @@ END`,
 
 function fail(message) {
   throw new Error(message)
+}
+
+function classifiedFailure(message, details) {
+  const error = new Error(message)
+  error.failureDetails = details
+  return error
+}
+
+function schemaContractFail(message) {
+  throw classifiedFailure(message, {
+    failureDomain: 'schema_contract',
+    failureHint: 'none',
+    phase: 'schema_validation',
+    exitClass: 'runner_error',
+  })
+}
+
+function classifyChildFailureHint(output) {
+  const auth = /\b(unauthorized|forbidden|authentication|api token|oauth|login)\b/i.test(output)
+  const network = /\b(fetch failed|network|econn\w*|etimedout|enotfound|cloudflare api)\b/i.test(output)
+  if (auth && network) return 'ambiguous'
+  if (auth) return 'auth'
+  if (network) return 'network_api'
+  return 'none'
+}
+
+function destroyPrivateTree(path) {
+  let failure = null
+  try {
+    if (!existsSync(path)) return
+    const metadata = lstatSync(path)
+    if (metadata.isDirectory()) {
+      for (const name of readdirSync(path)) destroyPrivateTree(join(path, name))
+      rmdirSync(path)
+      return
+    }
+    if (metadata.isFile()) {
+      let descriptor = null
+      try {
+        descriptor = openSync(path, 'r+')
+        const zeros = Buffer.alloc(Math.min(65_536, Math.max(metadata.size, 1)))
+        let offset = 0
+        while (offset < metadata.size) {
+          const length = Math.min(zeros.length, metadata.size - offset)
+          writeSync(descriptor, zeros, 0, length, offset)
+          offset += length
+        }
+        fsyncSync(descriptor)
+      } finally {
+        if (descriptor !== null) closeSync(descriptor)
+      }
+    }
+    unlinkSync(path)
+  } catch (error) {
+    failure = error
+  } finally {
+    if (existsSync(path)) rmSync(path, { recursive: true, force: true })
+  }
+  if (failure || existsSync(path)) fail('Private Wrangler output cleanup failed')
+}
+
+function createFailureReporter(options) {
+  if (!options.failureReport) return null
+  let descriptor = null
+  try {
+    descriptor = openSync(options.failureReport, 'wx', 0o600)
+    fchmodSync(descriptor, 0o600)
+  } catch {
+    if (descriptor !== null) {
+      try {
+        closeSync(descriptor)
+      } catch {}
+      descriptor = null
+    }
+    fail('Failure report path must be fresh and writable')
+  }
+
+  let phase = 'runner_initialization'
+  let queryOrdinal = 0
+  const rawParent = dirname(options.failureReport)
+  const requestedTestTimeout = Number(process.env.BLOGMAN_MIGRATION_TEST_TIMEOUT_MS)
+  const timeout = process.env.NODE_ENV === 'test'
+    && Number.isInteger(requestedTestTimeout)
+    && requestedTestTimeout > 0
+    ? Math.min(requestedTestTimeout, privatePlanTimeoutMs)
+    : privatePlanTimeoutMs
+  function injectTestFailure(point) {
+    if (process.env.NODE_ENV === 'test'
+      && process.env.BLOGMAN_MIGRATION_TEST_REPORT_FAILURE === point) {
+      fail(`Injected report ${point} failure`)
+    }
+  }
+  function closeReport() {
+    if (descriptor === null) return
+    const current = descriptor
+    descriptor = null
+    let failure = null
+    try {
+      injectTestFailure('close')
+    } catch (error) {
+      failure = error
+    }
+    try {
+      closeSync(current)
+    } catch (error) {
+      failure ??= error
+    }
+    if (failure) throw failure
+  }
+  return {
+    setPhase(value) {
+      phase = value
+    },
+    setQueryOrdinal(value) {
+      queryOrdinal = value
+    },
+    runWrangler(executable, arguments_, spawnOptions) {
+      const rawDirectory = mkdtempSync(join(rawParent, '.migration-plan-raw-'))
+      try {
+        chmodSync(rawDirectory, 0o700)
+        const stdoutPath = join(rawDirectory, 'wrangler.stdout')
+        const stderrPath = join(rawDirectory, 'wrangler.stderr')
+        const debugPath = join(rawDirectory, 'wrangler.debug')
+        for (const path of [stdoutPath, stderrPath, debugPath]) {
+          let file = null
+          try {
+            file = openSync(path, 'wx', 0o600)
+            fchmodSync(file, 0o600)
+          } finally {
+            if (file !== null) closeSync(file)
+          }
+        }
+        let stdoutDescriptor = null
+        let stderrDescriptor = null
+        try {
+          stdoutDescriptor = openSync(stdoutPath, 'r+')
+          stderrDescriptor = openSync(stderrPath, 'r+')
+          const result = spawnSync(executable, arguments_, {
+            ...spawnOptions,
+            env: { ...process.env, WRANGLER_LOG_PATH: debugPath },
+            stdio: ['ignore', stdoutDescriptor, stderrDescriptor],
+            timeout,
+            killSignal: 'SIGKILL',
+          })
+          closeSync(stdoutDescriptor)
+          stdoutDescriptor = null
+          closeSync(stderrDescriptor)
+          stderrDescriptor = null
+          return {
+            ...result,
+            stdout: readFileSync(stdoutPath, 'utf8'),
+            stderr: readFileSync(stderrPath, 'utf8'),
+          }
+        } finally {
+          if (stdoutDescriptor !== null) closeSync(stdoutDescriptor)
+          if (stderrDescriptor !== null) closeSync(stderrDescriptor)
+        }
+      } finally {
+        destroyPrivateTree(rawDirectory)
+      }
+    },
+    record(error) {
+      if (descriptor === null) return
+      const details = error?.failureDetails ?? {}
+      const report = {
+        format: 'blogman-migration-failure/v1',
+        state: 'failed',
+        command: 'plan',
+        mode: 'remote',
+        failure_domain: details.failureDomain
+          ?? 'unknown',
+        failure_hint: details.failureHint ?? 'none',
+        phase: details.phase ?? phase,
+        query_ordinal: details.queryOrdinal ?? queryOrdinal,
+        exit_class: details.exitClass ?? 'runner_error',
+      }
+      try {
+        injectTestFailure('write')
+        writeSync(descriptor, `${JSON.stringify(report, null, 2)}\n`)
+        injectTestFailure('fsync')
+        fsyncSync(descriptor)
+      } finally {
+        closeReport()
+      }
+    },
+    complete() {
+      closeReport()
+      injectTestFailure('unlink')
+      unlinkSync(options.failureReport)
+    },
+  }
 }
 
 function stripLeadingSqlComments(source) {
@@ -181,6 +389,7 @@ function parseArguments(argv) {
     mode: null,
     persistTo: null,
     candidate: null,
+    failureReport: null,
   }
 
   for (let index = 0; index < tokens.length; index += 1) {
@@ -200,6 +409,7 @@ function parseArguments(argv) {
     else if (token === '--persist-to') options.persistTo = resolve(value)
     else if (token === '--candidate') options.candidate = value
     else if (token === '--migrations-dir') options.migrationsDirectory = resolve(value)
+    else if (token === '--failure-report') options.failureReport = value
     else fail(`Unknown option: ${token}`)
   }
 
@@ -210,6 +420,12 @@ function parseArguments(argv) {
   }
   if (command === 'apply' && !options.candidate?.trim()) {
     fail('apply requires a non-empty --candidate identity')
+  }
+  if (options.failureReport) {
+    if (command !== 'plan' || options.mode !== '--remote') {
+      fail('--failure-report is only available for plan --remote')
+    }
+    if (!isAbsolute(options.failureReport)) fail('--failure-report requires an absolute path')
   }
 
   return options
@@ -281,7 +497,7 @@ function loadMigrations(directory) {
   })
 }
 
-function createD1Client(options) {
+function createD1Client(options, failureReporter) {
   const commonArguments = [
     'd1',
     'execute',
@@ -292,8 +508,57 @@ function createD1Client(options) {
     '--json',
   ]
   if (options.persistTo) commonArguments.push('--persist-to', options.persistTo)
+  let queryOrdinal = 0
 
   function execute(arguments_) {
+    queryOrdinal += 1
+    failureReporter?.setQueryOrdinal(queryOrdinal)
+    if (failureReporter) {
+      const result = failureReporter.runWrangler(
+        defaultWranglerPath,
+        [...commonArguments, ...arguments_],
+        { cwd: repoRoot },
+      )
+      const stdout = result.stdout.trim()
+      const stderr = result.stderr.trim()
+      if (result.error?.code === 'ETIMEDOUT') {
+        throw classifiedFailure('Wrangler command timed out', {
+          failureDomain: 'wrangler_command',
+          failureHint: 'none',
+          phase: 'wrangler_execute',
+          queryOrdinal,
+          exitClass: 'timeout',
+        })
+      }
+      if (result.error) {
+        throw classifiedFailure(result.error.message, {
+          failureDomain: 'wrangler_command',
+          failureHint: 'none',
+          phase: 'wrangler_execute',
+          queryOrdinal,
+          exitClass: 'spawn_error',
+        })
+      }
+      if (result.signal) {
+        throw classifiedFailure('Wrangler command terminated by signal', {
+          failureDomain: 'wrangler_command',
+          failureHint: 'none',
+          phase: 'wrangler_execute',
+          queryOrdinal,
+          exitClass: 'signal',
+        })
+      }
+      if (result.status !== 0) {
+        throw classifiedFailure(stderr || stdout || 'Wrangler command failed', {
+          failureDomain: 'wrangler_command',
+          failureHint: classifyChildFailureHint(`${stdout}\n${stderr}`),
+          phase: 'wrangler_execute',
+          queryOrdinal,
+          exitClass: 'child_nonzero',
+        })
+      }
+      return result.stdout
+    }
     try {
       return execFileSync(defaultWranglerPath, [...commonArguments, ...arguments_], {
         cwd: repoRoot,
@@ -307,11 +572,57 @@ function createD1Client(options) {
         try {
           response = JSON.parse(stdout)
         } catch {}
-        if (response?.error?.text) fail(response.error.text)
+        if (response?.error?.text) {
+          throw classifiedFailure(response.error.text, {
+            failureDomain: 'wrangler_command',
+            failureHint: classifyChildFailureHint(response.error.text),
+            phase: 'wrangler_execute',
+            queryOrdinal,
+            exitClass: 'child_nonzero',
+          })
+        }
       }
       const stderr = error?.stderr?.toString().trim()
-      fail(stderr || error.message)
+      const message = stderr || error.message
+      const commandStartFailure = error?.code === 'ENOENT' || error?.code === 'EACCES'
+      throw classifiedFailure(message, {
+        failureDomain: 'wrangler_command',
+        failureHint: commandStartFailure ? 'none' : classifyChildFailureHint(`${stdout ?? ''}\n${stderr ?? ''}`),
+        phase: 'wrangler_execute',
+        queryOrdinal,
+        exitClass: commandStartFailure ? 'spawn_error' : 'child_nonzero',
+      })
     }
+  }
+
+  function decodeResponse(output) {
+    let response
+    try {
+      response = JSON.parse(output)
+    } catch (error) {
+      throw classifiedFailure(error.message, {
+        failureDomain: 'malformed_response',
+        failureHint: 'none',
+        phase: 'response_decode',
+        queryOrdinal,
+        exitClass: 'invalid_json',
+      })
+    }
+    if (!Array.isArray(response)
+      || response.some((statement) => (
+        !statement
+        || typeof statement !== 'object'
+        || !Array.isArray(statement.results)
+      ))) {
+      throw classifiedFailure('Wrangler returned an invalid response envelope', {
+        failureDomain: 'malformed_response',
+        failureHint: 'none',
+        phase: 'response_decode',
+        queryOrdinal,
+        exitClass: 'invalid_shape',
+      })
+    }
+    return response
   }
 
   function executeFile(sql) {
@@ -327,7 +638,7 @@ function createD1Client(options) {
 
   return {
     query(sql) {
-      const response = JSON.parse(executeFile(sql))
+      const response = decodeResponse(executeFile(sql))
       return response.flatMap((statement) => statement.results ?? [])
     },
     executeBatch(sql) {
@@ -337,7 +648,7 @@ function createD1Client(options) {
       const statements = validateReadOnlySidecarQueries(sql, context, singleStatement)
       try {
         for (const statement of statements) {
-          const explainResponse = JSON.parse(executeFile(`EXPLAIN ${statement};`))
+          const explainResponse = decodeResponse(executeFile(`EXPLAIN ${statement};`))
           const writeOpcode = explainResponse
             .flatMap((result) => result.results ?? [])
             .find((row) => persistentWriteOpcodes.has(row.opcode))
@@ -346,10 +657,13 @@ function createD1Client(options) {
           }
         }
         return statements.flatMap((statement) => {
-          const response = JSON.parse(executeFile(`${statement};`))
+          const response = decodeResponse(executeFile(`${statement};`))
           return response.flatMap((result) => result.results ?? [])
         })
       } catch (error) {
+        if (error?.failureDetails) {
+          throw classifiedFailure(`${context} must be read-only: ${error.message}`, error.failureDetails)
+        }
         fail(`${context} must be read-only: ${error.message}`)
       }
     },
@@ -404,7 +718,7 @@ WHERE name IN ('migration_ledger', 'migration_ledger_no_update', 'migration_ledg
       (object) => object.type === expected.type && object.name === expected.name,
     )
     if (!actual || normalizeSchemaSql(actual.sql) !== normalizeSchemaSql(expected.sql)) {
-      fail(`Migration ledger contract drift: ${expected.type} ${expected.name}`)
+      schemaContractFail(`Migration ledger contract drift: ${expected.type} ${expected.name}`)
     }
   }
 }
@@ -464,7 +778,7 @@ function sameIssues(actual, expected) {
 function validateCurrentSchema(client, migrations) {
   const canonical = migrations[0]
   if (!canonical.baselineSql) {
-    fail(`Existing schema cannot be baselined by migration ${canonical.name}`)
+    schemaContractFail(`Existing schema cannot be baselined by migration ${canonical.name}`)
   }
   const canonicalIssues = client.queryReadOnly(
     canonical.baselineSql,
@@ -488,10 +802,10 @@ function validateCurrentSchema(client, migrations) {
   }
 
   if (identityFailures.length > 0) {
-    fail(`Existing schema identity does not match: ${[...new Set(identityFailures)].sort().join(', ')}`)
+    schemaContractFail(`Existing schema identity does not match: ${[...new Set(identityFailures)].sort().join(', ')}`)
   }
   if (actualIssues.length === 0 || audited) return
-  fail(`Existing schema does not match ${canonical.name}: ${actualIssues.join(', ')}`)
+  schemaContractFail(`Existing schema does not match ${canonical.name}: ${actualIssues.join(', ')}`)
 }
 
 function validateMigrationPreflight(client, migration) {
@@ -501,7 +815,7 @@ function validateMigrationPreflight(client, migration) {
     `Migration preflight ${migration.name}`,
   )
   if (issues.length > 0) {
-    fail(`Migration preflight failed for ${migration.name}: ${issues.map((row) => row.issue).join(', ')}`)
+    schemaContractFail(`Migration preflight failed for ${migration.name}: ${issues.map((row) => row.issue).join(', ')}`)
   }
 }
 
@@ -690,8 +1004,11 @@ async function applyMigrations(client, migrations, candidate) {
   return buildStatus(migrations, readLedger(client, true), 'current')
 }
 
+let activeFailureReporter = null
+
 async function main() {
   const options = parseArguments(process.argv.slice(2))
+  activeFailureReporter = createFailureReporter(options)
   const migrations = loadMigrations(options.migrationsDirectory)
   if (options.command === 'catalog') {
     process.stdout.write(`${JSON.stringify({
@@ -700,7 +1017,8 @@ async function main() {
     }, null, 2)}\n`)
     return
   }
-  const client = createD1Client(options)
+  const client = createD1Client(options, activeFailureReporter)
+  activeFailureReporter?.setPhase('ledger_validation')
   const initialized = ledgerArtifactsExist(client)
   if (initialized) validateLedgerContract(client)
   const ledger = readLedger(client, initialized)
@@ -708,6 +1026,7 @@ async function main() {
 
   let baselineFirst = false
   if (options.command === 'plan' || options.command === 'apply') {
+    activeFailureReporter?.setPhase('schema_validation')
     baselineFirst = validateBeforeWrites(client, migrations, ledger)
   }
 
@@ -729,11 +1048,21 @@ async function main() {
   }
 
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+  activeFailureReporter?.complete()
+  activeFailureReporter = null
 }
 
 try {
   await main()
 } catch (error) {
-  process.stderr.write(`${error.message}\n`)
+  if (activeFailureReporter) {
+    try {
+      activeFailureReporter.record(error)
+    } catch {}
+    activeFailureReporter = null
+    process.stderr.write('Migration plan failed; see sanitized failure report.\n')
+  } else {
+    process.stderr.write(`${error.message}\n`)
+  }
   process.exitCode = 1
 }
