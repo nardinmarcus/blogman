@@ -40,6 +40,19 @@ ADMIN_COOKIE_FILE=<operator-owned-private-cookie-file>
 SMOKE_ARTICLE_SLUG=<approved-existing-article-slug>
 ```
 
+Validate the operator-owned production config before setup or any Wrangler production call. This gate checks only the path and file type; it does not read the file:
+
+```bash
+case "$CONFIG" in
+  /*) ;;
+  *) printf '%s\n' 'CONFIG must be an absolute path to an existing regular file' >&2; exit 1 ;;
+esac
+if ! test -f "$CONFIG"; then
+  printf '%s\n' 'CONFIG must be an absolute path to an existing regular file' >&2
+  exit 1
+fi
+```
+
 Create the private directories, then move into the candidate checkout:
 
 ```bash

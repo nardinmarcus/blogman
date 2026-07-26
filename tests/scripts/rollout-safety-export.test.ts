@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -397,5 +398,34 @@ describe('private D1 export capture', () => {
     expect(runbook).toContain('node scripts/rollout-safety.mjs backup export')
     expect(runbook).toContain('node scripts/rollout-safety.mjs backup dispose')
     expect(runbook).not.toMatch(/^\.\/node_modules\/\.bin\/wrangler d1 export/m)
+  })
+
+  it('validates the production CONFIG before the first Wrangler production call', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'blogman-runbook-config-test-'))
+    temporaryDirectories.push(directory)
+    const absoluteConfig = join(directory, 'wrangler.toml')
+    writeFileSync(absoluteConfig, 'must not be read by the guard')
+    chmodSync(absoluteConfig, 0o000)
+    const runbook = readFileSync(join(repoRoot, 'docs', 'issue-23-phase-b-runbook.md'), 'utf8')
+    const firstProductionCall = runbook.indexOf('./node_modules/.bin/wrangler deployments status')
+    const guard = runbook.match(
+      /case "\$CONFIG" in\n[\s\S]*?\nesac\nif ! test -f "\$CONFIG"; then\n[\s\S]*?\nfi/,
+    )
+
+    expect(firstProductionCall).toBeGreaterThan(-1)
+    expect(guard, 'runbook must contain an executable CONFIG path guard').not.toBeNull()
+    if (!guard) return
+    expect(runbook.indexOf(guard[0])).toBeLessThan(firstProductionCall)
+
+    const runGuard = (config: string, cwd = repoRoot) => spawnSync('/bin/sh', ['-c', guard[0]], {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, CONFIG: config },
+    })
+
+    expect(runGuard(absoluteConfig).status).toBe(0)
+    expect(runGuard('wrangler.toml', directory).status).not.toBe(0)
+    expect(runGuard(join(directory, 'missing.toml')).status).not.toBe(0)
+    expect(runGuard(directory).status).not.toBe(0)
   })
 })
