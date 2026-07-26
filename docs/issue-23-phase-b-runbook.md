@@ -63,6 +63,12 @@ cd "$REPO"
 
 Every command below stops on a non-zero exit. Do not continue by hand after a failed gate. `EXPORT_RUN_ROOT` is an approved one-attempt identity: the export command creates it atomically with mode `0700`, and an existing root is a hard stop before Wrangler starts. Never rename, remove, or replace it to obtain a retry; a successor attempt requires a new candidate, approval, and run root.
 
+The repository-owned order contract is `scripts/phase-b-sequence.mjs`. Operator automation must call `runPhaseBSequence()` with the absolute `CONFIG` path, an immutable binding cache for the approved candidate/packet/build/baseline identities, and the Issue #23 stage adapters. It fixes this exact sequence and rejects dynamic stage graphs:
+
+`PRE-CAS/local gates → CAS1 → D1 identity → remote migration plan → export → double restore → upload → migrations 001–006 → CAS2 → traffic → smoke/reconcile → T0`.
+
+The runner validates `CONFIG` and the immutable bindings before entering the first stage, freezes both into one execution context supplied to every stage adapter, invokes each stage exactly once, never retries, and stops at the first rejection. Every production adapter must use `context.configPath`; a temporary script must not substitute another config, reorder, omit, repeat, or directly drive these stages outside that contract.
+
 Install the failure cleanup before the export. It never echoes captured output. It certifies disposal only after the synchronous wrapper has recorded the child terminal state as `failed` or `captured`:
 
 ```bash
@@ -125,9 +131,23 @@ test "$BASELINE_VERSION_ID" = "$EXPECTED_BASELINE_VERSION"
 
 Stop if the checkout is dirty, the candidate differs, `main` and `origin/main` differ, the candidate does not descend from `origin/main`, the installed versions differ from the lockfile, the build fails, or the active production deployment/version is not the explicitly approved baseline at 100%. `BASELINE_VERSION_ID` is the only version eligible for the separately authorized emergency traffic restore. Local build output is not production proof.
 
-## 2. Backup and baseline
+## 2. Remote migration plan hard gate
 
-Classification: production read-only. This is the first operation requiring explicit production access approval. Cloudflare D1 cannot export an FTS5 virtual table, so export the seven regular application tables once and pair it with the candidate-bound FTS reconstruction artifact already proven by Issue #21.
+Classification: production read-only. This is the first operation requiring explicit production access approval. It runs after CAS1 and D1 identity, but before the one-shot export or either isolated restore.
+
+```bash
+node scripts/migrations.mjs plan --database "$DATABASE" --remote --config "$CONFIG" \
+  --failure-report "$REPORT_DIR/production-plan-before-failure.json" \
+  > "$REPORT_DIR/production-plan-before.json"
+```
+
+Expected result: the plan accepts the current schema and lists only the expected pending migrations. A successful plan removes its reserved failure-report path. With `--failure-report`, the migration runner itself executes every inner Wrangler query once inside a fresh mode-`0700` directory with pre-created mode-`0600` stdout, stderr, and forced `WRANGLER_LOG_PATH` files, enforces the fixed 300-second timeout with no retry, then recursively overwrites, removes, and verifies removal of that raw directory. On failure it preserves only the mode-`0600` `blogman-migration-failure/v1` report with fixed classification fields; `failure_domain` records the confirmed layer while `failure_hint` records only non-confirmed auth/network text signals. The report must never contain SQL, raw output, URLs, credentials, or response bodies. An existing failure-report path is a hard stop and must never be removed or reused to obtain another attempt.
+
+Stop on any remote plan failure or unexpected pending migration. In that case export, double restore, upload, migrations 001–006, CAS2, traffic, smoke/reconciliation, and T0 must all remain at attempt count `0`. Do not bypass query 7 or replace its read-only/opcode proof in this phase.
+
+## 3. Backup and baseline
+
+Classification: production read-only. This uses the same explicit production access approval after the remote plan passes. Cloudflare D1 cannot export an FTS5 virtual table, so export the seven regular application tables once and pair it with the candidate-bound FTS reconstruction artifact already proven by Issue #21.
 
 ```bash
 node scripts/rollout-safety.mjs backup export \
@@ -170,14 +190,11 @@ node scripts/rollout-safety.mjs reconcile capture \
   --database "$DATABASE" --remote --config "$CONFIG" \
   > "$REPORT_DIR/production-before.json"
 
-node scripts/migrations.mjs plan --database "$DATABASE" --remote --config "$CONFIG" \
-  --failure-report "$REPORT_DIR/production-plan-before-failure.json" \
-  > "$REPORT_DIR/production-plan-before.json"
 ```
 
-Expected result: the export report is sanitized and `state=captured, attempt_count=1`; Wrangler stdout/stderr and the explicitly private `WRANGLER_LOG_PATH` debug capture have already been overwritten and unlinked; no default Wrangler debug log was used; `backup-report.state=verified`; plan accepts the current schema and lists only the expected pending migrations. A successful plan removes its reserved failure-report path. With `--failure-report`, the migration runner itself executes every inner Wrangler query once inside a fresh mode-`0700` directory with pre-created mode-`0600` stdout, stderr, and forced `WRANGLER_LOG_PATH` files, enforces the fixed 300-second timeout with no retry, then recursively overwrites, removes, and verifies removal of that raw directory. On failure it preserves only the mode-`0600` `blogman-migration-failure/v1` report with fixed classification fields; `failure_domain` records the confirmed layer while `failure_hint` records only non-confirmed auth/network text signals. The report must never contain SQL, raw output, URLs, credentials, or response bodies. An existing failure-report path is a hard stop and must never be removed or reused to obtain another attempt. The export wrapper imports the SQL only inside its private root and checks the exact seven-table column-name set plus `type/notnull/default/pk/hidden` semantics, allowing only the frozen Issue #21 text-AI A/B/C variants (`ai_actions.profile_id` position/presence paired with the approved `max_tokens` default). This is a column-semantics contract; the later candidate migration plan remains the authority for the frozen UNIQUE/FK/CHECK/index compatibility rules. Stop on export/config mismatch, timeout, a second export attempt, output permissions other than `0600`, empty/malformed SQL, wrong exported table schema, backup identity failure, unsupported schema, or any unexpected pending migration. Never invoke `wrangler d1 export` directly or use inherited stdio/default debug logging.
+Expected result: the export report is sanitized and `state=captured, attempt_count=1`; Wrangler stdout/stderr and the explicitly private `WRANGLER_LOG_PATH` debug capture have already been overwritten and unlinked; no default Wrangler debug log was used; and `backup-report.state=verified`. The export wrapper imports the SQL only inside its private root and checks the exact seven-table column-name set plus `type/notnull/default/pk/hidden` semantics, allowing only the frozen Issue #21 text-AI A/B/C variants (`ai_actions.profile_id` position/presence paired with the approved `max_tokens` default). This is a column-semantics contract; the earlier remote candidate migration plan remains the authority for the frozen UNIQUE/FK/CHECK/index compatibility rules. Stop on export/config mismatch, timeout, a second export attempt, output permissions other than `0600`, empty/malformed SQL, wrong exported table schema, backup identity failure, or unsupported schema. Never invoke `wrangler d1 export` directly or use inherited stdio/default debug logging.
 
-## 3. Two isolated restores and local candidate verification
+## 4. Two isolated restores and local candidate verification
 
 Classification: local/private writes only; no production mutation.
 
@@ -234,7 +251,7 @@ jq -n '{format:"blogman-test-report/v1",state:"passed",exit_code:0,passed:43,fai
   > "$REPORT_DIR/test-report.json"
 ```
 
-## 4. Upload the exact Worker version and verify the immutable pre-migration candidate
+## 5. Upload the exact Worker version and verify the immutable pre-migration candidate
 
 Classification: production write. Requires explicit approval. This creates a Cloudflare Worker version and may populate the configured remote OpenNext cache, but it does not serve the version yet.
 
@@ -304,7 +321,7 @@ jq -e '.state == "disposed" and .attempt_count == 1 and .raw_artifacts_remaining
 
 Stop before production `apply` unless the dedicated verifier returns `state=verified, phase=pre-migration`, the uploaded version is unchanged, every input hash still matches, and private export disposal is verified. Disposal is the prescribed success lifecycle boundary because both isolated restores and the immutable pre-migration packet have accepted the backup. On every ordinary earlier shell failure after the wrapper records `failed` or `captured`, the `EXIT` trap disposes the raw SQL; the wrapper itself disposes it immediately when export or local validation fails. A `started` report is indeterminate and must remain quarantined rather than being falsely certified. Any edit to the commit, lockfile, build, backup, restore, migration set, local migration verification, Workerd smoke, reconciliation, or test report requires a new upload and a new pre-migration packet.
 
-## 5. Ledgered production migration
+## 6. Ledgered production migration
 
 Classification: production D1 write. This is the first database mutation.
 
@@ -336,7 +353,7 @@ jq -n --arg candidate "$EXPECTED_CANDIDATE" --arg migration_set "$MIGRATION_SET_
   > "$REPORT_DIR/migration-report.json"
 ```
 
-## 6. Deploy the uploaded version and prove the serving version
+## 7. Deploy the uploaded version and prove the serving version
 
 Classification: production traffic write, then read-only proof.
 
@@ -376,7 +393,7 @@ test "$(jq -er '.versions | select(length == 1) | .[0] | select(.percentage == 1
 
 The two `test` commands are a compare-and-stop guard: if traffic no longer belongs exclusively to this candidate, do not overwrite another operator's deployment. Stop after the proof. Do not resume this candidate or undo D1 facts; open a successor forward-fix candidate.
 
-## 7. Same-version smoke, D1 reconciliation, and rollout snapshot
+## 8. Same-version smoke, D1 reconciliation, and rollout snapshot
 
 Classification: production read-only. Do not retain response bodies. Use status codes and report hashes only.
 
@@ -408,9 +425,9 @@ jq -n '{format:"blogman-rollout-state/v1",state:"captured",controls:{producer:"d
 
 Expected result: all six real GET paths return success, the deployment is unchanged at 100%, D1 matches the locally migrated restore, and producer/authority/executors remain disabled. Any response failure, version drift, schema/ledger/count/status/content delta, or unexpected enabled control stops the gate. Do not create production fixtures to make smoke pass.
 
-## 8. Assemble and verify the pending candidate
+## 9. Assemble and verify the pending candidate
 
-Create `observation-start-smoke.json` and `observation-start-reconciliation.json` as immutable copies of the initial production reports. Set `T0` only after steps 1–7 all pass.
+Create `observation-start-smoke.json` and `observation-start-reconciliation.json` as immutable copies of the initial production reports. Set `T0` only after steps 1–8 all pass.
 
 ```bash
 cp "$REPORT_DIR/production-smoke.json" "$REPORT_DIR/observation-start-smoke.json"
@@ -507,7 +524,7 @@ node scripts/rollout-safety.mjs rollout status \
 
 The observation starts at `STARTED_AT`; its earliest possible end is `EARLIEST_END`. Neither timestamp passes the gate by itself.
 
-## 9. Observation end
+## 10. Observation end
 
 Classification: production read-only plus private evidence update. Run no earlier than `EARLIEST_END`.
 

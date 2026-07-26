@@ -4,6 +4,7 @@
 
 ## 安全边界
 
+- Issue #23 Phase B 的唯一仓库顺序合同是 `scripts/phase-b-sequence.mjs`：`PRE-CAS/local gates → CAS1 → D1 identity → remote migration plan → export → double restore → upload → migrations 001–006 → CAS2 → traffic → smoke/reconcile → T0`。runner 在任何 stage 前验证 absolute production `CONFIG` 和冻结的 candidate/approval packet/build/baseline binding cache，将两者冻结为每个 adapter 必须使用的同一 execution context；每 stage exactly once、无 retry，任一失败立即停止。remote plan 失败时 export 及全部后缀计数必须为 `0`。这不改变八批交付顺序，也不替换 query 7 的 read-only/opcode proof。
 - `backup restore` 和 `request smoke` 只接受 `--local`，必须显式指定仓库外的绝对 `--persist-to` 空目录，绝不回退到默认 `.wrangler/state`。
 - `reconcile capture|compare` 支持显式 local D1，也为经授权的未来 production read-only 对账保留 `--remote` 接口；普通本地验收只使用 `--local`。
 - 旧备份不能恢复到已有文件的 persist 目录。新事实出现后只能停用 producer/authority/executor 并前向修复，不能用旧备份覆盖、down migration 或清空新表。
