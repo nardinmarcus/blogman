@@ -31,11 +31,58 @@ function createFixture(withBaseline = false, privateTimeoutMs = 300_000) {
       "SELECT 'sensitive schema detail' AS issue;\n",
     )
   }
+  const ledgerContract = [
+    {
+      type: 'table',
+      name: 'migration_ledger',
+      sql: `CREATE TABLE migration_ledger (
+  number INTEGER PRIMARY KEY CHECK(number > 0),
+  name TEXT UNIQUE NOT NULL,
+  checksum TEXT NOT NULL CHECK(length(checksum) = 64),
+  applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  candidate_id TEXT NOT NULL CHECK(length(candidate_id) > 0)
+) STRICT`,
+    },
+    {
+      type: 'trigger',
+      name: 'migration_ledger_no_update',
+      sql: `CREATE TRIGGER migration_ledger_no_update
+BEFORE UPDATE ON migration_ledger BEGIN
+  SELECT RAISE(ABORT, 'migration ledger rows are immutable');
+END`,
+    },
+    {
+      type: 'trigger',
+      name: 'migration_ledger_no_delete',
+      sql: `CREATE TRIGGER migration_ledger_no_delete
+BEFORE DELETE ON migration_ledger BEGIN
+  SELECT RAISE(ABORT, 'migration ledger rows are immutable');
+END`,
+    },
+    {
+      type: 'trigger',
+      name: 'migration_ledger_no_replace',
+      sql: `CREATE TRIGGER migration_ledger_no_replace
+BEFORE INSERT ON migration_ledger
+WHEN EXISTS (
+  SELECT 1 FROM migration_ledger
+  WHERE number = NEW.number OR name = NEW.name
+)
+BEGIN
+  SELECT RAISE(ABORT, 'migration ledger rows are immutable');
+END`,
+    },
+  ]
   writeFileSync(wrangler, `#!/usr/bin/env node
 import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
 const mode = process.env.FAKE_WRANGLER_MODE
-if (process.env.FAKE_START_MARKER) appendFileSync(process.env.FAKE_START_MARKER, 'started\\n')
+const ledgerContract = ${JSON.stringify(ledgerContract)}
+let callCount = 0
+if (process.env.FAKE_START_MARKER) {
+  appendFileSync(process.env.FAKE_START_MARKER, 'started\\n')
+  callCount = readFileSync(process.env.FAKE_START_MARKER, 'utf8').trim().split('\\n').length
+}
 if (process.env.WRANGLER_LOG_PATH?.includes('.migration-plan-raw-')) {
   const permissions = [
     statSync(process.env.WRANGLER_LOG_PATH).mode & 0o777,
@@ -71,6 +118,43 @@ if (mode === 'mixed-signals') {
   process.stderr.write('Unauthorized API token and fetch failed ECONNRESET\\n')
   process.exit(1)
 }
+if (mode === 'malformed-api-response') {
+  process.stdout.write(JSON.stringify({ error: { text: 'Received a malformed response from the API' } }))
+  process.exit(1)
+}
+if (mode === 'cloudflare-api-error') {
+  process.stdout.write(JSON.stringify({ error: {
+    name: 'APIError',
+    text: 'A request to the Cloudflare API (/accounts/private/d1/query) failed.',
+    notes: [{ text: 'private API note' }],
+    location: { line: 1, column: 2 },
+    kind: 'error',
+    code: 7500,
+    accountTag: 'private-account-tag',
+  } }))
+  process.exit(1)
+}
+if (mode === 'cloudflare-api-error-extra-key') {
+  process.stdout.write(JSON.stringify({ error: {
+    name: 'APIError',
+    text: 'A request to the Cloudflare API (/accounts/private/d1/query) failed.',
+    notes: [{ text: 'private API note' }],
+    location: { line: 1, column: 2 },
+    kind: 'error',
+    code: 7500,
+    accountTag: 'private-account-tag',
+    unexpectedPrivate: 'private-value',
+  } }))
+  process.exit(1)
+}
+if (mode === 'wrangler-user-error') {
+  process.stderr.write('UserError: invalid local CLI option private-value\\n')
+  process.exit(1)
+}
+if (mode === 'opaque-error') {
+  process.stderr.write('opaque child rejection private-value\\n')
+  process.exit(1)
+}
 if (mode === 'malformed-json') {
   process.stdout.write('not-json secret response body')
   process.exit(0)
@@ -99,6 +183,18 @@ if (process.env.FAKE_TRANSPORT_OBSERVATION) {
     arguments: process.argv.slice(2),
   }) + '\\n')
 }
+if (mode === 'query-seven-cloudflare-error' && callCount === 7) {
+  process.stdout.write(JSON.stringify({ error: {
+    name: 'APIError',
+    text: 'A request to the Cloudflare API (/accounts/private/d1/query) failed.',
+    notes: [{ text: 'private API note' }],
+    location: { line: 1, column: 2 },
+    kind: 'error',
+    code: 7500,
+    accountTag: 'private-account-tag',
+  } }))
+  process.exit(1)
+}
 if (hadApplyWrite) {
   process.stderr.write('stop after first write')
   process.exit(1)
@@ -111,10 +207,18 @@ const emit = (value) => {
     process.stdout.write(value)
   }
 }
-if (sql.includes("WHERE lower(name) IN")) {
+if (mode === 'query-seven-cloudflare-error' && callCount === 1) {
+  emit(JSON.stringify([{ results: [{ count: 4 }] }]))
+} else if (mode === 'query-seven-cloudflare-error' && callCount === 2) {
+  emit(JSON.stringify([{ results: ledgerContract }]))
+} else if (mode === 'query-seven-cloudflare-error' && callCount === 3) {
+  emit(JSON.stringify([{ results: [] }]))
+} else if (mode === 'query-seven-cloudflare-error' && callCount === 4) {
+  emit(JSON.stringify([{ results: [{ count: 1 }] }]))
+} else if (sql.includes("WHERE lower(name) IN")) {
   emit(JSON.stringify([{ results: [{ count: 0 }] }]))
 } else if (sql.includes("name NOT LIKE 'sqlite_%'")) {
-  emit(JSON.stringify([{ results: [{ count: ['schema-contract', 'business-schema'].includes(mode) ? 1 : 0 }] }]))
+  emit(JSON.stringify([{ results: [{ count: ['schema-contract', 'business-schema', 'query-seven-cloudflare-error'].includes(mode) ? 1 : 0 }] }]))
 } else if (mode === 'schema-contract') {
   emit(JSON.stringify([{ results: [{ issue: 'sensitive schema detail' }] }]))
 } else {
@@ -441,24 +545,95 @@ describe('remote migration plan failure reports', () => {
   })
 
   it.each([
-    ['auth', 'auth'],
-    ['network-api', 'network_api'],
-    ['mixed-signals', 'ambiguous'],
-  ])('records %s only as a non-confirmed failure hint', (mode, failureHint) => {
+    ['auth', 'wrangler_command', 'auth'],
+    ['network-api', 'wrangler_command', 'network_api'],
+    ['mixed-signals', 'wrangler_command', 'ambiguous'],
+    ['malformed-api-response', 'malformed_response', 'none'],
+    ['cloudflare-api-error', 'cloudflare_api', 'none'],
+    ['wrangler-user-error', 'wrangler_command', 'none'],
+    ['opaque-error', 'wrangler_command', 'none'],
+  ])('records %s with orthogonal safe domain and hint enums', (mode, failureDomain, failureHint) => {
     const fixture = createFixture()
     const report = join(fixture.root, `${mode}.json`)
     const result = runPlan(fixture, report, mode)
 
     expect(result.status).toBe(1)
     expect(`${result.stdout}${result.stderr}${readFileSync(report, 'utf8')}`)
-      .not.toMatch(/API token secret|cloudflare\.example|response body/)
+      .not.toMatch(/API token secret|cloudflare\.example|response body|private-value/)
     expect(readFailureReport(report)).toMatchObject({
-      failure_domain: 'wrangler_command',
+      failure_domain: failureDomain,
       failure_hint: failureHint,
       phase: 'wrangler_execute',
       query_ordinal: 1,
       exit_class: 'child_nonzero',
     })
+  })
+
+  it('stops when query seven is a baseline EXPLAIN with a structured API error', () => {
+    const fixture = createFixture(true)
+    const thirdStatement = "SELECT 'third private issue' AS issue"
+    writeFileSync(
+      join(fixture.migrations, '001_initial.baseline.sql'),
+      `SELECT 'first private issue' AS issue;\nSELECT 'second private issue' AS issue;\n${thirdStatement};\n`,
+    )
+    const report = join(fixture.root, 'query-seven.json')
+    const startMarker = join(fixture.root, 'query-seven-starts.txt')
+    const observation = join(fixture.root, 'query-seven-argv.jsonl')
+
+    const result = runPlan(fixture, report, 'query-seven-cloudflare-error', {
+      FAKE_START_MARKER: startMarker,
+      FAKE_TRANSPORT_OBSERVATION: observation,
+    })
+
+    expect(result.status).toBe(1)
+    expect(readFailureReport(report)).toMatchObject({
+      failure_domain: 'cloudflare_api',
+      failure_hint: 'none',
+      phase: 'wrangler_execute',
+      query_ordinal: 7,
+      exit_class: 'child_nonzero',
+    })
+    expect(readFileSync(startMarker, 'utf8')).toBe('started\n'.repeat(7))
+    const calls = readFileSync(observation, 'utf8').trim().split('\n')
+      .map((line) => JSON.parse(line) as { transport: string; sql: string; arguments: string[] })
+    expect(calls).toHaveLength(7)
+    expect(calls.filter((call) => call.sql.startsWith('EXPLAIN '))).toHaveLength(3)
+    expect(calls[6].sql).toBe(`EXPLAIN ${thirdStatement};`)
+    expect(calls.every((call) => call.transport === 'command')).toBe(true)
+    expect(calls.every((call) => call.arguments.includes('--command') && !call.arguments.includes('--file'))).toBe(true)
+    expect(calls.every((call) => !call.arguments.includes('apply'))).toBe(true)
+    expect(`${result.stdout}${result.stderr}${readFileSync(report, 'utf8')}`)
+      .not.toMatch(/accounts\/private|private API note|private-account-tag|first private|second private|third private/)
+    expectRawOutputDestroyed(fixture.root)
+  })
+
+  it('rejects an API error envelope with an unknown private key', () => {
+    const fixture = createFixture()
+    const report = join(fixture.root, 'cloudflare-api-extra-key.json')
+    const startMarker = join(fixture.root, 'cloudflare-api-extra-key-starts.txt')
+
+    const result = runPlan(fixture, report, 'cloudflare-api-error-extra-key', {
+      FAKE_START_MARKER: startMarker,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toBe('Migration plan failed; see sanitized failure report.\n')
+    expect(readFailureReport(report)).toEqual({
+      format: 'blogman-migration-failure/v1',
+      state: 'failed',
+      command: 'plan',
+      mode: 'remote',
+      failure_domain: 'wrangler_command',
+      failure_hint: 'none',
+      phase: 'wrangler_execute',
+      query_ordinal: 1,
+      exit_class: 'child_nonzero',
+    })
+    expect(readFileSync(startMarker, 'utf8')).toBe('started\n')
+    expect(`${result.stdout}${result.stderr}${readFileSync(report, 'utf8')}`)
+      .not.toMatch(/accounts\/private|private API note|private-account-tag|private-value/)
+    expectRawOutputDestroyed(fixture.root)
   })
 
   it('removes the reserved report on success and never overwrites an existing path', () => {

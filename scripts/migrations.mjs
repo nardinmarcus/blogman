@@ -106,11 +106,40 @@ function schemaContractFail(message) {
 
 function classifyChildFailureHint(output) {
   const auth = /\b(unauthorized|forbidden|authentication|api token|oauth|login)\b/i.test(output)
-  const network = /\b(fetch failed|network|econn\w*|etimedout|enotfound|cloudflare api)\b/i.test(output)
+  const network = /\b(fetch failed|network|econn\w*|etimedout|enotfound|dns|socket hang up)\b/i.test(output)
   if (auth && network) return 'ambiguous'
   if (auth) return 'auth'
   if (network) return 'network_api'
   return 'none'
+}
+
+function classifyChildFailureDomain(stdout) {
+  let response
+  try {
+    response = JSON.parse(stdout)
+  } catch {
+    return 'wrangler_command'
+  }
+  if (!response || typeof response !== 'object' || Array.isArray(response)
+    || Object.keys(response).length !== 1 || !Object.hasOwn(response, 'error')
+    || !response.error || typeof response.error !== 'object' || Array.isArray(response.error)
+    || typeof response.error.text !== 'string') {
+    return 'wrangler_command'
+  }
+  const knownErrorKeys = new Set([
+    'name', 'text', 'notes', 'location', 'kind', 'code', 'accountTag',
+  ])
+  if (Object.keys(response.error).some((key) => !knownErrorKeys.has(key))) {
+    return 'wrangler_command'
+  }
+  if (response.error.text === 'Received a malformed response from the API') {
+    return 'malformed_response'
+  }
+  if (response.error.name === 'APIError'
+    && /^A request to the Cloudflare API \([^\r\n()]+\) failed\.$/.test(response.error.text)) {
+    return 'cloudflare_api'
+  }
+  return 'wrangler_command'
 }
 
 function destroyPrivateTree(path) {
@@ -550,7 +579,7 @@ function createD1Client(options, failureReporter) {
       }
       if (result.status !== 0) {
         throw classifiedFailure(stderr || stdout || 'Wrangler command failed', {
-          failureDomain: 'wrangler_command',
+          failureDomain: classifyChildFailureDomain(stdout),
           failureHint: classifyChildFailureHint(`${stdout}\n${stderr}`),
           phase: 'wrangler_execute',
           queryOrdinal,
@@ -574,7 +603,7 @@ function createD1Client(options, failureReporter) {
         } catch {}
         if (response?.error?.text) {
           throw classifiedFailure(response.error.text, {
-            failureDomain: 'wrangler_command',
+            failureDomain: classifyChildFailureDomain(stdout),
             failureHint: classifyChildFailureHint(response.error.text),
             phase: 'wrangler_execute',
             queryOrdinal,
