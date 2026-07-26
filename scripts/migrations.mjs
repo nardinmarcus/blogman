@@ -636,9 +636,14 @@ function createD1Client(options, failureReporter) {
     }
   }
 
+  function executeQuery(sql) {
+    if (options.mode === '--remote') return execute(['--command', sql])
+    return executeFile(sql)
+  }
+
   return {
     query(sql) {
-      const response = decodeResponse(executeFile(sql))
+      const response = decodeResponse(executeQuery(sql))
       return response.flatMap((statement) => statement.results ?? [])
     },
     executeBatch(sql) {
@@ -648,7 +653,7 @@ function createD1Client(options, failureReporter) {
       const statements = validateReadOnlySidecarQueries(sql, context, singleStatement)
       try {
         for (const statement of statements) {
-          const explainResponse = decodeResponse(executeFile(`EXPLAIN ${statement};`))
+          const explainResponse = decodeResponse(executeQuery(`EXPLAIN ${statement};`))
           const writeOpcode = explainResponse
             .flatMap((result) => result.results ?? [])
             .find((row) => persistentWriteOpcodes.has(row.opcode))
@@ -657,7 +662,7 @@ function createD1Client(options, failureReporter) {
           }
         }
         return statements.flatMap((statement) => {
-          const response = decodeResponse(executeFile(`${statement};`))
+          const response = decodeResponse(executeQuery(`${statement};`))
           return response.flatMap((result) => result.results ?? [])
         })
       } catch (error) {

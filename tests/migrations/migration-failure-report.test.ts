@@ -32,7 +32,7 @@ function createFixture(withBaseline = false, privateTimeoutMs = 300_000) {
     )
   }
   writeFileSync(wrangler, `#!/usr/bin/env node
-import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
 const mode = process.env.FAKE_WRANGLER_MODE
 if (process.env.FAKE_START_MARKER) appendFileSync(process.env.FAKE_START_MARKER, 'started\\n')
@@ -83,8 +83,29 @@ if (mode === 'missing-results') {
   process.stdout.write(JSON.stringify([{}]))
   process.exit(0)
 }
+const hadApplyWrite = mode === 'apply-stop-after-write'
+  && process.env.FAKE_APPLY_STATE
+  && existsSync(process.env.FAKE_APPLY_STATE)
 const fileIndex = process.argv.indexOf('--file')
-const sql = readFileSync(process.argv[fileIndex + 1], 'utf8')
+const commandIndex = process.argv.indexOf('--command')
+const transport = commandIndex >= 0 ? 'command' : 'file'
+const sql = commandIndex >= 0
+  ? process.argv[commandIndex + 1]
+  : readFileSync(process.argv[fileIndex + 1], 'utf8')
+if (process.env.FAKE_TRANSPORT_OBSERVATION) {
+  appendFileSync(process.env.FAKE_TRANSPORT_OBSERVATION, JSON.stringify({
+    transport,
+    sql,
+    arguments: process.argv.slice(2),
+  }) + '\\n')
+}
+if (hadApplyWrite) {
+  process.stderr.write('stop after first write')
+  process.exit(1)
+}
+if (mode === 'apply-stop-after-write' && transport === 'file' && process.env.FAKE_APPLY_STATE) {
+  writeFileSync(process.env.FAKE_APPLY_STATE, 'written')
+}
 const emit = (value) => {
   if (!process.env.FAKE_REQUIRE_LOG_LEVEL || process.env.WRANGLER_LOG === 'log') {
     process.stdout.write(value)
@@ -93,7 +114,7 @@ const emit = (value) => {
 if (sql.includes("WHERE lower(name) IN")) {
   emit(JSON.stringify([{ results: [{ count: 0 }] }]))
 } else if (sql.includes("name NOT LIKE 'sqlite_%'")) {
-  emit(JSON.stringify([{ results: [{ count: mode === 'schema-contract' ? 1 : 0 }] }]))
+  emit(JSON.stringify([{ results: [{ count: ['schema-contract', 'business-schema'].includes(mode) ? 1 : 0 }] }]))
 } else if (mode === 'schema-contract') {
   emit(JSON.stringify([{ results: [{ issue: 'sensitive schema detail' }] }]))
 } else {
@@ -147,6 +168,30 @@ function runPlainPlan(fixture: ReturnType<typeof createFixture>, mode: string) {
   })
 }
 
+function runApply(
+  fixture: ReturnType<typeof createFixture>,
+  mode: string,
+  environment: Record<string, string> = {},
+) {
+  return spawnSync(process.execPath, [
+    fixture.runner,
+    'apply',
+    '--candidate',
+    'transport-regression',
+    '--database',
+    'DB',
+    '--remote',
+    '--config',
+    join(fixture.root, 'wrangler.toml'),
+    '--migrations-dir',
+    fixture.migrations,
+  ], {
+    cwd: fixture.root,
+    encoding: 'utf8',
+    env: { ...process.env, NODE_ENV: 'test', FAKE_WRANGLER_MODE: mode, ...environment },
+  })
+}
+
 function readFailureReport(report: string) {
   const parsed = JSON.parse(readFileSync(report, 'utf8')) as Record<string, unknown>
   expect(Object.keys(parsed).sort()).toEqual([
@@ -174,6 +219,52 @@ afterEach(() => {
 })
 
 describe('remote migration plan failure reports', () => {
+  it('sends every remote plan read through Wrangler command transport', () => {
+    const fixture = createFixture(true)
+    const report = join(fixture.root, 'command-transport-success.json')
+    const observation = join(fixture.root, 'command-transport-argv.jsonl')
+    const result = runPlan(fixture, report, 'business-schema', {
+      FAKE_TRANSPORT_OBSERVATION: observation,
+    })
+
+    expect(result.status).toBe(0)
+    const calls = readFileSync(observation, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { transport: string; sql: string; arguments: string[] })
+    expect(calls.length).toBeGreaterThan(0)
+    for (const call of calls) {
+      expect(call.transport).toBe('command')
+      expect(call.arguments).toContain('--command')
+      expect(call.arguments).not.toContain('--file')
+    }
+    expect(calls.some((call) => call.sql.startsWith('EXPLAIN '))).toBe(true)
+    expect(calls.some((call) => call.sql.includes("SELECT 'sensitive schema detail' AS issue"))).toBe(true)
+  })
+
+  it('keeps a remote apply write batch on file transport and does not retry it', () => {
+    const fixture = createFixture()
+    const observation = join(fixture.root, 'apply-transport-argv.jsonl')
+    const applyState = join(fixture.root, 'apply-state')
+    const result = runApply(fixture, 'apply-stop-after-write', {
+      FAKE_TRANSPORT_OBSERVATION: observation,
+      FAKE_APPLY_STATE: applyState,
+    })
+
+    expect(result.status).toBe(1)
+    const calls = readFileSync(observation, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { transport: string; sql: string; arguments: string[] })
+    const writes = calls.filter((call) => call.transport === 'file')
+    expect(writes).toHaveLength(1)
+    expect(writes[0].arguments).toContain('--file')
+    expect(writes[0].arguments).not.toContain('--command')
+    expect(writes[0].sql).toContain('CREATE TABLE migration_ledger')
+    expect(writes[0].sql).toContain('CREATE TABLE sample')
+    expect(calls.filter((call) => call.transport === 'command').length).toBeGreaterThan(0)
+  })
+
   it.each(['error', 'none'])('forces private Wrangler JSON output when the parent log level is %s', (parentLogLevel) => {
     const fixture = createFixture()
     const report = join(fixture.root, `${parentLogLevel}-success.json`)
