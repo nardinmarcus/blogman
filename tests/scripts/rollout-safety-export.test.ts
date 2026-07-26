@@ -56,9 +56,18 @@ if ((fstatSync(1).mode & 0o777) !== 0o600
   || (statSync(process.env.WRANGLER_LOG_PATH).mode & 0o777) !== 0o600
   || (statSync(output).mode & 0o777) !== 0o600) process.exit(9)
 writeFileSync(process.env.WRANGLER_LOG_PATH, 'https://debug.example/export?raw_token=debug-secret\\n')
-if (mode === 'child-failure') {
+if (mode.endsWith('-failure')) {
+  const raw = {
+    'auth-failure': 'Unauthorized API token=auth-secret',
+    'network-failure': 'fetch failed ECONNRESET https://api.cloudflare.example/private',
+    'remote-failure': 'Cloudflare API request failed with code 7500 invalid request body',
+    'unknown-failure': 'opaque child rejection private-detail',
+    'mixed-failure': 'Unauthorized API token and fetch failed ECONNRESET',
+    'auth-remote-failure': 'Unauthorized API token and Cloudflare API request failed',
+    'network-remote-failure': 'fetch failed ECONNRESET and Cloudflare API request failed',
+  }[mode]
   process.stdout.write('https://signed.example/export?token=failed-child-secret\\n')
-  process.stderr.write('failed-child-raw-response\\n')
+  process.stderr.write(raw + '\\n')
   process.exit(7)
 }
 if (mode === 'empty') writeFileSync(output, '')
@@ -99,14 +108,15 @@ if (mode === 'timeout') setInterval(() => {}, 60_000)
   writeFileSync(harness, `
 import { capturePrivateD1Export, disposePrivateD1Export } from ${JSON.stringify(rolloutSafetyUrl)}
 try {
+  const spawnError = process.argv[2] === 'spawn-error'
   const report = process.argv[2] === 'dispose'
     ? disposePrivateD1Export({ runRoot: process.argv[3] })
     : capturePrivateD1Export({
         runRoot: process.argv[3],
         database: 'DB',
         config: '/private/wrangler.toml',
-        command: process.execPath,
-        commandArgsPrefix: [process.argv[4], process.argv[2], process.argv[5], process.argv[6], process.argv[7]],
+        command: spawnError ? '/definitely-missing-blogman-wrangler' : process.execPath,
+        commandArgsPrefix: spawnError ? [] : [process.argv[4], process.argv[2], process.argv[5], process.argv[6], process.argv[7]],
         ...(process.argv[8] ? { timeoutMs: Number(process.argv[8]) } : {}),
       })
   process.stdout.write(JSON.stringify(report) + '\\n')
@@ -169,6 +179,65 @@ afterEach(() => {
 })
 
 describe('private D1 export capture', () => {
+  it.each([
+    ['auth-failure', 'auth'],
+    ['network-failure', 'network'],
+    ['remote-failure', 'remote_api_or_cli_rejection'],
+    ['unknown-failure', 'unknown'],
+    ['mixed-failure', 'unknown'],
+    ['auth-remote-failure', 'unknown'],
+    ['network-remote-failure', 'unknown'],
+  ])('classifies %s with a fixed safe failure contract', (mode, hint) => {
+    const fixture = createFixture()
+    const runRoot = join(fixture.directory, `run-${mode}`)
+
+    const result = runExport(fixture, runRoot, mode)
+
+    expect(result.status).not.toBe(0)
+    expect(`${result.stdout}${result.stderr}`).not.toMatch(
+      /signed\.example|token=|ECONNRESET|cloudflare\.example|invalid request body|private-detail|debug-secret/,
+    )
+    expect(JSON.parse(readFileSync(join(runRoot, 'export-report.json'), 'utf8'))).toEqual({
+      format: 'blogman-d1-private-export/v1',
+      state: 'failed',
+      attempt_count: 1,
+      failure: {
+        phase: 'wrangler_export',
+        exit_class: 'child_nonzero',
+        hint,
+      },
+    })
+    expect(readdirSync(join(runRoot, 'private'))).toEqual([])
+    expect(existsSync(join(runRoot, 'backup', 'regular-tables.sql'))).toBe(false)
+    expect(readFileSync(fixture.counter, 'utf8')).toBe('1')
+    const retained = allFiles(runRoot).map((path) => readFileSync(path, 'utf8')).join('\n')
+    expect(retained).not.toMatch(/signed\.example|token=|ECONNRESET|cloudflare\.example|invalid request body|private-detail|debug-secret/)
+  })
+
+  it('classifies a child that cannot start without exposing spawn details', () => {
+    const fixture = createFixture()
+    const runRoot = join(fixture.directory, 'run-spawn-error')
+
+    const result = runExport(fixture, runRoot, 'spawn-error')
+
+    expect(result.status).not.toBe(0)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toBe('Private D1 export subprocess failed\n')
+    expect(JSON.parse(readFileSync(join(runRoot, 'export-report.json'), 'utf8'))).toEqual({
+      format: 'blogman-d1-private-export/v1',
+      state: 'failed',
+      attempt_count: 1,
+      failure: {
+        phase: 'wrangler_export',
+        exit_class: 'spawn_error',
+        hint: 'unknown',
+      },
+    })
+    expect(readdirSync(join(runRoot, 'private'))).toEqual([])
+    expect(existsSync(join(runRoot, 'backup', 'regular-tables.sql'))).toBe(false)
+    expect(existsSync(fixture.counter)).toBe(false)
+  })
+
   it('prevents signed URLs and raw Wrangler responses from reaching parent output', () => {
     const fixture = createFixture()
     const runRoot = join(fixture.directory, 'run-r1')
@@ -191,7 +260,6 @@ describe('private D1 export capture', () => {
   })
 
   it.each([
-    'child-failure',
     'empty',
     'malformed',
     'wrong-schema',
@@ -306,6 +374,11 @@ describe('private D1 export capture', () => {
       format: 'blogman-d1-private-export/v1',
       state: 'failed',
       attempt_count: 1,
+      failure: {
+        phase: 'wrangler_export',
+        exit_class: 'timeout',
+        hint: 'timeout',
+      },
     })
     expect(readdirSync(join(runRoot, 'private'))).toEqual([])
     expect(existsSync(join(runRoot, 'backup', 'regular-tables.sql'))).toBe(false)

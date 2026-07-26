@@ -535,6 +535,33 @@ function writeExportReport(path, report) {
   writeFileSync(path, `${JSON.stringify(report)}\n`, { flag: 'w', mode: 0o600 })
 }
 
+function classifyPrivateExportFailure(result, paths) {
+  if (result.error?.code === 'ETIMEDOUT') {
+    return { phase: 'wrangler_export', exit_class: 'timeout', hint: 'timeout' }
+  }
+  if (result.error) {
+    return { phase: 'wrangler_export', exit_class: 'spawn_error', hint: 'unknown' }
+  }
+  if (result.signal) {
+    return { phase: 'wrangler_export', exit_class: 'signal', hint: 'unknown' }
+  }
+
+  let raw = ''
+  try {
+    raw = paths.map((path) => readFileSync(path, 'utf8')).join('\n')
+  } catch {}
+  let hint = 'unknown'
+  const auth = /\b(unauthorized|forbidden|authentication|api token|oauth|login)\b/i.test(raw)
+  const network = /\b(fetch failed|network|econn\w*|etimedout|enotfound|dns|socket hang up)\b/i.test(raw)
+  const remoteRejection = /\b(cloudflare api|api request failed|invalid request|request rejected|error code \d+|wrangler error)\b/i.test(raw)
+  if ([auth, network, remoteRejection].filter(Boolean).length === 1) {
+    if (auth) hint = 'auth'
+    else if (network) hint = 'network'
+    else hint = 'remote_api_or_cli_rejection'
+  }
+  return { phase: 'wrangler_export', exit_class: 'child_nonzero', hint }
+}
+
 function runPrivately(command, args, {
   stdin = 'ignore',
   stdoutPath,
@@ -713,6 +740,7 @@ export function capturePrivateD1Export({
   })
 
   let captured = false
+  let failure = null
   try {
     writeFileSync(sqlPath, '', { flag: 'wx', mode: 0o600 })
     writeFileSync(debugPath, '', { flag: 'wx', mode: 0o600 })
@@ -732,7 +760,10 @@ export function capturePrivateD1Export({
     if (!debug.isFile() || (debug.mode & 0o777) !== 0o600) {
       fail('Private D1 export debug log permissions are not 0600')
     }
-    if (result.status !== 0) fail('Private D1 export subprocess failed')
+    if (result.error || result.signal || result.status !== 0) {
+      failure = classifyPrivateExportFailure(result, [stdoutPath, stderrPath, debugPath])
+      fail('Private D1 export subprocess failed')
+    }
     const sql = statSync(sqlPath)
     if (!sql.isFile() || sql.size === 0) fail('Private D1 export did not create non-empty SQL')
     if ((sql.mode & 0o777) !== 0o600) fail('Private D1 export SQL permissions are not 0600')
@@ -756,6 +787,7 @@ export function capturePrivateD1Export({
       format: 'blogman-d1-private-export/v1',
       state: 'failed',
       attempt_count: 1,
+      ...(failure ? { failure } : {}),
     })
     throw error
   } finally {
