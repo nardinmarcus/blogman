@@ -33,7 +33,7 @@ function createFixture(withBaseline = false, privateTimeoutMs = 300_000) {
   }
   writeFileSync(wrangler, `#!/usr/bin/env node
 import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { basename, dirname } from 'node:path'
 const mode = process.env.FAKE_WRANGLER_MODE
 if (process.env.FAKE_START_MARKER) appendFileSync(process.env.FAKE_START_MARKER, 'started\\n')
 if (process.env.WRANGLER_LOG_PATH?.includes('.migration-plan-raw-')) {
@@ -45,6 +45,13 @@ if (process.env.WRANGLER_LOG_PATH?.includes('.migration-plan-raw-')) {
   if (permissions.some((value) => value !== 0o600)) process.exit(97)
   if ((statSync(dirname(process.env.WRANGLER_LOG_PATH)).mode & 0o777) !== 0o700) process.exit(98)
   writeFileSync(process.env.WRANGLER_LOG_PATH, 'secret debug URL and credential')
+  if (process.env.FAKE_ENV_OBSERVATION) {
+    writeFileSync(process.env.FAKE_ENV_OBSERVATION, JSON.stringify({
+      wranglerLog: process.env.WRANGLER_LOG,
+      debugBasename: basename(process.env.WRANGLER_LOG_PATH),
+      debugMode: statSync(process.env.WRANGLER_LOG_PATH).mode & 0o777,
+    }))
+  }
 }
 if (mode === 'timeout') await new Promise((resolve) => setTimeout(resolve, 10_000))
 if (mode === 'signal') process.kill(process.pid, 'SIGTERM')
@@ -78,14 +85,19 @@ if (mode === 'missing-results') {
 }
 const fileIndex = process.argv.indexOf('--file')
 const sql = readFileSync(process.argv[fileIndex + 1], 'utf8')
+const emit = (value) => {
+  if (!process.env.FAKE_REQUIRE_LOG_LEVEL || process.env.WRANGLER_LOG === 'log') {
+    process.stdout.write(value)
+  }
+}
 if (sql.includes("WHERE lower(name) IN")) {
-  process.stdout.write(JSON.stringify([{ results: [{ count: 0 }] }]))
+  emit(JSON.stringify([{ results: [{ count: 0 }] }]))
 } else if (sql.includes("name NOT LIKE 'sqlite_%'")) {
-  process.stdout.write(JSON.stringify([{ results: [{ count: mode === 'schema-contract' ? 1 : 0 }] }]))
+  emit(JSON.stringify([{ results: [{ count: mode === 'schema-contract' ? 1 : 0 }] }]))
 } else if (mode === 'schema-contract') {
-  process.stdout.write(JSON.stringify([{ results: [{ issue: 'sensitive schema detail' }] }]))
+  emit(JSON.stringify([{ results: [{ issue: 'sensitive schema detail' }] }]))
 } else {
-  process.stdout.write(JSON.stringify([{ results: [] }]))
+  emit(JSON.stringify([{ results: [] }]))
 }
 `)
   chmodSync(wrangler, 0o755)
@@ -162,6 +174,45 @@ afterEach(() => {
 })
 
 describe('remote migration plan failure reports', () => {
+  it.each(['error', 'none'])('forces private Wrangler JSON output when the parent log level is %s', (parentLogLevel) => {
+    const fixture = createFixture()
+    const report = join(fixture.root, `${parentLogLevel}-success.json`)
+    const observation = join(fixture.root, `${parentLogLevel}-child-env.json`)
+    const result = runPlan(fixture, report, 'success', {
+      WRANGLER_LOG: parentLogLevel,
+      FAKE_REQUIRE_LOG_LEVEL: '1',
+      FAKE_ENV_OBSERVATION: observation,
+    })
+
+    expect(result.status).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ state: 'pending' })
+    expect(existsSync(report)).toBe(false)
+    expect(JSON.parse(readFileSync(observation, 'utf8'))).toEqual({
+      wranglerLog: 'log',
+      debugBasename: 'wrangler-debug.log',
+      debugMode: 0o600,
+    })
+    expectRawOutputDestroyed(fixture.root)
+  })
+
+  it('uses and destroys a private mode-0600 debug log after child failure', () => {
+    const fixture = createFixture()
+    const report = join(fixture.root, 'debug-log-child-failure.json')
+    const observation = join(fixture.root, 'debug-log-child-failure-env.json')
+    const result = runPlan(fixture, report, 'child-nonzero', {
+      WRANGLER_LOG: 'none',
+      FAKE_ENV_OBSERVATION: observation,
+    })
+
+    expect(result.status).toBe(1)
+    expect(JSON.parse(readFileSync(observation, 'utf8'))).toEqual({
+      wranglerLog: 'log',
+      debugBasename: 'wrangler-debug.log',
+      debugMode: 0o600,
+    })
+    expectRawOutputDestroyed(fixture.root)
+  })
+
   it('classifies schema contract failures without retaining schema details', () => {
     const fixture = createFixture(true)
     const report = join(fixture.root, 'schema-failure.json')

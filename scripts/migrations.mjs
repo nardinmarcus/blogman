@@ -209,7 +209,7 @@ function createFailureReporter(options) {
         chmodSync(rawDirectory, 0o700)
         const stdoutPath = join(rawDirectory, 'wrangler.stdout')
         const stderrPath = join(rawDirectory, 'wrangler.stderr')
-        const debugPath = join(rawDirectory, 'wrangler.debug')
+        const debugPath = join(rawDirectory, 'wrangler-debug.log')
         for (const path of [stdoutPath, stderrPath, debugPath]) {
           let file = null
           try {
@@ -226,7 +226,7 @@ function createFailureReporter(options) {
           stderrDescriptor = openSync(stderrPath, 'r+')
           const result = spawnSync(executable, arguments_, {
             ...spawnOptions,
-            env: { ...process.env, WRANGLER_LOG_PATH: debugPath },
+            env: { ...process.env, WRANGLER_LOG: 'log', WRANGLER_LOG_PATH: debugPath },
             stdio: ['ignore', stdoutDescriptor, stderrDescriptor],
             timeout,
             killSignal: 'SIGKILL',
