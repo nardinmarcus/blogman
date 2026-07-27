@@ -42,6 +42,39 @@ const persistentWriteOpcodes = new Set([
   'Vacuum',
 ])
 const privatePlanTimeoutMs = 300_000
+const remoteBaselineReplacementContracts = new Map([
+  ['001:001_initial_schema', {
+    migrationNumber: 1,
+    migrationName: '001_initial_schema',
+    baselineSha256: 'b3f61982cc36ff2c88d7b4330dd304ef075b5c5c34debf4499671c33ae2b6540',
+    statementOrdinal: 3,
+    statementSha256: 'c61b390568cafc468c6adbbff5b78d08dd5d18a544d917fbc06c043393e3c7bd',
+    replacementSha256: 'a3d4834018b7124c27ba82231c95239ce0092cd44a3b3959aec060b86accde28',
+    replacementStatementCount: 3,
+  }],
+])
+const remoteBaselineFingerprintSql = `
+SELECT type, name, tbl_name, coalesce(sql, '') AS sql
+FROM sqlite_schema
+WHERE name NOT LIKE 'sqlite_%'
+  AND name NOT LIKE '_cf_%'
+ORDER BY type, name, tbl_name, sql
+`
+const remoteBaselineIssueAllowlist = new Set(Object.entries({
+  ai_provider_profiles: [
+    'id', 'name', 'provider', 'provider_name', 'provider_type', 'provider_category',
+    'api_key_url', 'base_url', 'model', 'temperature', 'max_tokens', 'api_key_encrypted',
+    'api_key_masked', 'is_default', 'created_at', 'updated_at',
+  ],
+  ai_post_generators: [
+    'id', 'target_key', 'label', 'description', 'prompt', 'provider_mode', 'text_profile_id',
+    'image_profile_id', 'workers_model', 'temperature', 'max_tokens', 'aspect_ratio',
+    'resolution', 'is_enabled', 'is_builtin', 'created_at', 'updated_at',
+  ],
+  api_tokens: ['id', 'token', 'name', 'created_at', 'last_used_at', 'is_active'],
+}).flatMap(([table, columns]) => (
+  columns.map((column) => `column ${table}.${column} semantic drift`)
+)))
 const ledgerSchemaObjects = [
   {
     type: 'table',
@@ -89,6 +122,10 @@ function fail(message) {
   throw new Error(message)
 }
 
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex')
+}
+
 function classifiedFailure(message, details) {
   const error = new Error(message)
   error.failureDetails = details
@@ -100,6 +137,15 @@ function schemaContractFail(message) {
     failureDomain: 'schema_contract',
     failureHint: 'none',
     phase: 'schema_validation',
+    exitClass: 'runner_error',
+  })
+}
+
+function remoteBaselineContractFail(message) {
+  throw classifiedFailure(message, {
+    failureDomain: 'schema_contract',
+    failureHint: 'none',
+    phase: 'runner_initialization',
     exitClass: 'runner_error',
   })
 }
@@ -177,6 +223,52 @@ function destroyPrivateTree(path) {
   if (failure || existsSync(path)) fail('Private Wrangler output cleanup failed')
 }
 
+function runPrivateWrangler(executable, arguments_, spawnOptions, rawParent, timeout) {
+  const rawDirectory = mkdtempSync(join(rawParent, '.migration-plan-raw-'))
+  try {
+    chmodSync(rawDirectory, 0o700)
+    const stdoutPath = join(rawDirectory, 'wrangler.stdout')
+    const stderrPath = join(rawDirectory, 'wrangler.stderr')
+    const debugPath = join(rawDirectory, 'wrangler-debug.log')
+    for (const path of [stdoutPath, stderrPath, debugPath]) {
+      let file = null
+      try {
+        file = openSync(path, 'wx', 0o600)
+        fchmodSync(file, 0o600)
+      } finally {
+        if (file !== null) closeSync(file)
+      }
+    }
+    let stdoutDescriptor = null
+    let stderrDescriptor = null
+    try {
+      stdoutDescriptor = openSync(stdoutPath, 'r+')
+      stderrDescriptor = openSync(stderrPath, 'r+')
+      const result = spawnSync(executable, arguments_, {
+        ...spawnOptions,
+        env: { ...process.env, WRANGLER_LOG: 'log', WRANGLER_LOG_PATH: debugPath },
+        stdio: ['ignore', stdoutDescriptor, stderrDescriptor],
+        timeout,
+        killSignal: 'SIGKILL',
+      })
+      closeSync(stdoutDescriptor)
+      stdoutDescriptor = null
+      closeSync(stderrDescriptor)
+      stderrDescriptor = null
+      return {
+        ...result,
+        stdout: readFileSync(stdoutPath, 'utf8'),
+        stderr: readFileSync(stderrPath, 'utf8'),
+      }
+    } finally {
+      if (stdoutDescriptor !== null) closeSync(stdoutDescriptor)
+      if (stderrDescriptor !== null) closeSync(stderrDescriptor)
+    }
+  } finally {
+    destroyPrivateTree(rawDirectory)
+  }
+}
+
 function createFailureReporter(options) {
   if (!options.failureReport) return null
   let descriptor = null
@@ -233,49 +325,7 @@ function createFailureReporter(options) {
       queryOrdinal = value
     },
     runWrangler(executable, arguments_, spawnOptions) {
-      const rawDirectory = mkdtempSync(join(rawParent, '.migration-plan-raw-'))
-      try {
-        chmodSync(rawDirectory, 0o700)
-        const stdoutPath = join(rawDirectory, 'wrangler.stdout')
-        const stderrPath = join(rawDirectory, 'wrangler.stderr')
-        const debugPath = join(rawDirectory, 'wrangler-debug.log')
-        for (const path of [stdoutPath, stderrPath, debugPath]) {
-          let file = null
-          try {
-            file = openSync(path, 'wx', 0o600)
-            fchmodSync(file, 0o600)
-          } finally {
-            if (file !== null) closeSync(file)
-          }
-        }
-        let stdoutDescriptor = null
-        let stderrDescriptor = null
-        try {
-          stdoutDescriptor = openSync(stdoutPath, 'r+')
-          stderrDescriptor = openSync(stderrPath, 'r+')
-          const result = spawnSync(executable, arguments_, {
-            ...spawnOptions,
-            env: { ...process.env, WRANGLER_LOG: 'log', WRANGLER_LOG_PATH: debugPath },
-            stdio: ['ignore', stdoutDescriptor, stderrDescriptor],
-            timeout,
-            killSignal: 'SIGKILL',
-          })
-          closeSync(stdoutDescriptor)
-          stdoutDescriptor = null
-          closeSync(stderrDescriptor)
-          stderrDescriptor = null
-          return {
-            ...result,
-            stdout: readFileSync(stdoutPath, 'utf8'),
-            stderr: readFileSync(stderrPath, 'utf8'),
-          }
-        } finally {
-          if (stdoutDescriptor !== null) closeSync(stdoutDescriptor)
-          if (stderrDescriptor !== null) closeSync(stderrDescriptor)
-        }
-      } finally {
-        destroyPrivateTree(rawDirectory)
-      }
+      return runPrivateWrangler(executable, arguments_, spawnOptions, rawParent, timeout)
     },
     record(error) {
       if (descriptor === null) return
@@ -404,6 +454,82 @@ function validateReadOnlySidecarQueries(source, context, singleStatement = false
   return statements
 }
 
+function loadRemoteBaselineReplacement({
+  migrationNumber,
+  migrationName,
+  migrationPath,
+  baselineSql,
+  mode,
+}) {
+  const contract = remoteBaselineReplacementContracts.get(
+    `${String(migrationNumber).padStart(3, '0')}:${migrationName}`,
+  )
+  if (!contract) {
+    const matchingSource = [...remoteBaselineReplacementContracts.values()].find((candidate) => (
+      baselineSql !== null && sha256(baselineSql) === candidate.baselineSha256
+    ))
+    if (matchingSource && mode === '--remote') {
+      remoteBaselineContractFail(`Remote baseline replacement migration identity drift in ${migrationName}`)
+    }
+    return null
+  }
+
+  const replacementPath = migrationPath.replace(/\.sql$/, '.remote.baseline.sql')
+  let source = null
+  try {
+    source = readFileSync(replacementPath, 'utf8')
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+  }
+  if (source === null && mode !== '--remote') return null
+  if (source === null) {
+    remoteBaselineContractFail(`Remote baseline replacement is required for ${migrationName}`)
+  }
+  if (migrationNumber !== contract.migrationNumber || migrationName !== contract.migrationName) {
+    remoteBaselineContractFail(`Remote baseline replacement migration identity drift in ${migrationName}`)
+  }
+  if (baselineSql === null || sha256(baselineSql) !== contract.baselineSha256) {
+    remoteBaselineContractFail(`Remote baseline replacement source drift in ${migrationName}`)
+  }
+
+  const baselineStatements = validateReadOnlySidecarQueries(
+    baselineSql,
+    `Migration baseline ${migrationName}`,
+  )
+  const sourceStatement = baselineStatements[contract.statementOrdinal - 1]
+  if (!sourceStatement || sha256(sourceStatement) !== contract.statementSha256) {
+    remoteBaselineContractFail(`Remote baseline replacement statement drift in ${migrationName}`)
+  }
+  if (sha256(source) !== contract.replacementSha256) {
+    remoteBaselineContractFail(`Remote baseline replacement content drift in ${migrationName}`)
+  }
+
+  const lineEnd = source.indexOf('\n')
+  const expectedHeader = [
+    '-- migration-remote-baseline-replacement:',
+    `migration_number=${String(contract.migrationNumber).padStart(3, '0')}`,
+    `migration=${contract.migrationName}`,
+    `baseline_sha256=${contract.baselineSha256}`,
+    `statement_ordinal=${contract.statementOrdinal}`,
+    `statement_sha256=${contract.statementSha256}`,
+  ].join(' ')
+  if (lineEnd === -1 || source.slice(0, lineEnd).trim() !== expectedHeader) {
+    remoteBaselineContractFail(`Remote baseline replacement header drift in ${migrationName}`)
+  }
+  const statements = validateReadOnlySidecarQueries(
+    source.slice(lineEnd + 1),
+    `Remote baseline replacement ${migrationName}`,
+  )
+  if (statements.length !== contract.replacementStatementCount) {
+    remoteBaselineContractFail(`Remote baseline replacement statement count drift in ${migrationName}`)
+  }
+  return {
+    sourceStatementOrdinal: contract.statementOrdinal,
+    sourceStatementSha256: contract.statementSha256,
+    statements,
+  }
+}
+
 function parseArguments(argv) {
   const [command, ...tokens] = argv
   if (!['catalog', 'plan', 'apply', 'status', 'verify'].includes(command)) {
@@ -460,8 +586,9 @@ function parseArguments(argv) {
   return options
 }
 
-function loadMigrations(directory) {
-  const fileNames = readdirSync(directory)
+function loadMigrations(directory, mode = null) {
+  const directoryEntries = readdirSync(directory)
+  const fileNames = directoryEntries
     .filter((name) => (
       name.endsWith('.sql')
       && !name.endsWith('.baseline.sql')
@@ -469,6 +596,18 @@ function loadMigrations(directory) {
     ))
     .sort()
   if (fileNames.length === 0) fail(`No migrations found in ${directory}`)
+
+  for (const replacementName of directoryEntries.filter((name) => (
+    name.endsWith('.remote.baseline.sql')
+  ))) {
+    const mainName = replacementName.replace(/\.remote\.baseline\.sql$/, '')
+    const match = /^(\d{3})_([a-z0-9_]+)$/.exec(mainName)
+    const key = match ? `${match[1]}:${mainName}` : null
+    if (!key || !remoteBaselineReplacementContracts.has(key)
+      || !fileNames.includes(`${mainName}.sql`)) {
+      remoteBaselineContractFail(`Unknown remote baseline replacement: ${replacementName}`)
+    }
+  }
 
   return fileNames.map((fileName, index) => {
     const match = /^(\d{3})_([a-z0-9_]+)\.sql$/.exec(fileName)
@@ -480,6 +619,7 @@ function loadMigrations(directory) {
       fail(`Migration sequence must be contiguous: expected ${String(expectedNumber).padStart(3, '0')}, found ${match[1]}`)
     }
 
+    const name = fileName.replace(/\.sql$/, '')
     const path = join(directory, fileName)
     const sql = readFileSync(path, 'utf8')
     const baselinePath = path.replace(/\.sql$/, '.baseline.sql')
@@ -513,13 +653,21 @@ function loadMigrations(directory) {
       .update(baselineSql === null ? '' : `\0${baselineSql}`)
     if (preflightSql !== null) checksum.update(`\0preflight\0${preflightSql}`)
     if (dataModuleSource !== null) checksum.update(`\0data\0${dataModuleSource}`)
+    const remoteBaselineReplacement = loadRemoteBaselineReplacement({
+      migrationNumber: number,
+      migrationName: name,
+      migrationPath: path,
+      baselineSql,
+      mode,
+    })
 
     return {
       number,
-      name: fileName.replace(/\.sql$/, ''),
+      name,
       checksum: checksum.digest('hex'),
       sql,
       baselineSql,
+      remoteBaselineReplacement,
       preflightSql,
       dataModuleSource,
     }
@@ -539,15 +687,23 @@ function createD1Client(options, failureReporter) {
   if (options.persistTo) commonArguments.push('--persist-to', options.persistTo)
   let queryOrdinal = 0
 
-  function execute(arguments_) {
+  function execute(arguments_, privateOutput = false) {
     queryOrdinal += 1
     failureReporter?.setQueryOrdinal(queryOrdinal)
-    if (failureReporter) {
-      const result = failureReporter.runWrangler(
-        defaultWranglerPath,
-        [...commonArguments, ...arguments_],
-        { cwd: repoRoot },
-      )
+    if (failureReporter || privateOutput) {
+      const result = failureReporter
+        ? failureReporter.runWrangler(
+            defaultWranglerPath,
+            [...commonArguments, ...arguments_],
+            { cwd: repoRoot },
+          )
+        : runPrivateWrangler(
+            defaultWranglerPath,
+            [...commonArguments, ...arguments_],
+            { cwd: repoRoot },
+            tmpdir(),
+            privatePlanTimeoutMs,
+          )
       const stdout = result.stdout.trim()
       const stderr = result.stderr.trim()
       if (result.error?.code === 'ETIMEDOUT') {
@@ -578,7 +734,7 @@ function createD1Client(options, failureReporter) {
         })
       }
       if (result.status !== 0) {
-        throw classifiedFailure(stderr || stdout || 'Wrangler command failed', {
+        throw classifiedFailure('Wrangler command failed', {
           failureDomain: classifyChildFailureDomain(stdout),
           failureHint: classifyChildFailureHint(`${stdout}\n${stderr}`),
           phase: 'wrangler_execute',
@@ -665,12 +821,37 @@ function createD1Client(options, failureReporter) {
     }
   }
 
-  function executeQuery(sql) {
-    if (options.mode === '--remote') return execute(['--command', sql])
+  function executeQuery(sql, privateOutput = false) {
+    if (options.mode === '--remote') return execute(['--command', sql], privateOutput)
     return executeFile(sql)
   }
 
+  function queryReadOnly(sql, context, singleStatement = false, privateOutput = false) {
+    const statements = validateReadOnlySidecarQueries(sql, context, singleStatement)
+    try {
+      for (const statement of statements) {
+        const explainResponse = decodeResponse(executeQuery(`EXPLAIN ${statement};`, privateOutput))
+        const writeOpcode = explainResponse
+          .flatMap((result) => result.results ?? [])
+          .find((row) => persistentWriteOpcodes.has(row.opcode))
+        if (writeOpcode) {
+          fail(`${context} must be read-only: SQLite opcode ${writeOpcode.opcode}`)
+        }
+      }
+      return statements.flatMap((statement) => {
+        const response = decodeResponse(executeQuery(`${statement};`, privateOutput))
+        return response.flatMap((result) => result.results ?? [])
+      })
+    } catch (error) {
+      if (error?.failureDetails) {
+        throw classifiedFailure(`${context} must be read-only: ${error.message}`, error.failureDetails)
+      }
+      fail(`${context} must be read-only: ${error.message}`)
+    }
+  }
+
   return {
+    isRemote: options.mode === '--remote',
     query(sql) {
       const response = decodeResponse(executeQuery(sql))
       return response.flatMap((statement) => statement.results ?? [])
@@ -679,27 +860,10 @@ function createD1Client(options, failureReporter) {
       executeFile(sql)
     },
     queryReadOnly(sql, context, singleStatement = false) {
-      const statements = validateReadOnlySidecarQueries(sql, context, singleStatement)
-      try {
-        for (const statement of statements) {
-          const explainResponse = decodeResponse(executeQuery(`EXPLAIN ${statement};`))
-          const writeOpcode = explainResponse
-            .flatMap((result) => result.results ?? [])
-            .find((row) => persistentWriteOpcodes.has(row.opcode))
-          if (writeOpcode) {
-            fail(`${context} must be read-only: SQLite opcode ${writeOpcode.opcode}`)
-          }
-        }
-        return statements.flatMap((statement) => {
-          const response = decodeResponse(executeQuery(`${statement};`))
-          return response.flatMap((result) => result.results ?? [])
-        })
-      } catch (error) {
-        if (error?.failureDetails) {
-          throw classifiedFailure(`${context} must be read-only: ${error.message}`, error.failureDetails)
-        }
-        fail(`${context} must be read-only: ${error.message}`)
-      }
+      return queryReadOnly(sql, context, singleStatement)
+    },
+    queryPrivateReadOnly(sql, context, singleStatement = false) {
+      return queryReadOnly(sql, context, singleStatement, true)
     },
   }
 }
@@ -809,15 +973,80 @@ function sameIssues(actual, expected) {
     && actual.every((issue, index) => issue === expected[index])
 }
 
+function readRemoteBaselineFingerprint(client, context) {
+  const rows = client.queryPrivateReadOnly(remoteBaselineFingerprintSql, context, true)
+  const normalized = rows.map((row) => {
+    if (!row || typeof row !== 'object'
+      || Object.keys(row).sort().join(',') !== 'name,sql,tbl_name,type'
+      || typeof row.type !== 'string'
+      || typeof row.name !== 'string'
+      || typeof row.tbl_name !== 'string'
+      || typeof row.sql !== 'string') {
+      schemaContractFail('Remote baseline schema fingerprint response is invalid')
+    }
+    return [row.type, row.name, row.tbl_name, row.sql]
+  })
+  return sha256(JSON.stringify(normalized))
+}
+
+function validateRemoteBaselineIssueRows(rows, migrationName) {
+  for (const row of rows) {
+    if (!row || typeof row !== 'object'
+      || Object.keys(row).length !== 1
+      || !Object.hasOwn(row, 'issue')
+      || typeof row.issue !== 'string'
+      || !remoteBaselineIssueAllowlist.has(row.issue)) {
+      schemaContractFail(`Remote baseline replacement response is invalid in ${migrationName}`)
+    }
+  }
+}
+
+function readCanonicalBaselineIssues(client, migration) {
+  const context = `Migration baseline ${migration.name}`
+  const replacement = client.isRemote ? migration.remoteBaselineReplacement : null
+  if (!replacement) return client.queryReadOnly(migration.baselineSql, context)
+
+  const sourceStatements = validateReadOnlySidecarQueries(migration.baselineSql, context)
+  const sourceStatement = sourceStatements[replacement.sourceStatementOrdinal - 1]
+  if (!sourceStatement || sha256(sourceStatement) !== replacement.sourceStatementSha256) {
+    schemaContractFail(`Remote baseline replacement identity drift in ${migration.name}`)
+  }
+
+  const issues = []
+  for (const [index, statement] of sourceStatements.entries()) {
+    if (index + 1 !== replacement.sourceStatementOrdinal) {
+      issues.push(...client.queryReadOnly(statement, context, true))
+      continue
+    }
+
+    const before = readRemoteBaselineFingerprint(
+      client,
+      `Remote baseline schema fingerprint before ${migration.name}`,
+    )
+    for (const probe of replacement.statements) {
+      const probeIssues = client.queryPrivateReadOnly(
+        probe,
+        `Remote baseline replacement ${migration.name}`,
+        true,
+      )
+      validateRemoteBaselineIssueRows(probeIssues, migration.name)
+      issues.push(...probeIssues)
+    }
+    const after = readRemoteBaselineFingerprint(
+      client,
+      `Remote baseline schema fingerprint after ${migration.name}`,
+    )
+    if (before !== after) schemaContractFail(`Remote baseline schema drift in ${migration.name}`)
+  }
+  return issues
+}
+
 function validateCurrentSchema(client, migrations) {
   const canonical = migrations[0]
   if (!canonical.baselineSql) {
     schemaContractFail(`Existing schema cannot be baselined by migration ${canonical.name}`)
   }
-  const canonicalIssues = client.queryReadOnly(
-    canonical.baselineSql,
-    `Migration baseline ${canonical.name}`,
-  )
+  const canonicalIssues = readCanonicalBaselineIssues(client, canonical)
   const actualIssues = canonicalIssues.map((row) => String(row.issue)).sort()
   const identityFailures = []
   let audited = false
@@ -1014,6 +1243,7 @@ async function applyMigrations(client, migrations, candidate) {
   }
 
   const pending = migrations.slice(pendingStart)
+  for (const migration of pending) validateMigrationPreflight(client, migration)
   if (pending.length === 0 && initializationSql) {
     client.executeBatch(`${schemaFingerprintGuardSql(fingerprint)}\n${initializationSql}`)
     initializationSql = ''
@@ -1043,7 +1273,7 @@ let activeFailureReporter = null
 async function main() {
   const options = parseArguments(process.argv.slice(2))
   activeFailureReporter = createFailureReporter(options)
-  const migrations = loadMigrations(options.migrationsDirectory)
+  const migrations = loadMigrations(options.migrationsDirectory, options.mode)
   if (options.command === 'catalog') {
     process.stdout.write(`${JSON.stringify({
       format: 'blogman-migration-catalog/v1',
@@ -1059,7 +1289,7 @@ async function main() {
   validateLedger(migrations, ledger)
 
   let baselineFirst = false
-  if (options.command === 'plan' || options.command === 'apply') {
+  if (options.command === 'plan') {
     activeFailureReporter?.setPhase('schema_validation')
     baselineFirst = validateBeforeWrites(client, migrations, ledger)
   }
