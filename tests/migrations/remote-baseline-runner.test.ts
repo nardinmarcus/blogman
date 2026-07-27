@@ -62,7 +62,7 @@ appendFileSync(process.env.FAKE_OBSERVATION, JSON.stringify({
   arguments: process.argv.slice(2),
   ...privateModes,
 }) + '\\n')
-const emit = (results) => process.stdout.write(JSON.stringify([{ results }]))
+const emit = (results) => process.stdout.write(JSON.stringify([{ success: true, results }]))
 if (sql.includes("WHERE lower(name) IN")) {
   emit([{ count: 0 }])
 } else if (sql.includes("name NOT LIKE 'sqlite_%'") && sql.includes("migration_ledger%")) {
@@ -72,6 +72,21 @@ if (sql.includes("WHERE lower(name) IN")) {
   && sql.includes("pragma_table_info('" + process.env.FAKE_FAIL_TABLE + "')")) {
   process.stderr.write('private remote failure body')
   process.exit(7)
+} else if (process.env.FAKE_RESPONSE_MODE
+  && !sql.startsWith('EXPLAIN ')
+  && sql.includes("pragma_table_info('ai_provider_profiles')")) {
+  if (process.env.FAKE_RESPONSE_MODE === 'failed') {
+    process.stdout.write(JSON.stringify([{ success: false, results: [] }]))
+  } else if (process.env.FAKE_RESPONSE_MODE === 'unknown') {
+    process.stdout.write(JSON.stringify([{ results: [] }]))
+  } else if (process.env.FAKE_RESPONSE_MODE === 'multiple') {
+    process.stdout.write(JSON.stringify([
+      { success: true, results: [] },
+      { success: true, results: [] },
+    ]))
+  } else if (process.env.FAKE_RESPONSE_MODE === 'malformed') {
+    process.stdout.write('LEAK1234 private malformed response payload')
+  }
 } else if (sql.startsWith('EXPLAIN ')) {
   emit([])
 } else if (sql.includes("coalesce(sql, '') AS sql")) {
@@ -434,6 +449,47 @@ describe('remote baseline replacement runner', () => {
     ))).toBe(false)
     expect(`${result.stdout}${result.stderr}${readFileSync(report, 'utf8')}`)
       .not.toContain('private remote failure body')
+  })
+
+  it.each(['failed', 'unknown', 'multiple'])(
+    'rejects a %s Wrangler success envelope before later probes',
+    (responseMode) => {
+      const fixture = createFixture()
+      const { report, result } = runPlan(fixture, {
+        FAKE_RESPONSE_MODE: responseMode,
+      })
+
+      expect(result.status).toBe(1)
+      expect(readFailure(report)).toMatchObject({
+        failure_domain: 'malformed_response',
+        failure_hint: 'none',
+        phase: 'response_decode',
+        exit_class: 'invalid_shape',
+      })
+      const observed = calls(fixture)
+      expect(observed.some((call) => (
+        call.sql.includes("pragma_table_info('ai_post_generators')")
+      ))).toBe(false)
+      expect(observed.some((call) => call.arguments.includes('--file'))).toBe(false)
+    },
+  )
+
+  it('sanitizes malformed private probe responses during remote apply', () => {
+    const fixture = createFixture()
+    const result = runRemoteApply(fixture, {
+      FAKE_RESPONSE_MODE: 'malformed',
+    })
+
+    expect(result.status).toBe(1)
+    expect(`${result.stdout}${result.stderr}`).not.toContain('LEAK1234')
+    const observed = calls(fixture)
+    expect(observed.some((call) => (
+      call.sql.includes("pragma_table_info('ai_post_generators')")
+    ))).toBe(false)
+    expect(observed.some((call) => call.arguments.includes('--file'))).toBe(false)
+    expect(observed.some((call) => (
+      call.sql.includes('expected_definitions(type, name, normalized_sql)')
+    ))).toBe(false)
   })
 
   it('rejects an unallowlisted issue before remote apply can leak or write', () => {

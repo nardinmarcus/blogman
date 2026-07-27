@@ -784,8 +784,8 @@ function createD1Client(options, failureReporter) {
     let response
     try {
       response = JSON.parse(output)
-    } catch (error) {
-      throw classifiedFailure(error.message, {
+    } catch {
+      throw classifiedFailure('Wrangler returned malformed JSON', {
         failureDomain: 'malformed_response',
         failureHint: 'none',
         phase: 'response_decode',
@@ -794,11 +794,12 @@ function createD1Client(options, failureReporter) {
       })
     }
     if (!Array.isArray(response)
-      || response.some((statement) => (
-        !statement
-        || typeof statement !== 'object'
-        || !Array.isArray(statement.results)
-      ))) {
+      || response.length !== 1
+      || !response[0]
+      || typeof response[0] !== 'object'
+      || Array.isArray(response[0])
+      || response[0].success !== true
+      || !Array.isArray(response[0].results)) {
       throw classifiedFailure('Wrangler returned an invalid response envelope', {
         failureDomain: 'malformed_response',
         failureHint: 'none',
