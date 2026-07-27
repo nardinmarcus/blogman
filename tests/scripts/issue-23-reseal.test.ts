@@ -180,8 +180,45 @@ describe('Issue #23 local reseal CLI', () => {
       candidate_id: '39523f114316b05f9331c3daf77707ffcb81a59f',
       format: 'blogman-issue-23-reseal-package-validation/v1',
       package_manifest_sha256: '9577277baf5fe9deff888db0742d340140dff01518717b794a3ab9a0927f75d3',
-      state: 'valid',
+      acceptance_authority: false,
+      state: 'valid-historical',
     })
+  })
+
+  it('rejects a mixed historical/current package tuple', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-reseal-mixed-'))
+    try {
+      for (const file of [
+        'preflight-candidate.json',
+        'approval-packet.json',
+        'pre-cas-bindings.json',
+        'package-manifest.json',
+      ]) {
+        copyFileSync(
+          join(repoRoot, 'tests', 'fixtures', 'issue-23-reseal', 'v2', file),
+          join(directory, file),
+        )
+      }
+      const manifestPath = join(directory, 'package-manifest.json')
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+      manifest.format = 'blogman-issue-23-package-manifest/v3'
+      writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+
+      const result = spawnSync(process.execPath, [
+        cliPath,
+        'validate',
+        '--package',
+        directory,
+      ], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      })
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('mixes historical and current contract versions')
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   })
 
   it('rejects non-canonical field order and a one-byte candidate drift', () => {

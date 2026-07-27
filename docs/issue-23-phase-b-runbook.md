@@ -1,6 +1,6 @@
 # Issue #23 Phase B production runbook
 
-This runbook starts only after a separate production-write approval. It binds one immutable candidate to one backup, migration set, OpenNext build, Cloudflare version/deployment, same-version smoke, D1 reconciliation, rollout snapshot, test report, and a real observation window of at least 24 hours.
+This runbook starts only after a separate production-write approval. It binds one immutable candidate to one backup, migration set, OpenNext build, exact Cloudflare version/deployment and D1 identity, same-version smoke, final D1 reconciliation, rollout snapshot, test report, zero unresolved high-priority anomalies, and the immediate T0 acceptance event.
 
 Do not persist article bodies, HTML, tokens, passwords, Bridge/AI credentials, signed URLs, raw HTTP bodies, or raw Cloudflare responses in evidence or reports. The one temporary private SQL backup necessarily contains application rows; it is never evidence, stays `0600` inside the one-attempt `0700` export run root, and must be destroyed at the lifecycle boundary below. Keep the evidence root outside the repository with mode `0700`.
 
@@ -12,8 +12,8 @@ The approval must explicitly cover these production operations:
 2. One candidate-bound remote ledger migration `apply` for migrations 001–006.
 3. One OpenNext version upload and one 100% Cloudflare deployment of that exact uploaded version. OpenNext also populates its configured remote cache during upload/deploy.
 4. Status-only production HTTP smoke against article, token, AI configuration, and generator read paths; no response bodies are retained.
-5. Read-only post-migration and observation-start/end D1 reconciliation.
-6. Starting and ending the 24-hour observation window.
+5. Read-only post-migration final D1 reconciliation.
+6. Recording the T0 acceptance event immediately after every required Phase B fact passes.
 7. Only if a failure occurs: persistently disable an affected rollout control and/or restore the prior Worker version to 100% traffic. Neither action reverts D1; both invalidate this candidate and require a forward-fix successor.
 
 No approval in this packet includes a down migration, backup overwrite of production, ledger rewrite, deletion of new facts, production fixture writes, push, PR, Issue closure, or Batch 2 dispatch.
@@ -33,6 +33,7 @@ DATABASE=DB
 EXPECTED_CANDIDATE=<approved-40-hex-commit>
 EXPECTED_BASELINE_DEPLOYMENT=<approved-read-only-deployment-id>
 EXPECTED_BASELINE_VERSION=<approved-read-only-version-id>
+EXPECTED_BASELINE_D1=<approved-read-only-d1-database-id>
 EXPORT_RUN_ROOT="$EVIDENCE_ROOT/export-$EXPECTED_CANDIDATE-successor-1"
 BACKUP_DIR="$EXPORT_RUN_ROOT/backup"
 PUBLIC_ORIGIN=<approved-public-origin>
@@ -40,7 +41,7 @@ ADMIN_COOKIE_FILE=<operator-owned-private-cookie-file>
 SMOKE_ARTICLE_SLUG=<approved-existing-article-slug>
 ```
 
-Validate the operator-owned production config before setup or any Wrangler production call. This gate checks only the path and file type; it does not read the file:
+Validate the operator-owned production config before setup or any Wrangler production call. The gate first checks the path and file type, then freezes only its file identity and SHA-256; it never copies or emits config contents:
 
 ```bash
 case "$CONFIG" in
@@ -51,6 +52,15 @@ if ! test -f "$CONFIG"; then
   printf '%s\n' 'CONFIG must be an absolute path to an existing regular file' >&2
   exit 1
 fi
+CONFIG_SHA256=$(shasum -a 256 "$CONFIG" | awk '{print $1}')
+CONFIG_FILE_ID=$(stat -f '%d:%i' "$CONFIG")
+readonly CONFIG_SHA256 CONFIG_FILE_ID
+
+verify_config_identity() {
+  test -f "$CONFIG"
+  test "$(stat -f '%d:%i' "$CONFIG")" = "$CONFIG_FILE_ID"
+  test "$(shasum -a 256 "$CONFIG" | awk '{print $1}')" = "$CONFIG_SHA256"
+}
 ```
 
 Create the private directories, then move into the candidate checkout:
@@ -63,7 +73,7 @@ cd "$REPO"
 
 Every command below stops on a non-zero exit. Do not continue by hand after a failed gate. `EXPORT_RUN_ROOT` is an approved one-attempt identity: the export command creates it atomically with mode `0700`, and an existing root is a hard stop before Wrangler starts. Never rename, remove, or replace it to obtain a retry; a successor attempt requires a new candidate, approval, and run root.
 
-The repository-owned order contract is `scripts/phase-b-sequence.mjs`. Operator automation must call `runPhaseBSequence()` with the absolute `CONFIG` path, an immutable binding cache for the approved candidate/packet/build/baseline identities, and the Issue #23 stage adapters. It fixes this exact sequence and rejects dynamic stage graphs:
+The repository-owned order contract is `scripts/phase-b-sequence.mjs`. Operator automation must call `runPhaseBSequence()` with the absolute `CONFIG` path, an immutable binding cache for the approved candidate/packet/build/baseline deployment/version/D1 identities, and the Issue #23 stage adapters. It fixes this exact sequence and rejects dynamic stage graphs:
 
 `PRE-CAS/local gates → CAS1 → D1 identity → remote migration plan → export → double restore → upload → migrations 001–006 → CAS2 → traffic → smoke/reconcile → T0`.
 
@@ -83,16 +93,22 @@ trap dispose_private_export EXIT
 
 If the process is externally interrupted while the report remains `state=started`, `dispose` refuses to claim cleanup because the child terminal state is unknown. Quarantine that root without reading or moving its private files; do not delete or reuse it, do not retry, and obtain a new candidate, approval, and successor run root after controlled incident handling.
 
-The smoke helper retains status only; every response body is discarded:
+The smoke helper captures each actual HTTP status and discards every response body:
 
 ```bash
 run_production_smoke() {
-  curl --fail --silent --output /dev/null "$PUBLIC_ORIGIN/api/search?q=blogman"
-  curl --fail --silent --output /dev/null "$PUBLIC_ORIGIN/api/settings/appearance"
-  curl --fail --silent --output /dev/null --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/posts/$SMOKE_ARTICLE_SLUG"
-  curl --fail --silent --output /dev/null --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/tokens"
-  curl --fail --silent --output /dev/null --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/ai-provider"
-  curl --fail --silent --output /dev/null --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/ai-post-generators"
+  SMOKE_SEARCH_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' "$PUBLIC_ORIGIN/api/search?q=blogman")
+  SMOKE_APPEARANCE_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' "$PUBLIC_ORIGIN/api/settings/appearance")
+  SMOKE_ADMIN_ARTICLE_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/posts/$SMOKE_ARTICLE_SLUG")
+  SMOKE_TOKENS_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/tokens")
+  SMOKE_AI_PROVIDER_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/ai-provider")
+  SMOKE_AI_GENERATORS_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/ai-post-generators")
+  test "$SMOKE_SEARCH_STATUS" = 200
+  test "$SMOKE_APPEARANCE_STATUS" = 200
+  test "$SMOKE_ADMIN_ARTICLE_STATUS" = 200
+  test "$SMOKE_TOKENS_STATUS" = 200
+  test "$SMOKE_AI_PROVIDER_STATUS" = 200
+  test "$SMOKE_AI_GENERATORS_STATUS" = 200
 }
 ```
 
@@ -127,9 +143,11 @@ test "$BASELINE_VERSION_ID" = "$EXPECTED_BASELINE_VERSION"
 ./node_modules/.bin/wrangler d1 info "$DATABASE" --json -c "$CONFIG" \
   | jq '{uuid,name,created_at,num_tables,read_replication}' \
   > "$REPORT_DIR/d1-info-before.json"
+BASELINE_D1_DATABASE_ID=$(jq -er .uuid "$REPORT_DIR/d1-info-before.json")
+test "$BASELINE_D1_DATABASE_ID" = "$EXPECTED_BASELINE_D1"
 ```
 
-Stop if the checkout is dirty, the candidate differs, `main` and `origin/main` differ, the candidate does not descend from `origin/main`, the installed versions differ from the lockfile, the build fails, or the active production deployment/version is not the explicitly approved baseline at 100%. `BASELINE_VERSION_ID` is the only version eligible for the separately authorized emergency traffic restore. Local build output is not production proof.
+Stop if the checkout is dirty, the candidate differs, `main` and `origin/main` differ, the candidate does not descend from `origin/main`, the installed versions differ from the lockfile, the build fails, the active production deployment/version is not the explicitly approved baseline at 100%, or the D1 UUID differs from the approved baseline. `BASELINE_VERSION_ID` is the only version eligible for the separately authorized emergency traffic restore. Local build output is not production proof.
 
 ## 2. Remote migration plan hard gate
 
@@ -398,21 +416,45 @@ The two `test` commands are a compare-and-stop guard: if traffic no longer belon
 Classification: production read-only. Do not retain response bodies. Use status codes and report hashes only.
 
 ```bash
+verify_config_identity
+./node_modules/.bin/wrangler d1 info "$DATABASE" --json -c "$CONFIG" \
+  | jq '{uuid}' > "$REPORT_DIR/d1-info-t0-before.json"
+test "$(jq -er .uuid "$REPORT_DIR/d1-info-t0-before.json")" = "$DATABASE_ID"
+
 run_production_smoke
+SMOKE_CHECKED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
 
 ./node_modules/.bin/wrangler deployments status --json -c "$CONFIG" \
   | jq '{id,created_on,versions:[.versions[]|{version_id,percentage}]}' \
   > "$REPORT_DIR/deployment-after-smoke.json"
 cmp "$REPORT_DIR/deployment-after.json" "$REPORT_DIR/deployment-after-smoke.json"
 
+verify_config_identity
 node scripts/rollout-safety.mjs reconcile compare \
   --expected "$REPORT_DIR/expected-production-after.json" \
   --database "$DATABASE" --remote --config "$CONFIG" \
+  > "$REPORT_DIR/reconciliation-raw.json"
+RECON_CHECKED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
+jq -n --arg checked "$RECON_CHECKED_AT" --arg d1 "$DATABASE_ID" \
+  --slurpfile result "$REPORT_DIR/reconciliation-raw.json" \
+  '{format:"blogman-d1-reconciliation-check/v2",checked_at:$checked,d1_database_id:$d1,
+    state:$result[0].state,checks:$result[0].checks}' \
   > "$REPORT_DIR/reconciliation-report.json"
 
+verify_config_identity
+./node_modules/.bin/wrangler d1 info "$DATABASE" --json -c "$CONFIG" \
+  | jq '{uuid}' > "$REPORT_DIR/d1-info-t0-after.json"
+test "$(jq -er .uuid "$REPORT_DIR/d1-info-t0-after.json")" = "$DATABASE_ID"
+
 jq -n --arg candidate "$EXPECTED_CANDIDATE" --arg build "$BUILD_SHA256" \
-  --arg deployment "$DEPLOYMENT_ID" --arg version "$VERSION_ID" \
-  '{state:"passed",candidate_id:$candidate,build_sha256:$build,deployment_id:$deployment,version_id:$version}' \
+  --arg deployment "$DEPLOYMENT_ID" --arg version "$VERSION_ID" --arg d1 "$DATABASE_ID" \
+  --arg checked "$SMOKE_CHECKED_AT" \
+  --argjson search "$SMOKE_SEARCH_STATUS" --argjson appearance "$SMOKE_APPEARANCE_STATUS" \
+  --argjson admin_article "$SMOKE_ADMIN_ARTICLE_STATUS" --argjson tokens "$SMOKE_TOKENS_STATUS" \
+  --argjson ai_provider "$SMOKE_AI_PROVIDER_STATUS" --argjson ai_generators "$SMOKE_AI_GENERATORS_STATUS" \
+  '{format:"blogman-production-smoke/v2",checked_at:$checked,d1_database_id:$d1,
+    checks:{search:$search,appearance:$appearance,admin_article:$admin_article,tokens:$tokens,ai_provider:$ai_provider,ai_generators:$ai_generators},
+    state:"passed",candidate_id:$candidate,build_sha256:$build,deployment_id:$deployment,version_id:$version}' \
   > "$REPORT_DIR/production-smoke.json"
 
 ROLLOUT_ROWS=$(./node_modules/.bin/wrangler d1 execute "$DATABASE" --remote -c "$CONFIG" --json \
@@ -425,70 +467,92 @@ jq -n '{format:"blogman-rollout-state/v1",state:"captured",controls:{producer:"d
 
 Expected result: all six real GET paths return success, the deployment is unchanged at 100%, D1 matches the locally migrated restore, and producer/authority/executors remain disabled. Any response failure, version drift, schema/ledger/count/status/content delta, or unexpected enabled control stops the gate. Do not create production fixtures to make smoke pass.
 
-## 9. Assemble and verify the pending candidate
+## 9. T0 event acceptance
 
-Create `observation-start-smoke.json` and `observation-start-reconciliation.json` as immutable copies of the initial production reports. Set `T0` only after steps 1–8 all pass.
+Classification: production read-only review plus private evidence update. There is no minimum elapsed-time requirement and no observation-end wait. Run this stage immediately after steps 1–8 pass for the exact candidate, build, deployment, version, D1 database, migrations 001–006, six-path smoke, and final reconciliation.
+
+Review Cloudflare Workers **Errors & Exceptions** and the Issue #23 incident record for unresolved high-priority anomalies without exporting raw logs or responses. The GitHub review command is read-only and prints to the operator terminal only:
 
 ```bash
-cp "$REPORT_DIR/production-smoke.json" "$REPORT_DIR/observation-start-smoke.json"
-cp "$REPORT_DIR/reconciliation-report.json" "$REPORT_DIR/observation-start-reconciliation.json"
-STARTED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
-EARLIEST_END=$(node -e "process.stdout.write(new Date(Date.parse(process.argv[1])+24*60*60*1000).toISOString())" "$STARTED_AT")
-
-START_SMOKE_SHA=$(shasum -a 256 "$REPORT_DIR/observation-start-smoke.json" | awk '{print $1}')
-START_RECON_SHA=$(shasum -a 256 "$REPORT_DIR/observation-start-reconciliation.json" | awk '{print $1}')
-jq -n --arg started "$STARTED_AT" --arg smoke "$START_SMOKE_SHA" --arg recon "$START_RECON_SHA" \
-  '{format:"blogman-observation-window/v1",state:"pending",required_hours:24,
-    started_at:$started,ended_at:null,
-    start:{observed_at:$started,smoke_report_sha256:$smoke,reconciliation_report_sha256:$recon},
-    end:null,anomaly_audit:null}' > "$REPORT_DIR/observation-window.json"
+gh issue view 23 --repo nardinmarcus/blogman --comments
 ```
 
-Assemble `candidate.json` using the exact SHA-256 of every report. Its schema is documented in `docs/rollout-safety.md`; do not add notes, raw output, or placeholders:
+A high-priority anomaly is any data loss/duplication, authority mismatch, schema drift, sensitive disclosure, broken disable control, unexplained stuck state, or wrong-version traffic. Write only the redacted result:
+
+```bash
+ANOMALY_CHECKED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
+jq -n --arg checked "$ANOMALY_CHECKED_AT" \
+  '{format:"blogman-anomaly-audit/v1",state:"clear",checked_at:$checked,high_priority_open:0}' \
+  > "$REPORT_DIR/anomaly-audit.json"
+```
+
+If the audit is not clear, write `state=blocked` with the actual non-zero count and stop. Do not create T0, enable a control, or dispatch Batch 2. Disable the affected control if separately authorized and prepare a forward-fix candidate.
+
+Create the T0 report only after the audit is clear. It closes over the exact migrations 001–006 and the raw migration, verification, final smoke, final reconciliation, and anomaly report bytes:
 
 ```bash
 file_sha256() {
   shasum -a 256 "$1" | awk '{print $1}'
 }
 
-write_candidate() {
-  jq -n \
-    --arg candidate "$EXPECTED_CANDIDATE" \
-    --arg lockfile "$LOCKFILE_SHA256" --arg wrangler "$WRANGLER_VERSION" --arg opennext "$OPENNEXT_VERSION" \
-    --arg build "$BUILD_SHA256" --arg deployment "$DEPLOYMENT_ID" --arg version "$VERSION_ID" \
-    --arg migration_set "$MIGRATION_SET_SHA256" \
-    --arg migration_report "$(file_sha256 "$REPORT_DIR/migration-report.json")" \
-    --arg migration_verification "$(file_sha256 "$REPORT_DIR/production-verify.json")" \
-    --arg backup_id "$(jq -r .backup_id "$REPORT_DIR/backup-report.json")" \
-    --arg backup_report "$(file_sha256 "$REPORT_DIR/backup-report.json")" \
-    --arg restore_report "$(file_sha256 "$REPORT_DIR/restore-a-report.json")" \
-    --arg reconciliation "$(file_sha256 "$REPORT_DIR/reconciliation-report.json")" \
-    --arg smoke "$(file_sha256 "$REPORT_DIR/production-smoke.json")" \
-    --arg smoke_runtime "$(file_sha256 "$REPORT_DIR/restored-workerd-smoke.json")" \
-    --arg rollout "$(file_sha256 "$REPORT_DIR/rollout-state.json")" \
-    --arg tests "$(file_sha256 "$REPORT_DIR/test-report.json")" \
-    --arg observation "$(file_sha256 "$REPORT_DIR/observation-window.json")" \
-    '{format:"blogman-rollout-candidate/v1",candidate_id:$candidate,
-      lockfile:{sha256:$lockfile,wrangler:$wrangler,opennextjs_cloudflare:$opennext},
-      build:{sha256:$build},cloudflare:{deployment_id:$deployment,version_id:$version},
-      migration:{state:"verified",candidate_id:$candidate,set_sha256:$migration_set,report_sha256:$migration_report,verification_report_sha256:$migration_verification},
-      backup:{backup_id:$backup_id,verify_report_sha256:$backup_report,restore_report_sha256:$restore_report},
-      reconciliation:{report_sha256:$reconciliation},smoke:{report_sha256:$smoke,runtime_report_sha256:$smoke_runtime},
-      rollout:{report_sha256:$rollout},tests:{report_sha256:$tests},observation:{report_sha256:$observation}}' \
-    > "$REPORT_DIR/candidate.json"
-}
-
-write_candidate
+T0_ACCEPTED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
+jq -n \
+  --arg accepted "$T0_ACCEPTED_AT" --arg candidate "$EXPECTED_CANDIDATE" \
+  --arg build "$BUILD_SHA256" --arg deployment "$DEPLOYMENT_ID" \
+  --arg version "$VERSION_ID" --arg d1 "$DATABASE_ID" \
+  --arg migration_report "$(file_sha256 "$REPORT_DIR/migration-report.json")" \
+  --arg migration_verification "$(file_sha256 "$REPORT_DIR/production-verify.json")" \
+  --arg smoke "$(file_sha256 "$REPORT_DIR/production-smoke.json")" \
+  --arg reconciliation "$(file_sha256 "$REPORT_DIR/reconciliation-report.json")" \
+  --arg anomaly "$(file_sha256 "$REPORT_DIR/anomaly-audit.json")" \
+  '{format:"blogman-t0-acceptance/v1",state:"passed",accepted_at:$accepted,
+    candidate_id:$candidate,build_sha256:$build,deployment_id:$deployment,version_id:$version,
+    d1_database_id:$d1,migration_numbers:[1,2,3,4,5,6],
+    migration_report_sha256:$migration_report,
+    migration_verification_report_sha256:$migration_verification,
+    smoke_report_sha256:$smoke,final_reconciliation_report_sha256:$reconciliation,
+    anomaly_report_sha256:$anomaly}' > "$REPORT_DIR/t0-report.json"
 ```
 
-Then verify:
+Assemble `candidate.json` using the exact SHA-256 of every report. Its schema is documented in `docs/rollout-safety.md`; do not add notes, raw output, placeholders, observation fields, or elapsed-time fields:
+
+```bash
+jq -n \
+  --arg candidate "$EXPECTED_CANDIDATE" \
+  --arg lockfile "$LOCKFILE_SHA256" --arg wrangler "$WRANGLER_VERSION" --arg opennext "$OPENNEXT_VERSION" \
+  --arg build "$BUILD_SHA256" --arg deployment "$DEPLOYMENT_ID" --arg version "$VERSION_ID" \
+  --arg d1 "$DATABASE_ID" --arg migration_set "$MIGRATION_SET_SHA256" \
+  --arg migration_report "$(file_sha256 "$REPORT_DIR/migration-report.json")" \
+  --arg migration_verification "$(file_sha256 "$REPORT_DIR/production-verify.json")" \
+  --arg backup_id "$(jq -r .backup_id "$REPORT_DIR/backup-report.json")" \
+  --arg backup_report "$(file_sha256 "$REPORT_DIR/backup-report.json")" \
+  --arg restore_report "$(file_sha256 "$REPORT_DIR/restore-a-report.json")" \
+  --arg reconciliation "$(file_sha256 "$REPORT_DIR/reconciliation-report.json")" \
+  --arg smoke "$(file_sha256 "$REPORT_DIR/production-smoke.json")" \
+  --arg smoke_runtime "$(file_sha256 "$REPORT_DIR/restored-workerd-smoke.json")" \
+  --arg rollout "$(file_sha256 "$REPORT_DIR/rollout-state.json")" \
+  --arg tests "$(file_sha256 "$REPORT_DIR/test-report.json")" \
+  --arg t0 "$(file_sha256 "$REPORT_DIR/t0-report.json")" \
+  '{format:"blogman-rollout-candidate/v2",candidate_id:$candidate,
+    lockfile:{sha256:$lockfile,wrangler:$wrangler,opennextjs_cloudflare:$opennext},
+    build:{sha256:$build},cloudflare:{deployment_id:$deployment,version_id:$version},
+    d1:{database_id:$d1},
+    migration:{state:"verified",candidate_id:$candidate,set_sha256:$migration_set,report_sha256:$migration_report,verification_report_sha256:$migration_verification},
+    backup:{backup_id:$backup_id,verify_report_sha256:$backup_report,restore_report_sha256:$restore_report},
+    reconciliation:{report_sha256:$reconciliation},
+    smoke:{report_sha256:$smoke,runtime_report_sha256:$smoke_runtime},
+    rollout:{report_sha256:$rollout},tests:{report_sha256:$tests},t0:{report_sha256:$t0}}' \
+  > "$REPORT_DIR/candidate.json"
+```
+
+Run the current verifier once:
 
 ```bash
 node scripts/rollout-safety.mjs candidate verify \
   --evidence "$REPORT_DIR/candidate.json" \
   --candidate "$EXPECTED_CANDIDATE" --lockfile package-lock.json \
   --build "$REPORT_DIR/open-next-build.zip" \
-  --deployment "$DEPLOYMENT_ID" --version "$VERSION_ID" \
+  --deployment "$DEPLOYMENT_ID" --version "$VERSION_ID" --d1-database "$DATABASE_ID" \
   --backup-report "$REPORT_DIR/backup-report.json" \
   --restore-report "$REPORT_DIR/restore-a-report.json" \
   --migration-report "$REPORT_DIR/migration-report.json" \
@@ -498,133 +562,15 @@ node scripts/rollout-safety.mjs candidate verify \
   --smoke-runtime-report "$REPORT_DIR/restored-workerd-smoke.json" \
   --rollout-report "$REPORT_DIR/rollout-state.json" \
   --test-report "$REPORT_DIR/test-report.json" \
-  --observation-report "$REPORT_DIR/observation-window.json" \
-  --observation-start-smoke-report "$REPORT_DIR/observation-start-smoke.json" \
-  --observation-start-reconciliation-report "$REPORT_DIR/observation-start-reconciliation.json"
+  --t0-report "$REPORT_DIR/t0-report.json" \
+  --anomaly-report "$REPORT_DIR/anomaly-audit.json" \
+  > "$REPORT_DIR/t0-candidate-verify.json"
 
-node scripts/rollout-safety.mjs rollout status \
-  --evidence "$REPORT_DIR/candidate.json" \
-  --candidate "$EXPECTED_CANDIDATE" --lockfile package-lock.json \
-  --build "$REPORT_DIR/open-next-build.zip" \
-  --deployment "$DEPLOYMENT_ID" --version "$VERSION_ID" \
-  --backup-report "$REPORT_DIR/backup-report.json" \
-  --restore-report "$REPORT_DIR/restore-a-report.json" \
-  --migration-report "$REPORT_DIR/migration-report.json" \
-  --migration-verification-report "$REPORT_DIR/production-verify.json" \
-  --reconciliation-report "$REPORT_DIR/reconciliation-report.json" \
-  --smoke-report "$REPORT_DIR/production-smoke.json" \
-  --smoke-runtime-report "$REPORT_DIR/restored-workerd-smoke.json" \
-  --rollout-report "$REPORT_DIR/rollout-state.json" \
-  --test-report "$REPORT_DIR/test-report.json" \
-  --observation-report "$REPORT_DIR/observation-window.json" \
-  --observation-start-smoke-report "$REPORT_DIR/observation-start-smoke.json" \
-  --observation-start-reconciliation-report "$REPORT_DIR/observation-start-reconciliation.json" \
-  --database "$DATABASE" --remote --config "$CONFIG"
+jq -e '.state == "verified" and .phase == "batch-1-t0" and .d1_database_id == $d1' \
+  --arg d1 "$DATABASE_ID" "$REPORT_DIR/t0-candidate-verify.json" >/dev/null
 ```
 
-The observation starts at `STARTED_AT`; its earliest possible end is `EARLIEST_END`. Neither timestamp passes the gate by itself.
-
-## 10. Observation end
-
-Classification: production read-only plus private evidence update. Run no earlier than `EARLIEST_END`.
-
-First prove wall-clock eligibility, then repeat the exact real paths, same-version deployment proof, and D1 comparison. These commands are read-only against production and write only redacted private evidence:
-
-```bash
-node -e "if (Date.now() < Date.parse(process.argv[1])) process.exit(1)" "$EARLIEST_END"
-
-./node_modules/.bin/wrangler deployments status --json -c "$CONFIG" \
-  | jq '{id,created_on,versions:[.versions[]|{version_id,percentage}]}' \
-  > "$REPORT_DIR/deployment-observation-end-before.json"
-cmp "$REPORT_DIR/deployment-after.json" "$REPORT_DIR/deployment-observation-end-before.json"
-
-run_production_smoke
-
-node scripts/rollout-safety.mjs reconcile compare \
-  --expected "$REPORT_DIR/expected-production-after.json" \
-  --database "$DATABASE" --remote --config "$CONFIG" \
-  > "$REPORT_DIR/reconciliation-report.json"
-jq -e '.state == "matched" and ([.checks[]] | all(. == "matched"))' \
-  "$REPORT_DIR/reconciliation-report.json" >/dev/null
-
-./node_modules/.bin/wrangler deployments status --json -c "$CONFIG" \
-  | jq '{id,created_on,versions:[.versions[]|{version_id,percentage}]}' \
-  > "$REPORT_DIR/deployment-observation-end-after.json"
-cmp "$REPORT_DIR/deployment-after.json" "$REPORT_DIR/deployment-observation-end-after.json"
-
-END_OBSERVED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
-jq -n --arg candidate "$EXPECTED_CANDIDATE" --arg build "$BUILD_SHA256" \
-  --arg deployment "$DEPLOYMENT_ID" --arg version "$VERSION_ID" \
-  '{state:"passed",candidate_id:$candidate,build_sha256:$build,deployment_id:$deployment,version_id:$version}' \
-  > "$REPORT_DIR/production-smoke.json"
-```
-
-Stop if the eligibility check fails, any request fails, either deployment snapshot differs byte-for-byte from the original deployment proof, or any reconciliation dimension drifts. Do not create an end report from partial checks.
-
-Then review the exact UTC `[STARTED_AT, END_OBSERVED_AT]` interval in Cloudflare Workers **Errors & Exceptions** and the Issue #23 incident record without exporting raw logs or responses. The GitHub review command is read-only and prints to the operator terminal only:
-
-```bash
-gh issue view 23 --repo nardinmarcus/blogman --comments
-```
-
-A high-priority anomaly is any data loss/duplication, authority mismatch, schema drift, sensitive disclosure, broken disable control, unexplained stuck state, or wrong-version traffic. After that review finishes, write only this redacted anomaly summary:
-
-```bash
-CHECKED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
-jq -n --arg checked "$CHECKED_AT" \
-  '{format:"blogman-anomaly-audit/v1",state:"clear",checked_at:$checked,high_priority_open:0}' \
-  > "$REPORT_DIR/observation-anomaly-audit.json"
-```
-
-If the audit is not clear, write `state=blocked` with the actual non-zero count, stop, disable the affected control if authorized, and prepare a forward-fix candidate. Never falsify `clear` because 24 hours elapsed. The verifier additionally requires `end.observed_at >= started_at + required_hours` and `ended_at >= anomaly.checked_at >= end.observed_at`; moving only `ended_at` cannot make early evidence pass.
-
-Regenerate the main `production-smoke.json` and `reconciliation-report.json` from the end checks, then complete the observation report:
-
-```bash
-ENDED_AT="$CHECKED_AT"
-END_SMOKE_SHA=$(shasum -a 256 "$REPORT_DIR/production-smoke.json" | awk '{print $1}')
-END_RECON_SHA=$(shasum -a 256 "$REPORT_DIR/reconciliation-report.json" | awk '{print $1}')
-ANOMALY_SHA=$(shasum -a 256 "$REPORT_DIR/observation-anomaly-audit.json" | awk '{print $1}')
-
-jq -n --arg started "$STARTED_AT" --arg ended "$ENDED_AT" --arg end_observed "$END_OBSERVED_AT" \
-  --arg start_smoke "$START_SMOKE_SHA" --arg start_recon "$START_RECON_SHA" \
-  --arg end_smoke "$END_SMOKE_SHA" --arg end_recon "$END_RECON_SHA" --arg anomaly "$ANOMALY_SHA" \
-  '{format:"blogman-observation-window/v1",state:"complete",required_hours:24,
-    started_at:$started,ended_at:$ended,
-    start:{observed_at:$started,smoke_report_sha256:$start_smoke,reconciliation_report_sha256:$start_recon},
-    end:{observed_at:$end_observed,smoke_report_sha256:$end_smoke,reconciliation_report_sha256:$end_recon},
-    anomaly_audit:{report_sha256:$anomaly}}' > "$REPORT_DIR/observation-window.json"
-```
-
-Regenerate only the report hashes in `candidate.json` with `write_candidate`, then run the complete final gate:
-
-```bash
-write_candidate
-node scripts/rollout-safety.mjs candidate verify \
-  --evidence "$REPORT_DIR/candidate.json" \
-  --candidate "$EXPECTED_CANDIDATE" --lockfile package-lock.json \
-  --build "$REPORT_DIR/open-next-build.zip" \
-  --deployment "$DEPLOYMENT_ID" --version "$VERSION_ID" \
-  --backup-report "$REPORT_DIR/backup-report.json" \
-  --restore-report "$REPORT_DIR/restore-a-report.json" \
-  --migration-report "$REPORT_DIR/migration-report.json" \
-  --migration-verification-report "$REPORT_DIR/production-verify.json" \
-  --reconciliation-report "$REPORT_DIR/reconciliation-report.json" \
-  --smoke-report "$REPORT_DIR/production-smoke.json" \
-  --smoke-runtime-report "$REPORT_DIR/restored-workerd-smoke.json" \
-  --rollout-report "$REPORT_DIR/rollout-state.json" \
-  --test-report "$REPORT_DIR/test-report.json" \
-  --observation-report "$REPORT_DIR/observation-window.json" \
-  --observation-start-smoke-report "$REPORT_DIR/observation-start-smoke.json" \
-  --observation-start-reconciliation-report "$REPORT_DIR/observation-start-reconciliation.json" \
-  --anomaly-report "$REPORT_DIR/observation-anomaly-audit.json" \
-  > "$REPORT_DIR/observation-complete-candidate-verify.json"
-
-jq -e '.state == "verified"' \
-  "$REPORT_DIR/observation-complete-candidate-verify.json" >/dev/null
-```
-
-Only `state=verified`, unchanged same-version traffic, matched end reconciliation, clear anomaly audit, and an actual duration of at least 24 hours can pass Issue #23. Until then Batch 2 remains blocked.
+Only this terminal verifier result passes T0. It requires the exact candidate/build/deployment/version/D1 identity, migrations 001–006, matched schema/ledger/count/status/content reconciliation, all six real critical paths at HTTP 200, final D1 reconciliation, and zero unresolved high-priority anomalies. T0 PASS completes Issue #23 and unlocks Batch 2 immediately; no calendar wait is part of this contract.
 
 ## Failure stop and forward-fix boundaries
 
@@ -633,6 +579,6 @@ Only `state=verified`, unchanged same-version traffic, matched end reconciliatio
 | Preflight/backup/restore/local verify | Before any production write | Correct local evidence or create a successor candidate | Production apply/deploy |
 | Version upload | Before D1 apply | Leave uploaded version undeployed; create a successor if bytes drift | Pretend upload is a deployment |
 | Migration plan/apply/verify | Before traffic change | Preserve successful additive facts; add a forward migration and new candidate | Restore backup, down-migrate, edit ledger |
-| Deployment/version proof | Before smoke/observation | Read current status; emergency prior-version traffic restore only if approved; then forward-fix | Mix old deployment/version evidence with new candidate |
-| Smoke/reconciliation/rollout | Before observation start | Disable affected control, preserve D1, forward-fix | Create fixtures, enable authority, ignore drift |
-| 24-hour observation | Keep Issue #23 blocked | Disable affected capability, investigate, forward-fix, restart the full affected window | Pass on elapsed time alone or dispatch Batch 2 |
+| Deployment/version/D1 proof | Before smoke/T0 | Read current status; emergency prior-version traffic restore only if approved; then forward-fix | Mix old deployment/version/D1 evidence with new candidate |
+| Smoke/reconciliation/rollout | Before T0 | Disable affected control, preserve D1, forward-fix | Create fixtures, enable authority, ignore drift |
+| T0 event acceptance | Keep Issue #23 blocked | Resolve the anomaly or create a forward-fix candidate, then rerun the fixed sequence | Pass incomplete evidence or dispatch Batch 2 |

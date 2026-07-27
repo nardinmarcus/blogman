@@ -15,6 +15,7 @@ const bindings: Readonly<PhaseBBindings> = Object.freeze({
   buildArchiveSha256: 'c'.repeat(64),
   baselineDeploymentId: 'deployment-before',
   baselineVersionId: 'version-before',
+  baselineD1DatabaseId: '22222222-3333-4444-8555-666666666666',
 })
 const temporaryDirectories: string[] = []
 
@@ -76,6 +77,10 @@ describe('Issue #23 Phase B fixed sequence', () => {
     await expect(runPhaseBSequence({
       configPath: validConfig(), bindings: { ...bindings }, runStage,
     })).rejects.toThrow('immutable Phase B bindings')
+    const missingD1 = Object.freeze({ ...bindings, baselineD1DatabaseId: '' })
+    await expect(runPhaseBSequence({
+      configPath: validConfig(), bindings: missingD1, runStage,
+    })).rejects.toThrow('incomplete or invalid')
     expect(stagesStarted).toBe(0)
   })
 

@@ -18,6 +18,7 @@ export interface PhaseBBindings {
   buildArchiveSha256: string
   baselineDeploymentId: string
   baselineVersionId: string
+  baselineD1DatabaseId: string
 }
 
 export interface PhaseBExecutionContext {

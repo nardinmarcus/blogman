@@ -4,7 +4,7 @@
 
 ## 安全边界
 
-- Issue #23 Phase B 的唯一仓库顺序合同是 `scripts/phase-b-sequence.mjs`：`PRE-CAS/local gates → CAS1 → D1 identity → remote migration plan → export → double restore → upload → migrations 001–006 → CAS2 → traffic → smoke/reconcile → T0`。runner 在任何 stage 前验证 absolute production `CONFIG` 和冻结的 candidate/approval packet/build/baseline binding cache，将两者冻结为每个 adapter 必须使用的同一 execution context；每 stage exactly once、无 retry，任一失败立即停止。remote plan 失败时 export 及全部后缀计数必须为 `0`。这不改变八批交付顺序。Issue #23 的 superseding decision 只允许 migration `001` 的 `001_initial_schema.baseline.sql` statements `1` 与 `3` 在 remote baseline 验证中由 checksum-bound `001_initial_schema.remote.baseline.sql`（SHA-256 `90c94ce79e77d3ca3ab22fc67f702243e7305bcd1860f3d1feb2026fb56b4a03`）替换。原 migration/baseline 字节与 ledger checksum、本地路径、其他 sidecar 的 `EXPLAIN` opcode proof 和完整 compatibility issue multiset 均不变；两个 replacement group 的六条 probe 由 source/replacement identity、私有 0600 输出、300 秒上限、one-shot/no-retry 和各组前后 schema fingerprint 共同约束，任一失败禁止 fallback 并保持全部 downstream Phase B stage 为 `0`。
+- Issue #23 Phase B 的唯一仓库顺序合同是 `scripts/phase-b-sequence.mjs`：`PRE-CAS/local gates → CAS1 → D1 identity → remote migration plan → export → double restore → upload → migrations 001–006 → CAS2 → traffic → smoke/reconcile → T0`。runner 在任何 stage 前验证 absolute production `CONFIG` 和冻结的 candidate/approval packet/build/baseline deployment/version/D1 binding cache，将两者冻结为每个 adapter 必须使用的同一 execution context；每 stage exactly once、无 retry，任一失败立即停止。remote plan 失败时 export 及全部后缀计数必须为 `0`。这不改变八批交付顺序。Issue #23 的 superseding decision 只允许 migration `001` 的 `001_initial_schema.baseline.sql` statements `1` 与 `3` 在 remote baseline 验证中由 checksum-bound `001_initial_schema.remote.baseline.sql`（SHA-256 `90c94ce79e77d3ca3ab22fc67f702243e7305bcd1860f3d1feb2026fb56b4a03`）替换。原 migration/baseline 字节与 ledger checksum、本地路径、其他 sidecar 的 `EXPLAIN` opcode proof 和完整 compatibility issue multiset 均不变；两个 replacement group 的六条 probe 由 source/replacement identity、私有 0600 输出、300 秒上限、one-shot/no-retry 和各组前后 schema fingerprint 共同约束，任一失败禁止 fallback 并保持全部 downstream Phase B stage 为 `0`。
 - `backup restore` 和 `request smoke` 只接受 `--local`，必须显式指定仓库外的绝对 `--persist-to` 空目录，绝不回退到默认 `.wrangler/state`。
 - `reconcile capture|compare` 支持显式 local D1，也为经授权的未来 production read-only 对账保留 `--remote` 接口；普通本地验收只使用 `--local`。
 - 旧备份不能恢复到已有文件的 persist 目录。新事实出现后只能停用 producer/authority/executor 并前向修复，不能用旧备份覆盖、down migration 或清空新表。
@@ -103,7 +103,7 @@ node scripts/rollout-safety.mjs request smoke \
 
 ## 4. 候选证据
 
-生产 migration `apply` 前使用独立的 `blogman-pre-migration-candidate/v1` 合同。它只绑定 commit、lockfile/toolchain、build、已上传但未承载流量的 Cloudflare version、备份/隔离恢复、原始 local migration verify、原始 Workerd smoke、D1 对账和测试报告；不含 deployment、production smoke、rollout 或 observation 字段。因此它只能由专用命令验证，不能被正式 `candidate verify`、`rollout set` 或 `rollout status` 当成生产候选：
+生产 migration `apply` 前使用独立的 `blogman-pre-migration-candidate/v1` 合同。它只绑定 commit、lockfile/toolchain、build、已上传但未承载流量的 Cloudflare version、备份/隔离恢复、原始 local migration verify、原始 Workerd smoke、D1 对账和测试报告；不含 deployment、production smoke、rollout 或 T0 字段。因此它只能由专用命令验证，不能被正式 `candidate verify`、`rollout set` 或 `rollout status` 当成生产候选：
 
 ```bash
 node scripts/rollout-safety.mjs candidate verify-pre-migration \
@@ -121,29 +121,50 @@ node scripts/rollout-safety.mjs candidate verify-pre-migration \
 
 只有 `state=verified, phase=pre-migration` 才允许进入生产 apply。该格式没有可伪造的 deployment placeholder，也不能解锁 rollout control。验证器通过 migration runner 的只读 `catalog` 输出逐条交叉检查 raw verify 中的 migration number、name 和 canonical checksum；旧 verify report 不能与新的 migration set 拼接通过。
 
-候选文件格式为 `blogman-rollout-candidate/v1`，绑定：
+当前候选文件格式为 `blogman-rollout-candidate/v2`，绑定：
 
-- 40 位 Git commit；
-- `package-lock.json` SHA-256，以及 lockfile 中 Wrangler 与 `@opennextjs/cloudflare` 版本；
-- 不可变 build bundle/archive SHA-256；
-- Cloudflare deployment ID 和 version ID；
-- 实际 `db/ledger-migrations` SQL、baseline/preflight SQL 与 `*.data.mjs` sidecar 文件名及内容组成的 migration-set SHA-256，以及 candidate-bound migration summary 和原始 migration verify report；
-- backup verify 与 isolated restore 两份报告（同一 backup ID）；
-- reconciliation、原始本地 Workerd smoke 与 production smoke 报告；
+- 40 位 Git commit、lockfile/toolchain、不可变 build；
+- exact Cloudflare deployment ID、version ID 和 D1 database UUID；
+- migrations 001–006 的 migration-set、candidate-bound apply summary 与原始 verify report；
+- 同一 backup ID 的 verify 与 isolated restore 报告；
+- 最终 schema、migration ledger、文章 count/status/content 五维 D1 reconciliation；
+- 原始本地 Workerd smoke 与六条真实 production critical-path smoke；
 - producer、authority、各 executor 的 rollout 状态快照；
 - 退出码、通过/失败计数明确的测试报告；
-- 至少 24 小时要求的观察窗口报告（`pending` 或 `complete` 状态均绑定进候选，批次推进仍必须满足 #19 的完成门槛）。观察开始后必须绑定开始 smoke 与 D1 对账；完成时还必须绑定结束 smoke、结束 D1 对账和高优异常为零的脱敏审计。
+- `blogman-t0-acceptance/v1`，闭包绑定上述 exact identity、迁移 001–006、最终 smoke/reconciliation 和零未解决高优先级异常。
 
-Production smoke 报告还必须重复记录同一 candidate、build、deployment 和 version。Cloudflare deployment/version 应从部署结果及 `wrangler deployments list --json` / `wrangler versions list --json` 读取，不能手填另一个候选的值。
+Production smoke 使用 `blogman-production-smoke/v2`，必须记录采集时间、同一 D1 UUID、同一 candidate/build/deployment/version，以及 `search`、`appearance`、`admin_article`、`tokens`、`ai_provider`、`ai_generators` 六项 HTTP 200。最终 reconciliation 使用 `blogman-d1-reconciliation-check/v2`，必须记录采集时间、同一 D1 UUID，并使 `schema`、`migration_ledger`、`post_count`、`post_status`、`post_content` 全部为 `matched`。
+
+```json
+{
+  "format": "blogman-t0-acceptance/v1",
+  "state": "passed",
+  "accepted_at": "2026-07-26T01:00:00.000Z",
+  "candidate_id": "<40 hex>",
+  "build_sha256": "<64 hex>",
+  "deployment_id": "<deployment id>",
+  "version_id": "<version uuid>",
+  "d1_database_id": "<d1 uuid>",
+  "migration_numbers": [1, 2, 3, 4, 5, 6],
+  "migration_report_sha256": "<64 hex>",
+  "migration_verification_report_sha256": "<64 hex>",
+  "smoke_report_sha256": "<64 hex>",
+  "final_reconciliation_report_sha256": "<64 hex>",
+  "anomaly_report_sha256": "<64 hex>"
+}
+```
+
+当前验收命令为：
 
 ```bash
 node scripts/rollout-safety.mjs candidate verify \
   --evidence /private/evidence/candidate.json \
   --candidate "$(git rev-parse HEAD)" \
   --lockfile package-lock.json \
-  --build /private/evidence/open-next-build.tar \
+  --build /private/evidence/open-next-build.zip \
   --deployment "${CLOUDFLARE_DEPLOYMENT_ID}" \
   --version "${CLOUDFLARE_VERSION_ID}" \
+  --d1-database "${D1_DATABASE_ID}" \
   --backup-report /private/evidence/backup-report.json \
   --restore-report /private/evidence/restore-report.json \
   --migration-report /private/evidence/migration-report.json \
@@ -153,50 +174,24 @@ node scripts/rollout-safety.mjs candidate verify \
   --smoke-runtime-report /private/evidence/restored-request-smoke.json \
   --rollout-report /private/evidence/rollout-state.json \
   --test-report /private/evidence/test-report.json \
-  --observation-report /private/evidence/observation-window.json
+  --t0-report /private/evidence/t0-report.json \
+  --anomaly-report /private/evidence/anomaly-audit.json
 ```
 
-观察尚未开始时，报告使用 `pending`、`started_at=null`，且 `start`、`end`、`anomaly_audit` 均为 `null`。开始观察时仍为 `pending`，但 `started_at` 与 `start.observed_at` 必须相同，并绑定开始时的 same-version smoke 与 D1 对账：
+只有 `state=verified, phase=batch-1-t0` 且输出同一 `d1_database_id` 才通过。smoke、reconciliation、anomaly 的采集时间不得晚于 `accepted_at`；允许它们与 T0 在同一时刻完成，不存在最短时长、固定观察窗口或 observation-end wait。任何 hash、migration set、内部状态、candidate/build/deployment/version/D1 交叉绑定不一致，或任一高优先级异常未解决，都会返回 `state=invalid`。
 
-```json
-{
-  "format": "blogman-observation-window/v1",
-  "state": "pending",
-  "required_hours": 24,
-  "started_at": "2026-07-25T00:00:00.000Z",
-  "ended_at": null,
-  "start": {
-    "observed_at": "2026-07-25T00:00:00.000Z",
-    "smoke_report_sha256": "<64 hex>",
-    "reconciliation_report_sha256": "<64 hex>"
-  },
-  "end": null,
-  "anomaly_audit": null
-}
-```
+### 历史 v1 只读兼容
 
-完成观察时，`end` 绑定候选主 `--smoke-report` 与 `--reconciliation-report`；`start` 通过两个附加报告参数保留开始证据；异常报告只记录检查时间、是否 clear 和未解决高优异常数，不记录原始日志、请求或内容：
+`blogman-rollout-candidate/v1` 与 `blogman-observation-window/v1` 的 canonical 字节和完整 24 小时规则保持不变，仅用于验证历史证据：
 
 ```bash
-node scripts/rollout-safety.mjs candidate verify \
-  <全部候选参数> \
-  --observation-start-smoke-report /private/evidence/observation-start-smoke.json \
-  --observation-start-reconciliation-report /private/evidence/observation-start-reconciliation.json \
-  --anomaly-report /private/evidence/observation-anomaly-audit.json
+node scripts/rollout-safety.mjs candidate verify-historical \
+  <旧 v1 candidate verify 参数，包括 observation start/end 与 anomaly 报告>
 ```
 
-```json
-{
-  "format": "blogman-anomaly-audit/v1",
-  "state": "clear",
-  "checked_at": "2026-07-26T01:00:00.000Z",
-  "high_priority_open": 0
-}
-```
+成功只返回 `state=verified-historical, acceptance_authority=false`。把旧 v1 交给当前 `candidate verify` 会返回非零 `state=stale, acceptance_authority=false`；因此旧证据不能被 `rollout set`、`rollout status` 或当前 reseal/authorization 入口用于解锁任何控制。历史文件不会被重写，也不会被升级为 T0 证据。
 
-`complete` 必须同时满足：结束 smoke/D1 对账的实际采集时间不早于 `started_at + required_hours`；`ended_at >= anomaly.checked_at >= end.observed_at`；开始和结束 smoke 都绑定同一 candidate/build/deployment/version；开始和结束 D1 对账都为 matched；异常审计为 clear 且未解决高优异常数为 0。时间到达本身不会通过验证。
-
-任何实际文件哈希、migration set、内部状态或 candidate/build/deployment/version 交叉绑定不一致都会返回 `state=invalid`。候选及其绑定报告使用完整必需字段合同和严格 allowlist；未知/缺失字段、错误类型或枚举、无效时间戳、敏感字段名以及任意字段中的凭据样式字符串都会被拒绝且不会回显原值。
+当前与历史候选及其绑定报告都使用完整必需字段合同和严格 allowlist；未知/缺失字段、错误类型或枚举、无效时间戳、敏感字段名以及任意字段中的凭据样式字符串都会被拒绝且不会回显原值。
 
 ## 5. Rollout 控制与状态
 

@@ -159,7 +159,7 @@ function createSealFixture() {
   const migrationSetSha256 = sha256(JSON.stringify(migrationMembers))
   const migrationLedgerChecksum = sha256(`${migrationSql}\0${baselineSql}`)
   const input = {
-    format: 'blogman-issue-23-local-reseal-request/v1',
+    format: 'blogman-issue-23-local-reseal-request/v2',
     produced_at: '2026-07-27T10:00:00.000Z',
     candidate: {
       commit: candidate,
@@ -340,7 +340,7 @@ function runVerify(
 }
 
 describe('Issue #23 local reseal package generation', () => {
-  it('seals a canonical local-only v2 quartet through the public CLI', () => {
+  it('seals a canonical local-only T0 quartet through the public CLI', () => {
     const fixture = createSealFixture()
     try {
       const result = spawnSync(process.execPath, [
@@ -401,6 +401,20 @@ describe('Issue #23 local reseal package generation', () => {
         join(fixture.output, 'pre-cas-bindings.json'),
         'utf8',
       ))
+      const approval = JSON.parse(readFileSync(
+        join(fixture.output, 'approval-packet.json'),
+        'utf8',
+      ))
+      const manifest = JSON.parse(readFileSync(
+        join(fixture.output, 'package-manifest.json'),
+        'utf8',
+      ))
+      expect(approval.format).toBe('blogman-issue-23-approval-packet/v3')
+      expect(approval.scope.at(-1)).toBe('T0 event acceptance')
+      expect(preCas.format).toBe('blogman-issue-23-pre-cas-bindings/v3')
+      expect(preCas.immutable_phase_b_bindings.baselineD1DatabaseId)
+        .toBe('5d1cadcf-e10e-4245-b07d-16c64754f00d')
+      expect(manifest.format).toBe('blogman-issue-23-package-manifest/v3')
       expect(preCas.production_authorization_granted).toBe(false)
       expect(new Set(Object.values(preCas.stage_counts))).toEqual(new Set([0]))
     } finally {
@@ -1660,7 +1674,7 @@ syncBuiltinESMExports()
     }
   })
 
-  it('produces byte-identical v2 documents for identical frozen inputs', () => {
+  it('produces byte-identical T0 documents for identical frozen inputs', () => {
     const fixture = createSealFixture()
     const secondOutput = join(
       fixture.root,
@@ -1771,7 +1785,7 @@ syncBuiltinESMExports()
       })
 
       expect(result.status).not.toBe(0)
-      expect(result.stderr).toContain('does not match its preflight-candidate.json seal input')
+      expect(result.stderr).toContain('stale')
     } finally {
       rmSync(fixture.root, { recursive: true, force: true })
     }

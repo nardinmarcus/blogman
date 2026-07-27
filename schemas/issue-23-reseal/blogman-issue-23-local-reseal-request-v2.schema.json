@@ -1,0 +1,445 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blogman.local/schemas/issue-23-reseal/blogman-issue-23-local-reseal-request-v2.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "produced_at",
+    "candidate",
+    "repository",
+    "build",
+    "local_gates",
+    "github_evidence",
+    "expected_production_baseline"
+  ],
+  "properties": {
+    "format": {
+      "const": "blogman-issue-23-local-reseal-request/v2"
+    },
+    "produced_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit",
+        "tree"
+      ],
+      "properties": {
+        "commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "tree": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lockfile",
+        "runbook",
+        "migrations"
+      ],
+      "properties": {
+        "lockfile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "path": {
+              "const": "package-lock.json"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "runbook": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "path": {
+              "const": "docs/issue-23-phase-b-runbook.md"
+            },
+            "sha256": {
+              "const": "3a4c15efe55d0dc08b1c63477fbe12debc6c3bb64ad68a9f714aef50fed09d78"
+            }
+          }
+        },
+        "migrations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "directory",
+            "set_sha256",
+            "migration_001_sql_sha256",
+            "migration_001_ledger_checksum",
+            "migration_001_baseline_sha256",
+            "remote_baseline_companion_sha256"
+          ],
+          "properties": {
+            "directory": {
+              "const": "db/ledger-migrations"
+            },
+            "set_sha256": {
+              "const": "af8e6d00dabeeb08b8d830b39e86c1fe339d2eab09eb7d97119674745a126144"
+            },
+            "migration_001_sql_sha256": {
+              "const": "ce80438c559ff16bfc9909761837ea83b053d33c80616bd8477cee8841d7bfd1"
+            },
+            "migration_001_ledger_checksum": {
+              "const": "8a71414814571d4fe65e03fc92b3f976074d025ddf03a4dd9f861698b2387d05"
+            },
+            "migration_001_baseline_sha256": {
+              "const": "b3f61982cc36ff2c88d7b4330dd304ef075b5c5c34debf4499671c33ae2b6540"
+            },
+            "remote_baseline_companion_sha256": {
+              "const": "90c94ce79e77d3ca3ab22fc67f702243e7305bcd1860f3d1feb2026fb56b4a03"
+            }
+          }
+        }
+      }
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archive_path",
+        "archive_sha256",
+        "worker_path",
+        "worker_sha256",
+        "tree_manifest_path",
+        "tree_manifest_sha256"
+      ],
+      "properties": {
+        "archive_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "archive_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "worker_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "worker_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "tree_manifest_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tree_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "local_gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "affected_phase_b",
+        "static_gates",
+        "open_next_build",
+        "reviews"
+      ],
+      "properties": {
+        "affected_phase_b": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "passed",
+            "failed"
+          ],
+          "properties": {
+            "passed": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "failed": {
+              "const": 0
+            }
+          }
+        },
+        "static_gates": {
+          "const": "passed"
+        },
+        "open_next_build": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "static_pages"
+          ],
+          "properties": {
+            "state": {
+              "const": "passed"
+            },
+            "static_pages": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "reviews": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "standards",
+            "spec"
+          ],
+          "properties": {
+            "standards": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "state",
+                "blockers"
+              ],
+              "properties": {
+                "state": {
+                  "const": "passed"
+                },
+                "blockers": {
+                  "const": 0
+                }
+              }
+            },
+            "spec": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "state",
+                "blockers"
+              ],
+              "properties": {
+                "state": {
+                  "const": "passed"
+                },
+                "blockers": {
+                  "const": 0
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "github_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "quick",
+        "canonical_long_migration_runner"
+      ],
+      "properties": {
+        "quick": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "run_id",
+            "job_id",
+            "head_sha",
+            "head_tree",
+            "status",
+            "conclusion",
+            "test_files_passed",
+            "test_files_total",
+            "tests_passed",
+            "tests_total",
+            "build_static_pages",
+            "raw_job_log_sha256"
+          ],
+          "properties": {
+            "run_id": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "job_id": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "head_sha": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{40}$"
+            },
+            "head_tree": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{40}$"
+            },
+            "status": {
+              "const": "completed"
+            },
+            "conclusion": {
+              "const": "success"
+            },
+            "test_files_passed": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "test_files_total": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "tests_passed": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "tests_total": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "build_static_pages": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "raw_job_log_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "canonical_long_migration_runner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "run_id",
+            "job_id",
+            "head_sha",
+            "head_tree",
+            "status",
+            "conclusion",
+            "test_files_passed",
+            "test_files_total",
+            "tests_passed",
+            "tests_total",
+            "raw_job_log_sha256",
+            "coverage"
+          ],
+          "properties": {
+            "run_id": {
+              "const": 30251479781
+            },
+            "job_id": {
+              "const": 89930265069
+            },
+            "head_sha": {
+              "const": "31f60ffffa42dc38454c829420fc310e5924068b"
+            },
+            "head_tree": {
+              "const": "daeb1009a53743422b972eedb3d3bd142f4c5561"
+            },
+            "status": {
+              "const": "completed"
+            },
+            "conclusion": {
+              "const": "success"
+            },
+            "test_files_passed": {
+              "const": 1
+            },
+            "test_files_total": {
+              "const": 1
+            },
+            "tests_passed": {
+              "const": 46
+            },
+            "tests_total": {
+              "const": 46
+            },
+            "raw_job_log_sha256": {
+              "const": "f1e9a3e4b4f08fb3f22a8e5fbf8fff8cb6e31265f793a90abb9b139a0c9191ec"
+            },
+            "coverage": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "migration_runner_source_blob",
+                "migration_runner_test_blob",
+                "ledger_migrations_tree",
+                "package_lock_blob",
+                "schema_blob",
+                "seed_template_blob",
+                "historical_migrations_tree",
+                "wrangler_config_blob",
+                "ai_provider_profiles_blob",
+                "ai_post_generator_constants_blob"
+              ],
+              "properties": {
+                "migration_runner_source_blob": {
+                  "const": "2208c47157618c35484670f72b6b18837d28b33d"
+                },
+                "migration_runner_test_blob": {
+                  "const": "6151348a3030676ca6718737393e29962c0b81d6"
+                },
+                "ledger_migrations_tree": {
+                  "const": "aecf5d95f3e96084e67aaf9018d35ce85b9000cc"
+                },
+                "package_lock_blob": {
+                  "const": "18c04f636fa0d4a0dd54eafbecfb083cad024428"
+                },
+                "schema_blob": {
+                  "const": "9585b5fdc67811d8f3b70b1fad3c0afbf42496f9"
+                },
+                "seed_template_blob": {
+                  "const": "14beef7572457a5c85ad571ba1d0edc37f1f1f64"
+                },
+                "historical_migrations_tree": {
+                  "const": "349ae025fa89f487bb7e65870c1c423fcf122650"
+                },
+                "wrangler_config_blob": {
+                  "const": "bc57f24fa1ce2a5699ea340256eb24593421463f"
+                },
+                "ai_provider_profiles_blob": {
+                  "const": "9d1f521268875f2a984de6d52e4caf8dbd77708b"
+                },
+                "ai_post_generator_constants_blob": {
+                  "const": "d34700c62cf1f2dcaef1ee6d6a28d3d51b4767c1"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "expected_production_baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deployment_id",
+        "version_id",
+        "d1_database_id"
+      ],
+      "properties": {
+        "deployment_id": {
+          "const": "92422ae1-e7ce-45b7-95ab-bac8cc69f808"
+        },
+        "version_id": {
+          "const": "bf8666ae-996f-496d-a090-4c779ad57c3a"
+        },
+        "d1_database_id": {
+          "const": "5d1cadcf-e10e-4245-b07d-16c64754f00d"
+        }
+      }
+    }
+  }
+}
