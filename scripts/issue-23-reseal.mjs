@@ -27,7 +27,11 @@ import { PHASE_B_STAGES } from './phase-b-sequence.mjs'
 
 const MAX_DOCUMENT_BYTES = 1024 * 1024
 const PREFLIGHT_FORMAT = 'blogman-local-preflight-candidate/v2'
-const REQUEST_FORMAT = 'blogman-issue-23-local-reseal-request/v1'
+const REQUEST_FORMAT = 'blogman-issue-23-local-reseal-request/v2'
+const HISTORICAL_REQUEST_FORMAT = 'blogman-issue-23-local-reseal-request/v1'
+const CURRENT_APPROVAL_FORMAT = 'blogman-issue-23-approval-packet/v3'
+const CURRENT_PRE_CAS_FORMAT = 'blogman-issue-23-pre-cas-bindings/v3'
+const CURRENT_MANIFEST_FORMAT = 'blogman-issue-23-package-manifest/v3'
 const PACKAGE_FILE_NAMES = Object.freeze([
   'approval-packet.json',
   'package-manifest.json',
@@ -51,8 +55,24 @@ const SCHEMA_URLS = new Map([
     '../schemas/issue-23-reseal/blogman-issue-23-package-manifest-v2.schema.json',
     import.meta.url,
   )],
-  [REQUEST_FORMAT, new URL(
+  [CURRENT_APPROVAL_FORMAT, new URL(
+    '../schemas/issue-23-reseal/blogman-issue-23-approval-packet-v3.schema.json',
+    import.meta.url,
+  )],
+  [CURRENT_PRE_CAS_FORMAT, new URL(
+    '../schemas/issue-23-reseal/blogman-issue-23-pre-cas-bindings-v3.schema.json',
+    import.meta.url,
+  )],
+  [CURRENT_MANIFEST_FORMAT, new URL(
+    '../schemas/issue-23-reseal/blogman-issue-23-package-manifest-v3.schema.json',
+    import.meta.url,
+  )],
+  [HISTORICAL_REQUEST_FORMAT, new URL(
     '../schemas/issue-23-reseal/blogman-issue-23-local-reseal-request-v1.schema.json',
+    import.meta.url,
+  )],
+  [REQUEST_FORMAT, new URL(
+    '../schemas/issue-23-reseal/blogman-issue-23-local-reseal-request-v2.schema.json',
     import.meta.url,
   )],
 ])
@@ -1086,7 +1106,7 @@ function resealDocuments(request, toolVersions) {
   const preflightBytes = canonicalBytes(preflight)
 
   const approval = {
-    format: 'blogman-issue-23-approval-packet/v2',
+    format: CURRENT_APPROVAL_FORMAT,
     state: 'ready-for-fresh-production-authorization',
     produced_at: request.produced_at,
     candidate_id: request.candidate.commit,
@@ -1106,14 +1126,14 @@ function resealDocuments(request, toolVersions) {
       'migrations 001-006',
       'one 100% traffic deployment',
       'status-only smoke and reconciliation',
-      'T0 and 24h observation',
+      'T0 event acceptance',
     ],
     old_lineages_invalid: true,
   }
   const approvalBytes = canonicalBytes(approval)
 
   const preCas = {
-    format: 'blogman-issue-23-pre-cas-bindings/v2',
+    format: CURRENT_PRE_CAS_FORMAT,
     state: 'sealed-local-only',
     produced_at: request.produced_at,
     executor_started: false,
@@ -1125,6 +1145,7 @@ function resealDocuments(request, toolVersions) {
       buildArchiveSha256: request.build.archive_sha256,
       baselineDeploymentId: request.expected_production_baseline.deployment_id,
       baselineVersionId: request.expected_production_baseline.version_id,
+      baselineD1DatabaseId: request.expected_production_baseline.d1_database_id,
     },
     migration_set_sha256: request.repository.migrations.set_sha256,
     stage_counts: Object.fromEntries(PHASE_B_STAGES.map((stage) => [stage, 0])),
@@ -1136,7 +1157,7 @@ function resealDocuments(request, toolVersions) {
   const preCasBytes = canonicalBytes(preCas)
 
   const manifest = {
-    format: 'blogman-issue-23-package-manifest/v2',
+    format: CURRENT_MANIFEST_FORMAT,
     state: 'sealed-local-only',
     produced_at: request.produced_at,
     candidate_id: request.candidate.commit,
@@ -1170,6 +1191,9 @@ function loadSealContext(inputPath, repositoryPath, artifactsPath) {
   const requestDocument = readValidatedDocument(inputPath, {
     label: 'request document',
   })
+  if (requestDocument.value.format === HISTORICAL_REQUEST_FORMAT) {
+    fail('Issue #23 historical v1 reseal request is stale for current sealing')
+  }
   requireEqual(requestDocument.value.format, REQUEST_FORMAT, 'request format')
   const sealInputs = verifySealInputs(requestDocument.value, repository, artifacts)
   return {
@@ -1272,6 +1296,9 @@ export function verifyPackage({
   )
   const packageSnapshot = readPackageSnapshot(packagePath)
   verifyPackageSnapshot(packageSnapshot)
+  if (packageSnapshot.contract !== 'current-t0') {
+    fail('Issue #23 historical v2 reseal package is stale for current verification')
+  }
   const validation = packageSnapshot.summary
   const expectedDocuments = resealDocuments(
     context.requestDocument.value,
@@ -1304,7 +1331,7 @@ function readPackageSnapshot(packagePath) {
     JSON.stringify(entries)
     !== JSON.stringify(PACKAGE_FILE_NAMES)
   ) {
-    fail('Issue #23 reseal package must contain exactly the four v2 documents')
+    fail('Issue #23 reseal package must contain exactly the four documents')
   }
 
   const preflight = readValidatedDocument(
@@ -1333,6 +1360,20 @@ function readPackageSnapshot(packagePath) {
   const a = approval.value
   const c = preCas.value
   const m = manifest.value
+  const formats = [a.format, c.format, m.format]
+  const historical = JSON.stringify(formats) === JSON.stringify([
+    'blogman-issue-23-approval-packet/v2',
+    'blogman-issue-23-pre-cas-bindings/v2',
+    'blogman-issue-23-package-manifest/v2',
+  ])
+  const current = JSON.stringify(formats) === JSON.stringify([
+    CURRENT_APPROVAL_FORMAT,
+    CURRENT_PRE_CAS_FORMAT,
+    CURRENT_MANIFEST_FORMAT,
+  ])
+  if (!historical && !current) {
+    fail('Issue #23 reseal package mixes historical and current contract versions')
+  }
 
   requireEqual(a.produced_at, p.produced_at, 'produced_at')
   requireEqual(c.produced_at, p.produced_at, 'produced_at')
@@ -1365,6 +1406,13 @@ function readPackageSnapshot(packagePath) {
     a.expected_baseline.version_id,
     'baseline version',
   )
+  if (current) {
+    requireEqual(
+      c.immutable_phase_b_bindings.baselineD1DatabaseId,
+      a.expected_baseline.d1_database_id,
+      'baseline D1 database',
+    )
+  }
 
   return {
     directory: {
@@ -1373,6 +1421,7 @@ function readPackageSnapshot(packagePath) {
       realPath: realPackagePath,
       requestedPath: requestedPackagePath,
     },
+    contract: historical ? 'historical-observation' : 'current-t0',
     documents: new Map([
       ['preflight-candidate.json', preflight],
       ['approval-packet.json', approval],
@@ -1389,7 +1438,8 @@ function readPackageSnapshot(packagePath) {
       candidate_id: p.candidate_id,
       format: 'blogman-issue-23-reseal-package-validation/v1',
       package_manifest_sha256: manifest.sha256,
-      state: 'valid',
+      ...(historical ? { acceptance_authority: false } : {}),
+      state: historical ? 'valid-historical' : 'valid',
     },
   }
 }

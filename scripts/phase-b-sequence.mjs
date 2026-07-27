@@ -31,7 +31,8 @@ function validateInputs(configPath, bindings) {
     || !sha256.test(bindings.approvalPacketSha256)
     || !sha256.test(bindings.buildArchiveSha256)
     || !bindings.baselineDeploymentId
-    || !bindings.baselineVersionId) {
+    || !bindings.baselineVersionId
+    || !bindings.baselineD1DatabaseId) {
     throw new Error('Phase B bindings are incomplete or invalid')
   }
 }
