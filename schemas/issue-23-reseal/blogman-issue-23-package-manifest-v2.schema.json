@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blogman.local/schemas/issue-23-reseal/blogman-issue-23-package-manifest-v2.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "state",
+    "produced_at",
+    "candidate_id",
+    "local_preflight_candidate_sha256",
+    "approval_packet_sha256",
+    "pre_cas_bindings_sha256",
+    "build_archive_sha256",
+    "migration_set_sha256",
+    "formal_pre_migration_candidate_created",
+    "production_counters_all_zero",
+    "github_ci"
+  ],
+  "properties": {
+    "format": {
+      "const": "blogman-issue-23-package-manifest/v2"
+    },
+    "state": {
+      "const": "sealed-local-only"
+    },
+    "produced_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "candidate_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "local_preflight_candidate_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "approval_packet_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "pre_cas_bindings_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "build_archive_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "migration_set_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "formal_pre_migration_candidate_created": {
+      "const": false
+    },
+    "production_counters_all_zero": {
+      "const": true
+    },
+    "github_ci": {
+      "const": "pending"
+    }
+  }
+}

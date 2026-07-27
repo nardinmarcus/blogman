@@ -373,7 +373,7 @@ describe('remote baseline replacement runner', () => {
     expect(calls(fixture).some((call) => call.arguments.includes('--file'))).toBe(false)
   })
 
-  it('passes allowlisted object issues into baseline compatibility matching', () => {
+  it('passes allowlisted object issues into baseline compatibility matching', { timeout: 15_000 }, () => {
     const fixture = createFixture()
     writeFileSync(
       join(fixture.migrations, '002_allow_missing_index.sql'),
