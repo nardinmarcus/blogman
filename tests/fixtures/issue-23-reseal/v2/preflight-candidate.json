@@ -1,0 +1,45 @@
+{
+  "format": "blogman-local-preflight-candidate/v2",
+  "state": "sealed-local-only",
+  "produced_at": "2026-07-27T08:15:30.000Z",
+  "candidate_id": "39523f114316b05f9331c3daf77707ffcb81a59f",
+  "lockfile": {
+    "sha256": "b5eba873f33d9c6eb529ae2bdfcd2765dff321b2dcc7143c723ad0d0300aba29",
+    "wrangler": "4.86.0",
+    "opennextjs_cloudflare": "1.19.10"
+  },
+  "migration_set_sha256": "af8e6d00dabeeb08b8d830b39e86c1fe339d2eab09eb7d97119674745a126144",
+  "runbook_sha256": "6c48caac29f8cbb575f39ba157ac165f4aef1859247f8474d801992ae1b5988a",
+  "build": {
+    "archive_sha256": "0467e69cf0c0943b2eafc53958bab5a6b8b1c227cae6f0a24731d9436d1af6f7",
+    "worker_sha256": "d05223bf4d44c84108a102ab62aa3bc9c5568f0c3ac2064c37be5cc65c64bc45",
+    "tree_manifest_sha256": "9458a10758ad4f8df7ab2ccc6cfdc0068af5d5a8e761368373b2ee86a6a675e1"
+  },
+  "tests": {
+    "affected_phase_b": {
+      "state": "passed",
+      "passed": 69,
+      "failed": 0
+    },
+    "static_gates": "passed",
+    "open_next_build": {
+      "state": "passed",
+      "static_pages": 38
+    },
+    "canonical_long_migration_runner": {
+      "state": "unverified",
+      "reason": "prior 1200s hard timeout; later targeted invocation interrupted; not claimed PASS"
+    }
+  },
+  "reviews": {
+    "standards": {
+      "state": "passed",
+      "blockers": 0
+    },
+    "spec": {
+      "state": "passed",
+      "blockers": 0
+    }
+  },
+  "production_counters_all_zero": true
+}

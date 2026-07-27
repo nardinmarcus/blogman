@@ -1,0 +1,14 @@
+{
+  "format": "blogman-issue-23-package-manifest/v2",
+  "state": "sealed-local-only",
+  "produced_at": "2026-07-27T08:15:30.000Z",
+  "candidate_id": "39523f114316b05f9331c3daf77707ffcb81a59f",
+  "local_preflight_candidate_sha256": "7d056cbb8c41dcb53c3347fd10828a90a7e27c8c3e74020ab7a7dd0327c3689b",
+  "approval_packet_sha256": "9ab75338f5ff001aa4f46c4ae118b6156b3e10f404268d5945a198065e440896",
+  "pre_cas_bindings_sha256": "7ab048f46534a7c396c42827ea3d78f803268c116bb78681f9926c9eaba4366a",
+  "build_archive_sha256": "0467e69cf0c0943b2eafc53958bab5a6b8b1c227cae6f0a24731d9436d1af6f7",
+  "migration_set_sha256": "af8e6d00dabeeb08b8d830b39e86c1fe339d2eab09eb7d97119674745a126144",
+  "formal_pre_migration_candidate_created": false,
+  "production_counters_all_zero": true,
+  "github_ci": "pending"
+}

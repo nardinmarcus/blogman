@@ -5,6 +5,8 @@ import { spawnSync } from 'node:child_process'
 import { afterEach, describe, expect, it } from 'vitest'
 
 const sourceRunner = join(process.cwd(), 'scripts', 'migrations.mjs')
+// Test-only budget for child startup under full-suite load; production keeps its hard timeout.
+const FULL_SUITE_CHILD_STARTUP_TIMEOUT_MS = 2_000
 const temporaryDirectories: string[] = []
 
 function createFixture(withBaseline = false, privateTimeoutMs = 300_000) {
@@ -508,7 +510,7 @@ describe('remote migration plan failure reports', () => {
     const startMarker = join(fixture.root, `${mode}-starts.txt`)
     const result = runPlan(fixture, report, mode, {
       FAKE_START_MARKER: startMarker,
-      BLOGMAN_MIGRATION_TEST_TIMEOUT_MS: '500',
+      BLOGMAN_MIGRATION_TEST_TIMEOUT_MS: String(FULL_SUITE_CHILD_STARTUP_TIMEOUT_MS),
     })
 
     expect(result.status).toBe(1)
@@ -524,7 +526,7 @@ describe('remote migration plan failure reports', () => {
   })
 
   it('never lets the test override exceed the hard timeout ceiling', () => {
-    const fixture = createFixture(false, 500)
+    const fixture = createFixture(false, FULL_SUITE_CHILD_STARTUP_TIMEOUT_MS)
     const report = join(fixture.root, 'timeout-ceiling.json')
     const startMarker = join(fixture.root, 'timeout-ceiling-starts.txt')
     const result = runPlan(fixture, report, 'timeout', {

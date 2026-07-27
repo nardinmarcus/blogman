@@ -1,0 +1,29 @@
+{
+  "format": "blogman-issue-23-approval-packet/v2",
+  "state": "ready-for-fresh-production-authorization",
+  "produced_at": "2026-07-27T08:15:30.000Z",
+  "candidate_id": "39523f114316b05f9331c3daf77707ffcb81a59f",
+  "local_preflight_candidate_sha256": "7d056cbb8c41dcb53c3347fd10828a90a7e27c8c3e74020ab7a7dd0327c3689b",
+  "lockfile_sha256": "b5eba873f33d9c6eb529ae2bdfcd2765dff321b2dcc7143c723ad0d0300aba29",
+  "migration_set_sha256": "af8e6d00dabeeb08b8d830b39e86c1fe339d2eab09eb7d97119674745a126144",
+  "runbook_sha256": "6c48caac29f8cbb575f39ba157ac165f4aef1859247f8474d801992ae1b5988a",
+  "build_archive_sha256": "0467e69cf0c0943b2eafc53958bab5a6b8b1c227cae6f0a24731d9436d1af6f7",
+  "worker_sha256": "d05223bf4d44c84108a102ab62aa3bc9c5568f0c3ac2064c37be5cc65c64bc45",
+  "tree_manifest_sha256": "9458a10758ad4f8df7ab2ccc6cfdc0068af5d5a8e761368373b2ee86a6a675e1",
+  "expected_baseline": {
+    "deployment_id": "92422ae1-e7ce-45b7-95ab-bac8cc69f808",
+    "version_id": "bf8666ae-996f-496d-a090-4c779ad57c3a",
+    "d1_database_id": "5d1cadcf-e10e-4245-b07d-16c64754f00d"
+  },
+  "scope": [
+    "one remote migration plan",
+    "one private seven-table export",
+    "double local restore",
+    "one version upload",
+    "migrations 001-006",
+    "one 100% traffic deployment",
+    "status-only smoke and reconciliation",
+    "T0 and 24h observation"
+  ],
+  "old_lineages_invalid": true
+}
