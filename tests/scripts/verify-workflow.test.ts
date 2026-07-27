@@ -1,0 +1,58 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { describe, expect, it } from 'vitest'
+
+const repoRoot = process.cwd()
+const longMigrationTest = 'tests/migrations/migration-runner.test.ts'
+
+function workflowJob(workflow: string, name: string) {
+  const jobsStart = workflow.indexOf('\njobs:\n')
+  const marker = `  ${name}:\n`
+  const jobStart = workflow.indexOf(marker, jobsStart)
+
+  if (jobsStart === -1 || jobStart === -1) {
+    throw new Error(`Workflow job not found: ${name}`)
+  }
+
+  const remainingWorkflow = workflow.slice(jobStart + marker.length)
+  const nextJob = remainingWorkflow.search(/\n  [a-zA-Z0-9_-]+:\n/)
+
+  return nextJob === -1
+    ? workflow.slice(jobStart)
+    : workflow.slice(jobStart, jobStart + marker.length + nextJob)
+}
+
+describe('Verify workflow test partition', () => {
+  it('keeps the quick suite complete except for the long migration runner', () => {
+    const script = readFileSync(join(repoRoot, 'scripts', 'verify.sh'), 'utf8')
+    const scriptLines = script.split('\n')
+
+    expect(script).toContain(`LONG_MIGRATION_TEST="${longMigrationTest}"`)
+    expect(script).toContain('if [[ "${MODE}" == "quick" ]]')
+    expect(scriptLines).toContain('  npm run test:run -- --exclude "${LONG_MIGRATION_TEST}"')
+    expect(script).toContain('npm run lint')
+    expect(script).toContain('npm run build')
+    expect(script.match(/--exclude/g)).toHaveLength(1)
+    expect(script.match(/tests\/migrations\/migration-runner\.test\.ts/g)).toHaveLength(1)
+  })
+
+  it('runs quick and long verification as separate hard-fail jobs', () => {
+    const workflow = readFileSync(join(repoRoot, '.github', 'workflows', 'verify.yml'), 'utf8')
+    const quickJob = workflowJob(workflow, 'verify')
+    const longJob = workflowJob(workflow, 'verify-migrations')
+
+    expect(quickJob).toContain('timeout-minutes: 20')
+    expect(quickJob.split('\n')).toContain('        run: npm run verify:quick')
+
+    expect(longJob).toContain('timeout-minutes: 45')
+    expect(longJob.split('\n')).toContain(
+      `        run: npm run test:run -- ${longMigrationTest} --reporter=verbose`,
+    )
+
+    for (const job of [quickJob, longJob]) {
+      expect(job).not.toContain('continue-on-error')
+      expect(job).not.toContain('|| true')
+      expect(job).not.toMatch(/^\s+if:/m)
+    }
+  })
+})
