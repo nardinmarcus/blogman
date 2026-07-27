@@ -208,21 +208,21 @@ const emit = (value) => {
   }
 }
 if (mode === 'query-seven-cloudflare-error' && callCount === 1) {
-  emit(JSON.stringify([{ results: [{ count: 4 }] }]))
+  emit(JSON.stringify([{ success: true, results: [{ count: 4 }] }]))
 } else if (mode === 'query-seven-cloudflare-error' && callCount === 2) {
-  emit(JSON.stringify([{ results: ledgerContract }]))
+  emit(JSON.stringify([{ success: true, results: ledgerContract }]))
 } else if (mode === 'query-seven-cloudflare-error' && callCount === 3) {
-  emit(JSON.stringify([{ results: [] }]))
+  emit(JSON.stringify([{ success: true, results: [] }]))
 } else if (mode === 'query-seven-cloudflare-error' && callCount === 4) {
-  emit(JSON.stringify([{ results: [{ count: 1 }] }]))
+  emit(JSON.stringify([{ success: true, results: [{ count: 1 }] }]))
 } else if (sql.includes("WHERE lower(name) IN")) {
-  emit(JSON.stringify([{ results: [{ count: 0 }] }]))
+  emit(JSON.stringify([{ success: true, results: [{ count: 0 }] }]))
 } else if (sql.includes("name NOT LIKE 'sqlite_%'")) {
-  emit(JSON.stringify([{ results: [{ count: ['schema-contract', 'business-schema', 'query-seven-cloudflare-error'].includes(mode) ? 1 : 0 }] }]))
+  emit(JSON.stringify([{ success: true, results: [{ count: ['schema-contract', 'business-schema', 'query-seven-cloudflare-error'].includes(mode) ? 1 : 0 }] }]))
 } else if (mode === 'schema-contract') {
-  emit(JSON.stringify([{ results: [{ issue: 'sensitive schema detail' }] }]))
+  emit(JSON.stringify([{ success: true, results: [{ issue: 'sensitive schema detail' }] }]))
 } else {
-  emit(JSON.stringify([{ results: [] }]))
+  emit(JSON.stringify([{ success: true, results: [] }]))
 }
 `)
   chmodSync(wrangler, 0o755)
