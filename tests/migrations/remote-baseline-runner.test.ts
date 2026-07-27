@@ -18,7 +18,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 const repoRoot = process.cwd()
 const temporaryDirectories: string[] = []
 const baselineSha256 = 'b3f61982cc36ff2c88d7b4330dd304ef075b5c5c34debf4499671c33ae2b6540'
-const replacementSha256 = 'a3d4834018b7124c27ba82231c95239ce0092cd44a3b3959aec060b86accde28'
+const replacementSha256 = '90c94ce79e77d3ca3ab22fc67f702243e7305bcd1860f3d1feb2026fb56b4a03'
 
 function sha256(source: string): string {
   return createHash('sha256').update(source).digest('hex')
@@ -67,6 +67,11 @@ if (sql.includes("WHERE lower(name) IN")) {
   emit([{ count: 0 }])
 } else if (sql.includes("name NOT LIKE 'sqlite_%'") && sql.includes("migration_ledger%")) {
   emit([{ count: 1 }])
+} else if (process.env.FAKE_FAIL_OBJECT_TYPE
+  && !sql.startsWith('EXPLAIN ')
+  && sql.includes("sqlite_schema.type = '" + process.env.FAKE_FAIL_OBJECT_TYPE + "'")) {
+  process.stderr.write('private remote object failure body')
+  process.exit(7)
 } else if (process.env.FAKE_FAIL_TABLE
   && !sql.startsWith('EXPLAIN ')
   && sql.includes("pragma_table_info('" + process.env.FAKE_FAIL_TABLE + "')")) {
@@ -91,15 +96,23 @@ if (sql.includes("WHERE lower(name) IN")) {
   emit([])
 } else if (sql.includes("coalesce(sql, '') AS sql")) {
   const state = process.env.FAKE_FINGERPRINT_STATE
-  if (state && existsSync(state)) {
+  const fingerprintCall = state && existsSync(state)
+    ? Number(readFileSync(state, 'utf8')) + 1
+    : 1
+  if (state) writeFileSync(state, String(fingerprintCall))
+  const driftAt = Number(process.env.FAKE_FINGERPRINT_DRIFT_AT || 2)
+  if (state && fingerprintCall >= driftAt) {
     emit([{ type: 'table', name: 'changed', tbl_name: 'changed', sql: 'CREATE TABLE changed(id)' }])
   } else {
-    if (state) writeFileSync(state, 'captured')
     emit([{ type: 'table', name: 'stable', tbl_name: 'stable', sql: 'CREATE TABLE stable(id)' }])
   }
 } else if (process.env.FAKE_INVALID_ISSUE_TABLE
   && sql.includes("pragma_table_info('" + process.env.FAKE_INVALID_ISSUE_TABLE + "')")) {
   emit([{ issue: 'private schema detail' }])
+} else if (process.env.FAKE_MISSING_OBJECT
+  && !sql.startsWith('EXPLAIN ')
+  && sql.includes("('" + process.env.FAKE_MISSING_OBJECT + "')")) {
+  emit([{ issue: 'missing index ' + process.env.FAKE_MISSING_OBJECT }])
 } else if (process.env.FAKE_FAIL_PREFLIGHT === '1'
   && !sql.startsWith('EXPLAIN ')
   && sql.includes('later preflight failed')) {
@@ -230,7 +243,7 @@ afterEach(() => {
 })
 
 describe('remote baseline replacement runner', () => {
-  it('uses three private one-shot probes and retains ordinary EXPLAIN proofs', () => {
+  it('uses six private one-shot probes and retains ordinary EXPLAIN proofs', () => {
     const fixture = createFixture()
     const { report, result } = runPlan(fixture)
 
@@ -252,6 +265,24 @@ describe('remote baseline replacement runner', () => {
     ))
     expect(originalLargeStatement).toEqual([])
 
+    const originalRequiredObjectsStatement = observed.filter((call) => (
+      call.sql.includes("('table', 'posts')")
+      && call.sql.includes("('index', 'idx_posts_slug')")
+      && call.sql.includes("('trigger', 'posts_ai')")
+    ))
+    expect(originalRequiredObjectsStatement).toEqual([])
+
+    for (const marker of [
+      "sqlite_schema.type = 'table'",
+      "sqlite_schema.type = 'index'",
+      "sqlite_schema.type = 'trigger'",
+    ]) {
+      const objectCalls = observed.filter((call) => call.sql.includes(marker))
+      expect(objectCalls).toHaveLength(2)
+      expect(objectCalls.filter((call) => call.sql.startsWith('EXPLAIN '))).toHaveLength(1)
+      expect(objectCalls.filter((call) => !call.sql.startsWith('EXPLAIN '))).toHaveLength(1)
+    }
+
     for (const table of ['ai_provider_profiles', 'ai_post_generators', 'api_tokens']) {
       const tableCalls = observed.filter((call) => call.sql.includes(`pragma_table_info('${table}')`))
       expect(tableCalls).toHaveLength(2)
@@ -265,12 +296,20 @@ describe('remote baseline replacement runner', () => {
     const lastReplacement = observed.findLastIndex((call) => (
       call.sql.includes("pragma_table_info('api_tokens')")
     ))
+    const firstObjectReplacement = observed.findIndex((call) => (
+      call.sql.includes("sqlite_schema.type = 'table'")
+    ))
+    const lastObjectReplacement = observed.findLastIndex((call) => (
+      call.sql.includes("sqlite_schema.type = 'trigger'")
+    ))
     const fingerprintCalls = observed
       .map((call, index) => ({ call, index }))
       .filter(({ call }) => call.sql.includes("coalesce(sql, '') AS sql"))
-    expect(fingerprintCalls).toHaveLength(4)
-    expect(fingerprintCalls[1].index).toBeLessThan(firstReplacement)
-    expect(fingerprintCalls[2].index).toBeGreaterThan(lastReplacement)
+    expect(fingerprintCalls).toHaveLength(8)
+    expect(fingerprintCalls[1].index).toBeLessThan(firstObjectReplacement)
+    expect(fingerprintCalls[2].index).toBeGreaterThan(lastObjectReplacement)
+    expect(fingerprintCalls[5].index).toBeLessThan(firstReplacement)
+    expect(fingerprintCalls[6].index).toBeGreaterThan(lastReplacement)
 
     const ordinaryDefinitionProbe = observed.filter((call) => (
       call.sql.includes('expected_definitions(type, name, normalized_sql)')
@@ -334,6 +373,31 @@ describe('remote baseline replacement runner', () => {
     expect(calls(fixture).some((call) => call.arguments.includes('--file'))).toBe(false)
   })
 
+  it('passes allowlisted object issues into baseline compatibility matching', () => {
+    const fixture = createFixture()
+    writeFileSync(
+      join(fixture.migrations, '002_allow_missing_index.sql'),
+      [
+        '-- migration-number: 002',
+        '-- migration-baseline-compatibility',
+        '-- migration-baseline-allow-issues: missing index idx_posts_published',
+        'SELECT 1;',
+        '',
+      ].join('\n'),
+    )
+    writeFileSync(
+      join(fixture.migrations, '002_allow_missing_index.baseline.sql'),
+      'SELECT NULL AS issue WHERE 0;\n',
+    )
+
+    const { report, result } = runPlan(fixture, {
+      FAKE_MISSING_OBJECT: 'idx_posts_published',
+    })
+
+    expect(result.status).toBe(0)
+    expect(existsSync(report)).toBe(false)
+  })
+
   it('revalidates a later preflight after an earlier migration writes', () => {
     const fixture = createFixture()
     writeFileSync(
@@ -369,7 +433,7 @@ describe('remote baseline replacement runner', () => {
     }],
     ['replacement header drift', (fixture: ReturnType<typeof createFixture>) => {
       const path = join(fixture.migrations, '001_initial_schema.remote.baseline.sql')
-      const changed = readFileSync(path, 'utf8').replace('statement_ordinal=3', 'statement_ordinal=4')
+      const changed = readFileSync(path, 'utf8').replace('groups=1:', 'groups=2:')
       writeFileSync(path, changed)
       writeFileSync(
         fixture.runner,
@@ -385,6 +449,18 @@ describe('remote baseline replacement runner', () => {
       const changed = readFileSync(path, 'utf8').replace(
         "('api_tokens', 'is_active', 'INTEGER', 0, '1', 0)",
         "('api_tokens', 'is_active', 'INTEGER', 1, '1', 0)",
+      )
+      writeFileSync(path, changed)
+      writeFileSync(
+        fixture.runner,
+        readFileSync(fixture.runner, 'utf8').replace(baselineSha256, sha256(changed)),
+      )
+    }],
+    ['source statement one drift', (fixture: ReturnType<typeof createFixture>) => {
+      const path = join(fixture.migrations, '001_initial_schema.baseline.sql')
+      const changed = readFileSync(path, 'utf8').replace(
+        "('trigger', 'posts_ad')",
+        "('trigger', 'posts_ad_drift')",
       )
       writeFileSync(path, changed)
       writeFileSync(
@@ -415,10 +491,14 @@ describe('remote baseline replacement runner', () => {
     })
   })
 
-  it('fails closed when the schema fingerprint changes across the three probes', () => {
+  it.each([
+    ['statement one', 2],
+    ['statement three', 4],
+  ])('fails closed when the schema fingerprint changes across %s replacement', (_name, driftAt) => {
     const fixture = createFixture()
     const { report, result } = runPlan(fixture, {
       FAKE_FINGERPRINT_STATE: join(fixture.root, 'fingerprint-state'),
+      FAKE_FINGERPRINT_DRIFT_AT: String(driftAt),
     })
 
     expect(result.status).toBe(1)
@@ -427,6 +507,29 @@ describe('remote baseline replacement runner', () => {
       phase: 'schema_validation',
       exit_class: 'runner_error',
     })
+  })
+
+  it('does not retry or fall back when a statement-one object probe fails', () => {
+    const fixture = createFixture()
+    const { report, result } = runPlan(fixture, {
+      FAKE_FAIL_OBJECT_TYPE: 'index',
+    })
+
+    expect(result.status).toBe(1)
+    const observed = calls(fixture)
+    expect(observed.filter((call) => (
+      !call.sql.startsWith('EXPLAIN ')
+      && call.sql.includes("sqlite_schema.type = 'index'")
+    ))).toHaveLength(1)
+    expect(observed.some((call) => call.sql.includes("sqlite_schema.type = 'trigger'"))).toBe(false)
+    expect(observed.some((call) => call.sql.includes("pragma_table_info('ai_provider_profiles')"))).toBe(false)
+    expect(observed.some((call) => (
+      call.sql.includes("('table', 'posts')")
+      && call.sql.includes("('index', 'idx_posts_slug')")
+      && call.sql.includes("('trigger', 'posts_ai')")
+    ))).toBe(false)
+    expect(`${result.stdout}${result.stderr}${readFileSync(report, 'utf8')}`)
+      .not.toContain('private remote object failure body')
   })
 
   it('does not retry or fall back when a small probe fails', () => {

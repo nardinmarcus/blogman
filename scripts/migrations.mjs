@@ -47,10 +47,19 @@ const remoteBaselineReplacementContracts = new Map([
     migrationNumber: 1,
     migrationName: '001_initial_schema',
     baselineSha256: 'b3f61982cc36ff2c88d7b4330dd304ef075b5c5c34debf4499671c33ae2b6540',
-    statementOrdinal: 3,
-    statementSha256: 'c61b390568cafc468c6adbbff5b78d08dd5d18a544d917fbc06c043393e3c7bd',
-    replacementSha256: 'a3d4834018b7124c27ba82231c95239ce0092cd44a3b3959aec060b86accde28',
-    replacementStatementCount: 3,
+    replacementSha256: '90c94ce79e77d3ca3ab22fc67f702243e7305bcd1860f3d1feb2026fb56b4a03',
+    groups: [
+      {
+        statementOrdinal: 1,
+        statementSha256: '2c4d1aa391172c16b128c08a593e252f9e09b4fc151642ce738ae47882c38491',
+        replacementStatementCount: 3,
+      },
+      {
+        statementOrdinal: 3,
+        statementSha256: 'c61b390568cafc468c6adbbff5b78d08dd5d18a544d917fbc06c043393e3c7bd',
+        replacementStatementCount: 3,
+      },
+    ],
   }],
 ])
 const remoteBaselineFingerprintSql = `
@@ -60,7 +69,18 @@ WHERE name NOT LIKE 'sqlite_%'
   AND name NOT LIKE '_cf_%'
 ORDER BY type, name, tbl_name, sql
 `
-const remoteBaselineIssueAllowlist = new Set(Object.entries({
+const remoteBaselineIssueAllowlist = new Set([
+  ...Object.entries({
+    table: [
+      'posts', 'posts_fts', 'categories', 'site_settings', 'ai_actions',
+      'ai_provider_profiles', 'ai_post_generators', 'api_tokens',
+    ],
+    index: [
+      'idx_posts_slug', 'idx_posts_category', 'idx_posts_published', 'idx_api_tokens_token',
+    ],
+    trigger: ['posts_ai', 'posts_au', 'posts_ad'],
+  }).flatMap(([type, names]) => names.map((name) => `missing ${type} ${name}`)),
+  ...Object.entries({
   ai_provider_profiles: [
     'id', 'name', 'provider', 'provider_name', 'provider_type', 'provider_category',
     'api_key_url', 'base_url', 'model', 'temperature', 'max_tokens', 'api_key_encrypted',
@@ -72,9 +92,10 @@ const remoteBaselineIssueAllowlist = new Set(Object.entries({
     'resolution', 'is_enabled', 'is_builtin', 'created_at', 'updated_at',
   ],
   api_tokens: ['id', 'token', 'name', 'created_at', 'last_used_at', 'is_active'],
-}).flatMap(([table, columns]) => (
+  }).flatMap(([table, columns]) => (
   columns.map((column) => `column ${table}.${column} semantic drift`)
-)))
+  )),
+])
 const ledgerSchemaObjects = [
   {
     type: 'table',
@@ -496,9 +517,11 @@ function loadRemoteBaselineReplacement({
     baselineSql,
     `Migration baseline ${migrationName}`,
   )
-  const sourceStatement = baselineStatements[contract.statementOrdinal - 1]
-  if (!sourceStatement || sha256(sourceStatement) !== contract.statementSha256) {
-    remoteBaselineContractFail(`Remote baseline replacement statement drift in ${migrationName}`)
+  for (const group of contract.groups) {
+    const sourceStatement = baselineStatements[group.statementOrdinal - 1]
+    if (!sourceStatement || sha256(sourceStatement) !== group.statementSha256) {
+      remoteBaselineContractFail(`Remote baseline replacement statement drift in ${migrationName}`)
+    }
   }
   if (sha256(source) !== contract.replacementSha256) {
     remoteBaselineContractFail(`Remote baseline replacement content drift in ${migrationName}`)
@@ -506,12 +529,13 @@ function loadRemoteBaselineReplacement({
 
   const lineEnd = source.indexOf('\n')
   const expectedHeader = [
-    '-- migration-remote-baseline-replacement:',
+    '-- migration-remote-baseline-replacements:',
     `migration_number=${String(contract.migrationNumber).padStart(3, '0')}`,
     `migration=${contract.migrationName}`,
     `baseline_sha256=${contract.baselineSha256}`,
-    `statement_ordinal=${contract.statementOrdinal}`,
-    `statement_sha256=${contract.statementSha256}`,
+    `groups=${contract.groups.map((group) => (
+      `${group.statementOrdinal}:${group.statementSha256}:${group.replacementStatementCount}`
+    )).join('|')}`,
   ].join(' ')
   if (lineEnd === -1 || source.slice(0, lineEnd).trim() !== expectedHeader) {
     remoteBaselineContractFail(`Remote baseline replacement header drift in ${migrationName}`)
@@ -520,13 +544,27 @@ function loadRemoteBaselineReplacement({
     source.slice(lineEnd + 1),
     `Remote baseline replacement ${migrationName}`,
   )
-  if (statements.length !== contract.replacementStatementCount) {
+  const replacementStatementCount = contract.groups.reduce(
+    (total, group) => total + group.replacementStatementCount,
+    0,
+  )
+  if (statements.length !== replacementStatementCount) {
     remoteBaselineContractFail(`Remote baseline replacement statement count drift in ${migrationName}`)
   }
+  let replacementOffset = 0
   return {
-    sourceStatementOrdinal: contract.statementOrdinal,
-    sourceStatementSha256: contract.statementSha256,
-    statements,
+    groups: contract.groups.map((group) => {
+      const replacementStatements = statements.slice(
+        replacementOffset,
+        replacementOffset + group.replacementStatementCount,
+      )
+      replacementOffset += group.replacementStatementCount
+      return {
+        sourceStatementOrdinal: group.statementOrdinal,
+        sourceStatementSha256: group.statementSha256,
+        statements: replacementStatements,
+      }
+    }),
   }
 }
 
@@ -1008,23 +1046,26 @@ function readCanonicalBaselineIssues(client, migration) {
   if (!replacement) return client.queryReadOnly(migration.baselineSql, context)
 
   const sourceStatements = validateReadOnlySidecarQueries(migration.baselineSql, context)
-  const sourceStatement = sourceStatements[replacement.sourceStatementOrdinal - 1]
-  if (!sourceStatement || sha256(sourceStatement) !== replacement.sourceStatementSha256) {
-    schemaContractFail(`Remote baseline replacement identity drift in ${migration.name}`)
-  }
+  const replacementGroups = new Map(replacement.groups.map((group) => (
+    [group.sourceStatementOrdinal, group]
+  )))
 
   const issues = []
   for (const [index, statement] of sourceStatements.entries()) {
-    if (index + 1 !== replacement.sourceStatementOrdinal) {
+    const group = replacementGroups.get(index + 1)
+    if (!group) {
       issues.push(...client.queryReadOnly(statement, context, true))
       continue
+    }
+    if (sha256(statement) !== group.sourceStatementSha256) {
+      schemaContractFail(`Remote baseline replacement identity drift in ${migration.name}`)
     }
 
     const before = readRemoteBaselineFingerprint(
       client,
       `Remote baseline schema fingerprint before ${migration.name}`,
     )
-    for (const probe of replacement.statements) {
+    for (const probe of group.statements) {
       const probeIssues = client.queryPrivateReadOnly(
         probe,
         `Remote baseline replacement ${migration.name}`,
