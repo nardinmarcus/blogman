@@ -16,10 +16,11 @@ const replacementPath = join(
 )
 const schemaPath = join(repoRoot, 'db', 'schema.sql')
 const baselineSha256 = 'b3f61982cc36ff2c88d7b4330dd304ef075b5c5c34debf4499671c33ae2b6540'
-const statementSha256 = 'c61b390568cafc468c6adbbff5b78d08dd5d18a544d917fbc06c043393e3c7bd'
-const replacementSha256 = 'a3d4834018b7124c27ba82231c95239ce0092cd44a3b3959aec060b86accde28'
+const statementOneSha256 = '2c4d1aa391172c16b128c08a593e252f9e09b4fc151642ce738ae47882c38491'
+const statementThreeSha256 = 'c61b390568cafc468c6adbbff5b78d08dd5d18a544d917fbc06c043393e3c7bd'
+const replacementSha256 = '90c94ce79e77d3ca3ab22fc67f702243e7305bcd1860f3d1feb2026fb56b4a03'
 const migrationChecksum = '8a71414814571d4fe65e03fc92b3f976074d025ddf03a4dd9f861698b2387d05'
-const replacementHeader = `-- migration-remote-baseline-replacement: migration_number=001 migration=001_initial_schema baseline_sha256=${baselineSha256} statement_ordinal=3 statement_sha256=${statementSha256}`
+const replacementHeader = `-- migration-remote-baseline-replacements: migration_number=001 migration=001_initial_schema baseline_sha256=${baselineSha256} groups=1:${statementOneSha256}:3|3:${statementThreeSha256}:3`
 
 function sha256(source: string): string {
   return createHash('sha256').update(source).digest('hex')
@@ -208,10 +209,11 @@ describe('migration 001 remote baseline replacement equivalence', () => {
   it('binds exact source and replacement identities without changing the ledger checksum', () => {
     expect(sha256(baselineSource)).toBe(baselineSha256)
     expect(baselineStatements).toHaveLength(4)
-    expect(sha256(baselineStatements[2])).toBe(statementSha256)
+    expect(sha256(baselineStatements[0])).toBe(statementOneSha256)
+    expect(sha256(baselineStatements[2])).toBe(statementThreeSha256)
     expect(sha256(replacementSource)).toBe(replacementSha256)
     expect(replacementSource.split(/\r?\n/, 1)[0]).toBe(replacementHeader)
-    expect(replacementStatements).toHaveLength(3)
+    expect(replacementStatements).toHaveLength(6)
 
     const checksum = createHash('sha256')
       .update(readFileSync(migrationPath, 'utf8'))
@@ -220,10 +222,17 @@ describe('migration 001 remote baseline replacement equivalence', () => {
     expect(checksum).toBe(migrationChecksum)
   })
 
-  it('contains one literal read-only probe for each source table', () => {
+  it('contains one literal read-only probe for each object group and source table', () => {
+    expect(replacementStatements.slice(0, 3).map((statement) => (
+      [...statement.matchAll(/sqlite_schema\.type = '([^']+)'/g)].map((match) => match[1])
+    ))).toEqual([
+      ['table'],
+      ['index'],
+      ['trigger'],
+    ])
     expect(replacementStatements.map((statement) => (
       [...statement.matchAll(/pragma_table_info\('([^']+)'\)/g)].map((match) => match[1])
-    ))).toEqual([
+    )).slice(3)).toEqual([
       ['ai_provider_profiles'],
       ['ai_post_generators'],
       ['api_tokens'],
@@ -235,8 +244,12 @@ describe('migration 001 remote baseline replacement equivalence', () => {
   })
 
   it.each(fixtures)('preserves the complete sorted issue multiset for $name', ({ schema }) => {
-    const originalIssues = issuesForSchema(schema, `${baselineStatements[2]};`)
-    const replacementIssues = issuesForSchema(schema, `${replacementStatements.join(';\n')};`)
-    expect(replacementIssues).toEqual(originalIssues)
+    const originalObjectIssues = issuesForSchema(schema, `${baselineStatements[0]};`)
+    const replacementObjectIssues = issuesForSchema(schema, `${replacementStatements.slice(0, 3).join(';\n')};`)
+    expect(replacementObjectIssues).toEqual(originalObjectIssues)
+
+    const originalColumnIssues = issuesForSchema(schema, `${baselineStatements[2]};`)
+    const replacementColumnIssues = issuesForSchema(schema, `${replacementStatements.slice(3).join(';\n')};`)
+    expect(replacementColumnIssues).toEqual(originalColumnIssues)
   })
 })

@@ -1,4 +1,55 @@
--- migration-remote-baseline-replacement: migration_number=001 migration=001_initial_schema baseline_sha256=b3f61982cc36ff2c88d7b4330dd304ef075b5c5c34debf4499671c33ae2b6540 statement_ordinal=3 statement_sha256=c61b390568cafc468c6adbbff5b78d08dd5d18a544d917fbc06c043393e3c7bd
+-- migration-remote-baseline-replacements: migration_number=001 migration=001_initial_schema baseline_sha256=b3f61982cc36ff2c88d7b4330dd304ef075b5c5c34debf4499671c33ae2b6540 groups=1:2c4d1aa391172c16b128c08a593e252f9e09b4fc151642ce738ae47882c38491:3|3:c61b390568cafc468c6adbbff5b78d08dd5d18a544d917fbc06c043393e3c7bd:3
+WITH required_objects(name) AS (
+  VALUES
+    ('posts'),
+    ('posts_fts'),
+    ('categories'),
+    ('site_settings'),
+    ('ai_actions'),
+    ('ai_provider_profiles'),
+    ('ai_post_generators'),
+    ('api_tokens')
+)
+SELECT 'missing table ' || name AS issue
+FROM required_objects
+WHERE NOT EXISTS (
+  SELECT 1 FROM sqlite_schema
+  WHERE sqlite_schema.type = 'table'
+    AND sqlite_schema.name = required_objects.name
+)
+ORDER BY issue;
+
+WITH required_objects(name) AS (
+  VALUES
+    ('idx_posts_slug'),
+    ('idx_posts_category'),
+    ('idx_posts_published'),
+    ('idx_api_tokens_token')
+)
+SELECT 'missing index ' || name AS issue
+FROM required_objects
+WHERE NOT EXISTS (
+  SELECT 1 FROM sqlite_schema
+  WHERE sqlite_schema.type = 'index'
+    AND sqlite_schema.name = required_objects.name
+)
+ORDER BY issue;
+
+WITH required_objects(name) AS (
+  VALUES
+    ('posts_ai'),
+    ('posts_au'),
+    ('posts_ad')
+)
+SELECT 'missing trigger ' || name AS issue
+FROM required_objects
+WHERE NOT EXISTS (
+  SELECT 1 FROM sqlite_schema
+  WHERE sqlite_schema.type = 'trigger'
+    AND sqlite_schema.name = required_objects.name
+)
+ORDER BY issue;
+
 WITH expected_columns(column_name, declared_type, is_not_null, default_value, primary_key) AS (
   VALUES
     ('id', 'INTEGER', 0, NULL, 1),
