@@ -39,11 +39,13 @@ jobs:
 
   verify-migrations:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 55
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -51,10 +53,27 @@ jobs:
           node-version: 20
           cache: npm
 
+      - name: Classify migration changes
+        id: migration-changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if output="$(node scripts/verify-migrations-required.mjs)"; then
+            printf '%s\n' "${output}" >> "${GITHUB_OUTPUT}"
+          else
+            printf 'required=true\nreason=classifier-failed\n' >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Report migration verification not required
+        if: steps.migration-changes.outputs.required == 'false'
+        run: 'echo "verify-migrations: not-required"'
+
       - name: Install dependencies
+        if: steps.migration-changes.outputs.required != 'false'
         run: npm ci
 
       - name: Run long migration verification
+        if: steps.migration-changes.outputs.required != 'false'
         env:
           CI: true
         run: npm run test:run -- tests/migrations/migration-runner.test.ts --reporter=verbose

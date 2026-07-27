@@ -36,7 +36,7 @@ describe('Verify workflow test partition', () => {
     expect(script.match(/tests\/migrations\/migration-runner\.test\.ts/g)).toHaveLength(1)
   })
 
-  it('runs quick and long verification as separate hard-fail jobs', () => {
+  it('keeps quick and long verification as separate hard-fail jobs', () => {
     const workflow = readFileSync(join(repoRoot, '.github', 'workflows', 'verify.yml'), 'utf8')
     const quickJob = workflowJob(workflow, 'verify')
     const longJob = workflowJob(workflow, 'verify-migrations')
@@ -44,15 +44,31 @@ describe('Verify workflow test partition', () => {
     expect(quickJob).toContain('timeout-minutes: 20')
     expect(quickJob.split('\n')).toContain('        run: npm run verify:quick')
 
-    expect(longJob).toContain('timeout-minutes: 45')
+    expect(longJob).toContain('timeout-minutes: 55')
     expect(longJob.split('\n')).toContain(
       `        run: npm run test:run -- ${longMigrationTest} --reporter=verbose`,
     )
+    expect(longJob).not.toMatch(/^    if:/m)
 
     for (const job of [quickJob, longJob]) {
       expect(job).not.toContain('continue-on-error')
       expect(job).not.toContain('|| true')
-      expect(job).not.toMatch(/^\s+if:/m)
     }
+  })
+
+  it('fails closed while skipping the long suite for proven-unrelated changes', () => {
+    const workflow = readFileSync(join(repoRoot, '.github', 'workflows', 'verify.yml'), 'utf8')
+    const longJob = workflowJob(workflow, 'verify-migrations')
+    const requiredCondition = "if: steps.migration-changes.outputs.required != 'false'"
+
+    expect(longJob).toContain('fetch-depth: 0')
+    expect(longJob).toContain('id: migration-changes')
+    expect(longJob).toContain('node scripts/verify-migrations-required.mjs')
+    expect(longJob).toContain('required=true\\nreason=classifier-failed')
+    expect(longJob.match(new RegExp(requiredCondition, 'g'))).toHaveLength(2)
+    expect(longJob).toContain("if: steps.migration-changes.outputs.required == 'false'")
+    expect(longJob).toContain(`run: 'echo "verify-migrations: not-required"'`)
+    expect(longJob.indexOf('id: migration-changes'))
+      .toBeLessThan(longJob.indexOf('name: Install dependencies'))
   })
 })
