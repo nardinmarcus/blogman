@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 
 const sourceRunner = join(process.cwd(), 'scripts', 'migrations.mjs')
@@ -109,7 +110,35 @@ if (mode === 'child-nonzero') {
   process.exit(23)
 }
 if (mode === 'auth') {
-  process.stderr.write('Unauthorized API token secret\\n')
+  process.stderr.write('Unauthorized API token secret Cookie=session-private-cookie\\n')
+  process.exit(1)
+}
+if (mode === 'config-a') {
+  process.stderr.write('Configuration error: invalid wrangler.toml database_id=db-private-a account_id=acct-private-a\\n')
+  process.exit(1)
+}
+if (mode === 'config-b') {
+  process.stderr.write('Configuration error: invalid wrangler.toml database_id=db-private-b account_id=acct-private-b\\n')
+  process.exit(1)
+}
+if (mode === 'ambiguous-class') {
+  process.stderr.write('Unauthorized request caused by configuration error in private-config-path\\n')
+  process.exit(1)
+}
+if (mode === 'bounded-tail-auth') {
+  process.stderr.write('x'.repeat(70_000) + ' Unauthorized\\n')
+  process.exit(1)
+}
+if (mode === 'bounded-middle-auth') {
+  process.stderr.write('x'.repeat(40_000) + ' Unauthorized ' + 'x'.repeat(40_000) + '\\n')
+  process.exit(1)
+}
+if (mode === 'api-class') {
+  process.stderr.write('Cloudflare API request failed; raw response body at https://private.example/api?X-Amz-Signature=private-signature\\n')
+  process.exit(1)
+}
+if (mode === 'sql-class') {
+  process.stderr.write('D1_ERROR: no such column: private_column in SELECT private_token FROM private_table\\n')
   process.exit(1)
 }
 if (mode === 'network-api') {
@@ -252,7 +281,7 @@ function runPlan(
   ], {
     cwd: fixture.root,
     encoding: 'utf8',
-    env: { ...process.env, NODE_ENV: 'test', FAKE_WRANGLER_MODE: mode, ...environment },
+    env: childEnvironment({ NODE_ENV: 'test', FAKE_WRANGLER_MODE: mode, ...environment }),
   })
 }
 
@@ -270,7 +299,7 @@ function runPlainPlan(fixture: ReturnType<typeof createFixture>, mode: string) {
   ], {
     cwd: fixture.root,
     encoding: 'utf8',
-    env: { ...process.env, FAKE_WRANGLER_MODE: mode },
+    env: childEnvironment({ FAKE_WRANGLER_MODE: mode }),
   })
 }
 
@@ -294,8 +323,16 @@ function runApply(
   ], {
     cwd: fixture.root,
     encoding: 'utf8',
-    env: { ...process.env, NODE_ENV: 'test', FAKE_WRANGLER_MODE: mode, ...environment },
+    env: childEnvironment({ NODE_ENV: 'test', FAKE_WRANGLER_MODE: mode, ...environment }),
   })
+}
+
+function childEnvironment(values: Record<string, string>) {
+  const environment: NodeJS.ProcessEnv = { NODE_ENV: 'test', ...values }
+  for (const name of ['PATH', 'TMPDIR', 'TMP', 'TEMP']) {
+    if (process.env[name]) environment[name] = process.env[name]
+  }
+  return environment
 }
 
 function readFailureReport(report: string) {
@@ -303,7 +340,9 @@ function readFailureReport(report: string) {
   expect(Object.keys(parsed).sort()).toEqual([
     'command',
     'exit_class',
+    'failure_class',
     'failure_domain',
+    'failure_fingerprint',
     'failure_hint',
     'format',
     'mode',
@@ -312,6 +351,12 @@ function readFailureReport(report: string) {
     'state',
   ])
   return parsed
+}
+
+function expectedFailureFingerprint(failureClass: string, ...signals: string[]) {
+  return createHash('sha256')
+    .update(['blogman-wrangler-child-failure/v1', failureClass, ...signals].join('\0'))
+    .digest('hex')
 }
 
 function expectRawOutputDestroyed(root: string) {
@@ -420,12 +465,14 @@ describe('remote migration plan failure reports', () => {
     expect(`${result.stdout}${result.stderr}${readFileSync(report, 'utf8')}`)
       .not.toContain('sensitive schema detail')
     expect(readFailureReport(report)).toEqual({
-      format: 'blogman-migration-failure/v1',
+      format: 'blogman-migration-failure/v2',
       state: 'failed',
       command: 'plan',
       mode: 'remote',
       failure_domain: 'schema_contract',
       failure_hint: 'none',
+      failure_class: 'none',
+      failure_fingerprint: 'none',
       phase: 'schema_validation',
       query_ordinal: 4,
       exit_class: 'runner_error',
@@ -571,6 +618,75 @@ describe('remote migration plan failure reports', () => {
     })
   })
 
+  it('classifies child failures with bounded deterministic fingerprints', () => {
+    const cases = [
+      ['auth', 'auth', 'auth_denied'],
+      ['config-a', 'config', 'config_invalid'],
+      ['api-class', 'api', 'api_request_failed'],
+      ['sql-class', 'sql', 'sql_rejected'],
+      ['child-nonzero', 'unknown', 'unclassified'],
+      ['ambiguous-class', 'unknown', 'auth_denied', 'config_invalid'],
+    ] as const
+    const fingerprints = new Set<string>()
+
+    for (const [mode, failureClass, ...signals] of cases) {
+      const fixture = createFixture()
+      const report = join(fixture.root, `${mode}-classification.json`)
+      const result = runPlan(fixture, report, mode)
+      const parsed = readFailureReport(report)
+
+      expect(result.status).toBe(1)
+      expect(parsed).toMatchObject({
+        failure_class: failureClass,
+        exit_class: 'child_nonzero',
+      })
+      expect(parsed.failure_fingerprint).toMatch(/^[a-f0-9]{64}$/)
+      expect(parsed.failure_fingerprint).toBe(expectedFailureFingerprint(failureClass, ...signals))
+      fingerprints.add(String(parsed.failure_fingerprint))
+      expect(`${result.stdout}${result.stderr}${JSON.stringify(parsed)}`)
+        .not.toMatch(/private_|private-|secret|SELECT|X-Amz-Signature|response body/i)
+      expectRawOutputDestroyed(fixture.root)
+    }
+
+    expect(fingerprints.size).toBe(cases.length)
+  })
+
+  it('fingerprints only safe classification signals, not secret-bearing raw output', () => {
+    const reports = ['config-a', 'config-b'].map((mode) => {
+      const fixture = createFixture()
+      const report = join(fixture.root, `${mode}-determinism.json`)
+      const result = runPlan(fixture, report, mode)
+
+      expect(result.status).toBe(1)
+      expect(`${result.stdout}${result.stderr}${readFileSync(report, 'utf8')}`)
+        .not.toMatch(/db-private|acct-private|wrangler\.toml/i)
+      expectRawOutputDestroyed(fixture.root)
+      return readFailureReport(report)
+    })
+
+    expect(reports[0]).toMatchObject({ failure_class: 'config' })
+    expect(reports[1]).toMatchObject({ failure_class: 'config' })
+    expect(reports[0].failure_fingerprint).toBe(reports[1].failure_fingerprint)
+  })
+
+  it.each([
+    ['bounded-tail-auth', 'auth', 'auth_denied'],
+    ['bounded-middle-auth', 'unknown', 'unclassified'],
+  ])('bounds child output inspection for %s', (mode, failureClass, signal) => {
+    const fixture = createFixture()
+    const report = join(fixture.root, `${mode}.json`)
+    const result = runPlan(fixture, report, mode)
+    const parsed = readFailureReport(report)
+
+    expect(result.status).toBe(1)
+    expect(parsed).toMatchObject({
+      failure_class: failureClass,
+      failure_fingerprint: expectedFailureFingerprint(failureClass, signal),
+      exit_class: 'child_nonzero',
+    })
+    expectRawOutputDestroyed(fixture.root)
+  })
+
   it('stops when query seven is a baseline EXPLAIN with a structured API error', () => {
     const fixture = createFixture(true)
     const thirdStatement = "SELECT 'third private issue' AS issue"
@@ -622,12 +738,14 @@ describe('remote migration plan failure reports', () => {
     expect(result.stdout).toBe('')
     expect(result.stderr).toBe('Migration plan failed; see sanitized failure report.\n')
     expect(readFailureReport(report)).toEqual({
-      format: 'blogman-migration-failure/v1',
+      format: 'blogman-migration-failure/v2',
       state: 'failed',
       command: 'plan',
       mode: 'remote',
       failure_domain: 'wrangler_command',
       failure_hint: 'none',
+      failure_class: 'unknown',
+      failure_fingerprint: expectedFailureFingerprint('unknown', 'unclassified'),
       phase: 'wrangler_execute',
       query_ordinal: 1,
       exit_class: 'child_nonzero',

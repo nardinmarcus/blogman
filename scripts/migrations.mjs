@@ -209,6 +209,57 @@ function classifyChildFailureDomain(stdout) {
   return 'wrangler_command'
 }
 
+const childFailureClassRules = [
+  {
+    failureClass: 'auth',
+    signal: 'auth_denied',
+    pattern: /\b(?:unauthorized|forbidden|authentication (?:failed|required)|invalid api token|api token (?:invalid|expired))\b/i,
+  },
+  {
+    failureClass: 'config',
+    signal: 'config_invalid',
+    pattern: /\b(?:configuration error|invalid wrangler\.toml|missing (?:d1 )?(?:binding|configuration)|could not resolve configuration)\b/i,
+  },
+  {
+    failureClass: 'api',
+    signal: 'api_request_failed',
+    pattern: /\b(?:cloudflare api request failed|a request to the cloudflare api|received a malformed response from the api|api request failed)\b/i,
+  },
+  {
+    failureClass: 'sql',
+    signal: 'sql_rejected',
+    pattern: /\b(?:d1_error|sql(?:ite)? (?:error|syntax error)|no such (?:table|column)|constraint failed)\b/i,
+  },
+]
+const childFailureInspectionLimit = 65_536
+
+function classifyChildFailure(stdout, stderr, failureDomain) {
+  const halfLimit = childFailureInspectionLimit / 2
+  const trustedStdout = failureDomain === 'wrangler_command' && stdout.trimStart().startsWith('{')
+    ? ''
+    : stdout
+  const output = `${trustedStdout}\n${stderr}`
+  const inspected = output.length <= childFailureInspectionLimit
+    ? output
+    : `${output.slice(0, halfLimit)}\n${output.slice(-halfLimit)}`
+  const matches = childFailureClassRules.filter(({ pattern }) => pattern.test(inspected))
+  if (['cloudflare_api', 'malformed_response'].includes(failureDomain)
+    && !matches.some(({ failureClass }) => failureClass === 'api')) {
+    matches.push(...childFailureClassRules.filter(({ failureClass }) => failureClass === 'api'))
+  }
+  const classes = new Set(matches.map(({ failureClass }) => failureClass))
+  const failureClass = classes.size === 1 ? [...classes][0] : 'unknown'
+  const signals = matches.length > 0
+    ? matches.map(({ signal }) => signal).sort()
+    : ['unclassified']
+  const failureFingerprint = sha256([
+    'blogman-wrangler-child-failure/v1',
+    failureClass,
+    ...signals,
+  ].join('\0'))
+  return { failureClass, failureFingerprint }
+}
+
 function destroyPrivateTree(path) {
   let failure = null
   try {
@@ -352,13 +403,15 @@ function createFailureReporter(options) {
       if (descriptor === null) return
       const details = error?.failureDetails ?? {}
       const report = {
-        format: 'blogman-migration-failure/v1',
+        format: 'blogman-migration-failure/v2',
         state: 'failed',
         command: 'plan',
         mode: 'remote',
         failure_domain: details.failureDomain
           ?? 'unknown',
         failure_hint: details.failureHint ?? 'none',
+        failure_class: details.failureClass ?? 'none',
+        failure_fingerprint: details.failureFingerprint ?? 'none',
         phase: details.phase ?? phase,
         query_ordinal: details.queryOrdinal ?? queryOrdinal,
         exit_class: details.exitClass ?? 'runner_error',
@@ -772,9 +825,12 @@ function createD1Client(options, failureReporter) {
         })
       }
       if (result.status !== 0) {
+        const failureDomain = classifyChildFailureDomain(stdout)
+        const childFailure = classifyChildFailure(stdout, stderr, failureDomain)
         throw classifiedFailure('Wrangler command failed', {
-          failureDomain: classifyChildFailureDomain(stdout),
+          failureDomain,
           failureHint: classifyChildFailureHint(`${stdout}\n${stderr}`),
+          ...childFailure,
           phase: 'wrangler_execute',
           queryOrdinal,
           exitClass: 'child_nonzero',
