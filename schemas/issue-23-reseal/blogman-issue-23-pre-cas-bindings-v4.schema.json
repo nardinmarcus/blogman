@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blogman.local/schemas/issue-23-reseal/blogman-issue-23-pre-cas-bindings-v4.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "state",
+    "produced_at",
+    "executor_started",
+    "production_authorization_granted",
+    "formal_pre_migration_candidate_created",
+    "immutable_phase_b_bindings",
+    "migration_set_sha256",
+    "historical_data_disposition",
+    "stage_counts",
+    "start_conditions"
+  ],
+  "properties": {
+    "format": {
+      "const": "blogman-issue-23-pre-cas-bindings/v4"
+    },
+    "state": {
+      "const": "sealed-local-only"
+    },
+    "produced_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "executor_started": {
+      "const": false
+    },
+    "production_authorization_granted": {
+      "const": false
+    },
+    "formal_pre_migration_candidate_created": {
+      "const": false
+    },
+    "immutable_phase_b_bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidateId",
+        "approvalPacketSha256",
+        "buildArchiveSha256",
+        "baselineDeploymentId",
+        "baselineVersionId",
+        "baselineD1DatabaseId",
+        "deliveryMode",
+        "cleanStartResetSqlSha256",
+        "historicalDataDisposition"
+      ],
+      "properties": {
+        "candidateId": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "approvalPacketSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "buildArchiveSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "baselineDeploymentId": {
+          "type": "string",
+          "pattern": "^[a-f0-9-]{36}$"
+        },
+        "baselineVersionId": {
+          "type": "string",
+          "pattern": "^[a-f0-9-]{36}$"
+        },
+        "baselineD1DatabaseId": {
+          "type": "string",
+          "pattern": "^[a-f0-9-]{36}$"
+        },
+        "deliveryMode": {
+          "const": "clean-start"
+        },
+        "cleanStartResetSqlSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "historicalDataDisposition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "productionExport",
+            "doubleRestore",
+            "historicalBaselineQueries"
+          ],
+          "properties": {
+            "productionExport": {
+              "const": "NOT_APPLICABLE"
+            },
+            "doubleRestore": {
+              "const": "NOT_APPLICABLE"
+            },
+            "historicalBaselineQueries": {
+              "const": "NOT_APPLICABLE"
+            }
+          }
+        }
+      }
+    },
+    "migration_set_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "stage_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pre_cas_local_gates",
+        "cas1",
+        "d1_identity",
+        "upload",
+        "clean_start_reset",
+        "clean_start_empty_verify",
+        "remote_migration_plan",
+        "migrations_001_006",
+        "cas2",
+        "traffic",
+        "smoke_reconcile",
+        "t0"
+      ],
+      "properties": {
+        "pre_cas_local_gates": {
+          "const": 0
+        },
+        "cas1": {
+          "const": 0
+        },
+        "d1_identity": {
+          "const": 0
+        },
+        "upload": {
+          "const": 0
+        },
+        "clean_start_reset": {
+          "const": 0
+        },
+        "clean_start_empty_verify": {
+          "const": 0
+        },
+        "remote_migration_plan": {
+          "const": 0
+        },
+        "migrations_001_006": {
+          "const": 0
+        },
+        "cas2": {
+          "const": 0
+        },
+        "traffic": {
+          "const": 0
+        },
+        "smoke_reconcile": {
+          "const": 0
+        },
+        "t0": {
+          "const": 0
+        }
+      }
+    },
+    "start_conditions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fresh_candidate_bound_authorization_required",
+        "no_prior_lineage_reuse"
+      ],
+      "properties": {
+        "fresh_candidate_bound_authorization_required": {
+          "const": true
+        },
+        "no_prior_lineage_reuse": {
+          "const": true
+        }
+      }
+    },
+    "historical_data_disposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "production_export",
+        "double_restore",
+        "historical_baseline_queries"
+      ],
+      "properties": {
+        "production_export": {
+          "const": "NOT_APPLICABLE"
+        },
+        "double_restore": {
+          "const": "NOT_APPLICABLE"
+        },
+        "historical_baseline_queries": {
+          "const": "NOT_APPLICABLE"
+        }
+      }
+    }
+  }
+}

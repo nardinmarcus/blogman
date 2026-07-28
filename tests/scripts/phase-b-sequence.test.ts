@@ -16,6 +16,13 @@ const bindings: Readonly<PhaseBBindings> = Object.freeze({
   baselineDeploymentId: 'deployment-before',
   baselineVersionId: 'version-before',
   baselineD1DatabaseId: '22222222-3333-4444-8555-666666666666',
+  deliveryMode: 'clean-start',
+  cleanStartResetSqlSha256: 'd'.repeat(64),
+  historicalDataDisposition: Object.freeze({
+    productionExport: 'NOT_APPLICABLE',
+    doubleRestore: 'NOT_APPLICABLE',
+    historicalBaselineQueries: 'NOT_APPLICABLE',
+  }),
 })
 const temporaryDirectories: string[] = []
 
@@ -39,7 +46,7 @@ function stageCounts() {
 }
 
 describe('Issue #23 Phase B fixed sequence', () => {
-  it('stops at a failed remote plan before export or any later production stage', async () => {
+  it('stops at a failed empty-database plan after reset proof and before migrations', async () => {
     const counts = stageCounts()
 
     await expect(runPhaseBSequence({
@@ -55,10 +62,10 @@ describe('Issue #23 Phase B fixed sequence', () => {
       pre_cas_local_gates: 1,
       cas1: 1,
       d1_identity: 1,
+      upload: 1,
+      clean_start_reset: 1,
+      clean_start_empty_verify: 1,
       remote_migration_plan: 1,
-      export: 0,
-      double_restore: 0,
-      upload: 0,
       migrations_001_006: 0,
       cas2: 0,
       traffic: 0,
@@ -81,6 +88,16 @@ describe('Issue #23 Phase B fixed sequence', () => {
     await expect(runPhaseBSequence({
       configPath: validConfig(), bindings: missingD1, runStage,
     })).rejects.toThrow('incomplete or invalid')
+    const unboundAuthorization = Object.freeze({
+      ...bindings,
+      historicalDataDisposition: Object.freeze({
+        ...bindings.historicalDataDisposition,
+        productionExport: 'skip',
+      }),
+    })
+    await expect(runPhaseBSequence({
+      configPath: validConfig(), bindings: unboundAuthorization, runStage,
+    })).rejects.toThrow('clean-start authorization')
     expect(stagesStarted).toBe(0)
   })
 
@@ -130,8 +147,11 @@ describe('Issue #23 Phase B fixed sequence', () => {
     }
   })
 
-  it('pins the remote plan before export and double restore', () => {
-    expect(PHASE_B_STAGES.indexOf('remote_migration_plan')).toBeLessThan(PHASE_B_STAGES.indexOf('export'))
-    expect(PHASE_B_STAGES.indexOf('remote_migration_plan')).toBeLessThan(PHASE_B_STAGES.indexOf('double_restore'))
+  it('uploads before reset and plans only after proving the bound D1 is empty', () => {
+    expect(PHASE_B_STAGES.indexOf('upload')).toBeLessThan(PHASE_B_STAGES.indexOf('clean_start_reset'))
+    expect(PHASE_B_STAGES.indexOf('clean_start_reset')).toBeLessThan(PHASE_B_STAGES.indexOf('clean_start_empty_verify'))
+    expect(PHASE_B_STAGES.indexOf('clean_start_empty_verify')).toBeLessThan(PHASE_B_STAGES.indexOf('remote_migration_plan'))
+    expect(PHASE_B_STAGES).not.toContain('export')
+    expect(PHASE_B_STAGES).not.toContain('double_restore')
   })
 })

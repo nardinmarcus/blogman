@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blogman.local/schemas/issue-23-reseal/blogman-issue-23-approval-packet-v4.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "state",
+    "produced_at",
+    "delivery_mode",
+    "clean_start",
+    "candidate_id",
+    "local_preflight_candidate_sha256",
+    "lockfile_sha256",
+    "migration_set_sha256",
+    "runbook_sha256",
+    "build_archive_sha256",
+    "worker_sha256",
+    "tree_manifest_sha256",
+    "expected_baseline",
+    "scope",
+    "old_lineages_invalid"
+  ],
+  "properties": {
+    "format": {
+      "const": "blogman-issue-23-approval-packet/v4"
+    },
+    "state": {
+      "const": "ready-for-fresh-production-authorization"
+    },
+    "produced_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "delivery_mode": {
+      "const": "clean-start"
+    },
+    "clean_start": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision",
+        "database_strategy",
+        "reset_sql_sha256",
+        "historical_data_export",
+        "double_restore",
+        "historical_baseline_queries"
+      ],
+      "properties": {
+        "decision": {
+          "const": "discard-existing-blogman-data"
+        },
+        "database_strategy": {
+          "const": "reset-bound-d1-in-place"
+        },
+        "reset_sql_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "historical_data_export": {
+          "const": "NOT_APPLICABLE"
+        },
+        "double_restore": {
+          "const": "NOT_APPLICABLE"
+        },
+        "historical_baseline_queries": {
+          "const": "NOT_APPLICABLE"
+        }
+      }
+    },
+    "candidate_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "local_preflight_candidate_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "lockfile_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "migration_set_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "runbook_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "build_archive_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "worker_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "tree_manifest_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "expected_baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deployment_id",
+        "version_id",
+        "d1_database_id"
+      ],
+      "properties": {
+        "deployment_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9-]{36}$"
+        },
+        "version_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9-]{36}$"
+        },
+        "d1_database_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9-]{36}$"
+        }
+      }
+    },
+    "scope": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "prefixItems": [
+        {
+          "const": "one candidate-bound in-place D1 reset"
+        },
+        {
+          "const": "one empty D1 proof and plan"
+        },
+        {
+          "const": "one version upload"
+        },
+        {
+          "const": "migrations 001-006"
+        },
+        {
+          "const": "one 100% traffic deployment"
+        },
+        {
+          "const": "status-only smoke and reconciliation"
+        },
+        {
+          "const": "rollback and controls proof"
+        },
+        {
+          "const": "T0 event acceptance"
+        }
+      ],
+      "items": false
+    },
+    "old_lineages_invalid": {
+      "const": true
+    }
+  }
+}

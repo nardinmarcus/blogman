@@ -2,10 +2,10 @@ export type PhaseBStage =
   | 'pre_cas_local_gates'
   | 'cas1'
   | 'd1_identity'
-  | 'remote_migration_plan'
-  | 'export'
-  | 'double_restore'
   | 'upload'
+  | 'clean_start_reset'
+  | 'clean_start_empty_verify'
+  | 'remote_migration_plan'
   | 'migrations_001_006'
   | 'cas2'
   | 'traffic'
@@ -19,6 +19,13 @@ export interface PhaseBBindings {
   baselineDeploymentId: string
   baselineVersionId: string
   baselineD1DatabaseId: string
+  deliveryMode: 'clean-start'
+  cleanStartResetSqlSha256: string
+  historicalDataDisposition: Readonly<{
+    productionExport: 'NOT_APPLICABLE'
+    doubleRestore: 'NOT_APPLICABLE'
+    historicalBaselineQueries: 'NOT_APPLICABLE'
+  }>
 }
 
 export interface PhaseBExecutionContext {

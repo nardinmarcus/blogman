@@ -80,6 +80,10 @@ function createSealFixture() {
     join(projectRoot, 'db', 'seed-template.sql'),
     join(repository, 'db', 'seed-template.sql'),
   )
+  copyFileSync(
+    join(projectRoot, 'db', 'issue-23-clean-start-reset.sql'),
+    join(repository, 'db', 'issue-23-clean-start-reset.sql'),
+  )
   cpSync(
     join(projectRoot, 'db', 'migrations'),
     join(repository, 'db', 'migrations'),
@@ -148,6 +152,10 @@ function createSealFixture() {
     'assets/_next/chunk.js',
     'assets/BUILD_ID',
   ], { cwd: artifacts })
+  const uploadSource = join(root, '.open-next')
+  mkdirSync(uploadSource)
+  copyFileSync(workerPath, join(uploadSource, 'worker.js'))
+  cpSync(join(artifacts, 'assets'), join(uploadSource, 'assets'), { recursive: true })
 
   const migrationMembers = readdirSync(migrations)
     .filter((name) => /^\d{3}_.+\.(?:sql|data\.mjs)$/.test(name))
@@ -159,7 +167,7 @@ function createSealFixture() {
   const migrationSetSha256 = sha256(JSON.stringify(migrationMembers))
   const migrationLedgerChecksum = sha256(`${migrationSql}\0${baselineSql}`)
   const input = {
-    format: 'blogman-issue-23-local-reseal-request/v2',
+    format: 'blogman-issue-23-local-reseal-request/v3',
     produced_at: '2026-07-27T10:00:00.000Z',
     candidate: {
       commit: candidate,
@@ -258,6 +266,17 @@ function createSealFixture() {
       version_id: 'bf8666ae-996f-496d-a090-4c779ad57c3a',
       d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
     },
+    clean_start: {
+      decision: 'discard-existing-blogman-data',
+      database_strategy: 'reset-bound-d1-in-place',
+      reset_sql: {
+        path: 'db/issue-23-clean-start-reset.sql',
+        sha256: fileSha256(join(repository, 'db', 'issue-23-clean-start-reset.sql')),
+      },
+      historical_data_export: 'NOT_APPLICABLE',
+      double_restore: 'NOT_APPLICABLE',
+      historical_baseline_queries: 'NOT_APPLICABLE',
+    },
   }
   const inputPath = join(root, 'reseal-input.json')
   writeFileSync(inputPath, `${JSON.stringify(input, null, 2)}\n`)
@@ -272,6 +291,7 @@ function createSealFixture() {
     output,
     repository,
     root,
+    uploadSource,
   }
 }
 
@@ -340,6 +360,41 @@ function runVerify(
 }
 
 describe('Issue #23 local reseal package generation', () => {
+  it('rejects upload-time reproof when the source mutates after a successful rehearsal', () => {
+    const fixture = createSealFixture()
+    try {
+      const input = JSON.parse(readFileSync(fixture.inputPath, 'utf8'))
+      const args = [
+        cliPath,
+        'verify-build-directory',
+        '--archive', join(fixture.artifacts, 'open-next-build.zip'),
+        '--directory', fixture.uploadSource,
+        '--archive-sha256', input.build.archive_sha256,
+      ]
+      const verified = spawnSync(process.execPath, args, {
+        cwd: projectRoot,
+        encoding: 'utf8',
+      })
+      expect(verified.status, verified.stderr).toBe(0)
+      expect(JSON.parse(verified.stdout)).toEqual({
+        format: 'blogman-build-directory-proof/v1',
+        state: 'matched',
+        archive_sha256: input.build.archive_sha256,
+        file_count: 3,
+      })
+
+      writeFileSync(join(fixture.uploadSource, 'assets', '_next', 'chunk.js'), 'drift\n')
+      const drifted = spawnSync(process.execPath, args, {
+        cwd: projectRoot,
+        encoding: 'utf8',
+      })
+      expect(drifted.status).toBe(1)
+      expect(drifted.stderr).toContain('upload source directory does not match')
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
   it('seals a canonical local-only T0 quartet through the public CLI', () => {
     const fixture = createSealFixture()
     try {
@@ -409,14 +464,53 @@ describe('Issue #23 local reseal package generation', () => {
         join(fixture.output, 'package-manifest.json'),
         'utf8',
       ))
-      expect(approval.format).toBe('blogman-issue-23-approval-packet/v3')
+      expect(approval.format).toBe('blogman-issue-23-approval-packet/v4')
+      expect(approval.delivery_mode).toBe('clean-start')
+      expect(approval.clean_start).toMatchObject({
+        decision: 'discard-existing-blogman-data',
+        database_strategy: 'reset-bound-d1-in-place',
+        historical_data_export: 'NOT_APPLICABLE',
+        double_restore: 'NOT_APPLICABLE',
+        historical_baseline_queries: 'NOT_APPLICABLE',
+      })
       expect(approval.scope.at(-1)).toBe('T0 event acceptance')
-      expect(preCas.format).toBe('blogman-issue-23-pre-cas-bindings/v3')
+      expect(preCas.format).toBe('blogman-issue-23-pre-cas-bindings/v4')
+      expect(preCas.immutable_phase_b_bindings.deliveryMode).toBe('clean-start')
+      expect(preCas.immutable_phase_b_bindings.cleanStartResetSqlSha256)
+        .toBe(approval.clean_start.reset_sql_sha256)
+      expect(preCas.historical_data_disposition).toEqual({
+        production_export: 'NOT_APPLICABLE',
+        double_restore: 'NOT_APPLICABLE',
+        historical_baseline_queries: 'NOT_APPLICABLE',
+      })
       expect(preCas.immutable_phase_b_bindings.baselineD1DatabaseId)
         .toBe('5d1cadcf-e10e-4245-b07d-16c64754f00d')
-      expect(manifest.format).toBe('blogman-issue-23-package-manifest/v3')
+      expect(manifest.format).toBe('blogman-issue-23-package-manifest/v4')
+      expect(manifest.delivery_mode).toBe('clean-start')
+      expect(manifest.clean_start_reset_sql_sha256)
+        .toBe(approval.clean_start.reset_sql_sha256)
+      expect(manifest.historical_data_disposition).toEqual({
+        production_export: 'NOT_APPLICABLE',
+        double_restore: 'NOT_APPLICABLE',
+        historical_baseline_queries: 'NOT_APPLICABLE',
+      })
       expect(preCas.production_authorization_granted).toBe(false)
       expect(new Set(Object.values(preCas.stage_counts))).toEqual(new Set([0]))
+
+      manifest.historical_data_disposition.production_export = 'SKIPPED'
+      chmodSync(join(fixture.output, 'package-manifest.json'), 0o600)
+      writeFileSync(
+        join(fixture.output, 'package-manifest.json'),
+        `${JSON.stringify(manifest, null, 2)}\n`,
+      )
+      const dispositionDrift = spawnSync(process.execPath, [
+        cliPath,
+        'validate',
+        '--package',
+        fixture.output,
+      ], { cwd: projectRoot, encoding: 'utf8' })
+      expect(dispositionDrift.status).toBe(1)
+      expect(dispositionDrift.stderr).toContain('historical_data_disposition')
     } finally {
       rmSync(fixture.root, { recursive: true, force: true })
     }
