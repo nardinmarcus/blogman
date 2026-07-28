@@ -54,7 +54,7 @@ reject them as stale. The current request binds:
 - an existing build ZIP, worker, and canonical source-tree manifest;
 - local test/build/review gates;
 - the current quick-CI head/tree, terminal result, counts, and raw log SHA;
-- immutable long-runner run `30251479781`, job `89930265069`, its accepted
+- immutable long-runner run `30323510707`, job `90164062444`, its accepted
   head/tree, 46/46 result, raw log SHA, and repository coverage objects;
 - the expected production deployment/version/D1 baseline.
 
