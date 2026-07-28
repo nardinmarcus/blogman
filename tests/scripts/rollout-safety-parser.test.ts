@@ -1,9 +1,28 @@
 import { describe, expect, it } from 'vitest'
-import { parseD1QueryResponse } from '../../scripts/rollout-safety.mjs'
+import {
+  filterReconciliationSchemaRows,
+  parseD1QueryResponse,
+} from '../../scripts/rollout-safety.mjs'
 
 const rows = [{ count: 14 }]
 
 describe('rollout safety D1 response parser', () => {
+  it('excludes only the two exact D1-internal tables from final reconciliation', () => {
+    expect(filterReconciliationSchemaRows([
+      { type: 'table', name: '_cf_KV', tbl_name: '_cf_KV', sql: 'internal' },
+      { type: 'table', name: '_cf_METADATA', tbl_name: '_cf_METADATA', sql: 'internal' },
+      { type: 'table', name: '_cf_unknown', tbl_name: '_cf_unknown', sql: 'unknown' },
+      { type: 'view', name: '_cf_KV', tbl_name: '_cf_KV', sql: 'unknown view' },
+      { type: 'table', name: '_cf_KV', tbl_name: 'other', sql: 'unknown table' },
+      { type: 'table', name: 'posts', tbl_name: 'posts', sql: 'application' },
+    ])).toEqual([
+      { type: 'table', name: '_cf_unknown', tbl_name: '_cf_unknown', sql: 'unknown' },
+      { type: 'view', name: '_cf_KV', tbl_name: '_cf_KV', sql: 'unknown view' },
+      { type: 'table', name: '_cf_KV', tbl_name: 'other', sql: 'unknown table' },
+      { type: 'table', name: 'posts', tbl_name: 'posts', sql: 'application' },
+    ])
+  })
+
   it.each([
     ['Wrangler result array', [{ success: true, results: rows }]],
     ['single remote result', { success: true, results: rows }],

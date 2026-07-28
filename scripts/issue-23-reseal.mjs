@@ -27,11 +27,14 @@ import { PHASE_B_STAGES } from './phase-b-sequence.mjs'
 
 const MAX_DOCUMENT_BYTES = 1024 * 1024
 const PREFLIGHT_FORMAT = 'blogman-local-preflight-candidate/v2'
-const REQUEST_FORMAT = 'blogman-issue-23-local-reseal-request/v2'
-const HISTORICAL_REQUEST_FORMAT = 'blogman-issue-23-local-reseal-request/v1'
-const CURRENT_APPROVAL_FORMAT = 'blogman-issue-23-approval-packet/v3'
-const CURRENT_PRE_CAS_FORMAT = 'blogman-issue-23-pre-cas-bindings/v3'
-const CURRENT_MANIFEST_FORMAT = 'blogman-issue-23-package-manifest/v3'
+const REQUEST_FORMAT = 'blogman-issue-23-local-reseal-request/v3'
+const HISTORICAL_REQUEST_FORMATS = new Set([
+  'blogman-issue-23-local-reseal-request/v1',
+  'blogman-issue-23-local-reseal-request/v2',
+])
+const CURRENT_APPROVAL_FORMAT = 'blogman-issue-23-approval-packet/v4'
+const CURRENT_PRE_CAS_FORMAT = 'blogman-issue-23-pre-cas-bindings/v4'
+const CURRENT_MANIFEST_FORMAT = 'blogman-issue-23-package-manifest/v4'
 const PACKAGE_FILE_NAMES = Object.freeze([
   'approval-packet.json',
   'package-manifest.json',
@@ -55,24 +58,40 @@ const SCHEMA_URLS = new Map([
     '../schemas/issue-23-reseal/blogman-issue-23-package-manifest-v2.schema.json',
     import.meta.url,
   )],
-  [CURRENT_APPROVAL_FORMAT, new URL(
+  ['blogman-issue-23-approval-packet/v3', new URL(
     '../schemas/issue-23-reseal/blogman-issue-23-approval-packet-v3.schema.json',
     import.meta.url,
   )],
-  [CURRENT_PRE_CAS_FORMAT, new URL(
+  ['blogman-issue-23-pre-cas-bindings/v3', new URL(
     '../schemas/issue-23-reseal/blogman-issue-23-pre-cas-bindings-v3.schema.json',
     import.meta.url,
   )],
-  [CURRENT_MANIFEST_FORMAT, new URL(
+  ['blogman-issue-23-package-manifest/v3', new URL(
     '../schemas/issue-23-reseal/blogman-issue-23-package-manifest-v3.schema.json',
     import.meta.url,
   )],
-  [HISTORICAL_REQUEST_FORMAT, new URL(
+  ['blogman-issue-23-local-reseal-request/v1', new URL(
     '../schemas/issue-23-reseal/blogman-issue-23-local-reseal-request-v1.schema.json',
     import.meta.url,
   )],
-  [REQUEST_FORMAT, new URL(
+  ['blogman-issue-23-local-reseal-request/v2', new URL(
     '../schemas/issue-23-reseal/blogman-issue-23-local-reseal-request-v2.schema.json',
+    import.meta.url,
+  )],
+  [CURRENT_APPROVAL_FORMAT, new URL(
+    '../schemas/issue-23-reseal/blogman-issue-23-approval-packet-v4.schema.json',
+    import.meta.url,
+  )],
+  [CURRENT_PRE_CAS_FORMAT, new URL(
+    '../schemas/issue-23-reseal/blogman-issue-23-pre-cas-bindings-v4.schema.json',
+    import.meta.url,
+  )],
+  [CURRENT_MANIFEST_FORMAT, new URL(
+    '../schemas/issue-23-reseal/blogman-issue-23-package-manifest-v4.schema.json',
+    import.meta.url,
+  )],
+  [REQUEST_FORMAT, new URL(
+    '../schemas/issue-23-reseal/blogman-issue-23-local-reseal-request-v3.schema.json',
     import.meta.url,
   )],
 ])
@@ -259,6 +278,14 @@ export function validateDocument(documentPath) {
     sha256: document.sha256,
     state: 'valid',
   }
+}
+
+export function loadCurrentResealRequest(documentPath) {
+  const document = readValidatedDocument(documentPath, { label: 'current request' })
+  if (document.value.format !== REQUEST_FORMAT) {
+    fail('Issue #23 reseal request is stale for the current clean-start contract')
+  }
+  return document
 }
 
 function requireEqual(actual, expected, binding) {
@@ -736,6 +763,63 @@ function readArchiveEntries(archiveBytes) {
   }
 }
 
+function readBuildDirectoryEntries(directoryPath) {
+  requireAbsolutePath(directoryPath, 'upload source directory')
+  const root = requireDirectory(directoryPath, 'upload source directory')
+  const entries = new Map()
+  const visit = (relativeDirectory = '') => {
+    const directory = relativeDirectory ? join(root, relativeDirectory) : root
+    for (const entry of readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name))) {
+      const relativePath = relativeDirectory
+        ? `${relativeDirectory}/${entry.name}`
+        : entry.name
+      const entryPath = join(directory, entry.name)
+      const stat = lstatSync(entryPath)
+      if (entry.isDirectory() && stat.isDirectory()) {
+        visit(relativePath)
+      } else if (entry.isFile() && stat.isFile()) {
+        entries.set(relativePath, readFileSync(entryPath))
+      } else {
+        fail('Issue #23 reseal upload source directory must contain only regular files')
+      }
+    }
+  }
+  visit()
+  return entries
+}
+
+export function verifyBuildDirectory({
+  archivePath,
+  directoryPath,
+  expectedArchiveSha256,
+}) {
+  requireAbsolutePath(archivePath, 'build archive')
+  if (!/^[a-f0-9]{64}$/.test(expectedArchiveSha256 || '')) {
+    fail('Issue #23 reseal build archive SHA-256 is invalid')
+  }
+  const archiveStat = lstatSync(archivePath)
+  if (!archiveStat.isFile()) fail('Issue #23 reseal build archive must be a regular file')
+  const archiveBytes = readFileSync(archivePath)
+  requireEqual(sha256(archiveBytes), expectedArchiveSha256, 'build archive SHA-256')
+  const archiveEntries = readArchiveEntries(archiveBytes)
+  const directoryEntries = readBuildDirectoryEntries(directoryPath)
+  if (
+    archiveEntries.size !== directoryEntries.size
+    || [...archiveEntries].some(([path, bytes]) => (
+      !directoryEntries.has(path) || !directoryEntries.get(path).equals(bytes)
+    ))
+  ) {
+    fail('Issue #23 reseal upload source directory does not match the sealed build archive')
+  }
+  return {
+    format: 'blogman-build-directory-proof/v1',
+    state: 'matched',
+    archive_sha256: expectedArchiveSha256,
+    file_count: archiveEntries.size,
+  }
+}
+
 function verifyBuildTree(
   archiveBytes,
   workerRelativePath,
@@ -935,6 +1019,12 @@ function verifySealInputs(request, repositoryPath, artifactsPath) {
     request.repository.runbook.sha256,
     'runbook',
   )
+  const cleanStartResetSnapshot = requireBoundFile(
+    repositoryPath,
+    request.clean_start.reset_sql.path,
+    request.clean_start.reset_sql.sha256,
+    'clean-start reset SQL',
+  )
 
   requireNormalizedRelativePath(
     request.repository.migrations.directory,
@@ -1059,6 +1149,7 @@ function verifySealInputs(request, repositoryPath, artifactsPath) {
     snapshots: [
       lockfileSnapshot,
       runbookSnapshot,
+      cleanStartResetSnapshot,
       ...migrationSnapshots,
       archiveSnapshot,
       workerSnapshot,
@@ -1109,6 +1200,15 @@ function resealDocuments(request, toolVersions) {
     format: CURRENT_APPROVAL_FORMAT,
     state: 'ready-for-fresh-production-authorization',
     produced_at: request.produced_at,
+    delivery_mode: 'clean-start',
+    clean_start: {
+      decision: request.clean_start.decision,
+      database_strategy: request.clean_start.database_strategy,
+      reset_sql_sha256: request.clean_start.reset_sql.sha256,
+      historical_data_export: request.clean_start.historical_data_export,
+      double_restore: request.clean_start.double_restore,
+      historical_baseline_queries: request.clean_start.historical_baseline_queries,
+    },
     candidate_id: request.candidate.commit,
     local_preflight_candidate_sha256: sha256(preflightBytes),
     lockfile_sha256: request.repository.lockfile.sha256,
@@ -1119,13 +1219,13 @@ function resealDocuments(request, toolVersions) {
     tree_manifest_sha256: request.build.tree_manifest_sha256,
     expected_baseline: request.expected_production_baseline,
     scope: [
-      'one remote migration plan',
-      'one private seven-table export',
-      'double local restore',
+      'one candidate-bound in-place D1 reset',
+      'one empty D1 proof and plan',
       'one version upload',
       'migrations 001-006',
       'one 100% traffic deployment',
       'status-only smoke and reconciliation',
+      'rollback and controls proof',
       'T0 event acceptance',
     ],
     old_lineages_invalid: true,
@@ -1146,9 +1246,21 @@ function resealDocuments(request, toolVersions) {
       baselineDeploymentId: request.expected_production_baseline.deployment_id,
       baselineVersionId: request.expected_production_baseline.version_id,
       baselineD1DatabaseId: request.expected_production_baseline.d1_database_id,
+      deliveryMode: 'clean-start',
+      cleanStartResetSqlSha256: request.clean_start.reset_sql.sha256,
+      historicalDataDisposition: {
+        productionExport: request.clean_start.historical_data_export,
+        doubleRestore: request.clean_start.double_restore,
+        historicalBaselineQueries: request.clean_start.historical_baseline_queries,
+      },
     },
     migration_set_sha256: request.repository.migrations.set_sha256,
     stage_counts: Object.fromEntries(PHASE_B_STAGES.map((stage) => [stage, 0])),
+    historical_data_disposition: {
+      production_export: request.clean_start.historical_data_export,
+      double_restore: request.clean_start.double_restore,
+      historical_baseline_queries: request.clean_start.historical_baseline_queries,
+    },
     start_conditions: {
       fresh_candidate_bound_authorization_required: true,
       no_prior_lineage_reuse: true,
@@ -1160,6 +1272,13 @@ function resealDocuments(request, toolVersions) {
     format: CURRENT_MANIFEST_FORMAT,
     state: 'sealed-local-only',
     produced_at: request.produced_at,
+    delivery_mode: 'clean-start',
+    clean_start_reset_sql_sha256: request.clean_start.reset_sql.sha256,
+    historical_data_disposition: {
+      production_export: request.clean_start.historical_data_export,
+      double_restore: request.clean_start.double_restore,
+      historical_baseline_queries: request.clean_start.historical_baseline_queries,
+    },
     candidate_id: request.candidate.commit,
     local_preflight_candidate_sha256: sha256(preflightBytes),
     approval_packet_sha256: sha256(approvalBytes),
@@ -1191,8 +1310,8 @@ function loadSealContext(inputPath, repositoryPath, artifactsPath) {
   const requestDocument = readValidatedDocument(inputPath, {
     label: 'request document',
   })
-  if (requestDocument.value.format === HISTORICAL_REQUEST_FORMAT) {
-    fail('Issue #23 historical v1 reseal request is stale for current sealing')
+  if (HISTORICAL_REQUEST_FORMATS.has(requestDocument.value.format)) {
+    fail('Issue #23 historical reseal request is stale for current sealing')
   }
   requireEqual(requestDocument.value.format, REQUEST_FORMAT, 'request format')
   const sealInputs = verifySealInputs(requestDocument.value, repository, artifacts)
@@ -1296,8 +1415,8 @@ export function verifyPackage({
   )
   const packageSnapshot = readPackageSnapshot(packagePath)
   verifyPackageSnapshot(packageSnapshot)
-  if (packageSnapshot.contract !== 'current-t0') {
-    fail('Issue #23 historical v2 reseal package is stale for current verification')
+  if (packageSnapshot.contract !== 'current-clean-start-t0') {
+    fail('Issue #23 historical reseal package is stale for current verification')
   }
   const validation = packageSnapshot.summary
   const expectedDocuments = resealDocuments(
@@ -1361,11 +1480,17 @@ function readPackageSnapshot(packagePath) {
   const c = preCas.value
   const m = manifest.value
   const formats = [a.format, c.format, m.format]
-  const historical = JSON.stringify(formats) === JSON.stringify([
+  const historicalV2 = JSON.stringify(formats) === JSON.stringify([
     'blogman-issue-23-approval-packet/v2',
     'blogman-issue-23-pre-cas-bindings/v2',
     'blogman-issue-23-package-manifest/v2',
   ])
+  const historicalV3 = JSON.stringify(formats) === JSON.stringify([
+    'blogman-issue-23-approval-packet/v3',
+    'blogman-issue-23-pre-cas-bindings/v3',
+    'blogman-issue-23-package-manifest/v3',
+  ])
+  const historical = historicalV2 || historicalV3
   const current = JSON.stringify(formats) === JSON.stringify([
     CURRENT_APPROVAL_FORMAT,
     CURRENT_PRE_CAS_FORMAT,
@@ -1406,11 +1531,53 @@ function readPackageSnapshot(packagePath) {
     a.expected_baseline.version_id,
     'baseline version',
   )
-  if (current) {
+  if (!historicalV2) {
     requireEqual(
       c.immutable_phase_b_bindings.baselineD1DatabaseId,
       a.expected_baseline.d1_database_id,
       'baseline D1 database',
+    )
+  }
+  if (current) {
+    requireEqual(a.delivery_mode, 'clean-start', 'delivery mode')
+    requireEqual(c.immutable_phase_b_bindings.deliveryMode, a.delivery_mode, 'delivery mode')
+    requireEqual(m.delivery_mode, a.delivery_mode, 'delivery mode')
+    requireEqual(
+      c.immutable_phase_b_bindings.cleanStartResetSqlSha256,
+      a.clean_start.reset_sql_sha256,
+      'clean-start reset SQL',
+    )
+    requireEqual(
+      m.clean_start_reset_sql_sha256,
+      a.clean_start.reset_sql_sha256,
+      'clean-start reset SQL',
+    )
+    requireEqual(
+      JSON.stringify(c.immutable_phase_b_bindings.historicalDataDisposition),
+      JSON.stringify({
+        productionExport: a.clean_start.historical_data_export,
+        doubleRestore: a.clean_start.double_restore,
+        historicalBaselineQueries: a.clean_start.historical_baseline_queries,
+      }),
+      'historical-data disposition',
+    )
+    requireEqual(
+      JSON.stringify(c.historical_data_disposition),
+      JSON.stringify({
+        production_export: a.clean_start.historical_data_export,
+        double_restore: a.clean_start.double_restore,
+        historical_baseline_queries: a.clean_start.historical_baseline_queries,
+      }),
+      'historical-data disposition',
+    )
+    requireEqual(
+      JSON.stringify(m.historical_data_disposition),
+      JSON.stringify({
+        production_export: a.clean_start.historical_data_export,
+        double_restore: a.clean_start.double_restore,
+        historical_baseline_queries: a.clean_start.historical_baseline_queries,
+      }),
+      'historical-data disposition',
     )
   }
 
@@ -1421,7 +1588,7 @@ function readPackageSnapshot(packagePath) {
       realPath: realPackagePath,
       requestedPath: requestedPackagePath,
     },
-    contract: historical ? 'historical-observation' : 'current-t0',
+    contract: historical ? 'historical-read-only' : 'current-clean-start-t0',
     documents: new Map([
       ['preflight-candidate.json', preflight],
       ['approval-packet.json', approval],
@@ -1450,12 +1617,40 @@ export function validatePackage(packagePath) {
   return packageSnapshot.summary
 }
 
+export function loadCurrentResealPackage(packagePath) {
+  const packageSnapshot = readPackageSnapshot(packagePath)
+  verifyPackageSnapshot(packageSnapshot)
+  if (packageSnapshot.contract !== 'current-clean-start-t0') {
+    fail('Issue #23 reseal package is stale for the current clean-start contract')
+  }
+  return packageSnapshot
+}
+
 function runCli(args) {
   if (args.length === 3 && args[0] === 'validate' && args[1] === '--document') {
     return validateDocument(resolve(args[2]))
   }
   if (args.length === 3 && args[0] === 'validate' && args[1] === '--package') {
     return validatePackage(resolve(args[2]))
+  }
+  if (args.length === 7 && args[0] === 'verify-build-directory') {
+    const options = Object.fromEntries([
+      [args[1], args[2]],
+      [args[3], args[4]],
+      [args[5], args[6]],
+    ])
+    if (
+      Object.keys(options).length === 3
+      && options['--archive']
+      && options['--directory']
+      && options['--archive-sha256']
+    ) {
+      return verifyBuildDirectory({
+        archivePath: resolve(options['--archive']),
+        directoryPath: resolve(options['--directory']),
+        expectedArchiveSha256: options['--archive-sha256'],
+      })
+    }
   }
   if (args.length === 9 && args[0] === 'seal') {
     const options = Object.fromEntries([
@@ -1501,7 +1696,7 @@ function runCli(args) {
       })
     }
   }
-  fail('Usage: issue-23-reseal validate (--document <path> | --package <path>) | seal --input <path> --repo <path> --artifacts <path> --output <path> | verify --input <path> --repo <path> --artifacts <path> --package <path>')
+  fail('Usage: issue-23-reseal validate (--document <path> | --package <path>) | verify-build-directory --archive <path> --directory <path> --archive-sha256 <sha256> | seal --input <path> --repo <path> --artifacts <path> --output <path> | verify --input <path> --repo <path> --artifacts <path> --package <path>')
 }
 
 if (resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

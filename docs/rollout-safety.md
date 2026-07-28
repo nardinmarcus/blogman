@@ -4,13 +4,15 @@
 
 ## 安全边界
 
-- Issue #23 Phase B 的唯一仓库顺序合同是 `scripts/phase-b-sequence.mjs`：`PRE-CAS/local gates → CAS1 → D1 identity → remote migration plan → export → double restore → upload → migrations 001–006 → CAS2 → traffic → smoke/reconcile → T0`。runner 在任何 stage 前验证 absolute production `CONFIG` 和冻结的 candidate/approval packet/build/baseline deployment/version/D1 binding cache，将两者冻结为每个 adapter 必须使用的同一 execution context；每 stage exactly once、无 retry，任一失败立即停止。remote plan 失败时 export 及全部后缀计数必须为 `0`。这不改变八批交付顺序。Issue #23 的 superseding decision 只允许 migration `001` 的 `001_initial_schema.baseline.sql` statements `1` 与 `3` 在 remote baseline 验证中由 checksum-bound `001_initial_schema.remote.baseline.sql`（SHA-256 `90c94ce79e77d3ca3ab22fc67f702243e7305bcd1860f3d1feb2026fb56b4a03`）替换。原 migration/baseline 字节与 ledger checksum、本地路径、其他 sidecar 的 `EXPLAIN` opcode proof 和完整 compatibility issue multiset 均不变；两个 replacement group 的六条 probe 由 source/replacement identity、私有 0600 输出、300 秒上限、one-shot/no-retry 和各组前后 schema fingerprint 共同约束，任一失败禁止 fallback 并保持全部 downstream Phase B stage 为 `0`。
+- Issue #23 当前 Phase B 的唯一仓库顺序合同是 `scripts/phase-b-sequence.mjs`：`PRE-CAS/local gates → CAS1 → D1 identity → upload → clean-start reset → empty D1 verify → empty D1 migration plan → migrations 001–006 → CAS2 → traffic → smoke/reconcile → T0`。runner 在任何 stage 前验证 absolute production `CONFIG` 和冻结的 candidate/approval packet/build/baseline deployment/version/D1 binding cache，并要求 `delivery_mode=clean-start`、候选绑定的 reset SQL SHA-256 以及 export、double restore、historical baseline queries 三项 `NOT_APPLICABLE` disposition 完全一致。每 stage exactly once、无 retry，任一失败立即停止。reset 保持同一 D1 UUID，只删除已知 Blogman 对象；随后必须证明不存在任何非内部 SQLite 对象，并且 migration plan 精确给出 001–006 六个 `apply`，才可进入生产 apply。旧 migration `001` remote-baseline companion 和历史保存路径保持只读兼容，但不属于当前 clean-start 执行序列。
 - `backup restore` 和 `request smoke` 只接受 `--local`，必须显式指定仓库外的绝对 `--persist-to` 空目录，绝不回退到默认 `.wrangler/state`。
 - `reconcile capture|compare` 支持显式 local D1，也为经授权的未来 production read-only 对账保留 `--remote` 接口；普通本地验收只使用 `--local`。
 - 旧备份不能恢复到已有文件的 persist 目录。新事实出现后只能停用 producer/authority/executor 并前向修复，不能用旧备份覆盖、down migration 或清空新表。
 - Cloudflare D1 不支持导出包含 FTS5 virtual table 的数据库。备份包可按恢复顺序列出多个 SQL artifact，例如常规表导出和候选绑定的 FTS/index/trigger 重建脚本；每个 artifact 都必须有字节数和 SHA-256。
 
-### 私有生产导出封装
+### 历史保存路径：私有生产导出封装
+
+本节保留旧候选证据的只读验证和其他获准保存数据的操作能力。Issue #23 当前 clean-start 密封包必须把生产导出、双隔离恢复和历史 baseline query 全部绑定为 `NOT_APPLICABLE`，不得从当前序列进入本节命令。
 
 生产 D1 导出只能通过一次性私有封装执行，禁止直接运行 `wrangler d1 export` 或继承父进程 stdio：
 
@@ -103,16 +105,22 @@ node scripts/rollout-safety.mjs request smoke \
 
 ## 4. 候选证据
 
-生产 migration `apply` 前使用独立的 `blogman-pre-migration-candidate/v1` 合同。它只绑定 commit、lockfile/toolchain、build、已上传但未承载流量的 Cloudflare version、备份/隔离恢复、原始 local migration verify、原始 Workerd smoke、D1 对账和测试报告；不含 deployment、production smoke、rollout 或 T0 字段。因此它只能由专用命令验证，不能被正式 `candidate verify`、`rollout set` 或 `rollout status` 当成生产候选：
+当前 clean-start 在生产 migration `apply` 前使用独立的 `blogman-pre-migration-candidate/v2` 合同。它绑定 commit、lockfile/toolchain、在 upload 紧前从实际 `.open-next` 重新生成的 sealed-build 逐字节证明、由私有 upload 输出唯一导出的 Cloudflare version、D1 UUID、原始 v3 reseal request 与通过 package validator 的完整 v4 quartet、reset SQL、一次 reset report、empty-D1 report、精确 001–006 `apply` plan report、原始 local migration verify、原始 Workerd smoke、D1 对账和测试报告；不含 deployment、production smoke、rollout 或 T0 字段，也没有 backup/restore 字段。因此它只能由专用命令验证，不能被正式 `candidate verify`、`rollout set` 或 `rollout status` 当成生产候选：
 
 ```bash
 node scripts/rollout-safety.mjs candidate verify-pre-migration \
   --evidence /private/evidence/pre-migration-candidate.json \
   --candidate "$(git rev-parse HEAD)" --lockfile package-lock.json \
-  --build /private/evidence/open-next-build.tar \
+  --build /private/evidence/open-next-build.zip \
   --version "${UPLOADED_CLOUDFLARE_VERSION_ID}" \
-  --backup-report /private/evidence/backup-report.json \
-  --restore-report /private/evidence/restore-report.json \
+  --d1-database "${D1_DATABASE_ID}" \
+  --reseal-request /private/evidence/reseal-request.json \
+  --sealed-package /private/evidence/sealed-package \
+  --build-directory-proof /private/evidence/upload-build-directory-proof.json \
+  --clean-start-upload-report /private/evidence/clean-start-upload-report.json \
+  --clean-start-reset-report /private/evidence/clean-start-reset-report.json \
+  --clean-start-empty-report /private/evidence/clean-start-empty-report.json \
+  --clean-start-empty-plan-report /private/evidence/clean-start-empty-plan-report.json \
   --migration-verification-report /private/evidence/local-migration-verify.json \
   --reconciliation-report /private/evidence/local-reconciliation.json \
   --smoke-runtime-report /private/evidence/restored-request-smoke.json \
@@ -121,30 +129,38 @@ node scripts/rollout-safety.mjs candidate verify-pre-migration \
 
 只有 `state=verified, phase=pre-migration` 才允许进入生产 apply。该格式没有可伪造的 deployment placeholder，也不能解锁 rollout control。验证器通过 migration runner 的只读 `catalog` 输出逐条交叉检查 raw verify 中的 migration number、name 和 canonical checksum；旧 verify report 不能与新的 migration set 拼接通过。
 
-当前候选文件格式为 `blogman-rollout-candidate/v2`，绑定：
+当前候选文件格式为 `blogman-rollout-candidate/v3`，绑定：
 
-- 40 位 Git commit、lockfile/toolchain、不可变 build；
-- exact Cloudflare deployment ID、version ID 和 D1 database UUID；
+- 40 位 Git commit、lockfile/toolchain、不可变 build，以及 CAS1 后、upload 紧前重新生成的 upload source 与 sealed ZIP 逐字节同一性证明；
+- exact Cloudflare deployment ID、从一次私有 upload 输出唯一导出的 version ID 和 D1 database UUID；
 - migrations 001–006 的 migration-set、candidate-bound apply summary 与原始 verify report；
-- 同一 backup ID 的 verify 与 isolated restore 报告；
+- 原始 v3 reseal request、完整 v4 quartet package validation、同一 D1 UUID、候选绑定 reset SQL、一次 reset report、empty-D1 proof 与精确六条 `apply` plan report；
+- `historical_data_export`、`double_restore`、`historical_baseline_queries` 三项精确的 `NOT_APPLICABLE` disposition；
 - 最终 schema、migration ledger、文章 count/status/content 五维 D1 reconciliation；
 - 原始本地 Workerd smoke 与六条真实 production critical-path smoke；
 - producer、authority、各 executor 的 rollout 状态快照；
+- 同一 candidate、approval baseline Worker version、uploaded candidate version、D1 UUID 和 rollout report SHA-256 的 rollback/control proof；
 - 退出码、通过/失败计数明确的测试报告；
-- `blogman-t0-acceptance/v1`，闭包绑定上述 exact identity、迁移 001–006、最终 smoke/reconciliation 和零未解决高优先级异常。
+- `blogman-t0-acceptance/v2`，闭包绑定上述 exact identity、clean-start reset/empty reports、迁移 001–006、最终 smoke/reconciliation 和零未解决高优先级异常。
 
-Production smoke 使用 `blogman-production-smoke/v2`，必须记录采集时间、同一 D1 UUID、同一 candidate/build/deployment/version，以及 `search`、`appearance`、`admin_article`、`tokens`、`ai_provider`、`ai_generators` 六项 HTTP 200。最终 reconciliation 使用 `blogman-d1-reconciliation-check/v2`，必须记录采集时间、同一 D1 UUID，并使 `schema`、`migration_ledger`、`post_count`、`post_status`、`post_content` 全部为 `matched`。
+Production smoke 使用 `blogman-production-smoke/v2`，必须记录采集时间、同一 D1 UUID、同一 candidate/build/deployment/version。当前 clean-start v3 要求 `search`、`appearance`、`tokens`、`ai_provider`、`ai_generators` 为 HTTP 200，并要求带有效认证访问固定不存在文章的 `admin_article` 为 HTTP 404；这是空库 `posts=0` 的预期读路径证明，不创建 smoke 数据。历史 v2 仍要求六项全部 200。最终 reconciliation 使用 `blogman-d1-reconciliation-check/v2`，必须记录采集时间、同一 D1 UUID，并使 `schema`、`migration_ledger`、`post_count`、`post_status`、`post_content` 全部为 `matched`。schema 只精确排除 D1 内部 table tuple `_cf_KV/_cf_KV` 与 `_cf_METADATA/_cf_METADATA`；任何 `_cf_unknown`、同名非 table 或 tbl_name 不匹配对象都进入 schema 指纹并导致 drift。
 
 ```json
 {
-  "format": "blogman-t0-acceptance/v1",
+  "format": "blogman-t0-acceptance/v2",
   "state": "passed",
-  "accepted_at": "2026-07-26T01:00:00.000Z",
+  "accepted_at": "2026-07-28T01:00:00.000Z",
+  "delivery_mode": "clean-start",
   "candidate_id": "<40 hex>",
   "build_sha256": "<64 hex>",
   "deployment_id": "<deployment id>",
   "version_id": "<version uuid>",
   "d1_database_id": "<d1 uuid>",
+  "clean_start_reset_report_sha256": "<64 hex>",
+  "clean_start_empty_report_sha256": "<64 hex>",
+  "clean_start_upload_report_sha256": "<64 hex>",
+  "clean_start_empty_plan_report_sha256": "<64 hex>",
+  "rollback_control_proof_sha256": "<64 hex>",
   "migration_numbers": [1, 2, 3, 4, 5, 6],
   "migration_report_sha256": "<64 hex>",
   "migration_verification_report_sha256": "<64 hex>",
@@ -165,8 +181,14 @@ node scripts/rollout-safety.mjs candidate verify \
   --deployment "${CLOUDFLARE_DEPLOYMENT_ID}" \
   --version "${CLOUDFLARE_VERSION_ID}" \
   --d1-database "${D1_DATABASE_ID}" \
-  --backup-report /private/evidence/backup-report.json \
-  --restore-report /private/evidence/restore-report.json \
+  --reseal-request /private/evidence/reseal-request.json \
+  --sealed-package /private/evidence/sealed-package \
+  --build-directory-proof /private/evidence/upload-build-directory-proof.json \
+  --clean-start-upload-report /private/evidence/clean-start-upload-report.json \
+  --clean-start-reset-report /private/evidence/clean-start-reset-report.json \
+  --clean-start-empty-report /private/evidence/clean-start-empty-report.json \
+  --clean-start-empty-plan-report /private/evidence/clean-start-empty-plan-report.json \
+  --rollback-control-proof /private/evidence/rollback-control-proof-report.json \
   --migration-report /private/evidence/migration-report.json \
   --migration-verification-report /private/evidence/production-migration-verify.json \
   --reconciliation-report /private/evidence/reconciliation-report.json \
@@ -180,16 +202,15 @@ node scripts/rollout-safety.mjs candidate verify \
 
 只有 `state=verified, phase=batch-1-t0` 且输出同一 `d1_database_id` 才通过。smoke、reconciliation、anomaly 的采集时间不得晚于 `accepted_at`；允许它们与 T0 在同一时刻完成，不存在最短时长、固定观察窗口或 observation-end wait。任何 hash、migration set、内部状态、candidate/build/deployment/version/D1 交叉绑定不一致，或任一高优先级异常未解决，都会返回 `state=invalid`。
 
-### 历史 v1 只读兼容
+### 历史 v1/v2 只读兼容
 
-`blogman-rollout-candidate/v1` 与 `blogman-observation-window/v1` 的 canonical 字节和完整 24 小时规则保持不变，仅用于验证历史证据：
+`blogman-rollout-candidate/v1` 的 observation-window 合同和 `blogman-rollout-candidate/v2` 的历史 T0 合同保持不变，仅用于验证历史证据：
 
 ```bash
-node scripts/rollout-safety.mjs candidate verify-historical \
-  <旧 v1 candidate verify 参数，包括 observation start/end 与 anomaly 报告>
+node scripts/rollout-safety.mjs candidate verify-historical <旧 v1/v2 参数>
 ```
 
-成功只返回 `state=verified-historical, acceptance_authority=false`。把旧 v1 交给当前 `candidate verify` 会返回非零 `state=stale, acceptance_authority=false`；因此旧证据不能被 `rollout set`、`rollout status` 或当前 reseal/authorization 入口用于解锁任何控制。历史文件不会被重写，也不会被升级为 T0 证据。
+成功只返回 `state=verified-historical, acceptance_authority=false`。把旧 v1/v2 交给当前 `candidate verify` 会返回非零 `state=stale, acceptance_authority=false`；旧 `blogman-pre-migration-candidate/v1` 同样为 stale。因此旧证据不能被 `rollout set`、`rollout status` 或当前 reseal/authorization 入口用于解锁任何控制。历史文件不会被重写，也不会被升级为当前 clean-start 证据。
 
 当前与历史候选及其绑定报告都使用完整必需字段合同和严格 allowlist；未知/缺失字段、错误类型或枚举、无效时间戳、敏感字段名以及任意字段中的凭据样式字符串都会被拒绝且不会回显原值。
 

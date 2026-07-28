@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 const zeroSha = '0'.repeat(40)
 const exactPaths = new Set([
+  'db/issue-23-clean-start-reset.sql',
   'db/migrations/002_add_ai_actions.sql',
   'db/migrations/004_add_ai_provider_profiles.sql',
   'db/schema.sql',

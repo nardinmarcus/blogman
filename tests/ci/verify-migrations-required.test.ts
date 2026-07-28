@@ -47,6 +47,7 @@ describe('verify-migrations change classifier', () => {
     'db/seed-template.sql',
     'db/migrations/002_add_ai_actions.sql',
     'db/migrations/004_add_ai_provider_profiles.sql',
+    'db/issue-23-clean-start-reset.sql',
     'scripts/migrations.mjs',
     'tests/migrations/migration-runner.test.ts',
     'lib/ai-provider-profiles.ts',

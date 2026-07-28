@@ -1,60 +1,72 @@
-# Issue #23 Phase B production runbook
+# Issue #23 clean-start Phase B production runbook
 
-This runbook starts only after a separate production-write approval. It binds one immutable candidate to one backup, migration set, OpenNext build, exact Cloudflare version/deployment and D1 identity, same-version smoke, final D1 reconciliation, rollout snapshot, test report, zero unresolved high-priority anomalies, and the immediate T0 acceptance event.
+This is the current Issue #23 production contract. It is executable only after a separate authorization binds one exact clean-start v4 sealed package. The product decision that existing Blogman data may be discarded is not itself production authorization or a deletion instruction.
 
-Do not persist article bodies, HTML, tokens, passwords, Bridge/AI credentials, signed URLs, raw HTTP bodies, or raw Cloudflare responses in evidence or reports. The one temporary private SQL backup necessarily contains application rows; it is never evidence, stays `0600` inside the one-attempt `0700` export run root, and must be destroyed at the lifecycle boundary below. Keep the evidence root outside the repository with mode `0700`.
+The clean-start path keeps the approved D1 database UUID, uploads the candidate before the destructive boundary, resets only the known Blogman objects with the candidate-bound SQL file, proves the same D1 is empty, applies migrations 001–006 as new-database `apply` actions, and then performs CAS, traffic, smoke, reconciliation, rollback/control, and T0 proof.
 
-## Approval boundary
+Historical-data steps have these explicit dispositions:
 
-The approval must explicitly cover these production operations:
+- historical data export: `NOT_APPLICABLE`
+- double restore: `NOT_APPLICABLE`
+- historical baseline queries: `NOT_APPLICABLE`
 
-1. One pre-migration remote D1 export of the seven regular application tables and read-only D1 baseline queries.
-2. One candidate-bound remote ledger migration `apply` for migrations 001–006.
-3. One OpenNext version upload and one 100% Cloudflare deployment of that exact uploaded version. OpenNext also populates its configured remote cache during upload/deploy.
-4. Status-only production HTTP smoke against article, token, AI configuration, and generator read paths; no response bodies are retained.
-5. Read-only post-migration final D1 reconciliation.
-6. Recording the T0 acceptance event immediately after every required Phase B fact passes.
-7. Only if a failure occurs: persistently disable an affected rollout control and/or restore the prior Worker version to 100% traffic. Neither action reverts D1; both invalidate this candidate and require a forward-fix successor.
+They are not optional operator choices. All three values and the reset SQL SHA-256 must match the sealed request, approval packet, PRE-CAS bindings, package manifest, and fixed sequence before the first production command. A missing, different, or unbound disposition is a hard stop.
 
-No approval in this packet includes a down migration, backup overwrite of production, ledger rewrite, deletion of new facts, production fixture writes, push, PR, Issue closure, or Batch 2 dispatch.
+Never persist article bodies, HTML, tokens, credentials, signed URLs, raw HTTP bodies, or raw Cloudflare responses in reports. Private Wrangler output stays in the one-attempt evidence root with mode `0600`; the evidence root is outside the repository with mode `0700`.
 
-## Fixed inputs
+## Fixed sequence and stop rule
+
+The repository-owned sequence is `scripts/phase-b-sequence.mjs`:
+
+`PRE-CAS/local gates → CAS1 → D1 identity → upload → clean-start reset → empty D1 verify → empty D1 migration plan → migrations 001–006 → CAS2 → traffic → smoke/reconcile → T0`.
+
+Every applicable stage runs at most once. There is no retry, fallback to the historical-preservation path, down migration, ledger edit, or restoration of discarded data. A failure stops before the suffix. After reset, recovery is a forward-fix successor against the preserved empty/additive D1 facts; an emergency traffic restore may restore only the previously approved Worker version and never D1 data.
+
+## 0. Bound inputs
+
+Use absolute paths. Example variable names are placeholders; do not copy identities from an older lineage.
 
 ```bash
 set -euo pipefail
 umask 077
-REPO=/absolute/path/to/the/clean/candidate-checkout
-CONFIG=/absolute/path/to/the/operator-owned/production-wrangler.toml
-EVIDENCE_ROOT=/private/blogman-b1/issue-23
-REPORT_DIR="$EVIDENCE_ROOT/reports"
-RESTORE_A="$EVIDENCE_ROOT/restore-a"
-RESTORE_B="$EVIDENCE_ROOT/restore-b"
-DATABASE=DB
-EXPECTED_CANDIDATE=<approved-40-hex-commit>
-EXPECTED_BASELINE_DEPLOYMENT=<approved-read-only-deployment-id>
-EXPECTED_BASELINE_VERSION=<approved-read-only-version-id>
-EXPECTED_BASELINE_D1=<approved-read-only-d1-database-id>
-EXPORT_RUN_ROOT="$EVIDENCE_ROOT/export-$EXPECTED_CANDIDATE-successor-1"
-BACKUP_DIR="$EXPORT_RUN_ROOT/backup"
+
+CONFIG=/absolute/private/wrangler.toml
+DATABASE=blogman-db
+EXPECTED_CANDIDATE=<40-hex-approved-commit>
+RESEAL_REQUEST=/absolute/private/reseal-request.json
+SEALED_PACKAGE=/absolute/private/sealed/package
+APPROVAL_PACKET="$SEALED_PACKAGE/approval-packet.json"
+RESET_SQL="$PWD/db/issue-23-clean-start-reset.sql"
+BUILD_ZIP=/absolute/private/build/open-next-build.zip
+UPLOAD_SOURCE_DIRECTORY="$PWD/.open-next"
+REPORT_DIR=/absolute/private/issue-23-clean-start/reports
 PUBLIC_ORIGIN=<approved-public-origin>
 ADMIN_COOKIE_FILE=<operator-owned-private-cookie-file>
-SMOKE_ARTICLE_SLUG=<approved-existing-article-slug>
-```
+CLEAN_START_MISSING_SLUG=__issue-23-clean-start-empty__
 
-Validate the operator-owned production config before setup or any Wrangler production call. The gate first checks the path and file type, then freezes only its file identity and SHA-256; it never copies or emits config contents:
-
-```bash
 case "$CONFIG" in
   /*) ;;
-  *) printf '%s\n' 'CONFIG must be an absolute path to an existing regular file' >&2; exit 1 ;;
+  *) exit 1 ;;
 esac
 if ! test -f "$CONFIG"; then
-  printf '%s\n' 'CONFIG must be an absolute path to an existing regular file' >&2
   exit 1
 fi
+test "$(git rev-parse HEAD)" = "$EXPECTED_CANDIDATE"
+test -z "$(git status --porcelain --untracked-files=all)"
+test -f "$RESEAL_REQUEST"
+test -d "$SEALED_PACKAGE"
+test -f "$APPROVAL_PACKET"
+test -f "$RESET_SQL"
+test -d "$UPLOAD_SOURCE_DIRECTORY"
+test -d "$REPORT_DIR"
+test "$(stat -f '%Lp' "$REPORT_DIR")" = 700
+
+DATABASE_ID=$(jq -er .expected_baseline.d1_database_id "$APPROVAL_PACKET")
+BUILD_SHA256=$(shasum -a 256 "$BUILD_ZIP" | awk '{print $1}')
+test "$BUILD_SHA256" = "$(jq -er .build_archive_sha256 "$APPROVAL_PACKET")"
 CONFIG_SHA256=$(shasum -a 256 "$CONFIG" | awk '{print $1}')
 CONFIG_FILE_ID=$(stat -f '%d:%i' "$CONFIG")
-readonly CONFIG_SHA256 CONFIG_FILE_ID
+readonly DATABASE_ID BUILD_SHA256 CONFIG_SHA256 CONFIG_FILE_ID
 
 verify_config_identity() {
   test -f "$CONFIG"
@@ -63,357 +75,258 @@ verify_config_identity() {
 }
 ```
 
-Create the private directories, then move into the candidate checkout:
+Validate the canonical v3 request and current v4 package locally with `scripts/issue-23-reseal.mjs validate`; the package must be current, not historical. The later candidate verifier consumes those same original paths and hashes the original bytes. The package must have `production_authorization_granted=false` and all clean-start stage counters at zero before a separate authorization binds its exact package manifest SHA-256. A v2 or v3 package may validate only as historical read-only evidence and cannot start this sequence.
+
+Before every repository or Cloudflare adapter call, recheck the absolute config realpath and SHA-256 captured at PRE-CAS. Do not accept a symlink replacement or a different D1 binding.
+
+## 1. PRE-CAS local gates
+
+Classification: local-only except separately reviewed GitHub status. No Cloudflare command runs in this stage.
+
+Prove all of the following:
+
+- `HEAD`, tree, `main`, and `origin/main` match the sealed candidate and the worktree is clean;
+- lockfile, build ZIP, Worker, tree manifest, runbook, reset SQL, and migrations have the sealed hashes;
+- approval `delivery_mode=clean-start`, strategy `reset-bound-d1-in-place`, and all three historical dispositions are `NOT_APPLICABLE`;
+- the approval baseline deployment, version, and D1 UUID match PRE-CAS immutable bindings;
+- affected tests, static gates, OpenNext build, Standards review, Spec review, and required terminal CI are green;
+- one isolated local empty D1 applies and verifies migrations 001–006, passes real Workerd request smoke, and produces the expected post-migration reconciliation snapshot;
+- production authorization is fresh, exact, unused, and names this package; no other production writer exists.
+
+The local empty-D1 rehearsal is:
 
 ```bash
-install -d -m 0700 "$EVIDENCE_ROOT" "$REPORT_DIR" "$RESTORE_A" "$RESTORE_B"
-test ! -e "$EXPORT_RUN_ROOT"
-cd "$REPO"
+node scripts/issue-23-reseal.mjs validate --document "$RESEAL_REQUEST" \
+  > "$REPORT_DIR/reseal-request-validation.json"
+node scripts/issue-23-reseal.mjs validate --package "$SEALED_PACKAGE" \
+  > "$REPORT_DIR/sealed-package-validation.json"
+node scripts/issue-23-reseal.mjs verify-build-directory \
+  --archive "$BUILD_ZIP" --directory "$UPLOAD_SOURCE_DIRECTORY" \
+  --archive-sha256 "$BUILD_SHA256" > "$REPORT_DIR/pre-cas-build-directory-proof.json"
+
+LOCAL_D1_STATE=$(mktemp -d)
+node scripts/migrations.mjs apply \
+  --database DB --local --persist-to "$LOCAL_D1_STATE" --config wrangler.toml \
+  --candidate "$EXPECTED_CANDIDATE" > "$REPORT_DIR/local-apply.json"
+node scripts/migrations.mjs verify \
+  --database DB --local --persist-to "$LOCAL_D1_STATE" --config wrangler.toml \
+  > "$REPORT_DIR/local-verify.json"
+node scripts/rollout-safety.mjs reconcile capture \
+  --database DB --local --persist-to "$LOCAL_D1_STATE" --config wrangler.toml \
+  > "$REPORT_DIR/expected-production-after.json"
+node scripts/rollout-safety.mjs request smoke \
+  --database DB --local --persist-to "$LOCAL_D1_STATE" --config wrangler.toml \
+  > "$REPORT_DIR/empty-migrated-workerd-smoke.json"
+node scripts/rollout-safety.mjs reconcile compare \
+  --expected "$REPORT_DIR/expected-production-after.json" \
+  --database DB --local --persist-to "$LOCAL_D1_STATE" --config wrangler.toml \
+  > "$REPORT_DIR/local-reconciliation.json"
 ```
 
-Every command below stops on a non-zero exit. Do not continue by hand after a failed gate. `EXPORT_RUN_ROOT` is an approved one-attempt identity: the export command creates it atomically with mode `0700`, and an existing root is a hard stop before Wrangler starts. Never rename, remove, or replace it to obtain a retry; a successor attempt requires a new candidate, approval, and run root.
+Keep the local state until final reconciliation. Any local failure invalidates the candidate before production.
 
-The repository-owned order contract is `scripts/phase-b-sequence.mjs`. Operator automation must call `runPhaseBSequence()` with the absolute `CONFIG` path, an immutable binding cache for the approved candidate/packet/build/baseline deployment/version/D1 identities, and the Issue #23 stage adapters. It fixes this exact sequence and rejects dynamic stage graphs:
+## 2. CAS1 and D1 identity
 
-`PRE-CAS/local gates → CAS1 → D1 identity → remote migration plan → export → double restore → upload → migrations 001–006 → CAS2 → traffic → smoke/reconcile → T0`.
-
-The runner validates `CONFIG` and the immutable bindings before entering the first stage, freezes both into one execution context supplied to every stage adapter, invokes each stage exactly once, never retries, and stops at the first rejection. Every production adapter must use `context.configPath`; a temporary script must not substitute another config, reorder, omit, repeat, or directly drive these stages outside that contract.
-
-Install the failure cleanup before the export. It never echoes captured output. It certifies disposal only after the synchronous wrapper has recorded the child terminal state as `failed` or `captured`:
+Classification: production read-only. These are the first commands requiring the separate production authorization.
 
 ```bash
-dispose_private_export() {
-  if test -f "$EXPORT_RUN_ROOT/export-report.json" && test ! -f "$EXPORT_RUN_ROOT/dispose-report.json"; then
-    node scripts/rollout-safety.mjs backup dispose --run-root "$EXPORT_RUN_ROOT" \
-      > "$REPORT_DIR/export-dispose-report.json"
-  fi
-}
-trap dispose_private_export EXIT
-```
-
-If the process is externally interrupted while the report remains `state=started`, `dispose` refuses to claim cleanup because the child terminal state is unknown. Quarantine that root without reading or moving its private files; do not delete or reuse it, do not retry, and obtain a new candidate, approval, and successor run root after controlled incident handling.
-
-The smoke helper captures each actual HTTP status and discards every response body:
-
-```bash
-run_production_smoke() {
-  SMOKE_SEARCH_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' "$PUBLIC_ORIGIN/api/search?q=blogman")
-  SMOKE_APPEARANCE_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' "$PUBLIC_ORIGIN/api/settings/appearance")
-  SMOKE_ADMIN_ARTICLE_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/posts/$SMOKE_ARTICLE_SLUG")
-  SMOKE_TOKENS_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/tokens")
-  SMOKE_AI_PROVIDER_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/ai-provider")
-  SMOKE_AI_GENERATORS_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/ai-post-generators")
-  test "$SMOKE_SEARCH_STATUS" = 200
-  test "$SMOKE_APPEARANCE_STATUS" = 200
-  test "$SMOKE_ADMIN_ARTICLE_STATUS" = 200
-  test "$SMOKE_TOKENS_STATUS" = 200
-  test "$SMOKE_AI_PROVIDER_STATUS" = 200
-  test "$SMOKE_AI_GENERATORS_STATUS" = 200
-}
-```
-
-## 1. Preflight
-
-Classification: local read-only, except the local build and private evidence files. Expected result: clean exact candidate, pinned toolchain, reproducible build, and unchanged production baseline deployment.
-
-```bash
-test "$(git rev-parse HEAD)" = "$EXPECTED_CANDIDATE"
-test -z "$(git status --porcelain)"
-test "$(git rev-parse main)" = "$(git rev-parse origin/main)"
-git merge-base --is-ancestor origin/main HEAD
-
-LOCKFILE_SHA256=$(shasum -a 256 package-lock.json | awk '{print $1}')
-WRANGLER_VERSION=$(node -p "require('./package-lock.json').packages['node_modules/wrangler'].version")
-OPENNEXT_VERSION=$(node -p "require('./package-lock.json').packages['node_modules/@opennextjs/cloudflare'].version")
-test "$(./node_modules/.bin/wrangler --version)" = "$WRANGLER_VERSION"
-
-npm exec -- opennextjs-cloudflare build
-WORKER_SHA256=$(shasum -a 256 .open-next/worker.js | awk '{print $1}')
-
-(cd .open-next && find . -type f -print | LC_ALL=C sort | zip -X -q "$REPORT_DIR/open-next-build.zip" -@)
-BUILD_SHA256=$(shasum -a 256 "$REPORT_DIR/open-next-build.zip" | awk '{print $1}')
-
+verify_config_identity
 ./node_modules/.bin/wrangler deployments status --json -c "$CONFIG" \
   | jq '{id,created_on,versions:[.versions[]|{version_id,percentage}]}' \
   > "$REPORT_DIR/deployment-before.json"
-BASELINE_DEPLOYMENT_ID=$(jq -er .id "$REPORT_DIR/deployment-before.json")
-BASELINE_VERSION_ID=$(jq -er '.versions | select(length == 1) | .[0] | select(.percentage == 100) | .version_id' "$REPORT_DIR/deployment-before.json")
-test "$BASELINE_DEPLOYMENT_ID" = "$EXPECTED_BASELINE_DEPLOYMENT"
-test "$BASELINE_VERSION_ID" = "$EXPECTED_BASELINE_VERSION"
+
+verify_config_identity
 ./node_modules/.bin/wrangler d1 info "$DATABASE" --json -c "$CONFIG" \
-  | jq '{uuid,name,created_at,num_tables,read_replication}' \
-  > "$REPORT_DIR/d1-info-before.json"
-BASELINE_D1_DATABASE_ID=$(jq -er .uuid "$REPORT_DIR/d1-info-before.json")
-test "$BASELINE_D1_DATABASE_ID" = "$EXPECTED_BASELINE_D1"
+  | jq '{uuid}' > "$REPORT_DIR/d1-info-before.json"
 ```
 
-Stop if the checkout is dirty, the candidate differs, `main` and `origin/main` differ, the candidate does not descend from `origin/main`, the installed versions differ from the lockfile, the build fails, the active production deployment/version is not the explicitly approved baseline at 100%, or the D1 UUID differs from the approved baseline. `BASELINE_VERSION_ID` is the only version eligible for the separately authorized emergency traffic restore. Local build output is not production proof.
+Require one version at 100%, exact approval baseline deployment/version, and exact approval D1 UUID. Stop on drift or ambiguous output. The D1 UUID is rechecked after reset, after migration, before traffic, and at T0.
 
-## 2. Remote migration plan hard gate
+## 3. Upload before the destructive boundary
 
-Classification: production read-only. This is the first operation requiring explicit production access approval. It runs after CAS1 and D1 identity, but before the one-shot export or either isolated restore.
+Classification: production Worker version write, no traffic change and no D1 write.
 
 ```bash
+UPLOAD_PRIVATE="$REPORT_DIR/upload-private.jsonl"
+UPLOAD_OPERATION_ID="issue-23-$EXPECTED_CANDIDATE-upload-1"
+install -m 600 /dev/null "$UPLOAD_PRIVATE"
+node scripts/issue-23-reseal.mjs verify-build-directory \
+  --archive "$BUILD_ZIP" --directory "$UPLOAD_SOURCE_DIRECTORY" \
+  --archive-sha256 "$BUILD_SHA256" > "$REPORT_DIR/upload-build-directory-proof.json"
+verify_config_identity
+WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" npm exec -- opennextjs-cloudflare upload \
+  -c "$CONFIG" -- --message "$UPLOAD_OPERATION_ID"
+jq -s -e '[.[] | select(.type == "version-upload" and .version == 1
+  and (.version_id | type == "string"))] | length == 1' "$UPLOAD_PRIVATE" >/dev/null
+UPLOADED_VERSION_ID=$(jq -sr '[.[] | select(.type == "version-upload" and .version == 1)][0].version_id' "$UPLOAD_PRIVATE")
+UPLOAD_COMPLETED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
+UPLOAD_OUTPUT_SHA256=$(shasum -a 256 "$UPLOAD_PRIVATE" | awk '{print $1}')
+BUILD_DIRECTORY_PROOF_SHA256=$(shasum -a 256 "$REPORT_DIR/upload-build-directory-proof.json" | awk '{print $1}')
+jq -n --arg uploaded "$UPLOAD_COMPLETED_AT" --arg candidate "$EXPECTED_CANDIDATE" \
+  --arg build "$BUILD_SHA256" --arg proof "$BUILD_DIRECTORY_PROOF_SHA256" \
+  --arg output "$UPLOAD_OUTPUT_SHA256" --arg operation "$UPLOAD_OPERATION_ID" \
+  --arg version "$UPLOADED_VERSION_ID" \
+  '{format:"blogman-clean-start-upload/v1",state:"captured",uploaded_at:$uploaded,
+    candidate_id:$candidate,build_archive_sha256:$build,
+    build_directory_proof_sha256:$proof,wrangler_output_sha256:$output,
+    upload_operation_id:$operation,version_id:$version,attempt_count:1}' \
+  > "$REPORT_DIR/clean-start-upload-report.json"
+```
+
+The upload-source proof is regenerated from the actual `.open-next` directory after CAS1 and immediately before the mandatory adjacent config check plus upload adapter. Any directory mutation after PRE-CAS therefore stops before upload; the earlier rehearsal proof cannot be reused. The output file may contain other Wrangler records from the OpenNext upload path, but it must contain exactly one `version-upload/v1` record. The version ID comes only from that record; `versions list | last` is forbidden. Freeze the report and prove it belongs to this candidate, sealed build bytes, fresh upload-source proof, and operation. Re-run CAS1 and D1 identity immediately before reset. If another writer changed deployment, config, D1 identity, or upload attribution, stop without reset.
+
+## 4. Candidate-bound in-place reset
+
+Classification: destructive production D1 write. This is the only data-discard operation. It is allowed only for the exact bound D1 UUID and exact `db/issue-23-clean-start-reset.sql` bytes.
+
+```bash
+APPROVAL_SHA256=$(shasum -a 256 "$APPROVAL_PACKET" | awk '{print $1}')
+RESET_SQL_SHA256=$(shasum -a 256 "$RESET_SQL" | awk '{print $1}')
+test "$RESET_SQL_SHA256" = "$(jq -er .clean_start.reset_sql_sha256 "$APPROVAL_PACKET")"
+test "$(jq -er .delivery_mode "$APPROVAL_PACKET")" = clean-start
+test "$(jq -er .expected_baseline.d1_database_id "$APPROVAL_PACKET")" = "$DATABASE_ID"
+
+RESET_PRIVATE="$REPORT_DIR/reset-private.json"
+install -m 600 /dev/null "$RESET_PRIVATE"
+verify_config_identity
+./node_modules/.bin/wrangler deployments status --json -c "$CONFIG" \
+  | jq '{id,created_on,versions:[.versions[]|{version_id,percentage}]}' \
+  > "$REPORT_DIR/deployment-before-reset.json"
+cmp "$REPORT_DIR/deployment-before.json" "$REPORT_DIR/deployment-before-reset.json"
+verify_config_identity
+./node_modules/.bin/wrangler d1 info "$DATABASE" --json -c "$CONFIG" \
+  | jq '{uuid}' > "$REPORT_DIR/d1-info-before-reset.json"
+test "$(jq -er .uuid "$REPORT_DIR/d1-info-before-reset.json")" = "$DATABASE_ID"
+verify_config_identity
+./node_modules/.bin/wrangler d1 execute "$DATABASE" --remote -c "$CONFIG" --json \
+  --file "$RESET_SQL" > "$RESET_PRIVATE"
+jq -e 'type == "array" and length > 0 and all(.success == true)' \
+  "$RESET_PRIVATE" >/dev/null
+
+RESET_COMPLETED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
+jq -n --arg completed "$RESET_COMPLETED_AT" --arg candidate "$EXPECTED_CANDIDATE" \
+  --arg approval "$APPROVAL_SHA256" --arg reset "$RESET_SQL_SHA256" --arg d1 "$DATABASE_ID" \
+  '{format:"blogman-clean-start-reset/v1",state:"reset",completed_at:$completed,
+    candidate_id:$candidate,approval_packet_sha256:$approval,reset_sql_sha256:$reset,
+    d1_database_id:$d1,attempt_count:1}' > "$REPORT_DIR/clean-start-reset-report.json"
+```
+
+Do not run the reset command twice. A non-zero or indeterminate child result consumes this attempt. Preserve the private output and stop; do not infer that the database is empty.
+
+## 5. Empty D1 proof and empty-database migration plan
+
+Classification: production read-only after reset.
+
+```bash
+verify_config_identity
+./node_modules/.bin/wrangler d1 info "$DATABASE" --json -c "$CONFIG" \
+  | jq '{uuid}' > "$REPORT_DIR/d1-info-after-reset.json"
+test "$(jq -er .uuid "$REPORT_DIR/d1-info-after-reset.json")" = "$DATABASE_ID"
+
+EMPTY_PRIVATE="$REPORT_DIR/empty-schema-private.json"
+install -m 600 /dev/null "$EMPTY_PRIVATE"
+verify_config_identity
+./node_modules/.bin/wrangler d1 execute "$DATABASE" --remote -c "$CONFIG" --json \
+  --command "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND NOT (type = 'table' AND (name,tbl_name) IN (('_cf_KV','_cf_KV'),('_cf_METADATA','_cf_METADATA'))) ORDER BY type,name" \
+  > "$EMPTY_PRIVATE"
+jq -e 'type == "array" and length > 0 and .[-1].success == true
+  and (.[-1].results | length) == 0' "$EMPTY_PRIVATE" >/dev/null
+
+EMPTY_CHECKED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
+jq -n --arg checked "$EMPTY_CHECKED_AT" --arg candidate "$EXPECTED_CANDIDATE" \
+  --arg approval "$APPROVAL_SHA256" --arg reset "$RESET_SQL_SHA256" --arg d1 "$DATABASE_ID" \
+  '{format:"blogman-clean-start-empty/v1",state:"verified-empty",checked_at:$checked,
+    candidate_id:$candidate,approval_packet_sha256:$approval,reset_sql_sha256:$reset,
+    d1_database_id:$d1,application_object_count:0,migration_ledger_state:"absent"}' \
+  > "$REPORT_DIR/clean-start-empty-report.json"
+
+verify_config_identity
 node scripts/migrations.mjs plan --database "$DATABASE" --remote --config "$CONFIG" \
-  --failure-report "$REPORT_DIR/production-plan-before-failure.json" \
-  > "$REPORT_DIR/production-plan-before.json"
+  --failure-report "$REPORT_DIR/production-plan-failure.json" \
+  > "$REPORT_DIR/production-plan-empty.json"
+jq -e '.state == "pending" and (.applied|length)==0 and (.pending|length)==6
+  and ([.pending[].number] == [1,2,3,4,5,6])
+  and ([.pending[].action] | all(. == "apply"))' \
+  "$REPORT_DIR/production-plan-empty.json" >/dev/null
+
+PLAN_CHECKED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
+RESET_REPORT_SHA256=$(shasum -a 256 "$REPORT_DIR/clean-start-reset-report.json" | awk '{print $1}')
+EMPTY_REPORT_SHA256=$(shasum -a 256 "$REPORT_DIR/clean-start-empty-report.json" | awk '{print $1}')
+jq -n --arg checked "$PLAN_CHECKED_AT" --arg candidate "$EXPECTED_CANDIDATE" \
+  --arg d1 "$DATABASE_ID" --arg reset "$RESET_REPORT_SHA256" --arg empty "$EMPTY_REPORT_SHA256" \
+  --slurpfile plan "$REPORT_DIR/production-plan-empty.json" \
+  '{format:"blogman-clean-start-empty-plan/v1",state:"verified-empty-plan",
+    checked_at:$checked,candidate_id:$candidate,d1_database_id:$d1,
+    reset_report_sha256:$reset,empty_report_sha256:$empty,
+    migrations:($plan[0].pending | map({number,name,checksum,action}))}' \
+  > "$REPORT_DIR/clean-start-empty-plan-report.json"
 ```
 
-Expected result: the plan accepts the current schema and lists only the expected pending migrations. A successful plan removes its reserved failure-report path. With `--failure-report`, the migration runner itself executes every inner Wrangler query once inside a fresh mode-`0700` directory with pre-created mode-`0600` stdout, stderr, and forced `WRANGLER_LOG_PATH` files, enforces the fixed 300-second timeout with no retry, then recursively overwrites, removes, and verifies removal of that raw directory. On failure it preserves only the mode-`0600` `blogman-migration-failure/v2` report with fixed classification fields; `failure_domain` records the confirmed layer, `failure_hint` records only non-confirmed auth/network text signals, and child non-zero failures add an `auth`/`config`/`api`/`sql`/`unknown` class plus a deterministic SHA-256 fingerprint derived only from versioned allowlisted signal identifiers. Other failures record `none` for both new fields. The report must never contain SQL, raw output, URLs, credentials, cookies, tokens, presigned URLs, account or database identifiers, or response bodies. An existing failure-report path is a hard stop and must never be removed or reused to obtain another attempt.
+This plan must not baseline an existing schema. Any application object, ledger row, missing migration, `baseline` action, or D1 UUID drift stops before apply. Historical baseline queries are `NOT_APPLICABLE` because the bound database is proven empty.
 
-Stop on any remote plan failure or unexpected pending migration. In that case export, double restore, upload, migrations 001–006, CAS2, traffic, smoke/reconciliation, and T0 must all remain at attempt count `0`. The former query-7 blocker and the subsequently observed query-4 blocker are superseded only for migration `001`, frozen `001_initial_schema.baseline.sql` (SHA-256 `b3f61982cc36ff2c88d7b4330dd304ef075b5c5c34debf4499671c33ae2b6540`) statements `1` (SHA-256 `2c4d1aa391172c16b128c08a593e252f9e09b4fc151642ce738ae47882c38491`) and `3` (SHA-256 `c61b390568cafc468c6adbbff5b78d08dd5d18a544d917fbc06c043393e3c7bd`): `001_initial_schema.remote.baseline.sql` (SHA-256 `90c94ce79e77d3ca3ab22fc67f702243e7305bcd1860f3d1feb2026fb56b4a03`) supplies exactly two groups of three smaller equivalent probes. Before the first Wrangler call, the runner verifies the migration number/name, full baseline SHA, both source ordinal/SHA identities, replacement SHA/header and per-group statement counts. Each probe still uses remote `--command`, SELECT/WITH validation, `EXPLAIN` opcode proof, private mode-`0600` stdout/stderr/debug files, the fixed 300-second timeout and no retry; matching schema fingerprints are required immediately before and after each three-probe group. Local plans and every other sidecar retain the original statements and opcode proof. Missing or drifted proof stops without fallback.
+## 6. Verify the clean-start pre-migration candidate
 
-## 3. Backup and baseline
-
-Classification: production read-only. This uses the same explicit production access approval after the remote plan passes. Cloudflare D1 cannot export an FTS5 virtual table, so export the seven regular application tables once and pair it with the candidate-bound FTS reconstruction artifact already proven by Issue #21.
+Assemble `blogman-pre-migration-candidate/v2` with `delivery_mode=clean-start`. It binds the approval packet, reset SQL, reset report, empty report, uploaded version, local migration verify, local expected reconciliation, Workerd smoke, test report, and migration set. It has no backup field and cannot satisfy final candidate verification.
 
 ```bash
-node scripts/rollout-safety.mjs backup export \
-  --run-root "$EXPORT_RUN_ROOT" --database "$DATABASE" --remote --config "$CONFIG" \
-  > "$REPORT_DIR/export-report.json"
-
-jq -e '.format == "blogman-d1-private-export/v1" and .state == "captured" and .attempt_count == 1' \
-  "$REPORT_DIR/export-report.json" >/dev/null
-cmp "$REPORT_DIR/export-report.json" "$EXPORT_RUN_ROOT/export-report.json"
-
-sed -n '28,46p' db/ledger-migrations/001_initial_schema.sql > "$BACKUP_DIR/rebuild-fts.sql"
-printf '\nINSERT INTO posts_fts(posts_fts) VALUES (\x27rebuild\x27);\n' >> "$BACKUP_DIR/rebuild-fts.sql"
-
-REGULAR_SHA256=$(jq -er .artifact.sha256 "$REPORT_DIR/export-report.json")
-FTS_SHA256=$(shasum -a 256 "$BACKUP_DIR/rebuild-fts.sql" | awk '{print $1}')
-BACKUP_DIGEST=$(cat "$BACKUP_DIR/regular-tables.sql" "$BACKUP_DIR/rebuild-fts.sql" | shasum -a 256 | awk '{print $1}')
-DATABASE_ID=$(jq -r .uuid "$REPORT_DIR/d1-info-before.json")
-CAPTURED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
-
-jq -n \
-  --arg backup_id "sha256:$BACKUP_DIGEST" \
-  --arg database_id "$DATABASE_ID" \
-  --arg captured_at "$CAPTURED_AT" \
-  --arg regular_sha "$REGULAR_SHA256" \
-  --argjson regular_bytes "$(jq -er .artifact.bytes "$REPORT_DIR/export-report.json")" \
-  --arg fts_sha "$FTS_SHA256" \
-  --argjson fts_bytes "$(wc -c < "$BACKUP_DIR/rebuild-fts.sql" | tr -d ' ')" \
-  '{format:"blogman-d1-backup/v1",backup_id:$backup_id,
-    source:{database_id:$database_id,captured_at:$captured_at},
-    required_tables:["posts","posts_fts","categories","site_settings","ai_actions","ai_provider_profiles","ai_post_generators","api_tokens"],
-    artifacts:[
-      {path:"regular-tables.sql",bytes:$regular_bytes,sha256:$regular_sha},
-      {path:"rebuild-fts.sql",bytes:$fts_bytes,sha256:$fts_sha}
-    ]}' > "$BACKUP_DIR/manifest.json"
-
-node scripts/rollout-safety.mjs backup verify --manifest "$BACKUP_DIR/manifest.json" \
-  > "$REPORT_DIR/backup-report.json"
-
-node scripts/rollout-safety.mjs reconcile capture \
-  --database "$DATABASE" --remote --config "$CONFIG" \
-  > "$REPORT_DIR/production-before.json"
-
-```
-
-Expected result: the export report is sanitized and `state=captured, attempt_count=1`; Wrangler stdout/stderr and the explicitly private `WRANGLER_LOG_PATH` debug capture have already been overwritten and unlinked; no default Wrangler debug log was used; and `backup-report.state=verified`. The export wrapper imports the SQL only inside its private root and checks the exact seven-table column-name set plus `type/notnull/default/pk/hidden` semantics, allowing only the frozen Issue #21 text-AI A/B/C variants (`ai_actions.profile_id` position/presence paired with the approved `max_tokens` default). This is a column-semantics contract; the earlier remote candidate migration plan remains the authority for the frozen UNIQUE/FK/CHECK/index compatibility rules. Stop on export/config mismatch, timeout, a second export attempt, output permissions other than `0600`, empty/malformed SQL, wrong exported table schema, backup identity failure, or unsupported schema. Never invoke `wrangler d1 export` directly or use inherited stdio/default debug logging.
-
-## 4. Two isolated restores and local candidate verification
-
-Classification: local/private writes only; no production mutation.
-
-```bash
-node scripts/rollout-safety.mjs backup restore --manifest "$BACKUP_DIR/manifest.json" \
-  --database "$DATABASE" --local --persist-to "$RESTORE_A" --config wrangler.toml \
-  > "$REPORT_DIR/restore-a-report.json"
-node scripts/rollout-safety.mjs backup restore --manifest "$BACKUP_DIR/manifest.json" \
-  --database "$DATABASE" --local --persist-to "$RESTORE_B" --config wrangler.toml \
-  > "$REPORT_DIR/restore-b-report.json"
-
-node scripts/migrations.mjs plan --database "$DATABASE" --local --persist-to "$RESTORE_A" --config wrangler.toml \
-  > "$REPORT_DIR/local-plan.json"
-node scripts/migrations.mjs apply --database "$DATABASE" --local --persist-to "$RESTORE_A" --config wrangler.toml \
-  --candidate "$EXPECTED_CANDIDATE" > "$REPORT_DIR/local-apply.json"
-node scripts/migrations.mjs verify --database "$DATABASE" --local --persist-to "$RESTORE_A" --config wrangler.toml \
-  > "$REPORT_DIR/local-verify.json"
-
-node scripts/rollout-safety.mjs request smoke \
-  --database "$DATABASE" --local --persist-to "$RESTORE_A" --config wrangler.toml \
-  > "$REPORT_DIR/restored-workerd-smoke.json"
-node scripts/rollout-safety.mjs reconcile capture \
-  --database "$DATABASE" --local --persist-to "$RESTORE_A" --config wrangler.toml \
-  > "$REPORT_DIR/expected-production-after.json"
-
-node scripts/migrations.mjs apply --database "$DATABASE" --local --persist-to "$RESTORE_B" --config wrangler.toml \
-  --candidate "$EXPECTED_CANDIDATE" > "$REPORT_DIR/local-apply-b.json"
-node scripts/rollout-safety.mjs reconcile compare \
-  --expected "$REPORT_DIR/expected-production-after.json" \
-  --database "$DATABASE" --local --persist-to "$RESTORE_B" --config wrangler.toml \
-  > "$REPORT_DIR/restore-reproducibility.json"
-```
-
-Expected result: both restores bind the same backup ID; local apply/verify reach current/verified; Workerd smoke passes without changing D1 facts; restore B matches restore A. Stop on any delta. Do not repair the copy by hand.
-
-Run the focused gate and static checks. The full repository Vitest is intentionally excluded from this release command because the prior attempt exceeded 25 minutes; it must not be reported as passed.
-
-```bash
-perl -e 'alarm 900; exec @ARGV' npm run test:run -- \
-  tests/scripts/rollout-safety.test.ts \
-  tests/scripts/rollout-safety-parser.test.ts \
-  tests/scripts/rollout-evidence-capture.test.ts \
-  tests/scripts/rollout-safety-export.test.ts
-npm run lint
-./node_modules/.bin/tsc --noEmit
-node --check scripts/rollout-safety.mjs
-git diff --check
-```
-
-Create a redacted test summary only after all five commands exit 0:
-
-```bash
-jq -n '{format:"blogman-test-report/v1",state:"passed",exit_code:0,passed:43,failed:0}' \
-  > "$REPORT_DIR/test-report.json"
-```
-
-## 5. Upload the exact Worker version and verify the immutable pre-migration candidate
-
-Classification: production write. Requires explicit approval. This creates a Cloudflare Worker version and may populate the configured remote OpenNext cache, but it does not serve the version yet.
-
-```bash
-npm exec -- opennextjs-cloudflare upload -c "$CONFIG"
-./node_modules/.bin/wrangler versions list --json -c "$CONFIG" \
-  | jq 'sort_by(.metadata.created_on) | last | {id,number,metadata:{created_on:.metadata.created_on,source:.metadata.source,has_preview:.metadata.has_preview},annotations}' \
-  > "$REPORT_DIR/uploaded-version.json"
-UPLOADED_VERSION_ID=$(jq -r .id "$REPORT_DIR/uploaded-version.json")
-test -n "$UPLOADED_VERSION_ID"
-```
-
-Stop if upload output is ambiguous, the newest version is not attributable to this operation, or another operator changes the Worker concurrently. Do not migrate D1 until the exact upload identity is frozen.
-
-Before any production migration, assemble the separate `blogman-pre-migration-candidate/v1` packet. It has no deployment or production-smoke fields, cannot satisfy `candidate verify`, and cannot be consumed by rollout controls. It directly binds the uploaded version, raw `local-verify.json`, and raw Workerd report.
-
-```bash
-MIGRATION_SET_SHA256=$(node --input-type=module -e "import{readdirSync,readFileSync}from'node:fs';import{createHash}from'node:crypto';const h=b=>createHash('sha256').update(b).digest('hex');const a=readdirSync('db/ledger-migrations').filter(n=>/^\\d{3}_.+\\.(?:sql|data\\.mjs)$/.test(n)).sort().map(name=>({name,sha256:h(readFileSync('db/ledger-migrations/'+name))}));process.stdout.write(h(JSON.stringify(a)))")
-
-file_sha256() {
-  shasum -a 256 "$1" | awk '{print $1}'
-}
-
-jq -n \
-  --arg candidate "$EXPECTED_CANDIDATE" \
-  --arg lockfile "$LOCKFILE_SHA256" --arg wrangler "$WRANGLER_VERSION" --arg opennext "$OPENNEXT_VERSION" \
-  --arg build "$BUILD_SHA256" --arg version "$UPLOADED_VERSION_ID" \
-  --arg migration_set "$MIGRATION_SET_SHA256" \
-  --arg migration_verification "$(file_sha256 "$REPORT_DIR/local-verify.json")" \
-  --arg backup_id "$(jq -r .backup_id "$REPORT_DIR/backup-report.json")" \
-  --arg backup_report "$(file_sha256 "$REPORT_DIR/backup-report.json")" \
-  --arg restore_report "$(file_sha256 "$REPORT_DIR/restore-a-report.json")" \
-  --arg reconciliation "$(file_sha256 "$REPORT_DIR/restore-reproducibility.json")" \
-  --arg smoke_runtime "$(file_sha256 "$REPORT_DIR/restored-workerd-smoke.json")" \
-  --arg tests "$(file_sha256 "$REPORT_DIR/test-report.json")" \
-  '{format:"blogman-pre-migration-candidate/v1",candidate_id:$candidate,
-    lockfile:{sha256:$lockfile,wrangler:$wrangler,opennextjs_cloudflare:$opennext},
-    build:{sha256:$build},cloudflare:{uploaded_version_id:$version},
-    migration:{set_sha256:$migration_set,verification_report_sha256:$migration_verification},
-    backup:{backup_id:$backup_id,verify_report_sha256:$backup_report,restore_report_sha256:$restore_report},
-    reconciliation:{report_sha256:$reconciliation},
-    smoke:{runtime_report_sha256:$smoke_runtime},tests:{report_sha256:$tests}}' \
-  > "$REPORT_DIR/pre-migration-candidate.json"
-
 node scripts/rollout-safety.mjs candidate verify-pre-migration \
   --evidence "$REPORT_DIR/pre-migration-candidate.json" \
   --candidate "$EXPECTED_CANDIDATE" --lockfile package-lock.json \
-  --build "$REPORT_DIR/open-next-build.zip" \
-  --version "$UPLOADED_VERSION_ID" \
-  --backup-report "$REPORT_DIR/backup-report.json" \
-  --restore-report "$REPORT_DIR/restore-a-report.json" \
+  --build "$BUILD_ZIP" --version "$UPLOADED_VERSION_ID" --d1-database "$DATABASE_ID" \
+  --reseal-request "$RESEAL_REQUEST" --sealed-package "$SEALED_PACKAGE" \
+  --build-directory-proof "$REPORT_DIR/upload-build-directory-proof.json" \
+  --clean-start-upload-report "$REPORT_DIR/clean-start-upload-report.json" \
+  --clean-start-reset-report "$REPORT_DIR/clean-start-reset-report.json" \
+  --clean-start-empty-report "$REPORT_DIR/clean-start-empty-report.json" \
+  --clean-start-empty-plan-report "$REPORT_DIR/clean-start-empty-plan-report.json" \
   --migration-verification-report "$REPORT_DIR/local-verify.json" \
-  --reconciliation-report "$REPORT_DIR/restore-reproducibility.json" \
-  --smoke-runtime-report "$REPORT_DIR/restored-workerd-smoke.json" \
+  --reconciliation-report "$REPORT_DIR/local-reconciliation.json" \
+  --smoke-runtime-report "$REPORT_DIR/empty-migrated-workerd-smoke.json" \
   --test-report "$REPORT_DIR/test-report.json" \
   > "$REPORT_DIR/pre-migration-candidate-verify.json"
-
 jq -e '.state == "verified" and .phase == "pre-migration"' \
   "$REPORT_DIR/pre-migration-candidate-verify.json" >/dev/null
-
-dispose_private_export
-trap - EXIT
-test ! -e "$BACKUP_DIR/regular-tables.sql"
-jq -e '.state == "disposed" and .attempt_count == 1 and .raw_artifacts_remaining == 0' \
-  "$REPORT_DIR/export-dispose-report.json" >/dev/null
 ```
 
-Stop before production `apply` unless the dedicated verifier returns `state=verified, phase=pre-migration`, the uploaded version is unchanged, every input hash still matches, and private export disposal is verified. Disposal is the prescribed success lifecycle boundary because both isolated restores and the immutable pre-migration packet have accepted the backup. On every ordinary earlier shell failure after the wrapper records `failed` or `captured`, the `EXIT` trap disposes the raw SQL; the wrapper itself disposes it immediately when export or local validation fails. A `started` report is indeterminate and must remain quarantined rather than being falsely certified. Any edit to the commit, lockfile, build, backup, restore, migration set, local migration verification, Workerd smoke, reconciliation, or test report requires a new upload and a new pre-migration packet.
+## 7. Apply and verify migrations 001–006
 
-## 6. Ledgered production migration
-
-Classification: production D1 write. This is the first database mutation.
+Classification: production D1 write, then read-only verification.
 
 ```bash
-./node_modules/.bin/wrangler deployments status --json -c "$CONFIG" \
-  | jq '{id,created_on,versions:[.versions[]|{version_id,percentage}]}' \
-  > "$REPORT_DIR/deployment-before-apply.json"
-cmp "$REPORT_DIR/deployment-before.json" "$REPORT_DIR/deployment-before-apply.json"
-
-node scripts/migrations.mjs plan --database "$DATABASE" --remote --config "$CONFIG" \
-  --failure-report "$REPORT_DIR/production-plan-final-failure.json" \
-  > "$REPORT_DIR/production-plan-final.json"
-cmp "$REPORT_DIR/production-plan-before.json" "$REPORT_DIR/production-plan-final.json"
-
+verify_config_identity
 node scripts/migrations.mjs apply --database "$DATABASE" --remote --config "$CONFIG" \
   --candidate "$EXPECTED_CANDIDATE" > "$REPORT_DIR/production-apply.json"
+verify_config_identity
 node scripts/migrations.mjs verify --database "$DATABASE" --remote --config "$CONFIG" \
   > "$REPORT_DIR/production-verify.json"
 ```
 
-Expected result: the production deployment still equals the captured baseline immediately before apply; apply reaches `state=current`; verify reaches `state=verified`; ledger rows bind to the exact candidate. If the deployment or final plan differs, stop before apply. If apply fails, do not deploy. Preserve every successful additive fact, keep all controls disabled, and prepare a new forward migration and successor candidate. Never restore the backup over production or edit ledger rows.
+Require `state=current`, then `state=verified`, applied migrations exactly 001–006, empty pending list, canonical checksums, and every ledger `candidate_id` equal to the exact candidate. Capture the migration summary and compare production to `expected-production-after.json` across schema, ledger, post count, post status, and post content. A fresh canonical database contains seed settings/actions/categories but zero posts; these business facts are expected and must match the local empty-D1 rehearsal.
 
-Create the strict migration summary from the successful verify result and the repository migration set hash:
+## 8. CAS2, traffic, rollback and controls
 
-```bash
-MIGRATION_SET_SHA256=$(node --input-type=module -e "import{readdirSync,readFileSync}from'node:fs';import{createHash}from'node:crypto';const h=b=>createHash('sha256').update(b).digest('hex');const a=readdirSync('db/ledger-migrations').filter(n=>/^\\d{3}_.+\\.(?:sql|data\\.mjs)$/.test(n)).sort().map(name=>({name,sha256:h(readFileSync('db/ledger-migrations/'+name))}));process.stdout.write(h(JSON.stringify(a)))")
-jq -n --arg candidate "$EXPECTED_CANDIDATE" --arg migration_set "$MIGRATION_SET_SHA256" \
-  '{format:"blogman-migration-evidence/v1",state:"verified",candidate_id:$candidate,migration_set_sha256:$migration_set}' \
-  > "$REPORT_DIR/migration-report.json"
-```
-
-## 7. Deploy the uploaded version and prove the serving version
-
-Classification: production traffic write, then read-only proof.
+Recheck deployment baseline, uploaded version identity, config, exact D1 UUID, migration verify, and final reconciliation. Then deploy only the frozen uploaded version:
 
 ```bash
-./node_modules/.bin/wrangler deployments status --json -c "$CONFIG" \
-  | jq '{id,created_on,versions:[.versions[]|{version_id,percentage}]}' \
-  > "$REPORT_DIR/deployment-before-traffic-write.json"
-cmp "$REPORT_DIR/deployment-before.json" "$REPORT_DIR/deployment-before-traffic-write.json"
-
+verify_config_identity
 ./node_modules/.bin/wrangler versions deploy "$UPLOADED_VERSION_ID@100%" -y -c "$CONFIG"
+verify_config_identity
 ./node_modules/.bin/wrangler deployments status --json -c "$CONFIG" \
   | jq '{id,created_on,versions:[.versions[]|{version_id,percentage}]}' \
   > "$REPORT_DIR/deployment-after.json"
-
-DEPLOYMENT_ID=$(jq -r .id "$REPORT_DIR/deployment-after.json")
-VERSION_ID=$(jq -r '.versions[] | select(.percentage == 100) | .version_id' "$REPORT_DIR/deployment-after.json")
-test "$VERSION_ID" = "$UPLOADED_VERSION_ID"
+DEPLOYMENT_ID=$(jq -er .id "$REPORT_DIR/deployment-after.json")
+readonly DEPLOYMENT_ID
 ```
 
-Expected result: immediately before the traffic write, production still equals the captured baseline; afterward there is one deployment ID, one version at 100%, and the version equals the uploaded version. If the pre-write comparison or deployment state is ambiguous, stop all traffic writes/smoke and inspect read-only status. If the new version is serving but broken, restoring the captured preflight version to 100% is allowed only under the emergency approval; doing so invalidates this candidate, does not revert D1, and requires a forward-fix successor.
+Require exactly one version at 100%. Producer, authority, and all executors remain disabled through T0. The rollback proof is asymmetric:
 
-Emergency traffic restore command (production traffic write; run only after a qualifying failure and only if operation 7 was explicitly approved):
+- before traffic, stop and forward-fix without changing traffic;
+- after traffic, an explicitly approved emergency action may restore only the captured baseline Worker version to 100%; this invalidates the candidate and never restores or clears D1;
+- D1 recovery is always forward migration/reconciliation; discarded historical data is not recoverable by this contract.
 
-```bash
-./node_modules/.bin/wrangler deployments status --json -c "$CONFIG" \
-  | jq '{id,created_on,versions:[.versions[]|{version_id,percentage}]}' \
-  > "$REPORT_DIR/deployment-before-emergency-restore.json"
-test "$(jq -er .id "$REPORT_DIR/deployment-before-emergency-restore.json")" = "$DEPLOYMENT_ID"
-test "$(jq -er '.versions | select(length == 1) | .[0] | select(.percentage == 100) | .version_id' "$REPORT_DIR/deployment-before-emergency-restore.json")" = "$VERSION_ID"
+## 9. Same-version smoke, reconciliation and T0
 
-./node_modules/.bin/wrangler versions deploy "$BASELINE_VERSION_ID@100%" -y -c "$CONFIG"
-./node_modules/.bin/wrangler deployments status --json -c "$CONFIG" \
-  | jq '{id,created_on,versions:[.versions[]|{version_id,percentage}]}' \
-  > "$REPORT_DIR/emergency-traffic-restore.json"
-test "$(jq -er '.versions | select(length == 1) | .[0] | select(.percentage == 100) | .version_id' "$REPORT_DIR/emergency-traffic-restore.json")" = "$BASELINE_VERSION_ID"
-```
-
-The two `test` commands are a compare-and-stop guard: if traffic no longer belongs exclusively to this candidate, do not overwrite another operator's deployment. Stop after the proof. Do not resume this candidate or undo D1 facts; open a successor forward-fix candidate.
-
-## 8. Same-version smoke, D1 reconciliation, and rollout snapshot
-
-Classification: production read-only. Do not retain response bodies. Use status codes and report hashes only.
+Run the six real GET paths without retaining response bodies. The five collection/settings paths must return 200. Because the clean-start database has zero posts, the authenticated admin-article read uses the fixed absent slug and must return 404; creating a smoke-only post is forbidden. Recheck deployment/version/D1 before and after smoke. Compare final D1 to the local expected snapshot and record all five dimensions as `matched`. Capture rollout controls as disabled and audit unresolved high-priority anomalies as zero.
 
 ```bash
 verify_config_identity
@@ -421,9 +334,21 @@ verify_config_identity
   | jq '{uuid}' > "$REPORT_DIR/d1-info-t0-before.json"
 test "$(jq -er .uuid "$REPORT_DIR/d1-info-t0-before.json")" = "$DATABASE_ID"
 
-run_production_smoke
+SMOKE_SEARCH_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' "$PUBLIC_ORIGIN/api/search?q=blogman")
+SMOKE_APPEARANCE_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' "$PUBLIC_ORIGIN/api/settings/appearance")
+SMOKE_ADMIN_ARTICLE_STATUS=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/posts/$CLEAN_START_MISSING_SLUG")
+SMOKE_TOKENS_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/tokens")
+SMOKE_AI_PROVIDER_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/ai-provider")
+SMOKE_AI_GENERATORS_STATUS=$(curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' --cookie "$ADMIN_COOKIE_FILE" "$PUBLIC_ORIGIN/api/admin/ai-post-generators")
+test "$SMOKE_SEARCH_STATUS" = 200
+test "$SMOKE_APPEARANCE_STATUS" = 200
+test "$SMOKE_ADMIN_ARTICLE_STATUS" = 404
+test "$SMOKE_TOKENS_STATUS" = 200
+test "$SMOKE_AI_PROVIDER_STATUS" = 200
+test "$SMOKE_AI_GENERATORS_STATUS" = 200
 SMOKE_CHECKED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
 
+verify_config_identity
 ./node_modules/.bin/wrangler deployments status --json -c "$CONFIG" \
   | jq '{id,created_on,versions:[.versions[]|{version_id,percentage}]}' \
   > "$REPORT_DIR/deployment-after-smoke.json"
@@ -447,7 +372,7 @@ verify_config_identity
 test "$(jq -er .uuid "$REPORT_DIR/d1-info-t0-after.json")" = "$DATABASE_ID"
 
 jq -n --arg candidate "$EXPECTED_CANDIDATE" --arg build "$BUILD_SHA256" \
-  --arg deployment "$DEPLOYMENT_ID" --arg version "$VERSION_ID" --arg d1 "$DATABASE_ID" \
+  --arg deployment "$DEPLOYMENT_ID" --arg version "$UPLOADED_VERSION_ID" --arg d1 "$DATABASE_ID" \
   --arg checked "$SMOKE_CHECKED_AT" \
   --argjson search "$SMOKE_SEARCH_STATUS" --argjson appearance "$SMOKE_APPEARANCE_STATUS" \
   --argjson admin_article "$SMOKE_ADMIN_ARTICLE_STATUS" --argjson tokens "$SMOKE_TOKENS_STATUS" \
@@ -457,128 +382,63 @@ jq -n --arg candidate "$EXPECTED_CANDIDATE" --arg build "$BUILD_SHA256" \
     state:"passed",candidate_id:$candidate,build_sha256:$build,deployment_id:$deployment,version_id:$version}' \
   > "$REPORT_DIR/production-smoke.json"
 
-ROLLOUT_ROWS=$(./node_modules/.bin/wrangler d1 execute "$DATABASE" --remote -c "$CONFIG" --json \
-  --command 'SELECT control_key, desired_enabled FROM rollout_controls ORDER BY control_key' \
-  | jq -c '.[-1].results')
-test "$ROLLOUT_ROWS" = '[]'
-jq -n '{format:"blogman-rollout-state/v1",state:"captured",controls:{producer:"disabled",authority:"disabled",executors:{}}}' \
-  > "$REPORT_DIR/rollout-state.json"
+jq -e '.format == "blogman-rollout-state/v1" and .state == "captured"
+  and .controls.producer == "disabled" and .controls.authority == "disabled"
+  and ([.controls.executors[]] | all(. == "disabled"))' \
+  "$REPORT_DIR/rollout-state.json" >/dev/null
+BASELINE_VERSION_ID=$(jq -er .expected_baseline.version_id "$APPROVAL_PACKET")
+ROLLOUT_REPORT_SHA256=$(shasum -a 256 "$REPORT_DIR/rollout-state.json" | awk '{print $1}')
+ROLLBACK_CHECKED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
+jq -n --arg checked "$ROLLBACK_CHECKED_AT" --arg candidate "$EXPECTED_CANDIDATE" \
+  --arg baseline "$BASELINE_VERSION_ID" --arg version "$UPLOADED_VERSION_ID" \
+  --arg d1 "$DATABASE_ID" --arg rollout "$ROLLOUT_REPORT_SHA256" \
+  '{format:"blogman-clean-start-rollback-control-proof/v1",state:"proved",
+    checked_at:$checked,candidate_id:$candidate,baseline_version_id:$baseline,
+    candidate_version_id:$version,d1_database_id:$d1,
+    traffic_restore_scope:"baseline-worker-version-only",d1_recovery:"forward-only",
+    discarded_data_recoverable:false,rollout_report_sha256:$rollout}' \
+  > "$REPORT_DIR/rollback-control-proof-report.json"
 ```
 
-Expected result: all six real GET paths return success, the deployment is unchanged at 100%, D1 matches the locally migrated restore, and producer/authority/executors remain disabled. Any response failure, version drift, schema/ledger/count/status/content delta, or unexpected enabled control stops the gate. Do not create production fixtures to make smoke pass.
+Create `blogman-t0-acceptance/v2`; besides the v1 identity/migration/smoke/reconciliation/anomaly bindings it must include:
 
-## 9. T0 event acceptance
-
-Classification: production read-only review plus private evidence update. There is no minimum elapsed-time requirement and no observation-end wait. Run this stage immediately after steps 1–8 pass for the exact candidate, build, deployment, version, D1 database, migrations 001–006, six-path smoke, and final reconciliation.
-
-Review Cloudflare Workers **Errors & Exceptions** and the Issue #23 incident record for unresolved high-priority anomalies without exporting raw logs or responses. The GitHub review command is read-only and prints to the operator terminal only:
-
-```bash
-gh issue view 23 --repo nardinmarcus/blogman --comments
-```
-
-A high-priority anomaly is any data loss/duplication, authority mismatch, schema drift, sensitive disclosure, broken disable control, unexplained stuck state, or wrong-version traffic. Write only the redacted result:
-
-```bash
-ANOMALY_CHECKED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
-jq -n --arg checked "$ANOMALY_CHECKED_AT" \
-  '{format:"blogman-anomaly-audit/v1",state:"clear",checked_at:$checked,high_priority_open:0}' \
-  > "$REPORT_DIR/anomaly-audit.json"
-```
-
-If the audit is not clear, write `state=blocked` with the actual non-zero count and stop. Do not create T0, enable a control, or dispatch Batch 2. Disable the affected control if separately authorized and prepare a forward-fix candidate.
-
-Create the T0 report only after the audit is clear. It closes over the exact migrations 001–006 and the raw migration, verification, final smoke, final reconciliation, and anomaly report bytes:
-
-```bash
-file_sha256() {
-  shasum -a 256 "$1" | awk '{print $1}'
+```json
+{
+  "delivery_mode": "clean-start",
+  "clean_start_reset_report_sha256": "<64 hex>",
+  "clean_start_empty_report_sha256": "<64 hex>",
+  "clean_start_upload_report_sha256": "<64 hex>",
+  "clean_start_empty_plan_report_sha256": "<64 hex>",
+  "rollback_control_proof_sha256": "<64 hex>"
 }
-
-T0_ACCEPTED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
-jq -n \
-  --arg accepted "$T0_ACCEPTED_AT" --arg candidate "$EXPECTED_CANDIDATE" \
-  --arg build "$BUILD_SHA256" --arg deployment "$DEPLOYMENT_ID" \
-  --arg version "$VERSION_ID" --arg d1 "$DATABASE_ID" \
-  --arg migration_report "$(file_sha256 "$REPORT_DIR/migration-report.json")" \
-  --arg migration_verification "$(file_sha256 "$REPORT_DIR/production-verify.json")" \
-  --arg smoke "$(file_sha256 "$REPORT_DIR/production-smoke.json")" \
-  --arg reconciliation "$(file_sha256 "$REPORT_DIR/reconciliation-report.json")" \
-  --arg anomaly "$(file_sha256 "$REPORT_DIR/anomaly-audit.json")" \
-  '{format:"blogman-t0-acceptance/v1",state:"passed",accepted_at:$accepted,
-    candidate_id:$candidate,build_sha256:$build,deployment_id:$deployment,version_id:$version,
-    d1_database_id:$d1,migration_numbers:[1,2,3,4,5,6],
-    migration_report_sha256:$migration_report,
-    migration_verification_report_sha256:$migration_verification,
-    smoke_report_sha256:$smoke,final_reconciliation_report_sha256:$reconciliation,
-    anomaly_report_sha256:$anomaly}' > "$REPORT_DIR/t0-report.json"
 ```
 
-Assemble `candidate.json` using the exact SHA-256 of every report. Its schema is documented in `docs/rollout-safety.md`; do not add notes, raw output, placeholders, observation fields, or elapsed-time fields:
-
-```bash
-jq -n \
-  --arg candidate "$EXPECTED_CANDIDATE" \
-  --arg lockfile "$LOCKFILE_SHA256" --arg wrangler "$WRANGLER_VERSION" --arg opennext "$OPENNEXT_VERSION" \
-  --arg build "$BUILD_SHA256" --arg deployment "$DEPLOYMENT_ID" --arg version "$VERSION_ID" \
-  --arg d1 "$DATABASE_ID" --arg migration_set "$MIGRATION_SET_SHA256" \
-  --arg migration_report "$(file_sha256 "$REPORT_DIR/migration-report.json")" \
-  --arg migration_verification "$(file_sha256 "$REPORT_DIR/production-verify.json")" \
-  --arg backup_id "$(jq -r .backup_id "$REPORT_DIR/backup-report.json")" \
-  --arg backup_report "$(file_sha256 "$REPORT_DIR/backup-report.json")" \
-  --arg restore_report "$(file_sha256 "$REPORT_DIR/restore-a-report.json")" \
-  --arg reconciliation "$(file_sha256 "$REPORT_DIR/reconciliation-report.json")" \
-  --arg smoke "$(file_sha256 "$REPORT_DIR/production-smoke.json")" \
-  --arg smoke_runtime "$(file_sha256 "$REPORT_DIR/restored-workerd-smoke.json")" \
-  --arg rollout "$(file_sha256 "$REPORT_DIR/rollout-state.json")" \
-  --arg tests "$(file_sha256 "$REPORT_DIR/test-report.json")" \
-  --arg t0 "$(file_sha256 "$REPORT_DIR/t0-report.json")" \
-  '{format:"blogman-rollout-candidate/v2",candidate_id:$candidate,
-    lockfile:{sha256:$lockfile,wrangler:$wrangler,opennextjs_cloudflare:$opennext},
-    build:{sha256:$build},cloudflare:{deployment_id:$deployment,version_id:$version},
-    d1:{database_id:$d1},
-    migration:{state:"verified",candidate_id:$candidate,set_sha256:$migration_set,report_sha256:$migration_report,verification_report_sha256:$migration_verification},
-    backup:{backup_id:$backup_id,verify_report_sha256:$backup_report,restore_report_sha256:$restore_report},
-    reconciliation:{report_sha256:$reconciliation},
-    smoke:{report_sha256:$smoke,runtime_report_sha256:$smoke_runtime},
-    rollout:{report_sha256:$rollout},tests:{report_sha256:$tests},t0:{report_sha256:$t0}}' \
-  > "$REPORT_DIR/candidate.json"
-```
-
-Run the current verifier once:
+Assemble `blogman-rollout-candidate/v3` with `delivery_mode=clean-start` and a `clean_start` object binding the approval packet, reset SQL, reset report, empty report, and all three `NOT_APPLICABLE` dispositions. It has no backup field.
 
 ```bash
 node scripts/rollout-safety.mjs candidate verify \
   --evidence "$REPORT_DIR/candidate.json" \
-  --candidate "$EXPECTED_CANDIDATE" --lockfile package-lock.json \
-  --build "$REPORT_DIR/open-next-build.zip" \
-  --deployment "$DEPLOYMENT_ID" --version "$VERSION_ID" --d1-database "$DATABASE_ID" \
-  --backup-report "$REPORT_DIR/backup-report.json" \
-  --restore-report "$REPORT_DIR/restore-a-report.json" \
+  --candidate "$EXPECTED_CANDIDATE" --lockfile package-lock.json --build "$BUILD_ZIP" \
+  --deployment "$DEPLOYMENT_ID" --version "$UPLOADED_VERSION_ID" --d1-database "$DATABASE_ID" \
+  --reseal-request "$RESEAL_REQUEST" --sealed-package "$SEALED_PACKAGE" \
+  --build-directory-proof "$REPORT_DIR/upload-build-directory-proof.json" \
+  --clean-start-upload-report "$REPORT_DIR/clean-start-upload-report.json" \
+  --clean-start-reset-report "$REPORT_DIR/clean-start-reset-report.json" \
+  --clean-start-empty-report "$REPORT_DIR/clean-start-empty-report.json" \
+  --clean-start-empty-plan-report "$REPORT_DIR/clean-start-empty-plan-report.json" \
+  --rollback-control-proof "$REPORT_DIR/rollback-control-proof-report.json" \
   --migration-report "$REPORT_DIR/migration-report.json" \
   --migration-verification-report "$REPORT_DIR/production-verify.json" \
   --reconciliation-report "$REPORT_DIR/reconciliation-report.json" \
   --smoke-report "$REPORT_DIR/production-smoke.json" \
-  --smoke-runtime-report "$REPORT_DIR/restored-workerd-smoke.json" \
+  --smoke-runtime-report "$REPORT_DIR/empty-migrated-workerd-smoke.json" \
   --rollout-report "$REPORT_DIR/rollout-state.json" \
   --test-report "$REPORT_DIR/test-report.json" \
   --t0-report "$REPORT_DIR/t0-report.json" \
   --anomaly-report "$REPORT_DIR/anomaly-audit.json" \
   > "$REPORT_DIR/t0-candidate-verify.json"
-
 jq -e '.state == "verified" and .phase == "batch-1-t0" and .d1_database_id == $d1' \
   --arg d1 "$DATABASE_ID" "$REPORT_DIR/t0-candidate-verify.json" >/dev/null
 ```
 
-Only this terminal verifier result passes T0. It requires the exact candidate/build/deployment/version/D1 identity, migrations 001–006, matched schema/ledger/count/status/content reconciliation, all six real critical paths at HTTP 200, final D1 reconciliation, and zero unresolved high-priority anomalies. T0 PASS completes Issue #23 and unlocks Batch 2 immediately; no calendar wait is part of this contract.
-
-## Failure stop and forward-fix boundaries
-
-| Failure point | Immediate stop | Allowed recovery | Forbidden recovery |
-|---|---|---|---|
-| Preflight/backup/restore/local verify | Before any production write | Correct local evidence or create a successor candidate | Production apply/deploy |
-| Version upload | Before D1 apply | Leave uploaded version undeployed; create a successor if bytes drift | Pretend upload is a deployment |
-| Migration plan/apply/verify | Before traffic change | Preserve successful additive facts; add a forward migration and new candidate | Restore backup, down-migrate, edit ledger |
-| Deployment/version/D1 proof | Before smoke/T0 | Read current status; emergency prior-version traffic restore only if approved; then forward-fix | Mix old deployment/version/D1 evidence with new candidate |
-| Smoke/reconciliation/rollout | Before T0 | Disable affected control, preserve D1, forward-fix | Create fixtures, enable authority, ignore drift |
-| T0 event acceptance | Keep Issue #23 blocked | Resolve the anomaly or create a forward-fix candidate, then rerun the fixed sequence | Pass incomplete evidence or dispatch Batch 2 |
+Only this terminal result passes T0. It requires exact candidate/build/deployment/version/D1, clean-start approval/reset/empty proof, migrations 001–006, schema/ledger/business reconciliation, six real critical paths, controls disabled, rollback proof, and zero unresolved high-priority anomalies. T0 PASS completes #23 immediately; there is no calendar wait. #23 remains open and #24 remains blocked until that separately authorized production event occurs.

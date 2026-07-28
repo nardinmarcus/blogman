@@ -392,11 +392,12 @@ describe('private D1 export capture', () => {
     expect(readFileSync(fixture.counter, 'utf8')).toBe('1')
   })
 
-  it('makes the private wrapper and disposal path mandatory in the Phase B runbook', () => {
+  it('keeps the historical export wrapper outside the clean-start Phase B runbook', () => {
     const runbook = readFileSync(join(repoRoot, 'docs', 'issue-23-phase-b-runbook.md'), 'utf8')
 
-    expect(runbook).toContain('node scripts/rollout-safety.mjs backup export')
-    expect(runbook).toContain('node scripts/rollout-safety.mjs backup dispose')
+    expect(runbook).toContain('historical data export: `NOT_APPLICABLE`')
+    expect(runbook).not.toContain('node scripts/rollout-safety.mjs backup export')
+    expect(runbook).not.toContain('node scripts/rollout-safety.mjs backup dispose')
     expect(runbook).not.toMatch(/^\.\/node_modules\/\.bin\/wrangler d1 export/m)
   })
 

@@ -48,6 +48,8 @@ Migration 可以带 checksum companion，以及一个仅用于冻结远程证明
 
 `db/migrations` 保存引入账本前的历史补丁，不是当前 runner 的输入。`001_initial_schema.sql` 是新空库的 canonical baseline；其中的初始 seed 只随空库 migration 执行一次。已有 current schema 只有在 `001_initial_schema.baseline.sql` 的 DDL 语义检查全部通过后才会被明确登记，不会重放业务 schema 或 seed。
 
+`db/issue-23-clean-start-reset.sql` 不是 migration runner 输入，也不是通用清库工具。它只属于 Issue #23 已密封的 clean-start 生产合同：在保持已绑定 D1 UUID 的前提下删除已知 Blogman 对象，随后必须证明不存在任何非内部 SQLite 对象，并要求 `plan` 将 001–006 全部判定为新空库 `apply`。未知对象、非空账本、`baseline` action 或 SQL 字节漂移都必须在 apply 前失败关闭。
+
 Legacy baseline 不把 `categories`、`site_settings`、`ai_actions`、`ai_post_generators` 等可变业务行当作 schema checksum。用户已修改或删除的数据会原样保留；只有列类型、约束、索引、触发器、FTS 等不可变 DDL 事实参与 baseline 判断。
 
 `002_add_ai_image_configuration` 收编图像 provider/action schema，兼容 absent、已知 legacy 缺列和 current-full 三种形状。legacy 的 `size` / `quality` 能映射时优先保留实际值，只有 `auto` 或未知值才按已知内置 `action_key` 使用 canonical fallback；其他作者字段不覆盖，已存在表也不会恢复被删除的默认 action。

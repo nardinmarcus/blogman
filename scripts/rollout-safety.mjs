@@ -24,6 +24,10 @@ import { tmpdir } from 'node:os'
 import { createServer } from 'node:net'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  loadCurrentResealPackage,
+  loadCurrentResealRequest,
+} from './issue-23-reseal.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const wranglerPath = join(repoRoot, 'node_modules', '.bin', 'wrangler')
@@ -155,26 +159,43 @@ function assertNoSensitiveAuditValue(...values) {
 }
 
 function assertCandidateEvidenceShape(evidence) {
+  const cleanStart = evidence.format === 'blogman-rollout-candidate/v3'
+  const t0 = ['blogman-rollout-candidate/v2', 'blogman-rollout-candidate/v3']
+    .includes(evidence.format)
   assertExactKeys(evidence, [
     'format', 'candidate_id', 'lockfile', 'build', 'cloudflare', 'migration',
-    'backup', 'reconciliation', 'smoke', 'rollout', 'tests',
-    ...(evidence.format === 'blogman-rollout-candidate/v2' ? ['d1', 't0'] : ['observation']),
+    cleanStart ? 'clean_start' : 'backup',
+    'reconciliation', 'smoke', 'rollout', 'tests',
+    ...(cleanStart ? ['delivery_mode'] : []),
+    ...(t0 ? ['d1', 't0'] : ['observation']),
   ])
   assertExactKeys(evidence.lockfile, ['sha256', 'wrangler', 'opennextjs_cloudflare'])
   assertExactKeys(evidence.build, ['sha256'])
-  assertExactKeys(evidence.cloudflare, ['deployment_id', 'version_id'])
-  if (evidence.format === 'blogman-rollout-candidate/v2') {
+  assertExactKeys(evidence.cloudflare, cleanStart
+    ? ['deployment_id', 'version_id', 'upload_report_sha256']
+    : ['deployment_id', 'version_id'])
+  if (t0) {
     assertExactKeys(evidence.d1, ['database_id'])
   }
   assertExactKeys(evidence.migration, [
     'state', 'candidate_id', 'set_sha256', 'report_sha256', 'verification_report_sha256',
   ])
-  assertExactKeys(evidence.backup, [
-    'backup_id', 'verify_report_sha256', 'restore_report_sha256',
-  ])
+  if (cleanStart) {
+    assertExactKeys(evidence.clean_start, [
+      'reseal_request_sha256', 'package_manifest_sha256',
+      'approval_packet_sha256', 'reset_sql_sha256', 'reset_report_sha256',
+      'empty_report_sha256', 'empty_plan_report_sha256',
+      'rollback_control_proof_sha256', 'historical_data_export',
+      'double_restore', 'historical_baseline_queries',
+    ])
+  } else {
+    assertExactKeys(evidence.backup, [
+      'backup_id', 'verify_report_sha256', 'restore_report_sha256',
+    ])
+  }
   for (const name of [
     'reconciliation', 'rollout', 'tests',
-    evidence.format === 'blogman-rollout-candidate/v2' ? 't0' : 'observation',
+    t0 ? 't0' : 'observation',
   ]) {
     assertExactKeys(evidence[name], ['report_sha256'])
   }
@@ -182,23 +203,39 @@ function assertCandidateEvidenceShape(evidence) {
 }
 
 function assertPreMigrationEvidenceShape(evidence) {
+  const cleanStart = evidence.format === 'blogman-pre-migration-candidate/v2'
   assertExactKeys(evidence, [
     'format', 'candidate_id', 'lockfile', 'build', 'cloudflare', 'migration',
-    'backup', 'reconciliation', 'smoke', 'tests',
+    cleanStart ? 'clean_start' : 'backup',
+    'reconciliation', 'smoke', 'tests',
+    ...(cleanStart ? ['delivery_mode'] : []),
   ])
   assertExactKeys(evidence.lockfile, ['sha256', 'wrangler', 'opennextjs_cloudflare'])
   assertExactKeys(evidence.build, ['sha256'])
-  assertExactKeys(evidence.cloudflare, ['uploaded_version_id'])
+  assertExactKeys(evidence.cloudflare, cleanStart
+    ? ['uploaded_version_id', 'upload_report_sha256']
+    : ['uploaded_version_id'])
   assertExactKeys(evidence.migration, ['set_sha256', 'verification_report_sha256'])
-  assertExactKeys(evidence.backup, [
-    'backup_id', 'verify_report_sha256', 'restore_report_sha256',
-  ])
+  if (cleanStart) {
+    assertExactKeys(evidence.clean_start, [
+      'reseal_request_sha256', 'package_manifest_sha256',
+      'approval_packet_sha256', 'reset_sql_sha256', 'reset_report_sha256',
+      'empty_report_sha256', 'empty_plan_report_sha256',
+      'historical_data_export', 'double_restore', 'historical_baseline_queries',
+    ])
+  } else {
+    assertExactKeys(evidence.backup, [
+      'backup_id', 'verify_report_sha256', 'restore_report_sha256',
+    ])
+  }
   assertExactKeys(evidence.reconciliation, ['report_sha256'])
   assertExactKeys(evidence.smoke, ['runtime_report_sha256'])
   assertExactKeys(evidence.tests, ['report_sha256'])
 }
 
 function assertReportShape(name, report, candidateFormat = 'blogman-rollout-candidate/v1') {
+  const t0Contract = ['blogman-rollout-candidate/v2', 'blogman-rollout-candidate/v3']
+    .includes(candidateFormat)
   if (name === 'backup-report') {
     assertExactKeys(report, ['state', 'backup_id', 'artifact_count'])
   } else if (name === 'restore-report') {
@@ -215,20 +252,20 @@ function assertReportShape(name, report, candidateFormat = 'blogman-rollout-cand
       assertExactKeys(applied, ['number', 'name', 'checksum', 'applied_at', 'candidate_id'])
     }
   } else if (name === 'reconciliation-report' || name === 'observation-start-reconciliation-report') {
-    assertExactKeys(report, candidateFormat === 'blogman-rollout-candidate/v2'
+    assertExactKeys(report, t0Contract
       ? ['format', 'checked_at', 'd1_database_id', 'state', 'checks']
       : ['state', 'checks'])
     assertExactKeys(report.checks, [
       'schema', 'migration_ledger', 'post_count', 'post_status', 'post_content',
     ])
   } else if (name === 'smoke-report' || name === 'observation-start-smoke-report') {
-    assertExactKeys(report, candidateFormat === 'blogman-rollout-candidate/v2'
+    assertExactKeys(report, t0Contract
       ? [
           'format', 'checked_at', 'd1_database_id', 'checks', 'state',
           'candidate_id', 'build_sha256', 'deployment_id', 'version_id',
         ]
       : ['state', 'candidate_id', 'build_sha256', 'deployment_id', 'version_id'])
-    if (candidateFormat === 'blogman-rollout-candidate/v2') {
+    if (t0Contract) {
       assertExactKeys(report.checks, [
         'search', 'appearance', 'admin_article', 'tokens', 'ai_provider', 'ai_generators',
       ])
@@ -274,7 +311,137 @@ function assertReportShape(name, report, candidateFormat = 'blogman-rollout-cand
       'migration_report_sha256', 'migration_verification_report_sha256',
       'smoke_report_sha256', 'final_reconciliation_report_sha256',
       'anomaly_report_sha256',
+      ...(candidateFormat === 'blogman-rollout-candidate/v3'
+        ? [
+            'delivery_mode', 'clean_start_reset_report_sha256',
+            'clean_start_empty_report_sha256', 'clean_start_upload_report_sha256',
+            'clean_start_empty_plan_report_sha256', 'rollback_control_proof_sha256',
+          ]
+        : []),
     ])
+  } else if (name === 'clean-start-reset-report') {
+    assertExactKeys(report, [
+      'format', 'state', 'completed_at', 'candidate_id',
+      'approval_packet_sha256', 'reset_sql_sha256', 'd1_database_id',
+      'attempt_count',
+    ])
+  } else if (name === 'clean-start-empty-report') {
+    assertExactKeys(report, [
+      'format', 'state', 'checked_at', 'candidate_id',
+      'approval_packet_sha256', 'reset_sql_sha256', 'd1_database_id',
+      'application_object_count', 'migration_ledger_state',
+    ])
+  } else if (name === 'clean-start-upload-report') {
+    assertExactKeys(report, [
+      'format', 'state', 'uploaded_at', 'candidate_id', 'build_archive_sha256',
+      'build_directory_proof_sha256', 'wrangler_output_sha256',
+      'upload_operation_id', 'version_id', 'attempt_count',
+    ])
+  } else if (name === 'build-directory-proof') {
+    assertExactKeys(report, [
+      'format', 'state', 'archive_sha256', 'file_count',
+    ])
+  } else if (name === 'clean-start-empty-plan-report') {
+    assertExactKeys(report, [
+      'format', 'state', 'checked_at', 'candidate_id', 'd1_database_id',
+      'reset_report_sha256', 'empty_report_sha256', 'migrations',
+    ])
+    if (!Array.isArray(report.migrations)) fail('Evidence has an unsupported shape')
+    for (const migration of report.migrations) {
+      assertExactKeys(migration, ['number', 'name', 'checksum', 'action'])
+    }
+  } else if (name === 'rollback-control-proof') {
+    assertExactKeys(report, [
+      'format', 'state', 'checked_at', 'candidate_id', 'baseline_version_id',
+      'candidate_version_id', 'd1_database_id', 'traffic_restore_scope',
+      'd1_recovery', 'discarded_data_recoverable', 'rollout_report_sha256',
+    ])
+  }
+}
+
+function assertCleanStartApproval(approval) {
+  assertExactKeys(approval, [
+    'format', 'state', 'produced_at', 'delivery_mode', 'clean_start',
+    'candidate_id', 'local_preflight_candidate_sha256', 'lockfile_sha256',
+    'migration_set_sha256', 'runbook_sha256', 'build_archive_sha256',
+    'worker_sha256', 'tree_manifest_sha256', 'expected_baseline', 'scope',
+    'old_lineages_invalid',
+  ])
+  assertExactKeys(approval.clean_start, [
+    'decision', 'database_strategy', 'reset_sql_sha256',
+    'historical_data_export', 'double_restore', 'historical_baseline_queries',
+  ])
+  assertExactKeys(approval.expected_baseline, [
+    'deployment_id', 'version_id', 'd1_database_id',
+  ])
+  if (
+    approval.format !== 'blogman-issue-23-approval-packet/v4'
+    || approval.state !== 'ready-for-fresh-production-authorization'
+    || approval.delivery_mode !== 'clean-start'
+    || approval.clean_start?.decision !== 'discard-existing-blogman-data'
+    || approval.clean_start?.database_strategy !== 'reset-bound-d1-in-place'
+    || approval.clean_start?.historical_data_export !== 'NOT_APPLICABLE'
+    || approval.clean_start?.double_restore !== 'NOT_APPLICABLE'
+    || approval.clean_start?.historical_baseline_queries !== 'NOT_APPLICABLE'
+    || approval.old_lineages_invalid !== true
+    || JSON.stringify(approval.scope) !== JSON.stringify([
+      'one candidate-bound in-place D1 reset',
+      'one empty D1 proof and plan',
+      'one version upload',
+      'migrations 001-006',
+      'one 100% traffic deployment',
+      'status-only smoke and reconciliation',
+      'rollback and controls proof',
+      'T0 event acceptance',
+    ])
+  ) {
+    fail('Candidate clean-start approval is invalid')
+  }
+}
+
+function loadCleanStartAuthority(options) {
+  const request = loadCurrentResealRequest(resolve(required(options, 'reseal-request')))
+  const sealedPackage = loadCurrentResealPackage(resolve(required(options, 'sealed-package')))
+  const approval = sealedPackage.documents.get('approval-packet.json')
+  const preCas = sealedPackage.documents.get('pre-cas-bindings.json')
+  const manifest = sealedPackage.documents.get('package-manifest.json')
+  const preflight = sealedPackage.documents.get('preflight-candidate.json')
+  for (const document of [request, approval, preCas, manifest, preflight]) {
+    assertNoSensitiveFields(document.value)
+  }
+  assertCleanStartApproval(approval.value)
+  const r = request.value
+  const a = approval.value
+  const c = preCas.value
+  const m = manifest.value
+  const disposition = {
+    production_export: r.clean_start.historical_data_export,
+    double_restore: r.clean_start.double_restore,
+    historical_baseline_queries: r.clean_start.historical_baseline_queries,
+  }
+  if (
+    r.candidate.commit !== a.candidate_id
+    || r.produced_at !== a.produced_at
+    || r.repository.lockfile.sha256 !== a.lockfile_sha256
+    || r.repository.runbook.sha256 !== a.runbook_sha256
+    || r.repository.migrations.set_sha256 !== a.migration_set_sha256
+    || r.build.archive_sha256 !== a.build_archive_sha256
+    || r.build.worker_sha256 !== a.worker_sha256
+    || r.build.tree_manifest_sha256 !== a.tree_manifest_sha256
+    || r.clean_start.reset_sql.sha256 !== a.clean_start.reset_sql_sha256
+    || JSON.stringify(r.expected_production_baseline) !== JSON.stringify(a.expected_baseline)
+    || JSON.stringify(disposition) !== JSON.stringify(c.historical_data_disposition)
+    || JSON.stringify(disposition) !== JSON.stringify(m.historical_data_disposition)
+    || m.approval_packet_sha256 !== approval.sha256
+    || m.pre_cas_bindings_sha256 !== preCas.sha256
+    || m.local_preflight_candidate_sha256 !== preflight.sha256
+  ) {
+    fail('Candidate clean-start authority package is not bound to the current request')
+  }
+  return {
+    approval: { bytes: approval.raw, sha256: approval.sha256, value: approval.value },
+    manifest: { bytes: manifest.raw, sha256: manifest.sha256, value: manifest.value },
+    request: { bytes: request.raw, sha256: request.sha256, value: request.value },
   }
 }
 
@@ -323,6 +490,46 @@ function migrationVerificationPassed(report, candidateId) {
     ))
     && Array.isArray(report?.pending)
     && report.pending.length === 0
+}
+
+function cleanStartUploadPassed(
+  report,
+  candidateId,
+  buildSha256,
+  versionId,
+  buildDirectoryProofSha256,
+) {
+  return report?.format === 'blogman-clean-start-upload/v1'
+    && report?.state === 'captured'
+    && isIsoTimestamp(report?.uploaded_at)
+    && report?.candidate_id === candidateId
+    && report?.build_archive_sha256 === buildSha256
+    && report?.build_directory_proof_sha256 === buildDirectoryProofSha256
+    && isSha256(report?.wrangler_output_sha256)
+    && report?.version_id === versionId
+    && report?.upload_operation_id === `issue-23-${candidateId}-upload-1`
+    && report?.attempt_count === 1
+}
+
+function cleanStartEmptyPlanPassed(
+  report,
+  candidateId,
+  d1DatabaseId,
+  resetReportSha256,
+  emptyReportSha256,
+  emptyCheckedAt,
+) {
+  return report?.format === 'blogman-clean-start-empty-plan/v1'
+    && report?.state === 'verified-empty-plan'
+    && isIsoTimestamp(report?.checked_at)
+    && Date.parse(report.checked_at) >= Date.parse(emptyCheckedAt)
+    && report?.candidate_id === candidateId
+    && report?.d1_database_id === d1DatabaseId
+    && report?.reset_report_sha256 === resetReportSha256
+    && report?.empty_report_sha256 === emptyReportSha256
+    && JSON.stringify(report?.migrations) === JSON.stringify(
+      migrationCatalog().map((migration) => ({ ...migration, action: 'apply' })),
+    )
 }
 
 function smokeRuntimePassed(report) {
@@ -943,12 +1150,12 @@ function restoreBackup(options) {
 }
 
 function captureReconciliation(options) {
-  const schemaRows = queryD1(options, `
+  const schemaRows = filterReconciliationSchemaRows(queryD1(options, `
 SELECT type, name, tbl_name, sql
 FROM sqlite_schema
-WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'
+WHERE name NOT LIKE 'sqlite_%'
 ORDER BY type, name
-`, 'schema')
+`, 'schema'))
   const tableNames = new Set(
     schemaRows.filter((row) => row.type === 'table').map((row) => row.name),
   )
@@ -991,6 +1198,16 @@ ORDER BY id
       content_sha256: canonicalHash(postRows),
     },
   }
+}
+
+export function filterReconciliationSchemaRows(rows) {
+  return rows.filter((row) => !(
+    row?.type === 'table'
+    && (
+      (row.name === '_cf_KV' && row.tbl_name === '_cf_KV')
+      || (row.name === '_cf_METADATA' && row.tbl_name === '_cf_METADATA')
+    )
+  ))
 }
 
 function compareReconciliation(options) {
@@ -1040,7 +1257,16 @@ function verifyPreMigrationCandidate(options) {
   } catch {
     fail('Pre-migration evidence or lockfile is not valid JSON')
   }
-  if (evidence?.format !== 'blogman-pre-migration-candidate/v1') {
+  if (evidence?.format === 'blogman-pre-migration-candidate/v1') {
+    assertNoSensitiveFields(evidence)
+    return {
+      state: 'stale',
+      candidate_id: isCandidateId(evidence.candidate_id) ? evidence.candidate_id : 'unavailable',
+      evidence_sha256: sha256(evidenceBytes),
+      acceptance_authority: false,
+    }
+  }
+  if (evidence?.format !== 'blogman-pre-migration-candidate/v2') {
     fail('Unsupported pre-migration evidence format')
   }
   assertNoSensitiveFields(evidence)
@@ -1058,8 +1284,13 @@ function verifyPreMigrationCandidate(options) {
     assertReportShape(optionName, report)
     return { bytes, report }
   }
-  const backupReport = readReport('backup-report')
-  const restoreReport = readReport('restore-report')
+  const buildDirectoryProof = readReport('build-directory-proof')
+  const cleanStartUploadReport = readReport('clean-start-upload-report')
+  const cleanStartResetReport = readReport('clean-start-reset-report')
+  const cleanStartEmptyReport = readReport('clean-start-empty-report')
+  const cleanStartEmptyPlanReport = readReport('clean-start-empty-plan-report')
+  const authority = loadCleanStartAuthority(options)
+  const approvalPacket = authority.approval
   const migrationVerificationReport = readReport('migration-verification-report')
   const reconciliationReport = readReport('reconciliation-report')
   const smokeRuntimeReport = readReport('smoke-runtime-report')
@@ -1067,6 +1298,7 @@ function verifyPreMigrationCandidate(options) {
 
   const candidateId = required(options, 'candidate')
   const versionId = required(options, 'version')
+  const d1DatabaseId = required(options, 'd1-database')
   const buildSha256 = sha256(readFileSync(resolve(required(options, 'build'))))
   const wranglerVersion = lockfile?.packages?.['node_modules/wrangler']?.version
   const openNextVersion = lockfile?.packages?.['node_modules/@opennextjs/cloudflare']?.version
@@ -1081,7 +1313,29 @@ function verifyPreMigrationCandidate(options) {
   mismatch(evidence.lockfile?.wrangler !== wranglerVersion, 'wrangler_toolchain')
   mismatch(evidence.lockfile?.opennextjs_cloudflare !== openNextVersion, 'opennext_toolchain')
   mismatch(evidence.build?.sha256 !== buildSha256, 'build_identity')
+  mismatch(
+    buildDirectoryProof.report?.format !== 'blogman-build-directory-proof/v1'
+      || buildDirectoryProof.report?.state !== 'matched'
+      || buildDirectoryProof.report?.archive_sha256 !== buildSha256
+      || !Number.isInteger(buildDirectoryProof.report?.file_count)
+      || buildDirectoryProof.report.file_count < 1,
+    'build_directory_proof_state',
+  )
   mismatch(evidence.cloudflare?.uploaded_version_id !== versionId, 'uploaded_version_identity')
+  mismatch(
+    evidence.cloudflare?.upload_report_sha256 !== sha256(cleanStartUploadReport.bytes),
+    'clean_start_upload_report_identity',
+  )
+  mismatch(
+    !cleanStartUploadPassed(
+      cleanStartUploadReport.report,
+      candidateId,
+      buildSha256,
+      versionId,
+      sha256(buildDirectoryProof.bytes),
+    ),
+    'clean_start_upload_state',
+  )
   mismatch(evidence.migration?.set_sha256 !== migrationSetSha256(), 'migration_set_identity')
   mismatch(
     evidence.migration?.verification_report_sha256
@@ -1092,28 +1346,77 @@ function verifyPreMigrationCandidate(options) {
     !migrationVerificationPassed(migrationVerificationReport.report, candidateId),
     'migration_verification_state',
   )
+  const approval = approvalPacket.value
+  const approvalSha256 = sha256(approvalPacket.bytes)
+  const resetSqlSha256 = sha256(readFileSync(join(repoRoot, 'db', 'issue-23-clean-start-reset.sql')))
+  const runbookSha256 = sha256(readFileSync(join(repoRoot, 'docs', 'issue-23-phase-b-runbook.md')))
+  const reset = cleanStartResetReport.report
+  const empty = cleanStartEmptyReport.report
+  mismatch(evidence.clean_start?.reseal_request_sha256 !== authority.request.sha256, 'clean_start_request_identity')
+  mismatch(evidence.clean_start?.package_manifest_sha256 !== authority.manifest.sha256, 'clean_start_package_manifest_identity')
+  if (
+    evidence.delivery_mode !== 'clean-start'
+    || evidence.clean_start?.historical_data_export !== 'NOT_APPLICABLE'
+    || evidence.clean_start?.double_restore !== 'NOT_APPLICABLE'
+    || evidence.clean_start?.historical_baseline_queries !== 'NOT_APPLICABLE'
+  ) {
+    fail('Pre-migration clean-start disposition is invalid')
+  }
+  mismatch(evidence.clean_start?.approval_packet_sha256 !== approvalSha256, 'clean_start_approval_identity')
+  mismatch(evidence.clean_start?.reset_sql_sha256 !== resetSqlSha256, 'clean_start_reset_sql_identity')
   mismatch(
-    evidence.backup?.verify_report_sha256 !== sha256(backupReport.bytes),
-    'backup_report_identity',
+    approval.candidate_id !== candidateId
+      || approval.lockfile_sha256 !== sha256(lockfileBytes)
+      || approval.build_archive_sha256 !== buildSha256
+      || approval.migration_set_sha256 !== migrationSetSha256()
+      || approval.runbook_sha256 !== runbookSha256
+      || approval.clean_start.reset_sql_sha256 !== resetSqlSha256
+      || approval.expected_baseline.d1_database_id !== d1DatabaseId,
+    'clean_start_approval_state',
+  )
+  mismatch(evidence.clean_start?.reset_report_sha256 !== sha256(cleanStartResetReport.bytes), 'clean_start_reset_report_identity')
+  mismatch(
+    reset?.format !== 'blogman-clean-start-reset/v1'
+      || reset?.state !== 'reset'
+      || !isIsoTimestamp(reset?.completed_at)
+      || reset?.candidate_id !== candidateId
+      || reset?.approval_packet_sha256 !== approvalSha256
+      || reset?.reset_sql_sha256 !== resetSqlSha256
+      || reset?.d1_database_id !== d1DatabaseId
+      || reset?.attempt_count !== 1
+      || Date.parse(reset?.completed_at)
+        < Date.parse(cleanStartUploadReport.report?.uploaded_at),
+    'clean_start_reset_state',
+  )
+  mismatch(evidence.clean_start?.empty_report_sha256 !== sha256(cleanStartEmptyReport.bytes), 'clean_start_empty_report_identity')
+  mismatch(
+    empty?.format !== 'blogman-clean-start-empty/v1'
+      || empty?.state !== 'verified-empty'
+      || !isIsoTimestamp(empty?.checked_at)
+      || empty?.candidate_id !== candidateId
+      || empty?.approval_packet_sha256 !== approvalSha256
+      || empty?.reset_sql_sha256 !== resetSqlSha256
+      || empty?.d1_database_id !== d1DatabaseId
+      || empty?.application_object_count !== 0
+      || empty?.migration_ledger_state !== 'absent'
+      || Date.parse(empty?.checked_at) < Date.parse(reset?.completed_at),
+    'clean_start_empty_state',
   )
   mismatch(
-    backupReport.report?.state !== 'verified'
-      || backupReport.report?.backup_id !== evidence.backup?.backup_id
-      || !Number.isInteger(backupReport.report?.artifact_count)
-      || backupReport.report?.artifact_count < 1
-      || !/^sha256:[a-f0-9]{64}$/.test(evidence.backup?.backup_id || ''),
-    'backup_state',
+    evidence.clean_start?.empty_plan_report_sha256
+      !== sha256(cleanStartEmptyPlanReport.bytes),
+    'clean_start_empty_plan_report_identity',
   )
   mismatch(
-    evidence.backup?.restore_report_sha256 !== sha256(restoreReport.bytes),
-    'restore_report_identity',
-  )
-  mismatch(
-    restoreReport.report?.state !== 'restored'
-      || restoreReport.report?.backup_id !== evidence.backup?.backup_id
-      || restoreReport.report?.target?.mode !== 'local'
-      || restoreReport.report?.target?.isolated !== true,
-    'restore_state',
+    !cleanStartEmptyPlanPassed(
+      cleanStartEmptyPlanReport.report,
+      candidateId,
+      d1DatabaseId,
+      sha256(cleanStartResetReport.bytes),
+      sha256(cleanStartEmptyReport.bytes),
+      empty?.checked_at,
+    ),
+    'clean_start_empty_plan_state',
   )
   mismatch(
     evidence.reconciliation?.report_sha256 !== sha256(reconciliationReport.bytes),
@@ -1159,7 +1462,10 @@ function verifyCandidate(options, { historical = false } = {}) {
     fail('Candidate evidence or lockfile is not valid JSON')
   }
   const candidateFormat = evidence?.format
-  if (candidateFormat === 'blogman-rollout-candidate/v1' && !historical) {
+  if (
+    ['blogman-rollout-candidate/v1', 'blogman-rollout-candidate/v2'].includes(candidateFormat)
+    && !historical
+  ) {
     assertNoSensitiveFields(evidence)
     return {
       state: 'stale',
@@ -1169,12 +1475,13 @@ function verifyCandidate(options, { historical = false } = {}) {
     }
   }
   if (
-    (historical && candidateFormat !== 'blogman-rollout-candidate/v1')
-    || (!historical && candidateFormat !== 'blogman-rollout-candidate/v2')
+    (historical && !['blogman-rollout-candidate/v1', 'blogman-rollout-candidate/v2'].includes(candidateFormat))
+    || (!historical && candidateFormat !== 'blogman-rollout-candidate/v3')
   ) {
     fail('Unsupported candidate evidence format')
   }
-  const currentT0Contract = candidateFormat === 'blogman-rollout-candidate/v2'
+  const currentT0Contract = candidateFormat !== 'blogman-rollout-candidate/v1'
+  const cleanStartContract = candidateFormat === 'blogman-rollout-candidate/v3'
   assertNoSensitiveFields(evidence)
   assertCandidateEvidenceShape(evidence)
   const readReport = (optionName) => {
@@ -1183,15 +1490,36 @@ function verifyCandidate(options, { historical = false } = {}) {
     try {
       bytes = readFileSync(resolve(required(options, optionName)))
       report = JSON.parse(bytes.toString('utf8'))
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('Evidence ')) throw error
       fail(`Candidate ${optionName} is not valid JSON`)
     }
     assertNoSensitiveFields(report)
     assertReportShape(optionName, report, candidateFormat)
     return { bytes, report }
   }
-  const backupReport = readReport('backup-report')
-  const restoreReport = readReport('restore-report')
+  const backupReport = cleanStartContract ? null : readReport('backup-report')
+  const restoreReport = cleanStartContract ? null : readReport('restore-report')
+  const buildDirectoryProof = cleanStartContract
+    ? readReport('build-directory-proof')
+    : null
+  const cleanStartUploadReport = cleanStartContract
+    ? readReport('clean-start-upload-report')
+    : null
+  const cleanStartResetReport = cleanStartContract
+    ? readReport('clean-start-reset-report')
+    : null
+  const cleanStartEmptyReport = cleanStartContract
+    ? readReport('clean-start-empty-report')
+    : null
+  const cleanStartEmptyPlanReport = cleanStartContract
+    ? readReport('clean-start-empty-plan-report')
+    : null
+  const rollbackControlProof = cleanStartContract
+    ? readReport('rollback-control-proof')
+    : null
+  const authority = cleanStartContract ? loadCleanStartAuthority(options) : null
+  const approvalPacket = authority?.approval ?? null
   const migrationReport = readReport('migration-report')
   const migrationVerificationReport = readReport('migration-verification-report')
   const reconciliationReport = readReport('reconciliation-report')
@@ -1235,6 +1563,30 @@ function verifyCandidate(options, { historical = false } = {}) {
   mismatch(evidence.build?.sha256 !== buildSha256, 'build_identity')
   mismatch(evidence.cloudflare?.deployment_id !== deploymentId, 'deployment_identity')
   mismatch(evidence.cloudflare?.version_id !== versionId, 'version_identity')
+  if (cleanStartContract) {
+    mismatch(
+      buildDirectoryProof.report?.format !== 'blogman-build-directory-proof/v1'
+        || buildDirectoryProof.report?.state !== 'matched'
+        || buildDirectoryProof.report?.archive_sha256 !== buildSha256
+        || !Number.isInteger(buildDirectoryProof.report?.file_count)
+        || buildDirectoryProof.report.file_count < 1,
+      'build_directory_proof_state',
+    )
+    mismatch(
+      evidence.cloudflare?.upload_report_sha256 !== sha256(cleanStartUploadReport.bytes),
+      'clean_start_upload_report_identity',
+    )
+    mismatch(
+      !cleanStartUploadPassed(
+        cleanStartUploadReport.report,
+        candidateId,
+        buildSha256,
+        versionId,
+        sha256(buildDirectoryProof.bytes),
+      ),
+      'clean_start_upload_state',
+    )
+  }
   if (currentT0Contract) {
     mismatch(evidence.d1?.database_id !== d1DatabaseId, 'd1_identity')
   }
@@ -1264,29 +1616,104 @@ function verifyCandidate(options, { historical = false } = {}) {
     !migrationVerificationPassed(migrationVerificationReport.report, candidateId),
     'migration_verification_state',
   )
-  mismatch(
-    evidence.backup?.verify_report_sha256 !== sha256(backupReport.bytes),
-    'backup_report_identity',
-  )
-  mismatch(
-    backupReport.report?.state !== 'verified'
-      || backupReport.report?.backup_id !== evidence.backup?.backup_id
-      || !Number.isInteger(backupReport.report?.artifact_count)
-      || backupReport.report?.artifact_count < 1
-      || !/^sha256:[a-f0-9]{64}$/.test(evidence.backup?.backup_id || ''),
-    'backup_state',
-  )
-  mismatch(
-    evidence.backup?.restore_report_sha256 !== sha256(restoreReport.bytes),
-    'restore_report_identity',
-  )
-  mismatch(
-    restoreReport.report?.state !== 'restored'
-      || restoreReport.report?.backup_id !== evidence.backup?.backup_id
-      || restoreReport.report?.target?.mode !== 'local'
-      || restoreReport.report?.target?.isolated !== true,
-    'restore_state',
-  )
+  if (cleanStartContract) {
+    const approval = approvalPacket.value
+    const reset = cleanStartResetReport.report
+    const empty = cleanStartEmptyReport.report
+    const approvalSha256 = sha256(approvalPacket.bytes)
+    const resetSqlSha256 = sha256(readFileSync(join(repoRoot, 'db', 'issue-23-clean-start-reset.sql')))
+    const runbookSha256 = sha256(readFileSync(join(repoRoot, 'docs', 'issue-23-phase-b-runbook.md')))
+    if (
+      evidence.delivery_mode !== 'clean-start'
+      || evidence.clean_start?.historical_data_export !== 'NOT_APPLICABLE'
+      || evidence.clean_start?.double_restore !== 'NOT_APPLICABLE'
+      || evidence.clean_start?.historical_baseline_queries !== 'NOT_APPLICABLE'
+    ) {
+      fail('Candidate clean-start disposition is invalid')
+    }
+    mismatch(evidence.clean_start?.reseal_request_sha256 !== authority.request.sha256, 'clean_start_request_identity')
+    mismatch(evidence.clean_start?.package_manifest_sha256 !== authority.manifest.sha256, 'clean_start_package_manifest_identity')
+    mismatch(evidence.clean_start?.approval_packet_sha256 !== approvalSha256, 'clean_start_approval_identity')
+    mismatch(evidence.clean_start?.reset_sql_sha256 !== resetSqlSha256, 'clean_start_reset_sql_identity')
+    mismatch(
+      approval.candidate_id !== candidateId
+        || approval.lockfile_sha256 !== lockfileSha256
+        || approval.build_archive_sha256 !== buildSha256
+        || approval.migration_set_sha256 !== migrationSetSha256()
+        || approval.runbook_sha256 !== runbookSha256
+        || approval.clean_start.reset_sql_sha256 !== resetSqlSha256
+        || approval.expected_baseline.d1_database_id !== d1DatabaseId,
+      'clean_start_approval_state',
+    )
+    mismatch(evidence.clean_start?.reset_report_sha256 !== sha256(cleanStartResetReport.bytes), 'clean_start_reset_report_identity')
+    mismatch(
+      reset?.format !== 'blogman-clean-start-reset/v1'
+        || reset?.state !== 'reset'
+        || !isIsoTimestamp(reset?.completed_at)
+        || reset?.candidate_id !== candidateId
+        || reset?.approval_packet_sha256 !== approvalSha256
+        || reset?.reset_sql_sha256 !== resetSqlSha256
+        || reset?.d1_database_id !== d1DatabaseId
+        || reset?.attempt_count !== 1
+        || Date.parse(reset?.completed_at)
+          < Date.parse(cleanStartUploadReport.report?.uploaded_at),
+      'clean_start_reset_state',
+    )
+    mismatch(evidence.clean_start?.empty_report_sha256 !== sha256(cleanStartEmptyReport.bytes), 'clean_start_empty_report_identity')
+    mismatch(
+      empty?.format !== 'blogman-clean-start-empty/v1'
+        || empty?.state !== 'verified-empty'
+        || !isIsoTimestamp(empty?.checked_at)
+        || empty?.candidate_id !== candidateId
+        || empty?.approval_packet_sha256 !== approvalSha256
+        || empty?.reset_sql_sha256 !== resetSqlSha256
+        || empty?.d1_database_id !== d1DatabaseId
+        || empty?.application_object_count !== 0
+        || empty?.migration_ledger_state !== 'absent'
+        || Date.parse(empty?.checked_at) < Date.parse(reset?.completed_at),
+      'clean_start_empty_state',
+    )
+    mismatch(
+      evidence.clean_start?.empty_plan_report_sha256
+        !== sha256(cleanStartEmptyPlanReport.bytes),
+      'clean_start_empty_plan_report_identity',
+    )
+    mismatch(
+      !cleanStartEmptyPlanPassed(
+        cleanStartEmptyPlanReport.report,
+        candidateId,
+        d1DatabaseId,
+        sha256(cleanStartResetReport.bytes),
+        sha256(cleanStartEmptyReport.bytes),
+        empty?.checked_at,
+      ),
+      'clean_start_empty_plan_state',
+    )
+  } else {
+    mismatch(
+      evidence.backup?.verify_report_sha256 !== sha256(backupReport.bytes),
+      'backup_report_identity',
+    )
+    mismatch(
+      backupReport.report?.state !== 'verified'
+        || backupReport.report?.backup_id !== evidence.backup?.backup_id
+        || !Number.isInteger(backupReport.report?.artifact_count)
+        || backupReport.report?.artifact_count < 1
+        || !/^sha256:[a-f0-9]{64}$/.test(evidence.backup?.backup_id || ''),
+      'backup_state',
+    )
+    mismatch(
+      evidence.backup?.restore_report_sha256 !== sha256(restoreReport.bytes),
+      'restore_report_identity',
+    )
+    mismatch(
+      restoreReport.report?.state !== 'restored'
+        || restoreReport.report?.backup_id !== evidence.backup?.backup_id
+        || restoreReport.report?.target?.mode !== 'local'
+        || restoreReport.report?.target?.isolated !== true,
+      'restore_state',
+    )
+  }
   mismatch(
     evidence.reconciliation?.report_sha256 !== sha256(reconciliationReport.bytes),
     'reconciliation_report_identity',
@@ -1314,11 +1741,17 @@ function verifyCandidate(options, { historical = false } = {}) {
   mismatch(smokeReport.report?.deployment_id !== deploymentId, 'smoke_deployment_identity')
   mismatch(smokeReport.report?.version_id !== versionId, 'smoke_version_identity')
   if (currentT0Contract) {
+    const expectedSmokeStatus = (name) => (
+      candidateFormat === 'blogman-rollout-candidate/v3' && name === 'admin_article'
+        ? 404
+        : 200
+    )
     mismatch(
       smokeReport.report?.format !== 'blogman-production-smoke/v2'
         || !isIsoTimestamp(smokeReport.report?.checked_at)
         || smokeReport.report?.d1_database_id !== d1DatabaseId
-        || Object.values(smokeReport.report?.checks || {}).some((status) => status !== 200),
+        || Object.entries(smokeReport.report?.checks || {})
+          .some(([name, status]) => status !== expectedSmokeStatus(name)),
       'smoke_critical_paths',
     )
   }
@@ -1348,6 +1781,29 @@ function verifyCandidate(options, { historical = false } = {}) {
       ),
     'rollout_report_state',
   )
+  if (cleanStartContract) {
+    const rollback = rollbackControlProof.report
+    mismatch(
+      evidence.clean_start?.rollback_control_proof_sha256
+        !== sha256(rollbackControlProof.bytes),
+      'rollback_control_proof_identity',
+    )
+    mismatch(
+      rollback?.format !== 'blogman-clean-start-rollback-control-proof/v1'
+        || rollback?.state !== 'proved'
+        || !isIsoTimestamp(rollback?.checked_at)
+        || rollback?.candidate_id !== candidateId
+        || rollback?.baseline_version_id
+          !== authority.approval.value.expected_baseline.version_id
+        || rollback?.candidate_version_id !== versionId
+        || rollback?.d1_database_id !== d1DatabaseId
+        || rollback?.traffic_restore_scope !== 'baseline-worker-version-only'
+        || rollback?.d1_recovery !== 'forward-only'
+        || rollback?.discarded_data_recoverable !== false
+        || rollback?.rollout_report_sha256 !== sha256(rolloutReport.bytes),
+      'rollback_control_proof_state',
+    )
+  }
   mismatch(evidence.tests?.report_sha256 !== sha256(testReport.bytes), 'test_report_identity')
   mismatch(
     !testReportPassed(testReport.report),
@@ -1357,7 +1813,9 @@ function verifyCandidate(options, { historical = false } = {}) {
     const t0 = t0Report.report
     mismatch(evidence.t0?.report_sha256 !== sha256(t0Report.bytes), 't0_report_identity')
     mismatch(
-      t0?.format !== 'blogman-t0-acceptance/v1'
+      t0?.format !== (cleanStartContract
+        ? 'blogman-t0-acceptance/v2'
+        : 'blogman-t0-acceptance/v1')
         || t0?.state !== 'passed'
         || !isIsoTimestamp(t0?.accepted_at)
         || t0?.candidate_id !== candidateId
@@ -1374,6 +1832,24 @@ function verifyCandidate(options, { historical = false } = {}) {
         || t0?.anomaly_report_sha256 !== sha256(anomalyReport.bytes),
       't0_state',
     )
+    if (cleanStartContract) {
+      mismatch(
+        t0?.delivery_mode !== 'clean-start'
+          || t0?.clean_start_reset_report_sha256
+            !== sha256(cleanStartResetReport.bytes)
+          || t0?.clean_start_empty_report_sha256
+            !== sha256(cleanStartEmptyReport.bytes)
+          || t0?.clean_start_upload_report_sha256
+            !== sha256(cleanStartUploadReport.bytes)
+          || t0?.clean_start_empty_plan_report_sha256
+            !== sha256(cleanStartEmptyPlanReport.bytes)
+          || t0?.rollback_control_proof_sha256
+            !== sha256(rollbackControlProof.bytes)
+          || Date.parse(rollbackControlProof.report?.checked_at)
+            > Date.parse(t0?.accepted_at),
+        't0_clean_start_state',
+      )
+    }
     mismatch(
       anomalyReport.report?.format !== 'blogman-anomaly-audit/v1'
         || anomalyReport.report?.state !== 'clear'
