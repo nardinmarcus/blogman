@@ -60,8 +60,11 @@ and v2 bytes remain valid under their original schemas, but current `seal` and
 - an existing build ZIP, worker, and canonical source-tree manifest;
 - local test/build/review gates;
 - the current quick-CI head/tree, terminal result, counts, and raw log SHA;
-- immutable long-runner run `30323510707`, job `90164062444`, its accepted
-  head/tree, 46/46 result, raw log SHA, and repository coverage objects;
+- immutable long-runner run `30412422336`, job `90451386124`, accepted head
+  `e4146228dca9134f4e4d11a9edae5861c0cf46c1`, tree
+  `19d8e0eae33f140cc9a0cc686733d78195a618eb`, 46/46 result, raw log SHA
+  `245e32aac1717620441d1b54f80c47e326c41e5aff3a2070ad53d721805f1cf3`,
+  and repository coverage objects;
 - the expected production deployment/version/D1 baseline.
 - `delivery_mode=clean-start`, the candidate-bound reset SQL SHA-256, the
   in-place-reset strategy, and all three historical-data dispositions.
