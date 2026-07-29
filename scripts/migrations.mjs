@@ -923,8 +923,9 @@ function createD1Client(options, failureReporter) {
 
   function queryReadOnly(sql, context, singleStatement = false, privateOutput = false) {
     const statements = validateReadOnlySidecarQueries(sql, context, singleStatement)
+    const executableStatements = statements.map(stripLeadingSqlComments)
     try {
-      for (const statement of statements) {
+      for (const statement of executableStatements) {
         const explainResponse = decodeResponse(executeQuery(`EXPLAIN ${statement};`, privateOutput))
         const writeOpcode = explainResponse
           .flatMap((result) => result.results ?? [])
@@ -933,7 +934,7 @@ function createD1Client(options, failureReporter) {
           fail(`${context} must be read-only: SQLite opcode ${writeOpcode.opcode}`)
         }
       }
-      return statements.flatMap((statement) => {
+      return executableStatements.flatMap((statement) => {
         const response = decodeResponse(executeQuery(`${statement};`, privateOutput))
         return response.flatMap((result) => result.results ?? [])
       })
