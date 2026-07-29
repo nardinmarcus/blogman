@@ -200,8 +200,8 @@ test "$(jq -er .uuid "$REPORT_DIR/d1-info-before-reset.json")" = "$DATABASE_ID"
 verify_config_identity
 ./node_modules/.bin/wrangler d1 execute "$DATABASE" --remote -c "$CONFIG" --json \
   --file "$RESET_SQL" > "$RESET_PRIVATE"
-jq -e 'type == "array" and length > 0 and all(.success == true)' \
-  "$RESET_PRIVATE" >/dev/null
+node scripts/phase-b-sequence.mjs validate-wrangler-d1-file-response \
+  < "$RESET_PRIVATE" >/dev/null
 
 RESET_COMPLETED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
 jq -n --arg completed "$RESET_COMPLETED_AT" --arg candidate "$EXPECTED_CANDIDATE" \
@@ -211,7 +211,12 @@ jq -n --arg completed "$RESET_COMPLETED_AT" --arg candidate "$EXPECTED_CANDIDATE
     d1_database_id:$d1,attempt_count:1}' > "$REPORT_DIR/clean-start-reset-report.json"
 ```
 
-Do not run the reset command twice. A non-zero or indeterminate child result consumes this attempt. Preserve the private output and stop; do not infer that the database is empty.
+Wrangler 4.86.0 writes one fixed non-interactive progress prefix before the JSON
+result for remote file execution. The repository parser accepts only that exact
+prefix (or plain JSON) followed by one deterministic successful file envelope.
+Do not run the reset command twice. A non-zero or indeterminate child result
+consumes this attempt. Preserve the private output and stop; do not infer that
+the database is empty.
 
 ## 5. Empty D1 proof and empty-database migration plan
 

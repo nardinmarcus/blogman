@@ -7,3 +7,5 @@
 - A mutable upload source needs a fresh byte proof immediately adjacent to the upload adapter; a PRE-CAS rehearsal proof cannot close changes that occur after rehearsal.
 - Acceptance reconciliation must enumerate each allowed platform-internal object exactly; namespace-wide exclusions such as `_cf_%` can hide unknown production drift.
 - When editing a generated executable embedded in a test template literal, inspect the closing delimiter before running the test so helper code is not inserted into the generated program.
+- A CLI `--json` flag does not prove stdout is pure JSON: Wrangler 4.86.0 remote D1 file execution emits a fixed non-interactive progress prefix outside its logger level. Bind parsers to the exact known prefix and deterministic envelope, reject every other mixed stream, and never infer a destructive effect from exit status alone.
+- Exact-key checks after `JSON.parse` cannot detect contradictory duplicate members because the parser has already kept one value. For evidence contracts, scan the valid raw JSON structure and reject duplicate decoded key names at every object level, including escaped aliases, before trusting the parsed object.

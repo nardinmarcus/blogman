@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -25,6 +26,28 @@ const bindings: Readonly<PhaseBBindings> = Object.freeze({
   }),
 })
 const temporaryDirectories: string[] = []
+const wranglerFilePrefix = '\u251c Checking if file needs uploading\n\u2502\n'
+const successfulFileEnvelope = [{
+  results: [{
+    'Total queries executed': 3,
+    'Rows read': 0,
+    'Rows written': 9,
+    'Database size (MB)': '0.25',
+  }],
+  success: true,
+  finalBookmark: 'synthetic-bookmark',
+  meta: { rows_read: 0, rows_written: 9, size_after: 250_000 },
+}]
+const duplicateSuccessEnvelope = String.raw`[{"results":[{"Total queries executed":3,"Rows read":0,"Rows written":9,"Database size (MB)":"0.25"}],"success":false,"\u0073uccess":true,"finalBookmark":"synthetic-bookmark","meta":{"rows_read":0,"rows_written":9,"size_after":250000}}]`
+const duplicateQueryCountEnvelope = String.raw`[{"results":[{"Total queries executed":0,"\u0054otal queries executed":3,"Rows read":0,"Rows written":9,"Database size (MB)":"0.25"}],"success":true,"finalBookmark":"synthetic-bookmark","meta":{"rows_read":0,"rows_written":9,"size_after":250000}}]`
+const duplicateMetaRowsEnvelope = String.raw`[{"results":[{"Total queries executed":3,"Rows read":0,"Rows written":9,"Database size (MB)":"0.25"}],"success":true,"finalBookmark":"synthetic-bookmark","meta":{"rows_read":0,"rows_written":8,"\u0072ows_written":9,"size_after":250000}}]`
+const parserPath = join(process.cwd(), 'scripts', 'phase-b-sequence.mjs')
+
+function validateWranglerD1FileResponse(stdout: string) {
+  return spawnSync(process.execPath, [parserPath, 'validate-wrangler-d1-file-response'], {
+    encoding: 'utf8', input: stdout,
+  })
+}
 
 function validConfig() {
   const directory = mkdtempSync(join(tmpdir(), 'blogman-phase-b-sequence-'))
@@ -153,5 +176,48 @@ describe('Issue #23 Phase B fixed sequence', () => {
     expect(PHASE_B_STAGES.indexOf('clean_start_empty_verify')).toBeLessThan(PHASE_B_STAGES.indexOf('remote_migration_plan'))
     expect(PHASE_B_STAGES).not.toContain('export')
     expect(PHASE_B_STAGES).not.toContain('double_restore')
+  })
+
+  it.each([
+    ['plain JSON', `${JSON.stringify(successfulFileEnvelope)}\n`],
+    ['Wrangler 4.86 file prefix', `${wranglerFilePrefix}${JSON.stringify(successfulFileEnvelope)}\n`],
+  ])('accepts one deterministic successful %s envelope', (_name, stdout) => {
+    expect(validateWranglerD1FileResponse(stdout)).toMatchObject({
+      status: 0, stdout: '{"state":"valid"}\n', stderr: '',
+    })
+  })
+
+  it.each([
+    ['HTML', '<html>upstream error</html>'],
+    ['arbitrary log prefix', `log line\n${JSON.stringify(successfulFileEnvelope)}`],
+    ['multiple JSON values', `${JSON.stringify(successfulFileEnvelope)}\n${JSON.stringify(successfulFileEnvelope)}`],
+    ['truncated JSON', JSON.stringify(successfulFileEnvelope).slice(0, -1)],
+    ['mixed trailing noise', `${JSON.stringify(successfulFileEnvelope)}\nlog line`],
+    ['multiple envelopes', JSON.stringify([...successfulFileEnvelope, ...successfulFileEnvelope])],
+    ['unsuccessful envelope', JSON.stringify([{ ...successfulFileEnvelope[0], success: false }])],
+    ['empty bookmark', JSON.stringify([{ ...successfulFileEnvelope[0], finalBookmark: '' }])],
+    ['missing results', JSON.stringify([{ ...successfulFileEnvelope[0], results: undefined }])],
+    ['zero executed queries', JSON.stringify([{
+      ...successfulFileEnvelope[0],
+      results: [{ ...successfulFileEnvelope[0].results[0], 'Total queries executed': 0 }],
+    }])],
+    ['ambiguous result rows', JSON.stringify([{
+      ...successfulFileEnvelope[0],
+      results: [...successfulFileEnvelope[0].results, ...successfulFileEnvelope[0].results],
+    }])],
+    ['mismatched row count', JSON.stringify([{
+      ...successfulFileEnvelope[0],
+      results: [{ ...successfulFileEnvelope[0].results[0], 'Rows written': 8 }],
+    }])],
+    ['unknown top-level field', JSON.stringify([{ ...successfulFileEnvelope[0], extra: true }])],
+    ['contradictory duplicate success members', duplicateSuccessEnvelope],
+    ['contradictory duplicate query-count members', duplicateQueryCountEnvelope],
+    ['contradictory duplicate meta rows-written members', duplicateMetaRowsEnvelope],
+  ])('rejects %s without echoing stdout', (_name, stdout) => {
+    const invalid = validateWranglerD1FileResponse(stdout)
+    expect(invalid).toMatchObject({
+      status: 1, stdout: '', stderr: 'Invalid Wrangler D1 file response\n',
+    })
+    expect(`${invalid.stdout}${invalid.stderr}`).not.toContain(stdout)
   })
 })

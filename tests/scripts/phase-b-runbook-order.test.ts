@@ -37,6 +37,25 @@ describe('Issue #23 Phase B runbook order', () => {
       )
   }
 
+  const hasResetResponseValidationOrder = (runbook: string) => {
+    const reset = runbook.indexOf(
+      './node_modules/.bin/wrangler d1 execute "$DATABASE" --remote -c "$CONFIG" --json \\\n'
+      + '  --file "$RESET_SQL" > "$RESET_PRIVATE"',
+    )
+    const validator = runbook.indexOf(
+      'node scripts/phase-b-sequence.mjs validate-wrangler-d1-file-response \\\n'
+      + '  < "$RESET_PRIVATE" >/dev/null',
+    )
+    const completedAt = runbook.indexOf('RESET_COMPLETED_AT=')
+    const resetReport = runbook.indexOf('blogman-clean-start-reset/v1')
+    const emptyProof = runbook.indexOf('## 5. Empty D1 proof')
+    return reset >= 0
+      && validator > reset
+      && completedAt > validator
+      && resetReport > completedAt
+      && emptyProof > resetReport
+  }
+
   it('revalidates the frozen config immediately before every production adapter', () => {
     const lines = readRunbook().split('\n')
     const adapterLines = lines.flatMap((line, index) => {
@@ -104,6 +123,18 @@ describe('Issue #23 Phase B runbook order', () => {
     expect(runbook).toContain("(name,tbl_name) IN (('_cf_KV','_cf_KV'),('_cf_METADATA','_cf_METADATA'))")
     expect(runbook).toContain("('_cf_METADATA','_cf_METADATA')")
     expect(runbook).not.toContain("name NOT LIKE '_cf_%'")
+  })
+
+  it('validates the reset response before creating reset evidence or entering empty proof', () => {
+    const runbook = readRunbook()
+    const validator = 'node scripts/phase-b-sequence.mjs validate-wrangler-d1-file-response \\\n'
+      + '  < "$RESET_PRIVATE" >/dev/null\n'
+
+    expect(hasResetResponseValidationOrder(runbook)).toBe(true)
+    expect(hasResetResponseValidationOrder(runbook.replace(validator, ''))).toBe(false)
+    expect(hasResetResponseValidationOrder(
+      runbook.replace(validator, '').replace('verify_config_identity\n', validator),
+    )).toBe(false)
   })
 
   it('finishes at the immediate T0 event without an observation wait', () => {
