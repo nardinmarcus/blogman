@@ -57,6 +57,15 @@ const privateModes = process.env.WRANGLER_LOG_PATH ? {
   stderrMode: statSync('/dev/fd/2').mode & 0o777,
   debugMode: statSync(process.env.WRANGLER_LOG_PATH).mode & 0o777,
 } : {}
+const schemaObjects = JSON.parse(process.env.FAKE_SCHEMA_OBJECTS || JSON.stringify([
+  { type: 'table', name: 'stable', tbl_name: 'stable' },
+]))
+const applicationObjects = schemaObjects.filter((object) => {
+  if (sql.includes("name NOT LIKE '_cf_%'")) return !object.name.startsWith('_cf_')
+  return !(object.type === 'table'
+    && object.name === object.tbl_name
+    && ['_cf_KV', '_cf_METADATA'].includes(object.name))
+})
 appendFileSync(process.env.FAKE_OBSERVATION, JSON.stringify({
   sql,
   arguments: process.argv.slice(2),
@@ -65,8 +74,8 @@ appendFileSync(process.env.FAKE_OBSERVATION, JSON.stringify({
 const emit = (results) => process.stdout.write(JSON.stringify([{ success: true, results }]))
 if (sql.includes("WHERE lower(name) IN")) {
   emit([{ count: 0 }])
-} else if (sql.includes("name NOT LIKE 'sqlite_%'") && sql.includes("migration_ledger%")) {
-  emit([{ count: 1 }])
+} else if (sql.includes('COUNT(*) AS count') && sql.includes('migration_ledger')) {
+  emit([{ count: applicationObjects.length }])
 } else if (process.env.FAKE_FAIL_OBJECT_TYPE
   && !sql.startsWith('EXPLAIN ')
   && sql.includes("sqlite_schema.type = '" + process.env.FAKE_FAIL_OBJECT_TYPE + "'")) {
@@ -92,6 +101,11 @@ if (sql.includes("WHERE lower(name) IN")) {
   } else if (process.env.FAKE_RESPONSE_MODE === 'malformed') {
     process.stdout.write('LEAK1234 private malformed response payload')
   }
+} else if (process.env.FAKE_FAIL_IMAGE_PREFLIGHT_EXPLAIN === '1'
+  && sql.startsWith('EXPLAIN ')
+  && sql.includes('expected_fragments(name, fragment)')) {
+  process.stderr.write('002 compatibility preflight must not run for an empty application database')
+  process.exit(7)
 } else if (sql.startsWith('EXPLAIN ')) {
   emit([])
 } else if (sql.includes("coalesce(sql, '') AS sql")) {
@@ -134,6 +148,21 @@ if (sql.includes("WHERE lower(name) IN")) {
 `)
   chmodSync(wrangler, 0o755)
   return { root, runner, migrations, observation }
+}
+
+function copyCanonicalMigrationSet(fixture: ReturnType<typeof createFixture>): void {
+  for (const name of [
+    '002_add_ai_image_configuration.sql',
+    '002_add_ai_image_configuration.preflight.sql',
+    '003_migrate_runtime_ai_configuration.sql',
+    '003_migrate_runtime_ai_configuration.data.mjs',
+    '004_complete_historical_text_ai_schema.sql',
+    '004_complete_historical_text_ai_schema.baseline.sql',
+    '005_fix_posts_fts_sync.sql',
+    '006_add_rollout_safety_controls.sql',
+  ]) {
+    copyFileSync(join(repoRoot, 'db', 'ledger-migrations', name), join(fixture.migrations, name))
+  }
 }
 
 function runPlan(
@@ -243,6 +272,65 @@ afterEach(() => {
 })
 
 describe('remote baseline replacement runner', () => {
+  it.each([
+    ['no schema objects', []],
+    ['only known Cloudflare internal tables', [
+      { type: 'table', name: '_cf_KV', tbl_name: '_cf_KV' },
+      { type: 'table', name: '_cf_METADATA', tbl_name: '_cf_METADATA' },
+    ]],
+  ])('plans every canonical migration with %s without compatibility preflights', (_name, schemaObjects) => {
+    const fixture = createFixture()
+    copyCanonicalMigrationSet(fixture)
+
+    const { report, result } = runPlan(fixture, {
+      FAKE_SCHEMA_OBJECTS: JSON.stringify(schemaObjects),
+      FAKE_FAIL_IMAGE_PREFLIGHT_EXPLAIN: '1',
+    })
+
+    expect(result.status).toBe(0)
+    expect(existsSync(report)).toBe(false)
+    expect(JSON.parse(result.stdout).pending).toEqual([
+      { number: 1, name: '001_initial_schema', checksum: expect.any(String), action: 'apply' },
+      { number: 2, name: '002_add_ai_image_configuration', checksum: expect.any(String), action: 'apply' },
+      { number: 3, name: '003_migrate_runtime_ai_configuration', checksum: expect.any(String), action: 'apply' },
+      { number: 4, name: '004_complete_historical_text_ai_schema', checksum: expect.any(String), action: 'apply' },
+      { number: 5, name: '005_fix_posts_fts_sync', checksum: expect.any(String), action: 'apply' },
+      { number: 6, name: '006_add_rollout_safety_controls', checksum: expect.any(String), action: 'apply' },
+    ])
+    expect(calls(fixture).some((call) => (
+      call.sql.startsWith('EXPLAIN ')
+      && call.sql.includes('expected_fragments(name, fragment)')
+    ))).toBe(false)
+  })
+
+  it.each([
+    ['an existing application table', [{ type: 'table', name: 'posts', tbl_name: 'posts' }]],
+    ['an unknown Cloudflare-prefixed table', [{ type: 'table', name: '_cf_unknown', tbl_name: '_cf_unknown' }]],
+    ['a table resembling the SQLite internal prefix', [{ type: 'table', name: 'sqliteXunknown', tbl_name: 'sqliteXunknown' }]],
+    ['an index using a known internal name', [{ type: 'index', name: '_cf_KV', tbl_name: '_cf_KV' }]],
+    ['a trigger using a known internal name', [{ type: 'trigger', name: '_cf_METADATA', tbl_name: '_cf_METADATA' }]],
+    ['a view using a known internal name', [{ type: 'view', name: '_cf_KV', tbl_name: '_cf_KV' }]],
+  ])('keeps compatibility preflights for %s', (_name, schemaObjects) => {
+    const fixture = createFixture()
+    copyCanonicalMigrationSet(fixture)
+
+    const { report, result } = runPlan(fixture, {
+      FAKE_SCHEMA_OBJECTS: JSON.stringify(schemaObjects),
+      FAKE_FAIL_IMAGE_PREFLIGHT_EXPLAIN: '1',
+    })
+
+    expect(result.status).toBe(1)
+    expect(readFailure(report)).toMatchObject({
+      failure_domain: 'wrangler_command',
+      phase: 'wrangler_execute',
+      exit_class: 'child_nonzero',
+    })
+    expect(calls(fixture).some((call) => (
+      call.sql.startsWith('EXPLAIN ')
+      && call.sql.includes('expected_fragments(name, fragment)')
+    ))).toBe(true)
+  })
+
   it('uses six private one-shot probes and retains ordinary EXPLAIN proofs', () => {
     const fixture = createFixture()
     const { report, result } = runPlan(fixture)

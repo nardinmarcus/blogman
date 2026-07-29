@@ -6,3 +6,4 @@
 - Before launching a bounded local suite, confirm that a prior Vitest/Workerd runner has actually exited; an orphan focused runner can create false local-D1 timeouts and must be stopped before interpreting failures.
 - A mutable upload source needs a fresh byte proof immediately adjacent to the upload adapter; a PRE-CAS rehearsal proof cannot close changes that occur after rehearsal.
 - Acceptance reconciliation must enumerate each allowed platform-internal object exactly; namespace-wide exclusions such as `_cf_%` can hide unknown production drift.
+- When editing a generated executable embedded in a test template literal, inspect the closing delimiter before running the test so helper code is not inserted into the generated program.

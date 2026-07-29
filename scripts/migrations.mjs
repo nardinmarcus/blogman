@@ -1031,9 +1031,13 @@ function hasBusinessSchema(client) {
   const rows = client.query(`
 SELECT COUNT(*) AS count
 FROM sqlite_schema
-WHERE name NOT LIKE 'sqlite_%'
-  AND name NOT LIKE '_cf_%'
-  AND name NOT LIKE 'migration_ledger%'
+WHERE lower(name) NOT GLOB 'sqlite_*'
+  AND lower(name) NOT IN ('migration_ledger', 'migration_ledger_no_update', 'migration_ledger_no_delete', 'migration_ledger_no_replace')
+  AND NOT (
+    type = 'table'
+    AND name = tbl_name
+    AND name IN ('_cf_KV', '_cf_METADATA')
+  )
 `)
   return Number(rows[0]?.count) > 0
 }
@@ -1267,9 +1271,10 @@ function buildStatus(migrations, ledger, state, baselineFirst = false) {
   }
 }
 
-function validateBeforeWrites(client, migrations, ledger) {
+function validateBeforeWrites(client, migrations, ledger, initialized) {
   const shouldBaseline = ledger.length === 0 && hasBusinessSchema(client)
   if (shouldBaseline) validateCurrentSchema(client, migrations)
+  if (!initialized && !shouldBaseline) return false
 
   const pendingStart = ledger.length + (shouldBaseline ? 1 : 0)
   for (const migration of migrations.slice(pendingStart)) {
@@ -1389,7 +1394,7 @@ async function main() {
   let baselineFirst = false
   if (options.command === 'plan') {
     activeFailureReporter?.setPhase('schema_validation')
-    baselineFirst = validateBeforeWrites(client, migrations, ledger)
+    baselineFirst = validateBeforeWrites(client, migrations, ledger, initialized)
   }
 
   let result
