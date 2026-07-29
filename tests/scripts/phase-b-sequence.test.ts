@@ -487,6 +487,145 @@ fs.chmodSync(process.env.SNAPSHOT_ROOT, 0o500)
     })
   })
 
+  it('holds one snapshot lifecycle across a successful upload without evidence self-trigger', () => {
+    const snapshot = uploadSourceSnapshotFixture()
+    const reportDirectory = dirname(snapshot.destination)
+    const proofBefore = join(reportDirectory, 'upload-source-snapshot.json')
+    const proofAfter = join(reportDirectory, 'upload-source-snapshot-after.json')
+    const uploadOutput = join(reportDirectory, 'upload-private.jsonl')
+    const forwardedArgs = join(snapshot.directory, 'forwarded-lifecycle-args.json')
+    const operatorDirectory = join(snapshot.directory, 'operator')
+    const config = join(operatorDirectory, 'wrangler.toml')
+    const fakeBin = join(snapshot.directory, 'lifecycle-fake-bin')
+    mkdirSync(operatorDirectory)
+    writeFileSync(config, `[assets]\ndirectory = ${JSON.stringify(join(snapshot.source, 'assets'))}\n`)
+    for (const path of [proofBefore, proofAfter, uploadOutput, forwardedArgs]) {
+      writeFileSync(path, '')
+      chmodSync(path, 0o600)
+    }
+    mkdirSync(fakeBin)
+    writeFileSync(join(fakeBin, 'npm'), `#!/usr/bin/env node
+require('node:fs').writeFileSync(
+  process.env.FORWARDED_ARGS,
+  JSON.stringify(process.argv.slice(2)),
+)
+`)
+    chmodSync(join(fakeBin, 'npm'), 0o755)
+
+    const lifecycle = spawnSync(process.execPath, [
+      parserPath,
+      'run-upload-source-lifecycle',
+      '--config', config,
+      '--source', snapshot.source,
+      '--destination', snapshot.destination,
+      '--operation-id', `issue-23-${'a'.repeat(40)}-upload-1`,
+      '--proof-before', proofBefore,
+      '--proof-after', proofAfter,
+    ], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}${delimiter}${process.env.PATH}`,
+        WRANGLER_OUTPUT_FILE_PATH: uploadOutput,
+        FORWARDED_ARGS: forwardedArgs,
+      },
+    })
+    expect(lifecycle).toMatchObject({ status: 0, stdout: '', stderr: '' })
+    expect(JSON.parse(readFileSync(forwardedArgs, 'utf8'))).toEqual([
+      'exec', '--', 'opennextjs-cloudflare', 'upload',
+      '-c', config, '--', join(snapshot.destination, 'worker.js'),
+      '--message', `issue-23-${'a'.repeat(40)}-upload-1`,
+      '--assets', join(snapshot.destination, 'assets'),
+    ])
+    const before = JSON.parse(readFileSync(proofBefore, 'utf8')) as UploadSourceSnapshotProof
+      & { state: string }
+    const after = JSON.parse(readFileSync(proofAfter, 'utf8')) as UploadSourceSnapshotProof
+      & { state: string }
+    expect(before.state).toBe('created')
+    expect(after).toMatchObject({
+      state: 'matched',
+      tree_sha256: before.tree_sha256,
+      identity_sha256: before.identity_sha256,
+    })
+  })
+
+  it('rejects a complete report-directory swap-read-restore across the upload window', () => {
+    const snapshot = uploadSourceSnapshotFixture()
+    const reportDirectory = dirname(snapshot.destination)
+    const savedReportDirectory = `${reportDirectory}.saved`
+    const worker = join(snapshot.destination, 'worker.js')
+    const assets = join(snapshot.destination, 'assets')
+    const capturedUpload = join(snapshot.directory, 'captured-report-swap.json')
+    const proofBefore = join(reportDirectory, 'upload-source-snapshot.json')
+    const proofAfter = join(reportDirectory, 'upload-source-snapshot-after.json')
+    const uploadOutput = join(reportDirectory, 'upload-private.jsonl')
+    const operatorDirectory = join(snapshot.directory, 'operator')
+    const config = join(operatorDirectory, 'wrangler.toml')
+    const fakeBin = join(snapshot.directory, 'report-swap-fake-bin')
+    mkdirSync(operatorDirectory)
+    writeFileSync(config, `[assets]\ndirectory = ${JSON.stringify(join(snapshot.source, 'assets'))}\n`)
+    for (const path of [capturedUpload, proofBefore, proofAfter, uploadOutput]) {
+      writeFileSync(path, '')
+      chmodSync(path, 0o600)
+    }
+    mkdirSync(fakeBin)
+    writeFileSync(join(fakeBin, 'npm'), `#!/usr/bin/env node
+const fs = require('node:fs')
+const path = require('node:path')
+const args = process.argv.slice(2)
+if (args.shift() !== 'exec' || args.shift() !== '--'
+  || args.shift() !== 'opennextjs-cloudflare' || args.shift() !== 'upload') process.exit(90)
+const passthrough = args.indexOf('--')
+if (passthrough < 0) process.exit(91)
+if (args[passthrough + 1] !== process.env.SNAPSHOT_WORKER) process.exit(92)
+fs.renameSync(process.env.REPORT_DIRECTORY, process.env.SAVED_REPORT_DIRECTORY)
+fs.mkdirSync(path.join(process.env.SNAPSHOT_ROOT, 'assets'), { recursive: true })
+fs.writeFileSync(process.env.SNAPSHOT_WORKER, 'malicious parent worker\\n')
+fs.writeFileSync(path.join(process.env.SNAPSHOT_ROOT, 'assets', 'asset.txt'), 'malicious parent asset\\n')
+fs.writeFileSync(process.env.CAPTURED_UPLOAD, JSON.stringify({
+  worker: fs.readFileSync(process.env.SNAPSHOT_WORKER, 'utf8'),
+  asset: fs.readFileSync(path.join(process.env.SNAPSHOT_ROOT, 'assets', 'asset.txt'), 'utf8'),
+}))
+fs.rmSync(process.env.REPORT_DIRECTORY, { recursive: true, force: true })
+fs.renameSync(process.env.SAVED_REPORT_DIRECTORY, process.env.REPORT_DIRECTORY)
+`)
+    chmodSync(join(fakeBin, 'npm'), 0o755)
+    const lifecycle = spawnSync(process.execPath, [
+      parserPath,
+      'run-upload-source-lifecycle',
+      '--config', config,
+      '--source', snapshot.source,
+      '--destination', snapshot.destination,
+      '--operation-id', `issue-23-${'a'.repeat(40)}-upload-1`,
+      '--proof-before', proofBefore,
+      '--proof-after', proofAfter,
+    ], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}${delimiter}${process.env.PATH}`,
+        WRANGLER_OUTPUT_FILE_PATH: uploadOutput,
+        REPORT_DIRECTORY: reportDirectory,
+        SAVED_REPORT_DIRECTORY: savedReportDirectory,
+        SNAPSHOT_ROOT: snapshot.destination,
+        SNAPSHOT_WORKER: worker,
+        CAPTURED_UPLOAD: capturedUpload,
+      },
+    })
+    expect(lifecycle).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+    })
+    expect(JSON.parse(readFileSync(capturedUpload, 'utf8'))).toEqual({
+      worker: 'malicious parent worker\n',
+      asset: 'malicious parent asset\n',
+    })
+    expect(readFileSync(worker, 'utf8')).toBe('sealed worker\n')
+    expect(readFileSync(join(assets, 'asset.txt'), 'utf8')).toBe('sealed asset\n')
+    expect(readFileSync(proofAfter, 'utf8')).toBe('')
+  })
+
   it('stops at a failed empty-database plan after reset proof and before migrations', async () => {
     const counts = stageCounts()
 

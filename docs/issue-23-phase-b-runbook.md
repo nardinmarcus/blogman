@@ -153,42 +153,30 @@ install -m 600 /dev/null "$UPLOAD_PRIVATE"
 node scripts/issue-23-reseal.mjs verify-build-directory \
   --archive "$BUILD_ZIP" --directory "$UPLOAD_SOURCE_DIRECTORY" \
   --archive-sha256 "$BUILD_SHA256" > "$REPORT_DIR/upload-source-directory-proof.json"
-verify_config_identity
-CONFIG_UPLOAD_ASSETS_DIRECTORY=$(node scripts/phase-b-sequence.mjs bind-upload-assets-directory \
-  --config "$CONFIG" \
-  --upload-source-directory "$UPLOAD_SOURCE_DIRECTORY")
-readonly CONFIG_UPLOAD_ASSETS_DIRECTORY
 UPLOAD_SOURCE_SNAPSHOT_DIRECTORY="$REPORT_DIR/upload-source-snapshot"
 readonly UPLOAD_SOURCE_SNAPSHOT_DIRECTORY
-node scripts/phase-b-sequence.mjs create-upload-source-snapshot \
+UPLOAD_SOURCE_SNAPSHOT_PROOF="$REPORT_DIR/upload-source-snapshot.json"
+UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER="$REPORT_DIR/upload-source-snapshot-after.json"
+readonly UPLOAD_SOURCE_SNAPSHOT_PROOF UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER
+install -m 600 /dev/null "$UPLOAD_SOURCE_SNAPSHOT_PROOF"
+install -m 600 /dev/null "$UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER"
+verify_config_identity
+WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" node scripts/phase-b-sequence.mjs \
+  run-upload-source-lifecycle \
+  --config "$CONFIG" \
   --source "$UPLOAD_SOURCE_DIRECTORY" \
   --destination "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY" \
-  > "$REPORT_DIR/upload-source-snapshot.json"
-UPLOAD_SOURCE_SNAPSHOT_SHA256=$(jq -er \
-  'select(.format == "blogman-upload-source-snapshot/v1" and .state == "created") | .tree_sha256' \
-  "$REPORT_DIR/upload-source-snapshot.json")
-readonly UPLOAD_SOURCE_SNAPSHOT_SHA256
-UPLOAD_SOURCE_SNAPSHOT_IDENTITY_SHA256=$(jq -er \
-  'select(.format == "blogman-upload-source-snapshot/v1" and .state == "created") | .identity_sha256' \
-  "$REPORT_DIR/upload-source-snapshot.json")
-readonly UPLOAD_SOURCE_SNAPSHOT_IDENTITY_SHA256
+  --operation-id "$UPLOAD_OPERATION_ID" \
+  --proof-before "$UPLOAD_SOURCE_SNAPSHOT_PROOF" \
+  --proof-after "$UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER"
 node scripts/issue-23-reseal.mjs verify-build-directory \
   --archive "$BUILD_ZIP" --directory "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY" \
   --archive-sha256 "$BUILD_SHA256" > "$REPORT_DIR/upload-build-directory-proof.json"
-verify_config_identity
-WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" npm exec -- opennextjs-cloudflare upload \
-  -c "$CONFIG" -- "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY/worker.js" \
-  --message "$UPLOAD_OPERATION_ID" \
-  --assets "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY/assets"
-node scripts/phase-b-sequence.mjs verify-upload-source-snapshot \
-  --directory "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY" \
-  --tree-sha256 "$UPLOAD_SOURCE_SNAPSHOT_SHA256" \
-  --identity-sha256 "$UPLOAD_SOURCE_SNAPSHOT_IDENTITY_SHA256" \
-  > "$REPORT_DIR/upload-source-snapshot-after.json"
-node scripts/issue-23-reseal.mjs verify-build-directory \
-  --archive "$BUILD_ZIP" --directory "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY" \
-  --archive-sha256 "$BUILD_SHA256" > "$REPORT_DIR/upload-build-directory-proof-after.json"
-cmp "$REPORT_DIR/upload-build-directory-proof.json" "$REPORT_DIR/upload-build-directory-proof-after.json"
+jq -s -e '.[0].format == "blogman-upload-source-snapshot/v1"
+  and .[0].state == "created" and .[1].state == "matched"
+  and .[0].tree_sha256 == .[1].tree_sha256
+  and .[0].identity_sha256 == .[1].identity_sha256' \
+  "$UPLOAD_SOURCE_SNAPSHOT_PROOF" "$UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER" >/dev/null
 jq -s -e '[.[] | select(.type == "version-upload" and .version == 1
   and (.version_id | type == "string"))] | length == 1' "$UPLOAD_PRIVATE" >/dev/null
 UPLOADED_VERSION_ID=$(jq -sr '[.[] | select(.type == "version-upload" and .version == 1)][0].version_id' "$UPLOAD_PRIVATE")
@@ -206,9 +194,9 @@ jq -n --arg uploaded "$UPLOAD_COMPLETED_AT" --arg candidate "$EXPECTED_CANDIDATE
   > "$REPORT_DIR/clean-start-upload-report.json"
 ```
 
-The upload-source proof is regenerated from the actual `.open-next` directory after CAS1 and immediately before the mandatory adjacent config checks plus upload adapter. The binding command uses Wrangler's parser and config-relative semantics to require the configured `assets.directory` to resolve exactly to the verified `UPLOAD_SOURCE_DIRECTORY/assets`. The runner then copies that source through stable no-follow file descriptors into one exclusively created snapshot, freezes its directories to `0500` and files to `0400`, and proves the snapshot itself against the sealed archive. The snapshot's absolute `worker.js` is the positional Wrangler script and its sibling `assets` directory is the explicit `--assets` source, so the complete Worker version comes from the same frozen and sealed snapshot even when the external config has a different or missing `main`.
+The upload-source proof is regenerated from the actual `.open-next` directory after CAS1. One `run-upload-source-lifecycle` process opens and holds the report-directory ancestor, report directory, config parent, and config descriptors before it validates the config-relative `assets.directory` and creates the exclusive snapshot. It then holds the snapshot root while it performs the pre-proof, invokes OpenNext exactly once, and performs the terminal post-proof. Every held path must still resolve to the held object with unchanged device, inode, nanosecond ctime, mode, and size before the lifecycle can return success. A complete report-directory or ancestor swap therefore remains observable even if the original path and snapshot subtree are restored before the post-proof.
 
-Snapshot creation binds the root, every directory, and every file by device, inode, nanosecond ctime, mode, and size while stable parent/root/directory descriptors remain open. The separate identity hash and byte-tree hash are both reverified after the upload process returns, followed by the sealed archive proof, before any version record or report is accepted. This detects in-place mutation and swap-read-restore history even when the original bytes and names are restored. The no-other-production-writer reservation established at PRE-CAS must remain held through that post-upload reverification and version acceptance.
+Both proof files and Wrangler's private output are mode-`0600` regular files created before the lifecycle descriptors are captured. Writing those existing files does not add a directory entry to the held report directory, avoiding a self-trigger before the terminal identity check. Snapshot root, every directory, and every file remain separately bound by the identity hash and byte-tree hash. The snapshot's absolute `worker.js` is the positional Wrangler script and its sibling `assets` directory is the explicit `--assets` source, so the complete Worker version comes from the same frozen and sealed snapshot even when the external config has a different or missing `main`. The sealed archive proof runs only after the lifecycle succeeds and before any version record or report is accepted. The no-other-production-writer reservation established at PRE-CAS must remain held through version acceptance.
 
 OpenNext 1.19.10 internally forwards Wrangler arguments with `shell:true`, so every path entering this adapter must already be absolute, normalized, and match the conservative `^/[A-Za-z0-9._/-]+$` character set. Paths containing whitespace or shell metacharacters fail closed before snapshot creation or forwarding. This remains correct when the operator config directory is outside the snapshot repository. Any config or upload-directory mismatch, path alias, content mutation, symlink swap, or snapshot reuse therefore stops without accepting the upload; the earlier rehearsal proof cannot be reused. The output file may contain other Wrangler records from the OpenNext upload path, but it must contain exactly one `version-upload/v1` record. The version ID comes only from that record; `versions list | last` is forbidden. Freeze the report and prove it belongs to this candidate, sealed build bytes, fresh upload-source proof, and operation. Re-run CAS1 and D1 identity immediately before reset. If another writer changed deployment, config, D1 identity, or upload attribution, stop without reset.
 

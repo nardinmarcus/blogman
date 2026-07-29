@@ -30,34 +30,26 @@ describe('Issue #23 Phase B runbook order', () => {
       command.startsWith('node scripts/issue-23-reseal.mjs verify-build-directory')
       && command.includes('--directory "$UPLOAD_SOURCE_DIRECTORY"')
     ))
-    const snapshot = commands.findIndex((command) => (
-      command.startsWith('node scripts/phase-b-sequence.mjs create-upload-source-snapshot')
+    const lifecycle = commands.findIndex((command) => (
+      command.startsWith('WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" node scripts/phase-b-sequence.mjs')
+      && command.includes('run-upload-source-lifecycle')
     ))
     const snapshotProof = commands.findIndex((command) => (
       command.startsWith('node scripts/issue-23-reseal.mjs verify-build-directory')
       && command.includes('--directory "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY"')
       && command.includes('> "$REPORT_DIR/upload-build-directory-proof.json"')
     ))
-    const reverify = commands.findIndex((command) => (
-      command.startsWith('node scripts/phase-b-sequence.mjs verify-upload-source-snapshot')
-    ))
-    const postUploadProof = commands.findIndex((command) => (
-      command.startsWith('node scripts/issue-23-reseal.mjs verify-build-directory')
-      && command.includes('> "$REPORT_DIR/upload-build-directory-proof-after.json"')
-    ))
     const acceptVersion = commands.findIndex((command) => command.startsWith("jq -s -e '[.[] | select(.type == \"version-upload\""))
     return sourceProof >= 0
-      && snapshot > sourceProof
-      && snapshotProof > snapshot
-      && upload > snapshotProof
-      && commands[upload - 1] === 'verify_config_identity'
-      && commands[upload].includes('"$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY/worker.js"')
-      && commands[upload].includes('--assets "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY/assets"')
-      && reverify > upload
-      && commands[reverify].includes('--identity-sha256 "$UPLOAD_SOURCE_SNAPSHOT_IDENTITY_SHA256"')
-      && postUploadProof > reverify
-      && commands[postUploadProof + 1] === 'cmp "$REPORT_DIR/upload-build-directory-proof.json" "$REPORT_DIR/upload-build-directory-proof-after.json"'
-      && acceptVersion > postUploadProof
+      && lifecycle > sourceProof
+      && upload === lifecycle
+      && commands[lifecycle - 1] === 'verify_config_identity'
+      && commands[lifecycle].includes('--source "$UPLOAD_SOURCE_DIRECTORY"')
+      && commands[lifecycle].includes('--destination "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY"')
+      && commands[lifecycle].includes('--proof-before "$UPLOAD_SOURCE_SNAPSHOT_PROOF"')
+      && commands[lifecycle].includes('--proof-after "$UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER"')
+      && snapshotProof > lifecycle
+      && acceptVersion > snapshotProof
   }
 
   const hasResetResponseValidationOrder = (runbook: string) => {
@@ -83,7 +75,7 @@ describe('Issue #23 Phase B runbook order', () => {
     const lines = readRunbook().split('\n')
     const adapterLines = lines.flatMap((line, index) => {
       const trimmed = line.trim()
-      if (!/^(?:WRANGLER_OUTPUT_FILE_PATH=.*\s+)?(?:\.\/node_modules\/\.bin\/wrangler|npm exec -- opennextjs-cloudflare|node scripts\/(?:migrations|rollout-safety)\.mjs)/.test(trimmed)) {
+      if (!/^(?:WRANGLER_OUTPUT_FILE_PATH=.*\s+)?(?:\.\/node_modules\/\.bin\/wrangler|node scripts\/(?:phase-b-sequence|migrations|rollout-safety)\.mjs)/.test(trimmed)) {
         return []
       }
       let command = trimmed
@@ -127,8 +119,8 @@ describe('Issue #23 Phase B runbook order', () => {
     )
     expect(hasTightUploadSourceProof(staleProofMutation)).toBe(false)
     expect(hasTightUploadSourceProof(runbook.replace(
-      'node scripts/phase-b-sequence.mjs verify-upload-source-snapshot',
-      'node scripts/phase-b-sequence.mjs skipped-upload-source-reverification',
+      'run-upload-source-lifecycle',
+      'skipped-upload-source-lifecycle',
     ))).toBe(false)
   })
 

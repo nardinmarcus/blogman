@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import {
   chmodSync,
   closeSync,
@@ -33,6 +34,7 @@ export const PHASE_B_STAGES = Object.freeze([
 const sha256 = /^[a-f0-9]{64}$/
 const candidate = /^[a-f0-9]{40}$/
 const shellSafeAbsolutePath = /^\/[A-Za-z0-9._/-]+$/
+const uploadOperationId = /^issue-23-[a-f0-9]{40}-upload-1$/
 const wranglerD1FilePrefix = '\u251c Checking if file needs uploading\n\u2502\n'
 const envelopeKeys = ['finalBookmark', 'meta', 'results', 'success']
 const resultKeys = [
@@ -324,6 +326,76 @@ function identityEntry(path, type, stat) {
   })
 }
 
+function holdStablePath(path, type, mode) {
+  if (!isAbsolute(path) || path !== resolve(path) || !shellSafeAbsolutePath.test(path)) {
+    throw new Error()
+  }
+  const descriptor = openSync(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW
+      | (type === 'directory' ? constants.O_DIRECTORY : 0),
+  )
+  try {
+    const before = fstatSync(descriptor, { bigint: true })
+    const current = lstatSync(path, { bigint: true })
+    if ((type === 'directory' ? !before.isDirectory() : !before.isFile())
+      || (mode !== undefined && (before.mode & 0o777n) !== BigInt(mode))
+      || !sameIdentity(before, current)
+      || realpathSync(path) !== path) {
+      throw new Error()
+    }
+    return { before, descriptor, expectedMode: mode, path, type }
+  } catch (error) {
+    closeSync(descriptor)
+    throw error
+  }
+}
+
+function refreshHeldPath(held) {
+  const after = fstatSync(held.descriptor, { bigint: true })
+  const current = lstatSync(held.path, { bigint: true })
+  if ((held.type === 'directory' ? !after.isDirectory() : !after.isFile())
+    || (held.expectedMode !== undefined
+      && (after.mode & 0o777n) !== BigInt(held.expectedMode))
+    || !sameIdentity(after, current)
+    || realpathSync(held.path) !== held.path) {
+    throw new Error()
+  }
+  held.before = after
+}
+
+function verifyHeldPath(held) {
+  const after = fstatSync(held.descriptor, { bigint: true })
+  const current = lstatSync(held.path, { bigint: true })
+  if ((held.type === 'directory' ? !after.isDirectory() : !after.isFile())
+    || !sameIdentity(held.before, after)
+    || !sameIdentity(after, current)
+    || realpathSync(held.path) !== held.path) {
+    throw new Error()
+  }
+}
+
+function requirePreparedEvidenceFile(path, reportDirectory) {
+  if (!isAbsolute(path) || path !== resolve(path) || !shellSafeAbsolutePath.test(path)
+    || dirname(path) !== reportDirectory) {
+    throw new Error()
+  }
+  const stat = lstatSync(path)
+  if (!stat.isFile() || (stat.mode & 0o777) !== 0o600 || realpathSync(path) !== path) {
+    throw new Error()
+  }
+}
+
+function writeSnapshotProof(path, state, proof, destination) {
+  writeFileSync(path, `${JSON.stringify({
+    format: 'blogman-upload-source-snapshot/v1',
+    state,
+    worker_script: join(destination, 'worker.js'),
+    assets_directory: join(destination, 'assets'),
+    ...proof,
+  })}\n`)
+}
+
 function stableRegularFileBytes(path) {
   const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
@@ -517,12 +589,90 @@ function verifyUploadSourceSnapshot(directory, expectedTreeSha256, expectedIdent
   return proof
 }
 
+async function runUploadSourceLifecycle({
+  config,
+  source,
+  destination,
+  operationId,
+  proofBeforePath,
+  proofAfterPath,
+}) {
+  if (!uploadOperationId.test(operationId || '')) throw new Error()
+  const reportDirectory = dirname(destination)
+  const reportAncestor = dirname(reportDirectory)
+  const uploadOutputPath = process.env.WRANGLER_OUTPUT_FILE_PATH
+  requirePreparedEvidenceFile(proofBeforePath, reportDirectory)
+  requirePreparedEvidenceFile(proofAfterPath, reportDirectory)
+  requirePreparedEvidenceFile(uploadOutputPath, reportDirectory)
+
+  const held = []
+  try {
+    held.push(holdStablePath(reportAncestor, 'directory'))
+    const heldReportDirectory = holdStablePath(reportDirectory, 'directory', 0o700)
+    held.push(heldReportDirectory)
+    held.push(holdStablePath(dirname(config), 'directory'))
+    held.push(holdStablePath(config, 'file'))
+    await bindUploadAssetsDirectory(config, source)
+    const before = copyUploadSourceSnapshot(source, destination)
+    refreshHeldPath(heldReportDirectory)
+    held.push(holdStablePath(destination, 'directory', 0o500))
+    writeSnapshotProof(proofBeforePath, 'created', before, destination)
+
+    const upload = spawnSync('npm', [
+      'exec', '--', 'opennextjs-cloudflare', 'upload',
+      '-c', config, '--', join(destination, 'worker.js'),
+      '--message', operationId,
+      '--assets', join(destination, 'assets'),
+    ], {
+      env: process.env,
+      stdio: 'inherit',
+    })
+
+    const after = verifyUploadSourceSnapshot(
+      destination,
+      before.tree_sha256,
+      before.identity_sha256,
+    )
+    for (const path of held) verifyHeldPath(path)
+    if (upload.error || upload.status !== 0) throw new Error()
+    writeSnapshotProof(proofAfterPath, 'matched', after, destination)
+  } finally {
+    for (const path of held.reverse()) closeSync(path.descriptor)
+  }
+}
+
 function isMainModule() {
   return process.argv[1]
     && import.meta.url === pathToFileURL(resolve(process.argv[1])).href
 }
 
 async function runCli() {
+  if (process.argv[2] === 'run-upload-source-lifecycle') {
+    try {
+      if (process.argv.length !== 15
+        || process.argv[3] !== '--config'
+        || process.argv[5] !== '--source'
+        || process.argv[7] !== '--destination'
+        || process.argv[9] !== '--operation-id'
+        || process.argv[11] !== '--proof-before'
+        || process.argv[13] !== '--proof-after') {
+        throw new Error()
+      }
+      await runUploadSourceLifecycle({
+        config: process.argv[4],
+        source: process.argv[6],
+        destination: process.argv[8],
+        operationId: process.argv[10],
+        proofBeforePath: process.argv[12],
+        proofAfterPath: process.argv[14],
+      })
+    } catch {
+      process.stderr.write('Invalid Issue #23 upload source lifecycle\n')
+      process.exitCode = 1
+    }
+    return
+  }
+
   if (process.argv[2] === 'create-upload-source-snapshot') {
     try {
       if (process.argv.length !== 7
