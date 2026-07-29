@@ -1,5 +1,18 @@
-import { lstatSync, readFileSync, realpathSync } from 'node:fs'
-import { dirname, isAbsolute, resolve } from 'node:path'
+import { createHash } from 'node:crypto'
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 export const PHASE_B_STAGES = Object.freeze([
@@ -19,6 +32,7 @@ export const PHASE_B_STAGES = Object.freeze([
 
 const sha256 = /^[a-f0-9]{64}$/
 const candidate = /^[a-f0-9]{40}$/
+const shellSafeAbsolutePath = /^\/[A-Za-z0-9._/-]+$/
 const wranglerD1FilePrefix = '\u251c Checking if file needs uploading\n\u2502\n'
 const envelopeKeys = ['finalBookmark', 'meta', 'results', 'success']
 const resultKeys = [
@@ -249,7 +263,9 @@ export async function runPhaseBSequence({ configPath, bindings, runStage }) {
 
 async function bindUploadAssetsDirectory(configPath, uploadSourceDirectory) {
   if (!isAbsolute(configPath) || configPath !== resolve(configPath)
-    || !isAbsolute(uploadSourceDirectory) || uploadSourceDirectory !== resolve(uploadSourceDirectory)) {
+    || !shellSafeAbsolutePath.test(configPath)
+    || !isAbsolute(uploadSourceDirectory) || uploadSourceDirectory !== resolve(uploadSourceDirectory)
+    || !shellSafeAbsolutePath.test(uploadSourceDirectory)) {
     throw new Error()
   }
   if (!lstatSync(configPath).isFile() || realpathSync(configPath) !== configPath
@@ -279,12 +295,193 @@ async function bindUploadAssetsDirectory(configPath, uploadSourceDirectory) {
   return uploadAssetsDirectory
 }
 
+function isWithin(parent, child) {
+  const path = relative(parent, child)
+  return path === '' || (!path.startsWith('..') && !isAbsolute(path))
+}
+
+function sha256Bytes(bytes) {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+function stableRegularFileBytes(path) {
+  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const before = fstatSync(descriptor)
+    if (!before.isFile()) throw new Error()
+    const bytes = readFileSync(descriptor)
+    const after = fstatSync(descriptor)
+    const current = lstatSync(path)
+    if (!after.isFile()
+      || before.dev !== after.dev || before.ino !== after.ino
+      || before.size !== after.size || before.mtimeMs !== after.mtimeMs
+      || before.ctimeMs !== after.ctimeMs
+      || current.dev !== after.dev || current.ino !== after.ino
+      || current.size !== after.size || current.mtimeMs !== after.mtimeMs
+      || current.ctimeMs !== after.ctimeMs
+      || realpathSync(path) !== path) {
+      throw new Error()
+    }
+    return bytes
+  } finally {
+    closeSync(descriptor)
+  }
+}
+
+function treeProof(entries) {
+  const canonical = Buffer.from(`${JSON.stringify(entries)}\n`)
+  return Object.freeze({
+    file_count: entries.length,
+    tree_sha256: sha256Bytes(canonical),
+  })
+}
+
+function requireCanonicalDirectory(path, mode) {
+  if (!isAbsolute(path) || path !== resolve(path) || !shellSafeAbsolutePath.test(path)) {
+    throw new Error()
+  }
+  const stat = lstatSync(path)
+  if (!stat.isDirectory() || realpathSync(path) !== path
+    || (mode !== undefined && (stat.mode & 0o777) !== mode)) {
+    throw new Error()
+  }
+  return stat
+}
+
+function copyUploadSourceSnapshot(source, destination) {
+  requireCanonicalDirectory(source)
+  requireCanonicalDirectory(dirname(destination), 0o700)
+  if (!isAbsolute(destination) || destination !== resolve(destination)
+    || !shellSafeAbsolutePath.test(destination)
+    || isWithin(source, destination) || isWithin(destination, source)) {
+    throw new Error()
+  }
+  mkdirSync(destination, { mode: 0o700 })
+
+  const entries = []
+  const visit = (sourceDirectory, destinationDirectory, relativeDirectory = '') => {
+    const before = requireCanonicalDirectory(sourceDirectory)
+    const names = readdirSync(sourceDirectory).sort((left, right) => left.localeCompare(right))
+    for (const name of names) {
+      const sourcePath = join(sourceDirectory, name)
+      const destinationPath = join(destinationDirectory, name)
+      const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name
+      const stat = lstatSync(sourcePath)
+      if (stat.isDirectory() && realpathSync(sourcePath) === sourcePath) {
+        mkdirSync(destinationPath, { mode: 0o700 })
+        visit(sourcePath, destinationPath, relativePath)
+        chmodSync(destinationPath, 0o500)
+      } else if (stat.isFile() && realpathSync(sourcePath) === sourcePath) {
+        const bytes = stableRegularFileBytes(sourcePath)
+        const descriptor = openSync(
+          destinationPath,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+          0o400,
+        )
+        try {
+          writeFileSync(descriptor, bytes)
+        } finally {
+          closeSync(descriptor)
+        }
+        chmodSync(destinationPath, 0o400)
+        entries.push({ path: relativePath, bytes: bytes.byteLength, sha256: sha256Bytes(bytes) })
+      } else {
+        throw new Error()
+      }
+    }
+    const after = requireCanonicalDirectory(sourceDirectory)
+    if (before.dev !== after.dev || before.ino !== after.ino
+      || JSON.stringify(readdirSync(sourceDirectory).sort((left, right) => left.localeCompare(right)))
+        !== JSON.stringify(names)) {
+      throw new Error()
+    }
+  }
+  visit(source, destination)
+  chmodSync(destination, 0o500)
+  return treeProof(entries)
+}
+
+function verifyUploadSourceSnapshot(directory, expectedTreeSha256) {
+  if (!sha256.test(expectedTreeSha256 || '')) throw new Error()
+  requireCanonicalDirectory(directory, 0o500)
+  const entries = []
+  const visit = (path, relativeDirectory = '') => {
+    const before = requireCanonicalDirectory(path, 0o500)
+    const names = readdirSync(path).sort((left, right) => left.localeCompare(right))
+    for (const name of names) {
+      const entryPath = join(path, name)
+      const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name
+      const stat = lstatSync(entryPath)
+      if (stat.isDirectory() && (stat.mode & 0o777) === 0o500
+        && realpathSync(entryPath) === entryPath) {
+        visit(entryPath, relativePath)
+      } else if (stat.isFile() && (stat.mode & 0o777) === 0o400
+        && realpathSync(entryPath) === entryPath) {
+        const bytes = stableRegularFileBytes(entryPath)
+        entries.push({ path: relativePath, bytes: bytes.byteLength, sha256: sha256Bytes(bytes) })
+      } else {
+        throw new Error()
+      }
+    }
+    const after = requireCanonicalDirectory(path, 0o500)
+    if (before.dev !== after.dev || before.ino !== after.ino
+      || JSON.stringify(readdirSync(path).sort((left, right) => left.localeCompare(right)))
+        !== JSON.stringify(names)) {
+      throw new Error()
+    }
+  }
+  visit(directory)
+  const proof = treeProof(entries)
+  if (proof.tree_sha256 !== expectedTreeSha256) throw new Error()
+  return proof
+}
+
 function isMainModule() {
   return process.argv[1]
     && import.meta.url === pathToFileURL(resolve(process.argv[1])).href
 }
 
 async function runCli() {
+  if (process.argv[2] === 'create-upload-source-snapshot') {
+    try {
+      if (process.argv.length !== 7
+        || process.argv[3] !== '--source'
+        || process.argv[5] !== '--destination') {
+        throw new Error()
+      }
+      const proof = copyUploadSourceSnapshot(process.argv[4], process.argv[6])
+      process.stdout.write(`${JSON.stringify({
+        format: 'blogman-upload-source-snapshot/v1',
+        state: 'created',
+        ...proof,
+      })}\n`)
+    } catch {
+      process.stderr.write('Invalid Issue #23 upload source snapshot\n')
+      process.exitCode = 1
+    }
+    return
+  }
+
+  if (process.argv[2] === 'verify-upload-source-snapshot') {
+    try {
+      if (process.argv.length !== 7
+        || process.argv[3] !== '--directory'
+        || process.argv[5] !== '--tree-sha256') {
+        throw new Error()
+      }
+      const proof = verifyUploadSourceSnapshot(process.argv[4], process.argv[6])
+      process.stdout.write(`${JSON.stringify({
+        format: 'blogman-upload-source-snapshot/v1',
+        state: 'matched',
+        ...proof,
+      })}\n`)
+    } catch {
+      process.stderr.write('Invalid Issue #23 upload source snapshot\n')
+      process.exitCode = 1
+    }
+    return
+  }
+
   if (process.argv[2] === 'bind-upload-assets-directory') {
     try {
       if (process.argv.length !== 7

@@ -152,16 +152,37 @@ UPLOAD_OPERATION_ID="issue-23-$EXPECTED_CANDIDATE-upload-1"
 install -m 600 /dev/null "$UPLOAD_PRIVATE"
 node scripts/issue-23-reseal.mjs verify-build-directory \
   --archive "$BUILD_ZIP" --directory "$UPLOAD_SOURCE_DIRECTORY" \
-  --archive-sha256 "$BUILD_SHA256" > "$REPORT_DIR/upload-build-directory-proof.json"
+  --archive-sha256 "$BUILD_SHA256" > "$REPORT_DIR/upload-source-directory-proof.json"
 verify_config_identity
-UPLOAD_ASSETS_DIRECTORY=$(node scripts/phase-b-sequence.mjs bind-upload-assets-directory \
+CONFIG_UPLOAD_ASSETS_DIRECTORY=$(node scripts/phase-b-sequence.mjs bind-upload-assets-directory \
   --config "$CONFIG" \
   --upload-source-directory "$UPLOAD_SOURCE_DIRECTORY")
-readonly UPLOAD_ASSETS_DIRECTORY
+readonly CONFIG_UPLOAD_ASSETS_DIRECTORY
+UPLOAD_SOURCE_SNAPSHOT_DIRECTORY="$REPORT_DIR/upload-source-snapshot"
+readonly UPLOAD_SOURCE_SNAPSHOT_DIRECTORY
+node scripts/phase-b-sequence.mjs create-upload-source-snapshot \
+  --source "$UPLOAD_SOURCE_DIRECTORY" \
+  --destination "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY" \
+  > "$REPORT_DIR/upload-source-snapshot.json"
+UPLOAD_SOURCE_SNAPSHOT_SHA256=$(jq -er \
+  'select(.format == "blogman-upload-source-snapshot/v1" and .state == "created") | .tree_sha256' \
+  "$REPORT_DIR/upload-source-snapshot.json")
+readonly UPLOAD_SOURCE_SNAPSHOT_SHA256
+node scripts/issue-23-reseal.mjs verify-build-directory \
+  --archive "$BUILD_ZIP" --directory "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY" \
+  --archive-sha256 "$BUILD_SHA256" > "$REPORT_DIR/upload-build-directory-proof.json"
 verify_config_identity
 WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" npm exec -- opennextjs-cloudflare upload \
   -c "$CONFIG" -- --message "$UPLOAD_OPERATION_ID" \
-  --assets "$UPLOAD_ASSETS_DIRECTORY"
+  --assets "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY/assets"
+node scripts/phase-b-sequence.mjs verify-upload-source-snapshot \
+  --directory "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY" \
+  --tree-sha256 "$UPLOAD_SOURCE_SNAPSHOT_SHA256" \
+  > "$REPORT_DIR/upload-source-snapshot-after.json"
+node scripts/issue-23-reseal.mjs verify-build-directory \
+  --archive "$BUILD_ZIP" --directory "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY" \
+  --archive-sha256 "$BUILD_SHA256" > "$REPORT_DIR/upload-build-directory-proof-after.json"
+cmp "$REPORT_DIR/upload-build-directory-proof.json" "$REPORT_DIR/upload-build-directory-proof-after.json"
 jq -s -e '[.[] | select(.type == "version-upload" and .version == 1
   and (.version_id | type == "string"))] | length == 1' "$UPLOAD_PRIVATE" >/dev/null
 UPLOADED_VERSION_ID=$(jq -sr '[.[] | select(.type == "version-upload" and .version == 1)][0].version_id' "$UPLOAD_PRIVATE")
@@ -179,7 +200,9 @@ jq -n --arg uploaded "$UPLOAD_COMPLETED_AT" --arg candidate "$EXPECTED_CANDIDATE
   > "$REPORT_DIR/clean-start-upload-report.json"
 ```
 
-The upload-source proof is regenerated from the actual `.open-next` directory after CAS1 and immediately before the mandatory adjacent config checks plus upload adapter. The binding command uses Wrangler's parser and config-relative semantics to require the configured `assets.directory` to resolve exactly to the verified `UPLOAD_SOURCE_DIRECTORY/assets`; the same absolute directory is then the explicit `--assets` source of truth for `versions upload`. This remains correct when the operator config directory is outside the snapshot repository. Any config or upload-directory mismatch, symlink alias, or directory mutation after PRE-CAS therefore stops before upload; the earlier rehearsal proof cannot be reused. The output file may contain other Wrangler records from the OpenNext upload path, but it must contain exactly one `version-upload/v1` record. The version ID comes only from that record; `versions list | last` is forbidden. Freeze the report and prove it belongs to this candidate, sealed build bytes, fresh upload-source proof, and operation. Re-run CAS1 and D1 identity immediately before reset. If another writer changed deployment, config, D1 identity, or upload attribution, stop without reset.
+The upload-source proof is regenerated from the actual `.open-next` directory after CAS1 and immediately before the mandatory adjacent config checks plus upload adapter. The binding command uses Wrangler's parser and config-relative semantics to require the configured `assets.directory` to resolve exactly to the verified `UPLOAD_SOURCE_DIRECTORY/assets`. The runner then copies that source through stable no-follow file descriptors into one exclusively created snapshot, freezes its directories to `0500` and files to `0400`, and proves the snapshot itself against the sealed archive. Only the snapshot's absolute `assets` directory is passed as the `--assets` source of truth for `versions upload`. The snapshot tree hash, immutable modes, no-symlink contract, and sealed archive bytes are all reverified after the upload process returns and before its version record or report is accepted. The no-other-production-writer reservation established at PRE-CAS must remain held through that post-upload reverification and version acceptance.
+
+OpenNext 1.19.10 internally forwards Wrangler arguments with `shell:true`, so every path entering this adapter must already be absolute, normalized, and match the conservative `^/[A-Za-z0-9._/-]+$` character set. Paths containing whitespace or shell metacharacters fail closed before snapshot creation or forwarding. This remains correct when the operator config directory is outside the snapshot repository. Any config or upload-directory mismatch, path alias, content mutation, symlink swap, or snapshot reuse therefore stops without accepting the upload; the earlier rehearsal proof cannot be reused. The output file may contain other Wrangler records from the OpenNext upload path, but it must contain exactly one `version-upload/v1` record. The version ID comes only from that record; `versions list | last` is forbidden. Freeze the report and prove it belongs to this candidate, sealed build bytes, fresh upload-source proof, and operation. Re-run CAS1 and D1 identity immediately before reset. If another writer changed deployment, config, D1 identity, or upload attribution, stop without reset.
 
 ## 4. Candidate-bound in-place reset
 

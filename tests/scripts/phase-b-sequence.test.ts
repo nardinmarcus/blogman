@@ -1,7 +1,19 @@
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   PHASE_B_STAGES,
@@ -58,6 +70,31 @@ function bindUploadAssetsDirectory(configPath: string, uploadSourceDirectory: st
   ], { encoding: 'utf8' })
 }
 
+function uploadSourceSnapshot(
+  command: 'create-upload-source-snapshot' | 'verify-upload-source-snapshot',
+  args: string[],
+  env?: NodeJS.ProcessEnv,
+) {
+  return spawnSync(process.execPath, [parserPath, command, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, ...env },
+  })
+}
+
+function uploadSourceSnapshotFixture() {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-upload-source-snapshot-')))
+  temporaryDirectories.push(directory)
+  const source = join(directory, 'snapshot-repository', '.open-next')
+  const asset = join(source, 'assets', 'asset.txt')
+  const destination = join(directory, 'private-evidence', 'upload-source-snapshot')
+  mkdirSync(dirname(destination), { recursive: true })
+  chmodSync(dirname(destination), 0o700)
+  mkdirSync(dirname(asset), { recursive: true })
+  writeFileSync(join(source, 'worker.js'), 'sealed worker\n')
+  writeFileSync(asset, 'sealed asset\n')
+  return { asset, destination, directory, source }
+}
+
 function uploadAssetsFixture(configAssetsDirectory: string) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-upload-assets-binding-')))
   temporaryDirectories.push(directory)
@@ -83,6 +120,16 @@ function validConfig() {
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
+    const makeRemovable = (path: string) => {
+      const stat = lstatSync(path)
+      if (!stat.isSymbolicLink() && stat.isDirectory()) {
+        chmodSync(path, 0o700)
+        for (const name of readdirSync(path)) makeRemovable(join(path, name))
+      } else if (!stat.isSymbolicLink()) {
+        chmodSync(path, 0o600)
+      }
+    }
+    makeRemovable(directory)
     rmSync(directory, { recursive: true, force: true })
   }
 })
@@ -126,6 +173,189 @@ describe('Issue #23 Phase B fixed sequence', () => {
     })
     expect(resolve(dirname(fixture.configPath), '.open-next/assets'))
       .not.toBe(fixture.uploadAssetsDirectory)
+  })
+
+  it('copies the proven source into an exclusive snapshot isolated from later source mutation', () => {
+    const fixture = uploadSourceSnapshotFixture()
+    const created = uploadSourceSnapshot('create-upload-source-snapshot', [
+      '--source', fixture.source,
+      '--destination', fixture.destination,
+    ])
+
+    expect(created.status, created.stderr).toBe(0)
+    const proof = JSON.parse(created.stdout) as { tree_sha256: string }
+    expect(statSync(fixture.destination).mode & 0o777).toBe(0o500)
+    expect(statSync(join(fixture.destination, 'assets', 'asset.txt')).mode & 0o777).toBe(0o400)
+    const repeated = uploadSourceSnapshot('create-upload-source-snapshot', [
+      '--source', fixture.source,
+      '--destination', fixture.destination,
+    ])
+    expect(repeated).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload source snapshot\n',
+    })
+    writeFileSync(fixture.asset, 'mutated source\n')
+
+    const verified = uploadSourceSnapshot('verify-upload-source-snapshot', [
+      '--directory', fixture.destination,
+      '--tree-sha256', proof.tree_sha256,
+    ])
+    expect(verified.status, verified.stderr).toBe(0)
+    expect(readFileSync(join(fixture.destination, 'assets', 'asset.txt'), 'utf8'))
+      .toBe('sealed asset\n')
+  })
+
+  it('rejects snapshot content mutation before upload evidence is accepted', () => {
+    const fixture = uploadSourceSnapshotFixture()
+    const created = uploadSourceSnapshot('create-upload-source-snapshot', [
+      '--source', fixture.source,
+      '--destination', fixture.destination,
+    ])
+    expect(created.status, created.stderr).toBe(0)
+    const proof = JSON.parse(created.stdout) as { tree_sha256: string }
+    const snapshotAsset = join(fixture.destination, 'assets', 'asset.txt')
+    chmodSync(fixture.destination, 0o700)
+    chmodSync(join(fixture.destination, 'assets'), 0o700)
+    chmodSync(snapshotAsset, 0o600)
+    writeFileSync(snapshotAsset, 'mutated upload bytes\n')
+    chmodSync(snapshotAsset, 0o400)
+    chmodSync(join(fixture.destination, 'assets'), 0o500)
+    chmodSync(fixture.destination, 0o500)
+
+    const verified = uploadSourceSnapshot('verify-upload-source-snapshot', [
+      '--directory', fixture.destination,
+      '--tree-sha256', proof.tree_sha256,
+    ])
+    expect(verified).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload source snapshot\n',
+    })
+  })
+
+  it('rejects a source file swapped to a symlink after directory enumeration', () => {
+    const fixture = uploadSourceSnapshotFixture()
+    const outside = join(fixture.directory, 'outside.txt')
+    const preload = join(fixture.directory, 'swap-after-enumeration.cjs')
+    writeFileSync(outside, 'sealed asset\n')
+    writeFileSync(preload, String.raw`
+const fs = require('node:fs')
+const original = fs.readdirSync
+fs.readdirSync = function (path, ...args) {
+  const entries = original.call(this, path, ...args)
+  if (path === process.env.SWAP_DIRECTORY && !process.env.SWAP_DONE) {
+    process.env.SWAP_DONE = '1'
+    fs.unlinkSync(process.env.SWAP_PATH)
+    fs.symlinkSync(process.env.SWAP_TARGET, process.env.SWAP_PATH)
+  }
+  return entries
+}
+`)
+
+    const created = uploadSourceSnapshot('create-upload-source-snapshot', [
+      '--source', fixture.source,
+      '--destination', fixture.destination,
+    ], {
+      NODE_OPTIONS: `--require=${preload}`,
+      SWAP_DIRECTORY: dirname(fixture.asset),
+      SWAP_PATH: fixture.asset,
+      SWAP_TARGET: outside,
+    })
+    expect(created).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload source snapshot\n',
+    })
+    expect(lstatSync(fixture.asset).isSymbolicLink()).toBe(true)
+  })
+
+  it('forwards safe bound paths as one Wrangler argv and rejects shell-unsafe paths first', async () => {
+    const fixture = uploadAssetsFixture('placeholder')
+    writeFileSync(
+      fixture.configPath,
+      `[assets]\ndirectory = ${JSON.stringify(fixture.uploadAssetsDirectory)}\n`,
+    )
+    const bound = bindUploadAssetsDirectory(fixture.configPath, fixture.uploadSourceDirectory)
+    expect(bound.status, bound.stderr).toBe(0)
+    const snapshot = uploadSourceSnapshotFixture()
+    const created = uploadSourceSnapshot('create-upload-source-snapshot', [
+      '--source', snapshot.source,
+      '--destination', snapshot.destination,
+    ])
+    expect(created.status, created.stderr).toBe(0)
+    const forwardedAssets = join(snapshot.destination, 'assets')
+    const unsafeDestination = join(dirname(snapshot.destination), 'unsafe snapshot;meta')
+    const rejectedDestination = uploadSourceSnapshot('create-upload-source-snapshot', [
+      '--source', snapshot.source,
+      '--destination', unsafeDestination,
+    ])
+    expect(rejectedDestination).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload source snapshot\n',
+    })
+
+    const fakeBin = join(dirname(fixture.configPath), 'fake-bin')
+    const argvPath = join(dirname(fixture.configPath), 'wrangler-argv.json')
+    mkdirSync(fakeBin)
+    writeFileSync(join(fakeBin, 'npm'), `#!/usr/bin/env node
+const { spawnSync } = require('node:child_process')
+const args = process.argv.slice(2)
+if (args.shift() !== 'exec' || args.shift() !== 'wrangler') process.exit(90)
+const passthrough = args.indexOf('--')
+if (passthrough < 0) process.exit(91)
+args.splice(passthrough, 1)
+const result = spawnSync('wrangler', args, { env: process.env, stdio: 'inherit' })
+process.exit(result.status ?? 92)
+`)
+    writeFileSync(join(fakeBin, 'wrangler'), `#!/usr/bin/env node
+require('node:fs').writeFileSync(process.env.WRANGLER_ARGV_PATH, JSON.stringify(process.argv.slice(2)))
+`)
+    chmodSync(join(fakeBin, 'npm'), 0o755)
+    chmodSync(join(fakeBin, 'wrangler'), 0o755)
+    const runWranglerPath = join(
+      process.cwd(),
+      'node_modules', '@opennextjs', 'cloudflare', 'dist',
+      'cli', 'commands', 'utils', 'run-wrangler.js',
+    )
+    const { runWrangler } = await import(pathToFileURL(runWranglerPath).href)
+    const forwarded = runWrangler({
+      packager: 'npm',
+      monorepoRoot: process.cwd(),
+    }, [
+      'versions upload',
+      '--config', fixture.configPath,
+      '--message', 'issue-23-safe-upload-1',
+      '--assets', forwardedAssets,
+    ], {
+      logging: 'none',
+      env: {
+        PATH: `${fakeBin}${delimiter}${process.env.PATH}`,
+        WRANGLER_ARGV_PATH: argvPath,
+      },
+    })
+    expect(forwarded.success).toBe(true)
+    expect(JSON.parse(readFileSync(argvPath, 'utf8'))).toEqual([
+      'versions', 'upload',
+      '--config', fixture.configPath,
+      '--message', 'issue-23-safe-upload-1',
+      '--assets', forwardedAssets,
+    ])
+
+    const unsafeSource = join(dirname(fixture.uploadSourceDirectory), 'unsafe source;meta', '.open-next')
+    const unsafeAssets = join(unsafeSource, 'assets')
+    mkdirSync(unsafeAssets, { recursive: true })
+    writeFileSync(
+      fixture.configPath,
+      `[assets]\ndirectory = ${JSON.stringify(unsafeAssets)}\n`,
+    )
+    const unsafe = bindUploadAssetsDirectory(fixture.configPath, unsafeSource)
+    expect(unsafe).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload assets binding\n',
+    })
   })
 
   it('stops at a failed empty-database plan after reset proof and before migrations', async () => {
