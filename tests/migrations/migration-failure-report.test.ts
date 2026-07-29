@@ -248,7 +248,7 @@ if (mode === 'query-seven-cloudflare-error' && callCount === 1) {
   emit(JSON.stringify([{ success: true, results: [{ count: 1 }] }]))
 } else if (sql.includes("WHERE lower(name) IN")) {
   emit(JSON.stringify([{ success: true, results: [{ count: 0 }] }]))
-} else if (sql.includes("name NOT LIKE 'sqlite_%'")) {
+} else if (sql.includes('COUNT(*) AS count') && sql.includes('migration_ledger')) {
   emit(JSON.stringify([{ success: true, results: [{ count: ['schema-contract', 'business-schema', 'query-seven-cloudflare-error'].includes(mode) ? 1 : 0 }] }]))
 } else if (mode === 'schema-contract') {
   emit(JSON.stringify([{ success: true, results: [{ issue: 'sensitive schema detail' }] }]))

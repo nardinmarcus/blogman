@@ -236,19 +236,19 @@ function createSealFixture() {
         raw_job_log_sha256: '9'.repeat(64),
       },
       canonical_long_migration_runner: {
-        run_id: 30323510707,
-        job_id: 90164062444,
-        head_sha: 'dde9e4abe1e2d6b31fac38c74716db6f745ab28a',
-        head_tree: '9400b7a5a8c2318c21595f5d68d543133fc67805',
+        run_id: 30431198339,
+        job_id: 90508593330,
+        head_sha: '91b223430ae92e3510d6767166c112aa94230282',
+        head_tree: 'ddbe51814fb037dce98d1aa73b8c1f5b008c8d43',
         status: 'completed',
         conclusion: 'success',
         test_files_passed: 1,
         test_files_total: 1,
         tests_passed: 46,
         tests_total: 46,
-        raw_job_log_sha256: 'e80e80768615b8bdb16499ede1e4b5216374ce4e544a3793b807afee881080bc',
+        raw_job_log_sha256: 'd43a3d6f616a3b2adb55a08b1bc6a17c1d64e737c2b8756b81c64969bc46bc48',
         coverage: {
-          migration_runner_source_blob: '6d29b7c6383a2605793ca39829e3eba02b0ccaa6',
+          migration_runner_source_blob: '89315421c9179aa5740dbe5ab97207373b9f8860',
           migration_runner_test_blob: '6151348a3030676ca6718737393e29962c0b81d6',
           ledger_migrations_tree: 'aecf5d95f3e96084e67aaf9018d35ce85b9000cc',
           package_lock_blob: '18c04f636fa0d4a0dd54eafbecfb083cad024428',
@@ -398,6 +398,33 @@ describe('Issue #23 local reseal package generation', () => {
   it('seals a canonical local-only T0 quartet through the public CLI', () => {
     const fixture = createSealFixture()
     try {
+      const input = JSON.parse(readFileSync(fixture.inputPath, 'utf8'))
+      expect(input.github_evidence.canonical_long_migration_runner).toEqual({
+        run_id: 30431198339,
+        job_id: 90508593330,
+        head_sha: '91b223430ae92e3510d6767166c112aa94230282',
+        head_tree: 'ddbe51814fb037dce98d1aa73b8c1f5b008c8d43',
+        status: 'completed',
+        conclusion: 'success',
+        test_files_passed: 1,
+        test_files_total: 1,
+        tests_passed: 46,
+        tests_total: 46,
+        raw_job_log_sha256: 'd43a3d6f616a3b2adb55a08b1bc6a17c1d64e737c2b8756b81c64969bc46bc48',
+        coverage: {
+          migration_runner_source_blob: '89315421c9179aa5740dbe5ab97207373b9f8860',
+          migration_runner_test_blob: '6151348a3030676ca6718737393e29962c0b81d6',
+          ledger_migrations_tree: 'aecf5d95f3e96084e67aaf9018d35ce85b9000cc',
+          package_lock_blob: '18c04f636fa0d4a0dd54eafbecfb083cad024428',
+          schema_blob: '9585b5fdc67811d8f3b70b1fad3c0afbf42496f9',
+          seed_template_blob: '14beef7572457a5c85ad571ba1d0edc37f1f1f64',
+          historical_migrations_tree: '349ae025fa89f487bb7e65870c1c423fcf122650',
+          wrangler_config_blob: 'bc57f24fa1ce2a5699ea340256eb24593421463f',
+          ai_provider_profiles_blob: '9d1f521268875f2a984de6d52e4caf8dbd77708b',
+          ai_post_generator_constants_blob: 'd34700c62cf1f2dcaef1ee6d6a28d3d51b4767c1',
+        },
+      })
+
       const result = spawnSync(process.execPath, [
         cliPath,
         'seal',
