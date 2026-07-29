@@ -248,7 +248,7 @@ function createSealFixture() {
         tests_total: 46,
         raw_job_log_sha256: 'd43a3d6f616a3b2adb55a08b1bc6a17c1d64e737c2b8756b81c64969bc46bc48',
         coverage: {
-          migration_runner_source_blob: '89315421c9179aa5740dbe5ab97207373b9f8860',
+          migration_runner_source_blob: 'e026c61529c6f96d30f4415a0697ad70a8ba38c4',
           migration_runner_test_blob: '6151348a3030676ca6718737393e29962c0b81d6',
           ledger_migrations_tree: 'aecf5d95f3e96084e67aaf9018d35ce85b9000cc',
           package_lock_blob: '18c04f636fa0d4a0dd54eafbecfb083cad024428',
@@ -412,7 +412,7 @@ describe('Issue #23 local reseal package generation', () => {
         tests_total: 46,
         raw_job_log_sha256: 'd43a3d6f616a3b2adb55a08b1bc6a17c1d64e737c2b8756b81c64969bc46bc48',
         coverage: {
-          migration_runner_source_blob: '89315421c9179aa5740dbe5ab97207373b9f8860',
+          migration_runner_source_blob: 'e026c61529c6f96d30f4415a0697ad70a8ba38c4',
           migration_runner_test_blob: '6151348a3030676ca6718737393e29962c0b81d6',
           ledger_migrations_tree: 'aecf5d95f3e96084e67aaf9018d35ce85b9000cc',
           package_lock_blob: '18c04f636fa0d4a0dd54eafbecfb083cad024428',

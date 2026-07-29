@@ -416,6 +416,29 @@ describe('remote migration plan failure reports', () => {
     expect(calls.filter((call) => call.transport === 'command').length).toBeGreaterThan(0)
   })
 
+  it('strips leading SQL comments before remote read-only command transport', () => {
+    const fixture = createFixture()
+    writeFileSync(
+      join(fixture.migrations, '001_initial.preflight.sql'),
+      '-- leading preflight comment\n-- second preflight comment\nSELECT NULL AS issue WHERE 0;\n',
+    )
+    const observation = join(fixture.root, 'comment-transport-argv.jsonl')
+    const applyState = join(fixture.root, 'apply-state')
+    const result = runApply(fixture, 'apply-stop-after-write', {
+      FAKE_TRANSPORT_OBSERVATION: observation,
+      FAKE_APPLY_STATE: applyState,
+    })
+
+    expect(result.status).toBe(1)
+    const calls = readFileSync(observation, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { transport: string; sql: string })
+    const preflightReads = calls.filter((call) => call.sql.includes('SELECT NULL AS issue WHERE 0'))
+    expect(preflightReads).toHaveLength(4)
+    expect(preflightReads.every((call) => !/^(?:EXPLAIN\s+)?--/.test(call.sql))).toBe(true)
+  })
+
   it.each(['error', 'none'])('forces private Wrangler JSON output when the parent log level is %s', (parentLogLevel) => {
     const fixture = createFixture()
     const report = join(fixture.root, `${parentLogLevel}-success.json`)
