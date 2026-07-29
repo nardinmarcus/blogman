@@ -387,7 +387,7 @@
               ],
               "properties": {
                 "migration_runner_source_blob": {
-                  "const": "89315421c9179aa5740dbe5ab97207373b9f8860"
+                  "const": "e026c61529c6f96d30f4415a0697ad70a8ba38c4"
                 },
                 "migration_runner_test_blob": {
                   "const": "6151348a3030676ca6718737393e29962c0b81d6"
