@@ -19,6 +19,13 @@ const repoRoot = process.cwd()
 const temporaryDirectories: string[] = []
 const baselineSha256 = 'b3f61982cc36ff2c88d7b4330dd304ef075b5c5c34debf4499671c33ae2b6540'
 const replacementSha256 = '90c94ce79e77d3ca3ab22fc67f702243e7305bcd1860f3d1feb2026fb56b4a03'
+const invalidCountRows = [
+  ['empty rows', []],
+  ['missing count', [{}]],
+  ['non-numeric count', [{ count: 'not-a-number' }]],
+  ['negative count', [{ count: -1 }]],
+  ['extra row', [{ count: 0 }, { count: 0 }]],
+] as const
 
 function sha256(source: string): string {
   return createHash('sha256').update(source).digest('hex')
@@ -66,6 +73,12 @@ const applicationObjects = schemaObjects.filter((object) => {
     && object.name === object.tbl_name
     && ['_cf_KV', '_cf_METADATA'].includes(object.name))
 })
+const ledgerCountRows = process.env.FAKE_LEDGER_COUNT_ROWS
+  ? JSON.parse(process.env.FAKE_LEDGER_COUNT_ROWS)
+  : [{ count: 0 }]
+const applicationCountRows = process.env.FAKE_APPLICATION_COUNT_ROWS
+  ? JSON.parse(process.env.FAKE_APPLICATION_COUNT_ROWS)
+  : [{ count: applicationObjects.length }]
 appendFileSync(process.env.FAKE_OBSERVATION, JSON.stringify({
   sql,
   arguments: process.argv.slice(2),
@@ -73,9 +86,9 @@ appendFileSync(process.env.FAKE_OBSERVATION, JSON.stringify({
 }) + '\\n')
 const emit = (results) => process.stdout.write(JSON.stringify([{ success: true, results }]))
 if (sql.includes("WHERE lower(name) IN")) {
-  emit([{ count: 0 }])
+  emit(ledgerCountRows)
 } else if (sql.includes('COUNT(*) AS count') && sql.includes('migration_ledger')) {
-  emit([{ count: applicationObjects.length }])
+  emit(applicationCountRows)
 } else if (process.env.FAKE_FAIL_OBJECT_TYPE
   && !sql.startsWith('EXPLAIN ')
   && sql.includes("sqlite_schema.type = '" + process.env.FAKE_FAIL_OBJECT_TYPE + "'")) {
@@ -272,6 +285,27 @@ afterEach(() => {
 })
 
 describe('remote baseline replacement runner', () => {
+  it.each(['ledger', 'application'].flatMap((query) => (
+    invalidCountRows.map(([shape, rows]) => [query, shape, rows] as const)
+  )))('fails closed on invalid %s count response: %s', (query, _shape, rows) => {
+    const fixture = createFixture()
+    const environmentKey = query === 'ledger'
+      ? 'FAKE_LEDGER_COUNT_ROWS'
+      : 'FAKE_APPLICATION_COUNT_ROWS'
+
+    const { report, result } = runPlan(fixture, {
+      [environmentKey]: JSON.stringify(rows),
+    })
+
+    expect(result.status).toBe(1)
+    expect(readFailure(report)).toMatchObject({
+      failure_domain: 'schema_contract',
+      phase: 'schema_validation',
+      query_ordinal: query === 'ledger' ? 1 : 2,
+      exit_class: 'runner_error',
+    })
+  })
+
   it.each([
     ['no schema objects', []],
     ['only known Cloudflare internal tables', [

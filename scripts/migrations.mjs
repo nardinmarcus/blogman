@@ -967,11 +967,21 @@ function sqlLiteral(value) {
   return `'${String(value).replaceAll("'", "''")}'`
 }
 
+function readCount(rows, context) {
+  const row = rows[0]
+  if (rows.length !== 1 || !row || typeof row !== 'object' || Array.isArray(row)
+    || Object.keys(row).length !== 1 || !Object.hasOwn(row, 'count')
+    || typeof row.count !== 'number' || !Number.isSafeInteger(row.count) || row.count < 0) {
+    schemaContractFail(`${context} response is invalid`)
+  }
+  return row.count
+}
+
 function ledgerArtifactsExist(client) {
   const rows = client.query(
     "SELECT COUNT(*) AS count FROM sqlite_schema WHERE lower(name) IN ('migration_ledger', 'migration_ledger_no_update', 'migration_ledger_no_delete', 'migration_ledger_no_replace')",
   )
-  return Number(rows[0]?.count) > 0
+  return readCount(rows, 'Migration ledger count') > 0
 }
 
 function normalizeSchemaSql(sql) {
@@ -1039,7 +1049,7 @@ WHERE lower(name) NOT GLOB 'sqlite_*'
     AND name IN ('_cf_KV', '_cf_METADATA')
   )
 `)
-  return Number(rows[0]?.count) > 0
+  return readCount(rows, 'Application object count') > 0
 }
 
 function ledgerInsertSql(migration, candidate) {
