@@ -34,22 +34,21 @@ describe('Issue #23 Phase B runbook order', () => {
       command.startsWith('WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" node scripts/phase-b-sequence.mjs')
       && command.includes('run-upload-source-lifecycle')
     ))
-    const snapshotProof = commands.findIndex((command) => (
-      command.startsWith('node scripts/issue-23-reseal.mjs verify-build-directory')
-      && command.includes('--directory "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY"')
-      && command.includes('> "$REPORT_DIR/upload-build-directory-proof.json"')
-    ))
     const acceptVersion = commands.findIndex((command) => command.startsWith("jq -s -e '[.[] | select(.type == \"version-upload\""))
     return sourceProof >= 0
       && lifecycle > sourceProof
       && upload === lifecycle
+      && commands.includes('UPLOAD_BUILD_DIRECTORY_PROOF="$REPORT_DIR/upload-build-directory-proof.json"')
+      && commands.includes('install -m 600 /dev/null "$UPLOAD_BUILD_DIRECTORY_PROOF"')
       && commands[lifecycle - 1] === 'verify_config_identity'
       && commands[lifecycle].includes('--source "$UPLOAD_SOURCE_DIRECTORY"')
       && commands[lifecycle].includes('--destination "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY"')
       && commands[lifecycle].includes('--proof-before "$UPLOAD_SOURCE_SNAPSHOT_PROOF"')
       && commands[lifecycle].includes('--proof-after "$UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER"')
-      && snapshotProof > lifecycle
-      && acceptVersion > snapshotProof
+      && commands[lifecycle].includes('--archive "$BUILD_ZIP"')
+      && commands[lifecycle].includes('--archive-sha256 "$BUILD_SHA256"')
+      && commands[lifecycle].includes('--build-proof "$UPLOAD_BUILD_DIRECTORY_PROOF"')
+      && acceptVersion > lifecycle
   }
 
   const hasResetResponseValidationOrder = (runbook: string) => {
@@ -107,7 +106,7 @@ describe('Issue #23 Phase B runbook order', () => {
     expect(runbook).toContain('pre-cas-build-directory-proof.json')
     expect(hasTightUploadSourceProof(runbook)).toBe(true)
     expect(runbook).toContain(
-      'BUILD_DIRECTORY_PROOF_SHA256=$(shasum -a 256 "$REPORT_DIR/upload-build-directory-proof.json"',
+      'BUILD_DIRECTORY_PROOF_SHA256=$(shasum -a 256 "$UPLOAD_BUILD_DIRECTORY_PROOF"',
     )
     expect(runbook).toContain(
       '--build-directory-proof "$REPORT_DIR/upload-build-directory-proof.json"',

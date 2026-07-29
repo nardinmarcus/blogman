@@ -5,13 +5,17 @@ import {
   closeSync,
   constants,
   fstatSync,
+  fsyncSync,
+  ftruncateSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -327,7 +331,8 @@ function identityEntry(path, type, stat) {
 }
 
 function holdStablePath(path, type, mode) {
-  if (!isAbsolute(path) || path !== resolve(path) || !shellSafeAbsolutePath.test(path)) {
+  if (!isAbsolute(path) || path !== resolve(path)
+    || (path !== '/' && !shellSafeAbsolutePath.test(path))) {
     throw new Error()
   }
   const descriptor = openSync(
@@ -351,6 +356,45 @@ function holdStablePath(path, type, mode) {
   }
 }
 
+function absolutePathChain(path) {
+  if (!isAbsolute(path) || path !== resolve(path) || !shellSafeAbsolutePath.test(path)) {
+    throw new Error()
+  }
+  const chain = ['/']
+  let current = '/'
+  for (const component of path.split('/').filter(Boolean)) {
+    current = join(current, component)
+    chain.push(current)
+  }
+  return chain
+}
+
+function holdStablePathChain(path, type, mode) {
+  const chain = absolutePathChain(path)
+  const held = []
+  try {
+    for (const [index, entry] of chain.entries()) {
+      held.push(holdStablePath(
+        entry,
+        index === chain.length - 1 ? type : 'directory',
+        index === chain.length - 1 ? mode : undefined,
+      ))
+    }
+    return held
+  } catch (error) {
+    for (const path of held.reverse()) closeSync(path.descriptor)
+    throw error
+  }
+}
+
+function commonAncestor(paths) {
+  const [first, ...rest] = paths
+  const candidates = absolutePathChain(first).reverse()
+  const common = candidates.find((path) => rest.every((entry) => isWithin(path, entry)))
+  if (!common) throw new Error()
+  return common
+}
+
 function refreshHeldPath(held) {
   const after = fstatSync(held.descriptor, { bigint: true })
   const current = lstatSync(held.path, { bigint: true })
@@ -368,32 +412,137 @@ function verifyHeldPath(held) {
   const after = fstatSync(held.descriptor, { bigint: true })
   const current = lstatSync(held.path, { bigint: true })
   if ((held.type === 'directory' ? !after.isDirectory() : !after.isFile())
-    || !sameIdentity(held.before, after)
+    || (held.expectedMode !== undefined
+      && (after.mode & 0o777n) !== BigInt(held.expectedMode))
+    || (held.strictMetadata
+      ? !sameIdentity(held.before, after)
+      : held.before.dev !== after.dev || held.before.ino !== after.ino)
     || !sameIdentity(after, current)
     || realpathSync(held.path) !== held.path) {
-    throw new Error()
+    throw new Error(`held path changed: ${held.path}`)
   }
 }
 
-function requirePreparedEvidenceFile(path, reportDirectory) {
+function readHeldBytes(descriptor, size) {
+  if (size > 16n * 1024n * 1024n || size > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error()
+  }
+  const bytes = Buffer.alloc(Number(size))
+  let offset = 0
+  while (offset < bytes.length) {
+    const count = readSync(descriptor, bytes, offset, bytes.length - offset, offset)
+    if (count === 0) throw new Error()
+    offset += count
+  }
+  return bytes
+}
+
+function evidenceState(held) {
+  const stat = fstatSync(held.descriptor, { bigint: true })
+  const current = lstatSync(held.path, { bigint: true })
+  if (!stat.isFile()
+    || stat.dev !== held.dev || stat.ino !== held.ino
+    || stat.uid !== held.uid || stat.nlink !== 1n
+    || (stat.mode & 0o777n) !== 0o600n
+    || !sameIdentity(stat, current)
+    || realpathSync(held.path) !== held.path) {
+    throw new Error()
+  }
+  return Object.freeze({ bytes: readHeldBytes(held.descriptor, stat.size), stat })
+}
+
+function holdEvidenceFile(path, reportDirectory) {
   if (!isAbsolute(path) || path !== resolve(path) || !shellSafeAbsolutePath.test(path)
     || dirname(path) !== reportDirectory) {
     throw new Error()
   }
-  const stat = lstatSync(path)
-  if (!stat.isFile() || (stat.mode & 0o777) !== 0o600 || realpathSync(path) !== path) {
+  const descriptor = openSync(path, constants.O_RDWR | constants.O_NOFOLLOW)
+  try {
+    const stat = fstatSync(descriptor, { bigint: true })
+    const held = {
+      descriptor,
+      dev: stat.dev,
+      ino: stat.ino,
+      path,
+      uid: BigInt(process.getuid()),
+    }
+    const initial = evidenceState(held)
+    if (initial.bytes.length !== 0) throw new Error()
+    return held
+  } catch (error) {
+    closeSync(descriptor)
+    throw error
+  }
+}
+
+function writeHeldEvidence(held, bytes) {
+  const contents = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
+  ftruncateSync(held.descriptor, 0)
+  let offset = 0
+  while (offset < contents.length) {
+    offset += writeSync(
+      held.descriptor,
+      contents,
+      offset,
+      contents.length - offset,
+      offset,
+    )
+  }
+  fsyncSync(held.descriptor)
+  const state = evidenceState(held)
+  if (!state.bytes.equals(contents)) throw new Error()
+  held.expected = Object.freeze({ bytes: contents, stat: state.stat })
+}
+
+function captureHeldEvidence(held, requireNonempty = false) {
+  const state = evidenceState(held)
+  if (requireNonempty && state.bytes.length === 0) throw new Error()
+  held.expected = state
+  return state.bytes
+}
+
+function verifyHeldEvidence(held) {
+  const state = evidenceState(held)
+  if (!held.expected
+    || !sameIdentity(held.expected.stat, state.stat)
+    || !held.expected.bytes.equals(state.bytes)) {
     throw new Error()
   }
 }
 
-function writeSnapshotProof(path, state, proof, destination) {
-  writeFileSync(path, `${JSON.stringify({
+function snapshotProofBytes(state, proof, destination) {
+  return Buffer.from(`${JSON.stringify({
     format: 'blogman-upload-source-snapshot/v1',
     state,
     worker_script: join(destination, 'worker.js'),
     assets_directory: join(destination, 'assets'),
     ...proof,
   })}\n`)
+}
+
+function verifyFrozenSnapshotAgainstArchive(archive, destination, archiveSha256) {
+  if (!sha256.test(archiveSha256 || '')) throw new Error()
+  const verification = spawnSync(process.execPath, [
+    join(process.cwd(), 'scripts', 'issue-23-reseal.mjs'),
+    'verify-build-directory',
+    '--archive', archive,
+    '--directory', destination,
+    '--archive-sha256', archiveSha256,
+  ], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    env: process.env,
+  })
+  if (verification.error || verification.status !== 0) throw new Error()
+  const proof = JSON.parse(verification.stdout)
+  if (!hasExactKeys(proof, ['archive_sha256', 'file_count', 'format', 'state'])
+    || proof.format !== 'blogman-build-directory-proof/v1'
+    || proof.state !== 'matched'
+    || proof.archive_sha256 !== archiveSha256
+    || !isPositiveSafeInteger(proof.file_count)) {
+    throw new Error()
+  }
+  return Buffer.from(`${JSON.stringify(proof)}\n`)
 }
 
 function stableRegularFileBytes(path) {
@@ -590,6 +739,9 @@ function verifyUploadSourceSnapshot(directory, expectedTreeSha256, expectedIdent
 }
 
 async function runUploadSourceLifecycle({
+  archive,
+  archiveSha256,
+  buildProofPath,
   config,
   source,
   destination,
@@ -599,24 +751,45 @@ async function runUploadSourceLifecycle({
 }) {
   if (!uploadOperationId.test(operationId || '')) throw new Error()
   const reportDirectory = dirname(destination)
-  const reportAncestor = dirname(reportDirectory)
   const uploadOutputPath = process.env.WRANGLER_OUTPUT_FILE_PATH
-  requirePreparedEvidenceFile(proofBeforePath, reportDirectory)
-  requirePreparedEvidenceFile(proofAfterPath, reportDirectory)
-  requirePreparedEvidenceFile(uploadOutputPath, reportDirectory)
-
   const held = []
+  const evidence = []
   try {
-    held.push(holdStablePath(reportAncestor, 'directory'))
-    const heldReportDirectory = holdStablePath(reportDirectory, 'directory', 0o700)
-    held.push(heldReportDirectory)
-    held.push(holdStablePath(dirname(config), 'directory'))
-    held.push(holdStablePath(config, 'file'))
+    held.push(...holdStablePathChain(reportDirectory, 'directory', 0o700))
+    held.push(...holdStablePathChain(config, 'file'))
+    held.push(...holdStablePathChain(source, 'directory'))
+    held.push(...holdStablePathChain(archive, 'file'))
+    const stabilityRoot = commonAncestor([reportDirectory, config, source, archive])
+    for (const path of held) path.strictMetadata = isWithin(stabilityRoot, path.path)
+    const beforeEvidence = holdEvidenceFile(proofBeforePath, reportDirectory)
+    evidence.push(beforeEvidence)
+    const afterEvidence = holdEvidenceFile(proofAfterPath, reportDirectory)
+    evidence.push(afterEvidence)
+    const buildEvidence = holdEvidenceFile(buildProofPath, reportDirectory)
+    evidence.push(buildEvidence)
+    const uploadEvidence = holdEvidenceFile(uploadOutputPath, reportDirectory)
+    evidence.push(uploadEvidence)
+
     await bindUploadAssetsDirectory(config, source)
     const before = copyUploadSourceSnapshot(source, destination)
-    refreshHeldPath(heldReportDirectory)
-    held.push(holdStablePath(destination, 'directory', 0o500))
-    writeSnapshotProof(proofBeforePath, 'created', before, destination)
+    for (const path of held.filter((entry) => entry.path === reportDirectory)) {
+      refreshHeldPath(path)
+    }
+    const snapshotChain = holdStablePathChain(destination, 'directory', 0o500)
+    for (const path of snapshotChain) path.strictMetadata = isWithin(stabilityRoot, path.path)
+    held.push(...snapshotChain)
+    const buildProof = verifyFrozenSnapshotAgainstArchive(
+      archive,
+      destination,
+      archiveSha256,
+    )
+    for (const path of held) refreshHeldPath(path)
+    writeHeldEvidence(buildEvidence, buildProof)
+    writeHeldEvidence(beforeEvidence, snapshotProofBytes('created', before, destination))
+    captureHeldEvidence(afterEvidence)
+    captureHeldEvidence(uploadEvidence)
+    for (const path of held) verifyHeldPath(path)
+    for (const file of evidence) verifyHeldEvidence(file)
 
     const upload = spawnSync('npm', [
       'exec', '--', 'opennextjs-cloudflare', 'upload',
@@ -628,15 +801,26 @@ async function runUploadSourceLifecycle({
       stdio: 'inherit',
     })
 
+    captureHeldEvidence(uploadEvidence, true)
     const after = verifyUploadSourceSnapshot(
       destination,
       before.tree_sha256,
       before.identity_sha256,
     )
+    const buildProofAfter = verifyFrozenSnapshotAgainstArchive(
+      archive,
+      destination,
+      archiveSha256,
+    )
+    if (!buildProofAfter.equals(buildProof)) throw new Error()
     for (const path of held) verifyHeldPath(path)
+    for (const file of evidence) verifyHeldEvidence(file)
     if (upload.error || upload.status !== 0) throw new Error()
-    writeSnapshotProof(proofAfterPath, 'matched', after, destination)
+    writeHeldEvidence(afterEvidence, snapshotProofBytes('matched', after, destination))
+    for (const path of held) verifyHeldPath(path)
+    for (const file of evidence) verifyHeldEvidence(file)
   } finally {
+    for (const file of evidence.reverse()) closeSync(file.descriptor)
     for (const path of held.reverse()) closeSync(path.descriptor)
   }
 }
@@ -649,16 +833,22 @@ function isMainModule() {
 async function runCli() {
   if (process.argv[2] === 'run-upload-source-lifecycle') {
     try {
-      if (process.argv.length !== 15
+      if (process.argv.length !== 21
         || process.argv[3] !== '--config'
         || process.argv[5] !== '--source'
         || process.argv[7] !== '--destination'
         || process.argv[9] !== '--operation-id'
         || process.argv[11] !== '--proof-before'
-        || process.argv[13] !== '--proof-after') {
+        || process.argv[13] !== '--proof-after'
+        || process.argv[15] !== '--archive'
+        || process.argv[17] !== '--archive-sha256'
+        || process.argv[19] !== '--build-proof') {
         throw new Error()
       }
       await runUploadSourceLifecycle({
+        archive: process.argv[16],
+        archiveSha256: process.argv[18],
+        buildProofPath: process.argv[20],
         config: process.argv[4],
         source: process.argv[6],
         destination: process.argv[8],
