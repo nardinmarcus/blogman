@@ -304,35 +304,53 @@ function sha256Bytes(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
+function sameIdentity(left, right) {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.ctimeNs === right.ctimeNs
+    && left.mode === right.mode
+    && left.size === right.size
+}
+
+function identityEntry(path, type, stat) {
+  return Object.freeze({
+    path,
+    type,
+    dev: stat.dev.toString(),
+    ino: stat.ino.toString(),
+    ctime_ns: stat.ctimeNs.toString(),
+    mode: Number(stat.mode & 0o7777n),
+    size: stat.size.toString(),
+  })
+}
+
 function stableRegularFileBytes(path) {
   const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
-    const before = fstatSync(descriptor)
+    const before = fstatSync(descriptor, { bigint: true })
     if (!before.isFile()) throw new Error()
     const bytes = readFileSync(descriptor)
-    const after = fstatSync(descriptor)
-    const current = lstatSync(path)
+    const after = fstatSync(descriptor, { bigint: true })
+    const current = lstatSync(path, { bigint: true })
     if (!after.isFile()
-      || before.dev !== after.dev || before.ino !== after.ino
-      || before.size !== after.size || before.mtimeMs !== after.mtimeMs
-      || before.ctimeMs !== after.ctimeMs
-      || current.dev !== after.dev || current.ino !== after.ino
-      || current.size !== after.size || current.mtimeMs !== after.mtimeMs
-      || current.ctimeMs !== after.ctimeMs
+      || !sameIdentity(before, after)
+      || !sameIdentity(current, after)
       || realpathSync(path) !== path) {
       throw new Error()
     }
-    return bytes
+    return Object.freeze({ bytes, stat: before })
   } finally {
     closeSync(descriptor)
   }
 }
 
-function treeProof(entries) {
+function snapshotProof(entries, identities) {
   const canonical = Buffer.from(`${JSON.stringify(entries)}\n`)
+  const canonicalIdentities = Buffer.from(`${JSON.stringify(identities)}\n`)
   return Object.freeze({
     file_count: entries.length,
     tree_sha256: sha256Bytes(canonical),
+    identity_sha256: sha256Bytes(canonicalIdentities),
   })
 }
 
@@ -358,7 +376,6 @@ function copyUploadSourceSnapshot(source, destination) {
   }
   mkdirSync(destination, { mode: 0o700 })
 
-  const entries = []
   const visit = (sourceDirectory, destinationDirectory, relativeDirectory = '') => {
     const before = requireCanonicalDirectory(sourceDirectory)
     const names = readdirSync(sourceDirectory).sort((left, right) => left.localeCompare(right))
@@ -372,7 +389,7 @@ function copyUploadSourceSnapshot(source, destination) {
         visit(sourcePath, destinationPath, relativePath)
         chmodSync(destinationPath, 0o500)
       } else if (stat.isFile() && realpathSync(sourcePath) === sourcePath) {
-        const bytes = stableRegularFileBytes(sourcePath)
+        const { bytes } = stableRegularFileBytes(sourcePath)
         const descriptor = openSync(
           destinationPath,
           constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
@@ -384,7 +401,6 @@ function copyUploadSourceSnapshot(source, destination) {
           closeSync(descriptor)
         }
         chmodSync(destinationPath, 0o400)
-        entries.push({ path: relativePath, bytes: bytes.byteLength, sha256: sha256Bytes(bytes) })
       } else {
         throw new Error()
       }
@@ -398,41 +414,106 @@ function copyUploadSourceSnapshot(source, destination) {
   }
   visit(source, destination)
   chmodSync(destination, 0o500)
-  return treeProof(entries)
+  return collectUploadSourceSnapshotProof(destination)
 }
 
-function verifyUploadSourceSnapshot(directory, expectedTreeSha256) {
-  if (!sha256.test(expectedTreeSha256 || '')) throw new Error()
+function collectUploadSourceSnapshotProof(directory) {
   requireCanonicalDirectory(directory, 0o500)
+  requireCanonicalDirectory(dirname(directory), 0o700)
   const entries = []
-  const visit = (path, relativeDirectory = '') => {
-    const before = requireCanonicalDirectory(path, 0o500)
-    const names = readdirSync(path).sort((left, right) => left.localeCompare(right))
-    for (const name of names) {
-      const entryPath = join(path, name)
-      const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name
-      const stat = lstatSync(entryPath)
-      if (stat.isDirectory() && (stat.mode & 0o777) === 0o500
-        && realpathSync(entryPath) === entryPath) {
-        visit(entryPath, relativePath)
-      } else if (stat.isFile() && (stat.mode & 0o777) === 0o400
-        && realpathSync(entryPath) === entryPath) {
-        const bytes = stableRegularFileBytes(entryPath)
-        entries.push({ path: relativePath, bytes: bytes.byteLength, sha256: sha256Bytes(bytes) })
-      } else {
-        throw new Error()
-      }
-    }
-    const after = requireCanonicalDirectory(path, 0o500)
-    if (before.dev !== after.dev || before.ino !== after.ino
-      || JSON.stringify(readdirSync(path).sort((left, right) => left.localeCompare(right)))
-        !== JSON.stringify(names)) {
+  const identities = []
+  const parent = dirname(directory)
+  const parentDescriptor = openSync(
+    parent,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  )
+  try {
+    const parentBefore = fstatSync(parentDescriptor, { bigint: true })
+    const parentCurrent = lstatSync(parent, { bigint: true })
+    if (!parentBefore.isDirectory()
+      || (parentBefore.mode & 0o777n) !== 0o700n
+      || !sameIdentity(parentBefore, parentCurrent)
+      || realpathSync(parent) !== parent) {
       throw new Error()
     }
+
+    const visit = (path, relativeDirectory = '') => {
+      const descriptor = openSync(
+        path,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      )
+      try {
+        const before = fstatSync(descriptor, { bigint: true })
+        const current = lstatSync(path, { bigint: true })
+        if (!before.isDirectory()
+          || (before.mode & 0o777n) !== 0o500n
+          || !sameIdentity(before, current)
+          || realpathSync(path) !== path) {
+          throw new Error()
+        }
+        identities.push(identityEntry(relativeDirectory || '.', 'directory', before))
+        const names = readdirSync(path).sort((left, right) => left.localeCompare(right))
+        for (const name of names) {
+          const entryPath = join(path, name)
+          const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name
+          const stat = lstatSync(entryPath, { bigint: true })
+          if (stat.isDirectory() && (stat.mode & 0o777n) === 0o500n
+            && realpathSync(entryPath) === entryPath) {
+            visit(entryPath, relativePath)
+          } else if (stat.isFile() && (stat.mode & 0o777n) === 0o400n
+            && realpathSync(entryPath) === entryPath) {
+            const stable = stableRegularFileBytes(entryPath)
+            if ((stable.stat.mode & 0o777n) !== 0o400n) throw new Error()
+            identities.push(identityEntry(relativePath, 'file', stable.stat))
+            entries.push({
+              path: relativePath,
+              bytes: stable.bytes.byteLength,
+              sha256: sha256Bytes(stable.bytes),
+            })
+          } else {
+            throw new Error()
+          }
+        }
+        const after = fstatSync(descriptor, { bigint: true })
+        const currentAfter = lstatSync(path, { bigint: true })
+        if (!sameIdentity(before, after)
+          || !sameIdentity(after, currentAfter)
+          || JSON.stringify(readdirSync(path).sort((left, right) => left.localeCompare(right)))
+            !== JSON.stringify(names)) {
+          throw new Error()
+        }
+      } finally {
+        closeSync(descriptor)
+      }
+    }
+
+    visit(directory)
+    if (!identities.some((entry) => entry.path === 'worker.js' && entry.type === 'file')
+      || !identities.some((entry) => entry.path === 'assets' && entry.type === 'directory')) {
+      throw new Error()
+    }
+    const parentAfter = fstatSync(parentDescriptor, { bigint: true })
+    const parentCurrentAfter = lstatSync(parent, { bigint: true })
+    if (!sameIdentity(parentBefore, parentAfter)
+      || !sameIdentity(parentAfter, parentCurrentAfter)) {
+      throw new Error()
+    }
+  } finally {
+    closeSync(parentDescriptor)
   }
-  visit(directory)
-  const proof = treeProof(entries)
-  if (proof.tree_sha256 !== expectedTreeSha256) throw new Error()
+  return snapshotProof(entries, identities)
+}
+
+function verifyUploadSourceSnapshot(directory, expectedTreeSha256, expectedIdentitySha256) {
+  if (!sha256.test(expectedTreeSha256 || '')
+    || !sha256.test(expectedIdentitySha256 || '')) {
+    throw new Error()
+  }
+  const proof = collectUploadSourceSnapshotProof(directory)
+  if (proof.tree_sha256 !== expectedTreeSha256
+    || proof.identity_sha256 !== expectedIdentitySha256) {
+    throw new Error()
+  }
   return proof
 }
 
@@ -464,12 +545,17 @@ async function runCli() {
 
   if (process.argv[2] === 'verify-upload-source-snapshot') {
     try {
-      if (process.argv.length !== 7
+      if (process.argv.length !== 9
         || process.argv[3] !== '--directory'
-        || process.argv[5] !== '--tree-sha256') {
+        || process.argv[5] !== '--tree-sha256'
+        || process.argv[7] !== '--identity-sha256') {
         throw new Error()
       }
-      const proof = verifyUploadSourceSnapshot(process.argv[4], process.argv[6])
+      const proof = verifyUploadSourceSnapshot(
+        process.argv[4],
+        process.argv[6],
+        process.argv[8],
+      )
       process.stdout.write(`${JSON.stringify({
         format: 'blogman-upload-source-snapshot/v1',
         state: 'matched',

@@ -51,8 +51,10 @@ describe('Issue #23 Phase B runbook order', () => {
       && snapshotProof > snapshot
       && upload > snapshotProof
       && commands[upload - 1] === 'verify_config_identity'
+      && commands[upload].includes('"$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY/worker.js"')
       && commands[upload].includes('--assets "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY/assets"')
       && reverify > upload
+      && commands[reverify].includes('--identity-sha256 "$UPLOAD_SOURCE_SNAPSHOT_IDENTITY_SHA256"')
       && postUploadProof > reverify
       && commands[postUploadProof + 1] === 'cmp "$REPORT_DIR/upload-build-directory-proof.json" "$REPORT_DIR/upload-build-directory-proof-after.json"'
       && acceptVersion > postUploadProof

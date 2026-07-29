@@ -168,16 +168,22 @@ UPLOAD_SOURCE_SNAPSHOT_SHA256=$(jq -er \
   'select(.format == "blogman-upload-source-snapshot/v1" and .state == "created") | .tree_sha256' \
   "$REPORT_DIR/upload-source-snapshot.json")
 readonly UPLOAD_SOURCE_SNAPSHOT_SHA256
+UPLOAD_SOURCE_SNAPSHOT_IDENTITY_SHA256=$(jq -er \
+  'select(.format == "blogman-upload-source-snapshot/v1" and .state == "created") | .identity_sha256' \
+  "$REPORT_DIR/upload-source-snapshot.json")
+readonly UPLOAD_SOURCE_SNAPSHOT_IDENTITY_SHA256
 node scripts/issue-23-reseal.mjs verify-build-directory \
   --archive "$BUILD_ZIP" --directory "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY" \
   --archive-sha256 "$BUILD_SHA256" > "$REPORT_DIR/upload-build-directory-proof.json"
 verify_config_identity
 WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" npm exec -- opennextjs-cloudflare upload \
-  -c "$CONFIG" -- --message "$UPLOAD_OPERATION_ID" \
+  -c "$CONFIG" -- "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY/worker.js" \
+  --message "$UPLOAD_OPERATION_ID" \
   --assets "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY/assets"
 node scripts/phase-b-sequence.mjs verify-upload-source-snapshot \
   --directory "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY" \
   --tree-sha256 "$UPLOAD_SOURCE_SNAPSHOT_SHA256" \
+  --identity-sha256 "$UPLOAD_SOURCE_SNAPSHOT_IDENTITY_SHA256" \
   > "$REPORT_DIR/upload-source-snapshot-after.json"
 node scripts/issue-23-reseal.mjs verify-build-directory \
   --archive "$BUILD_ZIP" --directory "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY" \
@@ -200,7 +206,9 @@ jq -n --arg uploaded "$UPLOAD_COMPLETED_AT" --arg candidate "$EXPECTED_CANDIDATE
   > "$REPORT_DIR/clean-start-upload-report.json"
 ```
 
-The upload-source proof is regenerated from the actual `.open-next` directory after CAS1 and immediately before the mandatory adjacent config checks plus upload adapter. The binding command uses Wrangler's parser and config-relative semantics to require the configured `assets.directory` to resolve exactly to the verified `UPLOAD_SOURCE_DIRECTORY/assets`. The runner then copies that source through stable no-follow file descriptors into one exclusively created snapshot, freezes its directories to `0500` and files to `0400`, and proves the snapshot itself against the sealed archive. Only the snapshot's absolute `assets` directory is passed as the `--assets` source of truth for `versions upload`. The snapshot tree hash, immutable modes, no-symlink contract, and sealed archive bytes are all reverified after the upload process returns and before its version record or report is accepted. The no-other-production-writer reservation established at PRE-CAS must remain held through that post-upload reverification and version acceptance.
+The upload-source proof is regenerated from the actual `.open-next` directory after CAS1 and immediately before the mandatory adjacent config checks plus upload adapter. The binding command uses Wrangler's parser and config-relative semantics to require the configured `assets.directory` to resolve exactly to the verified `UPLOAD_SOURCE_DIRECTORY/assets`. The runner then copies that source through stable no-follow file descriptors into one exclusively created snapshot, freezes its directories to `0500` and files to `0400`, and proves the snapshot itself against the sealed archive. The snapshot's absolute `worker.js` is the positional Wrangler script and its sibling `assets` directory is the explicit `--assets` source, so the complete Worker version comes from the same frozen and sealed snapshot even when the external config has a different or missing `main`.
+
+Snapshot creation binds the root, every directory, and every file by device, inode, nanosecond ctime, mode, and size while stable parent/root/directory descriptors remain open. The separate identity hash and byte-tree hash are both reverified after the upload process returns, followed by the sealed archive proof, before any version record or report is accepted. This detects in-place mutation and swap-read-restore history even when the original bytes and names are restored. The no-other-production-writer reservation established at PRE-CAS must remain held through that post-upload reverification and version acceptance.
 
 OpenNext 1.19.10 internally forwards Wrangler arguments with `shell:true`, so every path entering this adapter must already be absolute, normalized, and match the conservative `^/[A-Za-z0-9._/-]+$` character set. Paths containing whitespace or shell metacharacters fail closed before snapshot creation or forwarding. This remains correct when the operator config directory is outside the snapshot repository. Any config or upload-directory mismatch, path alias, content mutation, symlink swap, or snapshot reuse therefore stops without accepting the upload; the earlier rehearsal proof cannot be reused. The output file may contain other Wrangler records from the OpenNext upload path, but it must contain exactly one `version-upload/v1` record. The version ID comes only from that record; `versions list | last` is forbidden. Freeze the report and prove it belongs to this candidate, sealed build bytes, fresh upload-source proof, and operation. Re-run CAS1 and D1 identity immediately before reset. If another writer changed deployment, config, D1 identity, or upload attribution, stop without reset.
 

@@ -81,6 +81,19 @@ function uploadSourceSnapshot(
   })
 }
 
+type UploadSourceSnapshotProof = {
+  tree_sha256: string
+  identity_sha256?: string
+}
+
+function snapshotVerificationArgs(directory: string, proof: UploadSourceSnapshotProof) {
+  const args = ['--directory', directory, '--tree-sha256', proof.tree_sha256]
+  if (proof.identity_sha256) {
+    args.push('--identity-sha256', proof.identity_sha256)
+  }
+  return args
+}
+
 function uploadSourceSnapshotFixture() {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-upload-source-snapshot-')))
   temporaryDirectories.push(directory)
@@ -183,7 +196,8 @@ describe('Issue #23 Phase B fixed sequence', () => {
     ])
 
     expect(created.status, created.stderr).toBe(0)
-    const proof = JSON.parse(created.stdout) as { tree_sha256: string }
+    const proof = JSON.parse(created.stdout) as UploadSourceSnapshotProof
+    expect(proof.identity_sha256).toMatch(/^[a-f0-9]{64}$/)
     expect(statSync(fixture.destination).mode & 0o777).toBe(0o500)
     expect(statSync(join(fixture.destination, 'assets', 'asset.txt')).mode & 0o777).toBe(0o400)
     const repeated = uploadSourceSnapshot('create-upload-source-snapshot', [
@@ -197,10 +211,10 @@ describe('Issue #23 Phase B fixed sequence', () => {
     })
     writeFileSync(fixture.asset, 'mutated source\n')
 
-    const verified = uploadSourceSnapshot('verify-upload-source-snapshot', [
-      '--directory', fixture.destination,
-      '--tree-sha256', proof.tree_sha256,
-    ])
+    const verified = uploadSourceSnapshot(
+      'verify-upload-source-snapshot',
+      snapshotVerificationArgs(fixture.destination, proof),
+    )
     expect(verified.status, verified.stderr).toBe(0)
     expect(readFileSync(join(fixture.destination, 'assets', 'asset.txt'), 'utf8'))
       .toBe('sealed asset\n')
@@ -213,7 +227,7 @@ describe('Issue #23 Phase B fixed sequence', () => {
       '--destination', fixture.destination,
     ])
     expect(created.status, created.stderr).toBe(0)
-    const proof = JSON.parse(created.stdout) as { tree_sha256: string }
+    const proof = JSON.parse(created.stdout) as UploadSourceSnapshotProof
     const snapshotAsset = join(fixture.destination, 'assets', 'asset.txt')
     chmodSync(fixture.destination, 0o700)
     chmodSync(join(fixture.destination, 'assets'), 0o700)
@@ -223,10 +237,33 @@ describe('Issue #23 Phase B fixed sequence', () => {
     chmodSync(join(fixture.destination, 'assets'), 0o500)
     chmodSync(fixture.destination, 0o500)
 
-    const verified = uploadSourceSnapshot('verify-upload-source-snapshot', [
-      '--directory', fixture.destination,
-      '--tree-sha256', proof.tree_sha256,
+    const verified = uploadSourceSnapshot(
+      'verify-upload-source-snapshot',
+      snapshotVerificationArgs(fixture.destination, proof),
+    )
+    expect(verified).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload source snapshot\n',
+    })
+  })
+
+  it('rejects restored metadata-only changes to a snapshot file', () => {
+    const fixture = uploadSourceSnapshotFixture()
+    const created = uploadSourceSnapshot('create-upload-source-snapshot', [
+      '--source', fixture.source,
+      '--destination', fixture.destination,
     ])
+    expect(created.status, created.stderr).toBe(0)
+    const proof = JSON.parse(created.stdout) as UploadSourceSnapshotProof
+    const snapshotWorker = join(fixture.destination, 'worker.js')
+    chmodSync(snapshotWorker, 0o600)
+    chmodSync(snapshotWorker, 0o400)
+
+    const verified = uploadSourceSnapshot(
+      'verify-upload-source-snapshot',
+      snapshotVerificationArgs(fixture.destination, proof),
+    )
     expect(verified).toMatchObject({
       status: 1,
       stdout: '',
@@ -285,6 +322,7 @@ fs.readdirSync = function (path, ...args) {
     ])
     expect(created.status, created.stderr).toBe(0)
     const forwardedAssets = join(snapshot.destination, 'assets')
+    const forwardedWorker = join(snapshot.destination, 'worker.js')
     const unsafeDestination = join(dirname(snapshot.destination), 'unsafe snapshot;meta')
     const rejectedDestination = uploadSourceSnapshot('create-upload-source-snapshot', [
       '--source', snapshot.source,
@@ -320,14 +358,26 @@ require('node:fs').writeFileSync(process.env.WRANGLER_ARGV_PATH, JSON.stringify(
       'cli', 'commands', 'utils', 'run-wrangler.js',
     )
     const { runWrangler } = await import(pathToFileURL(runWranglerPath).href)
+    const wranglerArgsPath = join(
+      process.cwd(),
+      'node_modules', '@opennextjs', 'cloudflare', 'dist',
+      'cli', 'commands', 'utils', 'utils.js',
+    )
+    const { withWranglerPassthroughArgs } = await import(pathToFileURL(wranglerArgsPath).href)
+    const wranglerArgs = withWranglerPassthroughArgs({
+      config: fixture.configPath,
+      args: [
+        forwardedWorker,
+        '--message', 'issue-23-safe-upload-1',
+        '--assets', forwardedAssets,
+      ],
+    }).wranglerArgs
     const forwarded = runWrangler({
       packager: 'npm',
       monorepoRoot: process.cwd(),
     }, [
       'versions upload',
-      '--config', fixture.configPath,
-      '--message', 'issue-23-safe-upload-1',
-      '--assets', forwardedAssets,
+      ...wranglerArgs,
     ], {
       logging: 'none',
       env: {
@@ -339,6 +389,7 @@ require('node:fs').writeFileSync(process.env.WRANGLER_ARGV_PATH, JSON.stringify(
     expect(JSON.parse(readFileSync(argvPath, 'utf8'))).toEqual([
       'versions', 'upload',
       '--config', fixture.configPath,
+      forwardedWorker,
       '--message', 'issue-23-safe-upload-1',
       '--assets', forwardedAssets,
     ])
@@ -355,6 +406,84 @@ require('node:fs').writeFileSync(process.env.WRANGLER_ARGV_PATH, JSON.stringify(
       status: 1,
       stdout: '',
       stderr: 'Invalid Issue #23 upload assets binding\n',
+    })
+  })
+
+  it('rejects a Worker swap-read-restore performed inside the real upload forwarding window', async () => {
+    const snapshot = uploadSourceSnapshotFixture()
+    const created = uploadSourceSnapshot('create-upload-source-snapshot', [
+      '--source', snapshot.source,
+      '--destination', snapshot.destination,
+    ])
+    expect(created.status, created.stderr).toBe(0)
+    const proof = JSON.parse(created.stdout) as UploadSourceSnapshotProof
+    const worker = join(snapshot.destination, 'worker.js')
+    const savedWorker = join(snapshot.destination, 'worker.saved')
+    const capturedWorker = join(snapshot.directory, 'captured-worker.txt')
+    const fakeBin = join(snapshot.directory, 'swap-fake-bin')
+    mkdirSync(fakeBin)
+    writeFileSync(join(fakeBin, 'npm'), `#!/usr/bin/env node
+const { spawnSync } = require('node:child_process')
+const args = process.argv.slice(2)
+if (args.shift() !== 'exec' || args.shift() !== 'wrangler') process.exit(90)
+const passthrough = args.indexOf('--')
+if (passthrough < 0) process.exit(91)
+args.splice(passthrough, 1)
+const result = spawnSync('wrangler', args, { env: process.env, stdio: 'inherit' })
+process.exit(result.status ?? 92)
+`)
+    writeFileSync(join(fakeBin, 'wrangler'), `#!/usr/bin/env node
+const fs = require('node:fs')
+const args = process.argv.slice(2)
+if (args[0] !== 'versions' || args[1] !== 'upload' || args[2] !== process.env.SNAPSHOT_WORKER) {
+  process.exit(93)
+}
+fs.chmodSync(process.env.SNAPSHOT_ROOT, 0o700)
+fs.renameSync(process.env.SNAPSHOT_WORKER, process.env.SAVED_WORKER)
+fs.writeFileSync(process.env.SNAPSHOT_WORKER, 'malicious worker\\n')
+fs.writeFileSync(process.env.CAPTURED_WORKER, fs.readFileSync(process.env.SNAPSHOT_WORKER))
+fs.unlinkSync(process.env.SNAPSHOT_WORKER)
+fs.renameSync(process.env.SAVED_WORKER, process.env.SNAPSHOT_WORKER)
+fs.chmodSync(process.env.SNAPSHOT_WORKER, 0o400)
+fs.chmodSync(process.env.SNAPSHOT_ROOT, 0o500)
+`)
+    chmodSync(join(fakeBin, 'npm'), 0o755)
+    chmodSync(join(fakeBin, 'wrangler'), 0o755)
+    const runWranglerPath = join(
+      process.cwd(),
+      'node_modules', '@opennextjs', 'cloudflare', 'dist',
+      'cli', 'commands', 'utils', 'run-wrangler.js',
+    )
+    const { runWrangler } = await import(pathToFileURL(runWranglerPath).href)
+    const forwarded = runWrangler({
+      packager: 'npm',
+      monorepoRoot: process.cwd(),
+    }, [
+      'versions upload',
+      worker,
+      '--assets', join(snapshot.destination, 'assets'),
+    ], {
+      logging: 'none',
+      env: {
+        PATH: `${fakeBin}${delimiter}${process.env.PATH}`,
+        SNAPSHOT_ROOT: snapshot.destination,
+        SNAPSHOT_WORKER: worker,
+        SAVED_WORKER: savedWorker,
+        CAPTURED_WORKER: capturedWorker,
+      },
+    })
+    expect(forwarded.success).toBe(true)
+    expect(readFileSync(capturedWorker, 'utf8')).toBe('malicious worker\n')
+    expect(readFileSync(worker, 'utf8')).toBe('sealed worker\n')
+
+    const verified = uploadSourceSnapshot(
+      'verify-upload-source-snapshot',
+      snapshotVerificationArgs(snapshot.destination, proof),
+    )
+    expect(verified).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload source snapshot\n',
     })
   })
 
