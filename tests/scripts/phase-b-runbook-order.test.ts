@@ -26,15 +26,21 @@ describe('Issue #23 Phase B runbook order', () => {
     const upload = commands.findIndex((command) => (
       command.startsWith('WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE"')
     ))
-    return upload >= 2
+    return upload >= 5
       && commands[upload - 1] === 'verify_config_identity'
-      && commands[upload - 2].startsWith(
+      && commands[upload - 2] === 'readonly UPLOAD_ASSETS_DIRECTORY'
+      && commands[upload - 3].startsWith('UPLOAD_ASSETS_DIRECTORY=$(node scripts/phase-b-sequence.mjs bind-upload-assets-directory')
+      && commands[upload - 3].includes('--config "$CONFIG"')
+      && commands[upload - 3].includes('--upload-source-directory "$UPLOAD_SOURCE_DIRECTORY")')
+      && commands[upload - 4] === 'verify_config_identity'
+      && commands[upload - 5].startsWith(
         'node scripts/issue-23-reseal.mjs verify-build-directory',
       )
-      && commands[upload - 2].includes('--directory "$UPLOAD_SOURCE_DIRECTORY"')
-      && commands[upload - 2].includes(
+      && commands[upload - 5].includes('--directory "$UPLOAD_SOURCE_DIRECTORY"')
+      && commands[upload - 5].includes(
         '> "$REPORT_DIR/upload-build-directory-proof.json"',
       )
+      && commands[upload].includes('--assets "$UPLOAD_ASSETS_DIRECTORY"')
   }
 
   const hasResetResponseValidationOrder = (runbook: string) => {

@@ -154,8 +154,14 @@ node scripts/issue-23-reseal.mjs verify-build-directory \
   --archive "$BUILD_ZIP" --directory "$UPLOAD_SOURCE_DIRECTORY" \
   --archive-sha256 "$BUILD_SHA256" > "$REPORT_DIR/upload-build-directory-proof.json"
 verify_config_identity
+UPLOAD_ASSETS_DIRECTORY=$(node scripts/phase-b-sequence.mjs bind-upload-assets-directory \
+  --config "$CONFIG" \
+  --upload-source-directory "$UPLOAD_SOURCE_DIRECTORY")
+readonly UPLOAD_ASSETS_DIRECTORY
+verify_config_identity
 WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" npm exec -- opennextjs-cloudflare upload \
-  -c "$CONFIG" -- --message "$UPLOAD_OPERATION_ID"
+  -c "$CONFIG" -- --message "$UPLOAD_OPERATION_ID" \
+  --assets "$UPLOAD_ASSETS_DIRECTORY"
 jq -s -e '[.[] | select(.type == "version-upload" and .version == 1
   and (.version_id | type == "string"))] | length == 1' "$UPLOAD_PRIVATE" >/dev/null
 UPLOADED_VERSION_ID=$(jq -sr '[.[] | select(.type == "version-upload" and .version == 1)][0].version_id' "$UPLOAD_PRIVATE")
@@ -173,7 +179,7 @@ jq -n --arg uploaded "$UPLOAD_COMPLETED_AT" --arg candidate "$EXPECTED_CANDIDATE
   > "$REPORT_DIR/clean-start-upload-report.json"
 ```
 
-The upload-source proof is regenerated from the actual `.open-next` directory after CAS1 and immediately before the mandatory adjacent config check plus upload adapter. Any directory mutation after PRE-CAS therefore stops before upload; the earlier rehearsal proof cannot be reused. The output file may contain other Wrangler records from the OpenNext upload path, but it must contain exactly one `version-upload/v1` record. The version ID comes only from that record; `versions list | last` is forbidden. Freeze the report and prove it belongs to this candidate, sealed build bytes, fresh upload-source proof, and operation. Re-run CAS1 and D1 identity immediately before reset. If another writer changed deployment, config, D1 identity, or upload attribution, stop without reset.
+The upload-source proof is regenerated from the actual `.open-next` directory after CAS1 and immediately before the mandatory adjacent config checks plus upload adapter. The binding command uses Wrangler's parser and config-relative semantics to require the configured `assets.directory` to resolve exactly to the verified `UPLOAD_SOURCE_DIRECTORY/assets`; the same absolute directory is then the explicit `--assets` source of truth for `versions upload`. This remains correct when the operator config directory is outside the snapshot repository. Any config or upload-directory mismatch, symlink alias, or directory mutation after PRE-CAS therefore stops before upload; the earlier rehearsal proof cannot be reused. The output file may contain other Wrangler records from the OpenNext upload path, but it must contain exactly one `version-upload/v1` record. The version ID comes only from that record; `versions list | last` is forbidden. Freeze the report and prove it belongs to this candidate, sealed build bytes, fresh upload-source proof, and operation. Re-run CAS1 and D1 identity immediately before reset. If another writer changed deployment, config, D1 identity, or upload attribution, stop without reset.
 
 ## 4. Candidate-bound in-place reset
 

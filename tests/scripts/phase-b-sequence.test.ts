@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   PHASE_B_STAGES,
@@ -49,6 +49,29 @@ function validateWranglerD1FileResponse(stdout: string) {
   })
 }
 
+function bindUploadAssetsDirectory(configPath: string, uploadSourceDirectory: string) {
+  return spawnSync(process.execPath, [
+    parserPath,
+    'bind-upload-assets-directory',
+    '--config', configPath,
+    '--upload-source-directory', uploadSourceDirectory,
+  ], { encoding: 'utf8' })
+}
+
+function uploadAssetsFixture(configAssetsDirectory: string) {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-upload-assets-binding-')))
+  temporaryDirectories.push(directory)
+  const snapshotRepository = join(directory, 'snapshot-repository')
+  const uploadSourceDirectory = join(snapshotRepository, '.open-next')
+  const uploadAssetsDirectory = join(uploadSourceDirectory, 'assets')
+  const operatorDirectory = join(directory, 'operator')
+  const configPath = join(operatorDirectory, 'wrangler.toml')
+  mkdirSync(uploadAssetsDirectory, { recursive: true })
+  mkdirSync(join(operatorDirectory, '.open-next', 'assets'), { recursive: true })
+  writeFileSync(configPath, `[assets]\ndirectory = ${JSON.stringify(configAssetsDirectory)}\n`)
+  return { configPath, uploadAssetsDirectory, uploadSourceDirectory }
+}
+
 function validConfig() {
   const directory = mkdtempSync(join(tmpdir(), 'blogman-phase-b-sequence-'))
   temporaryDirectories.push(directory)
@@ -69,6 +92,42 @@ function stageCounts() {
 }
 
 describe('Issue #23 Phase B fixed sequence', () => {
+  it('binds an absolute config asset directory to a separate snapshot upload source', () => {
+    const fixture = uploadAssetsFixture('placeholder')
+    writeFileSync(
+      fixture.configPath,
+      `[assets]\ndirectory = ${JSON.stringify(fixture.uploadAssetsDirectory)}\n`,
+    )
+
+    const result = bindUploadAssetsDirectory(
+      fixture.configPath,
+      fixture.uploadSourceDirectory,
+    )
+
+    expect(result).toMatchObject({
+      status: 0,
+      stdout: `${fixture.uploadAssetsDirectory}\n`,
+      stderr: '',
+    })
+  })
+
+  it('rejects config-relative assets resolved outside the separate snapshot repository', () => {
+    const fixture = uploadAssetsFixture('.open-next/assets')
+
+    const result = bindUploadAssetsDirectory(
+      fixture.configPath,
+      fixture.uploadSourceDirectory,
+    )
+
+    expect(result).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload assets binding\n',
+    })
+    expect(resolve(dirname(fixture.configPath), '.open-next/assets'))
+      .not.toBe(fixture.uploadAssetsDirectory)
+  })
+
   it('stops at a failed empty-database plan after reset proof and before migrations', async () => {
     const counts = stageCounts()
 

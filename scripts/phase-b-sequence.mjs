@@ -1,5 +1,5 @@
-import { lstatSync, readFileSync } from 'node:fs'
-import { isAbsolute, resolve } from 'node:path'
+import { lstatSync, readFileSync, realpathSync } from 'node:fs'
+import { dirname, isAbsolute, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 export const PHASE_B_STAGES = Object.freeze([
@@ -247,12 +247,60 @@ export async function runPhaseBSequence({ configPath, bindings, runStage }) {
   return Object.freeze(counts)
 }
 
+async function bindUploadAssetsDirectory(configPath, uploadSourceDirectory) {
+  if (!isAbsolute(configPath) || configPath !== resolve(configPath)
+    || !isAbsolute(uploadSourceDirectory) || uploadSourceDirectory !== resolve(uploadSourceDirectory)) {
+    throw new Error()
+  }
+  if (!lstatSync(configPath).isFile() || realpathSync(configPath) !== configPath
+    || !lstatSync(uploadSourceDirectory).isDirectory()
+    || realpathSync(uploadSourceDirectory) !== uploadSourceDirectory) {
+    throw new Error()
+  }
+
+  const uploadAssetsDirectory = resolve(uploadSourceDirectory, 'assets')
+  if (!lstatSync(uploadAssetsDirectory).isDirectory()
+    || realpathSync(uploadAssetsDirectory) !== uploadAssetsDirectory) {
+    throw new Error()
+  }
+
+  const { unstable_readConfig: readWranglerConfig } = await import('wrangler')
+  const config = await readWranglerConfig({ config: configPath }, { hideWarnings: true })
+  if (config.configPath !== configPath
+    || typeof config.assets?.directory !== 'string'
+    || config.assets.directory.length === 0) {
+    throw new Error()
+  }
+  const configuredAssetsDirectory = resolve(
+    dirname(config.configPath),
+    config.assets.directory,
+  )
+  if (configuredAssetsDirectory !== uploadAssetsDirectory) throw new Error()
+  return uploadAssetsDirectory
+}
+
 function isMainModule() {
   return process.argv[1]
     && import.meta.url === pathToFileURL(resolve(process.argv[1])).href
 }
 
-if (isMainModule()) {
+async function runCli() {
+  if (process.argv[2] === 'bind-upload-assets-directory') {
+    try {
+      if (process.argv.length !== 7
+        || process.argv[3] !== '--config'
+        || process.argv[5] !== '--upload-source-directory') {
+        throw new Error()
+      }
+      const assetsDirectory = await bindUploadAssetsDirectory(process.argv[4], process.argv[6])
+      process.stdout.write(`${assetsDirectory}\n`)
+    } catch {
+      process.stderr.write('Invalid Issue #23 upload assets binding\n')
+      process.exitCode = 1
+    }
+    return
+  }
+
   try {
     if (process.argv.length !== 3 || process.argv[2] !== 'validate-wrangler-d1-file-response') {
       invalidWranglerD1FileResponse()
@@ -264,3 +312,5 @@ if (isMainModule()) {
     process.exitCode = 1
   }
 }
+
+if (isMainModule()) await runCli()
