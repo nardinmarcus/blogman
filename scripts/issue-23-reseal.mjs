@@ -31,6 +31,15 @@ import {
 
 const MAX_DOCUMENT_BYTES = 1024 * 1024
 const INPUT_EVIDENCE_FILE_NAME = 'input-evidence-manifest.json'
+const GIT_STORAGE_ENVIRONMENT_OVERRIDES = Object.freeze([
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_COMMON_DIR',
+  'GIT_DIR',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_QUARANTINE_PATH',
+  'GIT_WORK_TREE',
+])
 const PREFLIGHT_FORMAT = 'blogman-local-preflight-candidate/v2'
 const INPUT_EVIDENCE_FORMAT = 'blogman-issue-23-input-evidence-manifest/v2'
 const REQUEST_FORMAT = 'blogman-issue-23-local-reseal-request/v3'
@@ -391,7 +400,7 @@ function removeOwnedEmptyReservation(reservation) {
   rmdirSync(reservation.path)
 }
 
-function reserveOutputParent(outputPath, repositoryPath) {
+function reserveOutputParent(outputPath, repositoryPath, frozenRoot) {
   const requestedParent = dirname(outputPath)
   const requestedGrandparent = dirname(requestedParent)
   const realGrandparent = requireDirectory(
@@ -400,6 +409,12 @@ function reserveOutputParent(outputPath, repositoryPath) {
   )
   const outputParent = join(realGrandparent, basename(requestedParent))
   const finalOutputPath = join(outputParent, basename(outputPath))
+  if (
+    pathAtOrWithin(frozenRoot, outputParent)
+    || pathAtOrWithin(frozenRoot, finalOutputPath)
+  ) {
+    fail('Issue #23 reseal output real path must be outside the frozen evidence root')
+  }
   if (
     outputParent === repositoryPath
     || pathWithin(repositoryPath, outputParent)
@@ -506,6 +521,7 @@ function scanFrozenTree(rootPath) {
   const effectiveUid = typeof process.geteuid === 'function'
     ? BigInt(process.geteuid())
     : undefined
+  const identityEntries = []
 
   const visit = (entryPath) => {
     let stat
@@ -525,6 +541,7 @@ function scanFrozenTree(rootPath) {
 
     let type
     let realPath
+    let contentSha256
     if (stat.isSymbolicLink()) {
       type = 'symlink'
       counts.symlink_count += 1
@@ -546,6 +563,26 @@ function scanFrozenTree(rootPath) {
         anomalies.hardlink ??= relativePath || '.'
       }
       realPath = realpathSync(entryPath)
+      try {
+        contentSha256 = sha256(readFileSync(entryPath))
+        const afterRead = lstatSync(entryPath, { bigint: true })
+        if (
+          afterRead.dev !== stat.dev
+          || afterRead.ino !== stat.ino
+          || afterRead.mode !== stat.mode
+          || afterRead.nlink !== stat.nlink
+          || afterRead.size !== stat.size
+          || afterRead.uid !== stat.uid
+          || afterRead.gid !== stat.gid
+        ) {
+          fail('Issue #23 reseal frozen tree changed during traversal')
+        }
+      } catch (error) {
+        if (error?.message === 'Issue #23 reseal frozen tree changed during traversal') {
+          throw error
+        }
+        fail('Issue #23 reseal frozen tree changed during traversal')
+      }
     } else {
       type = 'special'
       counts.special_file_count += 1
@@ -561,6 +598,16 @@ function scanFrozenTree(rootPath) {
       counts.realpath_escape_count += 1
       anomalies.realpathEscape ??= relativePath || '.'
     }
+    identityEntries.push({
+      gid: String(stat.gid),
+      mode: posixMode(stat),
+      nlink: String(stat.nlink),
+      path: relativePath || '.',
+      sha256: contentSha256 ?? null,
+      size: String(stat.size),
+      type,
+      uid: String(stat.uid),
+    })
     if (type === 'directory') {
       for (const name of readdirSync(entryPath).sort()) {
         visit(join(entryPath, name))
@@ -587,7 +634,10 @@ function scanFrozenTree(rootPath) {
   if (anomalies.owner) {
     fail(`Issue #23 reseal frozen tree contains an entry owned by another user: ${anomalies.owner}`)
   }
-  return { counts }
+  return {
+    counts,
+    identitySha256: sha256(Buffer.from(`${JSON.stringify(identityEntries)}\n`)),
+  }
 }
 
 function requireMode(entryPath, expectedMode, label) {
@@ -727,6 +777,118 @@ function gitValue(repositoryPath, args, label) {
     }).trim()
   } catch {
     fail(`Issue #23 reseal could not read Git ${label}`)
+  }
+}
+
+function requireGitStoragePathWithinFrozenRoot({
+  expectedType,
+  frozenRoot,
+  label,
+  requestedPath,
+}) {
+  requireAbsolutePath(requestedPath, label)
+  let stat
+  let realPath
+  try {
+    stat = lstatSync(requestedPath)
+    realPath = realpathSync(requestedPath)
+  } catch {
+    fail(`Issue #23 reseal ${label} must exist`)
+  }
+  if (
+    (expectedType === 'directory' && !stat.isDirectory())
+    || (expectedType === 'file' && !stat.isFile())
+  ) {
+    fail(`Issue #23 reseal ${label} has an invalid type`)
+  }
+  if (!pathAtOrWithin(frozenRoot, realPath)) {
+    fail('Issue #23 reseal Git metadata storage escapes the frozen evidence root')
+  }
+  return realPath
+}
+
+function verifyGitStorageContainment(repositoryPath, frozenRoot) {
+  const activeOverrides = GIT_STORAGE_ENVIRONMENT_OVERRIDES.filter(
+    (name) => Object.hasOwn(process.env, name),
+  )
+  if (activeOverrides.length > 0) {
+    fail('Issue #23 reseal Git storage environment overrides are not allowed')
+  }
+
+  const layout = gitValue(repositoryPath, [
+    'rev-parse',
+    '--path-format=absolute',
+    '--is-inside-work-tree',
+    '--is-bare-repository',
+    '--show-toplevel',
+    '--absolute-git-dir',
+    '--git-common-dir',
+    '--git-path',
+    'objects',
+    '--git-path',
+    'index',
+    '--git-path',
+    'objects/info/alternates',
+  ], 'storage layout').split(/\r?\n/u)
+  if (layout.length !== 8) {
+    fail('Issue #23 reseal could not resolve the complete Git storage layout')
+  }
+  const [
+    insideWorktree,
+    bareRepository,
+    requestedTopLevel,
+    requestedGitDirectory,
+    requestedCommonDirectory,
+    requestedObjectDirectory,
+    requestedIndex,
+    alternatesPath,
+  ] = layout
+  requireEqual(insideWorktree, 'true', 'Git worktree state')
+  requireEqual(bareRepository, 'false', 'Git bare repository state')
+  const topLevel = requireGitStoragePathWithinFrozenRoot({
+    expectedType: 'directory',
+    frozenRoot,
+    label: 'Git worktree root',
+    requestedPath: requestedTopLevel,
+  })
+  requireEqual(topLevel, repositoryPath, 'Git worktree root')
+
+  requireGitStoragePathWithinFrozenRoot({
+    expectedType: 'directory',
+    frozenRoot,
+    label: 'absolute Git directory',
+    requestedPath: requestedGitDirectory,
+  })
+  requireGitStoragePathWithinFrozenRoot({
+    expectedType: 'directory',
+    frozenRoot,
+    label: 'Git common directory',
+    requestedPath: requestedCommonDirectory,
+  })
+  requireGitStoragePathWithinFrozenRoot({
+    expectedType: 'directory',
+    frozenRoot,
+    label: 'Git object directory',
+    requestedPath: requestedObjectDirectory,
+  })
+  requireGitStoragePathWithinFrozenRoot({
+    expectedType: 'file',
+    frozenRoot,
+    label: 'Git index',
+    requestedPath: requestedIndex,
+  })
+
+  requireAbsolutePath(alternatesPath, 'Git object alternates path')
+  if (pathEntryExists(alternatesPath)) {
+    requireGitStoragePathWithinFrozenRoot({
+      expectedType: 'file',
+      frozenRoot,
+      label: 'Git object alternates file',
+      requestedPath: alternatesPath,
+    })
+    if (readFileSync(alternatesPath).byteLength > 0) {
+      fail('Issue #23 reseal Git object alternates are not allowed')
+    }
   }
 }
 
@@ -885,7 +1047,8 @@ function verifyLongRunnerCoverage(request, repositoryPath) {
   }
 }
 
-function verifyGitIdentity(request, repositoryPath) {
+function verifyGitIdentity(request, repositoryPath, frozenRoot) {
+  verifyGitStorageContainment(repositoryPath, frozenRoot)
   requireEqual(
     gitValue(repositoryPath, ['rev-parse', 'HEAD'], 'commit'),
     request.candidate.commit,
@@ -907,8 +1070,8 @@ function verifyGitIdentity(request, repositoryPath) {
   )
 }
 
-function verifySealInputs(request, repositoryPath, artifactsPath) {
-  verifyGitIdentity(request, repositoryPath)
+function verifySealInputs(request, repositoryPath, artifactsPath, frozenRoot) {
+  verifyGitIdentity(request, repositoryPath, frozenRoot)
   requireEqual(
     request.github_evidence.quick.head_sha,
     request.candidate.commit,
@@ -1328,6 +1491,7 @@ function validateInputEvidenceBindings({
     'input-evidence quick CI conclusion',
   )
 
+  verifyGitStorageContainment(repository, frozenRoot)
   const originUrl = gitValue(
     repository,
     ['config', '--get', 'remote.origin.url'],
@@ -1424,14 +1588,18 @@ function captureFrozenTree(evidence, frozenRoot) {
   }
   return {
     counts: snapshot.counts,
+    identitySha256: snapshot.identitySha256,
     root: frozenRoot,
   }
 }
 
 function verifyFrozenTreeSnapshot(snapshot) {
   const current = scanFrozenTree(snapshot.root)
-  if (JSON.stringify(current.counts) !== JSON.stringify(snapshot.counts)) {
-    fail('Issue #23 reseal frozen tree counts changed after validation')
+  if (
+    JSON.stringify(current.counts) !== JSON.stringify(snapshot.counts)
+    || current.identitySha256 !== snapshot.identitySha256
+  ) {
+    fail('Issue #23 reseal frozen tree changed after validation')
   }
 }
 
@@ -1461,7 +1629,12 @@ function loadSealContext(inputPath, repositoryPath, artifactsPath) {
     repository,
     requestDocument,
   })
-  const sealInputs = verifySealInputs(requestDocument.value, repository, artifacts)
+  const sealInputs = verifySealInputs(
+    requestDocument.value,
+    repository,
+    artifacts,
+    inputEvidence.root,
+  )
   const frozenTree = captureFrozenTree(evidenceDocument.value, inputEvidence.root)
   return {
     directories: [repositoryDirectory, artifactsDirectory],
@@ -1482,7 +1655,11 @@ function loadSealContext(inputPath, repositoryPath, artifactsPath) {
 
 function verifySealContextUnchanged(context) {
   for (const directory of context.directories) verifyDirectoryIdentity(directory)
-  verifyGitIdentity(context.requestDocument.value, context.repository)
+  verifyGitIdentity(
+    context.requestDocument.value,
+    context.repository,
+    context.frozenTree.root,
+  )
   verifyLongRunnerCoverage(
     context.requestDocument.value,
     context.repository,
@@ -1519,7 +1696,11 @@ export function sealPackage({ inputPath, repositoryPath, artifactsPath, outputPa
     finalOutputPath,
     outputParent,
     reservation,
-  } = reserveOutputParent(outputPath, context.repository)
+  } = reserveOutputParent(
+    outputPath,
+    context.repository,
+    context.frozenTree.root,
+  )
   let stagingPath
   try {
     if (pathEntryExists(finalOutputPath)) fail('Issue #23 reseal output must be fresh')

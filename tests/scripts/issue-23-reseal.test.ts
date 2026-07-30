@@ -60,6 +60,7 @@ const inputEvidenceGolden = join(
   'issue-23-reseal',
   'input-evidence-manifest-v2.json',
 )
+const phaseBRunbook = join(repoRoot, 'docs', 'issue-23-phase-b-runbook.md')
 
 function sha256(value: string | Buffer) {
   return createHash('sha256').update(value).digest('hex')
@@ -96,6 +97,32 @@ interface MutableInputEvidence {
 }
 
 describe('Issue #23 local reseal CLI', () => {
+  it('keeps Phase B tool, snapshot, artifact, and evidence paths explicitly separated', () => {
+    const runbook = readFileSync(phaseBRunbook, 'utf8')
+
+    expect(runbook).toContain('TOOL_WORKSPACE=/absolute/path/to/blogman-tool-workspace')
+    expect(runbook).toContain('FROZEN_SNAPSHOT=/absolute/private/frozen/snapshot')
+    expect(runbook).toContain('FROZEN_ARTIFACTS=/absolute/private/frozen/artifacts')
+    expect(runbook).toContain('WRANGLER="$TOOL_WORKSPACE/node_modules/.bin/wrangler"')
+    expect(runbook).toContain('node "$TOOL_WORKSPACE/scripts/issue-23-reseal.mjs"')
+    expect(runbook).toContain('node "$TOOL_WORKSPACE/scripts/migrations.mjs"')
+    expect(runbook).toContain('git -C "$FROZEN_SNAPSHOT" rev-parse HEAD')
+    expect(runbook).toContain('--repo "$FROZEN_SNAPSHOT" --artifacts "$FROZEN_ARTIFACTS"')
+    expect(runbook).not.toMatch(/(?:^|\n)node scripts\//u)
+    expect(runbook).not.toContain('./node_modules/.bin/wrangler')
+    expect(runbook).not.toContain('$PWD')
+    expect(runbook).not.toContain('--config wrangler.toml')
+
+    const bashBlocks = [...runbook.matchAll(/```bash\n([\s\S]*?)\n```/gu)]
+      .map((match) => match[1])
+    expect(bashBlocks.length).toBeGreaterThan(0)
+    const syntax = spawnSync('bash', ['-n'], {
+      encoding: 'utf8',
+      input: `${bashBlocks.join('\n')}\n`,
+    })
+    expect(syntax.status, syntax.stderr).toBe(0)
+  })
+
   it('validates the canonical input-evidence v2 schema and golden bytes', () => {
     const schema = JSON.parse(readFileSync(inputEvidenceSchema, 'utf8'))
     const goldenBytes = readFileSync(inputEvidenceGolden)

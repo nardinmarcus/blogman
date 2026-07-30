@@ -150,6 +150,16 @@ the complete frozen root—not only the governed file index or `.open-next`
 allowlist—must contain no symlink, no regular file with link count other than
 one, no special file, no realpath escape, and no `node_modules` or `toolchain`
 entry. Build dependencies and executable toolchains stay outside that root.
+The repository snapshot must be a self-contained non-bare worktree: its
+effective top-level, absolute git-dir, common-dir, index, and primary object
+directory all resolve inside the frozen root. Linked-worktree metadata, object
+alternates, and Git storage environment overrides are rejected before Git
+identity is trusted.
+
+The first complete-tree traversal captures a deterministic identity digest over
+every relative entry path, type, POSIX mode, owner/group, link count, size, and
+regular-file SHA-256. The final barrier recomputes that digest as well as the
+declared counts, so an equal-count rename or byte replacement is not invisible.
 
 A lineage that reaches `BLOCK`, consumed authorization, or another terminal
 state is immutable history. Do not repair its schema, replace bytes, reseal it,
@@ -164,8 +174,10 @@ around the final byte recheck. Package validation similarly checks the exact
 four-entry directory before and after reading files, then repeats the complete
 membership and byte check after the final live-context verification.
 
-The output must be an absolute repository-external path whose parent does not
-exist. Its existing real grandparent must also resolve outside the repository.
+The output must be an absolute repository- and frozen-root-external path whose
+parent does not exist. Its existing real grandparent is resolved first; both the
+derived output parent and final output path must be outside the repository and
+the complete frozen root before the first `mkdir`.
 On supported local POSIX filesystems, `seal` reserves the output in one shot by
 creating that dedicated parent with one non-recursive `mkdir`, then forces and
 verifies owner=current effective UID and mode `0700`. `EEXIST` means another or

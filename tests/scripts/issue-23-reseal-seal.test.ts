@@ -13,6 +13,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -640,6 +641,78 @@ describe('Issue #23 local reseal package generation', () => {
     }
   })
 
+  it('rejects a real linked worktree whose effective Git storage is outside the frozen root', () => {
+    const fixture = createSealFixture()
+    try {
+      const toolWorkspace = join(fixture.root, 'tool-workspace')
+      const externalRepository = join(toolWorkspace, 'repository')
+      mkdirSync(toolWorkspace)
+      renameSync(fixture.repository, externalRepository)
+      execFileSync('git', [
+        'worktree',
+        'add',
+        '--detach',
+        fixture.repository,
+        'HEAD',
+      ], { cwd: externalRepository })
+      chmodSync(fixture.repository, 0o700)
+      rebindInputEvidence(fixture, { updateCounts: true })
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('Git metadata storage escapes the frozen evidence root')
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects an external Git object alternate declared by repository metadata', () => {
+    const fixture = createSealFixture()
+    try {
+      const externalObjects = join(fixture.root, 'external-objects')
+      const alternatesPath = join(
+        fixture.repository,
+        '.git',
+        'objects',
+        'info',
+        'alternates',
+      )
+      mkdirSync(externalObjects)
+      mkdirSync(dirname(alternatesPath), { recursive: true })
+      writeFileSync(alternatesPath, `${externalObjects}\n`)
+      rebindInputEvidence(fixture, { updateCounts: true })
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('Git object alternates are not allowed')
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects Git storage environment overrides before trusting repository identity', () => {
+    const fixture = createSealFixture()
+    try {
+      const externalObjects = join(fixture.root, 'environment-alternate-objects')
+      mkdirSync(externalObjects)
+
+      const result = runSeal(fixture, {
+        ...process.env,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: externalObjects,
+      })
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('Git storage environment overrides are not allowed')
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
   it('fails before output reservation when node_modules/.bin is a symlink', () => {
     const fixture = createSealFixture()
     try {
@@ -706,6 +779,50 @@ describe('Issue #23 local reseal package generation', () => {
       expect(result.status).toBe(1)
       expect(result.stderr).toContain('transient dependency or toolchain entry')
       expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a symlinked output grandparent into the frozen root before any reservation write', () => {
+    const fixture = createSealFixture()
+    try {
+      const outputAlias = join(fixture.root, 'output-alias')
+      const frozenOutputAnchor = join(fixture.frozenRoot, 'output-anchor')
+      const derivedOutputParent = join(frozenOutputAnchor, 'reservation')
+      const mkdirMarker = join(fixture.root, 'frozen-output-mkdir-attempted')
+      mkdirSync(frozenOutputAnchor)
+      rebindInputEvidence(fixture, { updateCounts: true })
+      const frozenEntries = readdirSync(fixture.frozenRoot).sort()
+      symlinkSync(fixture.frozenRoot, outputAlias)
+      fixture.output = join(outputAlias, 'output-anchor', 'reservation', 'sealed')
+
+      const preloadPath = join(fixture.root, 'observe-frozen-output-mkdir.cjs')
+      writeFileSync(preloadPath, `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const originalMkdirSync = fs.mkdirSync
+fs.mkdirSync = function patchedMkdirSync(path, ...args) {
+  if (String(path) === ${JSON.stringify(derivedOutputParent)}) {
+    fs.writeFileSync(${JSON.stringify(mkdirMarker)}, 'attempted\\n')
+  }
+  return originalMkdirSync.call(this, path, ...args)
+}
+syncBuiltinESMExports()
+`)
+
+      const result = runSeal(fixture, {
+        ...process.env,
+        NODE_OPTIONS: [
+          process.env.NODE_OPTIONS,
+          `--require=${preloadPath}`,
+        ].filter(Boolean).join(' '),
+      })
+
+      expect(result.status).toBe(1)
+      expect(existsSync(mkdirMarker)).toBe(false)
+      expect(existsSync(derivedOutputParent)).toBe(false)
+      expect(readdirSync(fixture.frozenRoot).sort()).toEqual(frozenEntries)
+      expect(result.stderr).toContain('output real path must be outside the frozen evidence root')
     } finally {
       rmSync(fixture.root, { recursive: true, force: true })
     }
@@ -1785,6 +1902,55 @@ process.exit(result.status ?? 1)
       expect(validation.status).not.toBe(0)
       expect(verification.status).not.toBe(0)
       expect(verification.stderr).toContain('package document changed after validation')
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('fails closed on an equal-count frozen-root entry replacement during the final context recheck', () => {
+    const fixture = createSealFixture()
+    try {
+      const originalEntry = join(fixture.frozenRoot, 'unguarded-a.txt')
+      const replacementEntry = join(fixture.frozenRoot, 'unguarded-b.txt')
+      writeFileSync(originalEntry, 'original frozen entry\n')
+      rebindInputEvidence(fixture, { updateCounts: true })
+
+      const fakeBin = join(fixture.root, 'equal-count-frozen-tree-fake-bin')
+      const counterPath = join(fixture.root, 'equal-count-head-check-count')
+      const replacementMarker = join(fixture.root, 'equal-count-entry-replaced')
+      const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
+      mkdirSync(fakeBin)
+      const fakeGitPath = join(fakeBin, 'git')
+      writeFileSync(fakeGitPath, `#!/usr/bin/env node
+const fs = require('node:fs')
+const { spawnSync } = require('node:child_process')
+const args = process.argv.slice(2)
+if (args[0] === 'rev-parse' && args[1] === 'HEAD') {
+  const count = fs.existsSync(${JSON.stringify(counterPath)})
+    ? Number(fs.readFileSync(${JSON.stringify(counterPath)}, 'utf8'))
+    : 0
+  fs.writeFileSync(${JSON.stringify(counterPath)}, String(count + 1))
+  if (count + 1 === 2) {
+    fs.unlinkSync(${JSON.stringify(originalEntry)})
+    fs.writeFileSync(${JSON.stringify(replacementEntry)}, 'replacement frozen entry\\n')
+    fs.writeFileSync(${JSON.stringify(replacementMarker)}, 'replaced\\n')
+  }
+}
+const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit' })
+process.exit(result.status ?? 1)
+`)
+      chmodSync(fakeGitPath, 0o700)
+
+      const result = runSeal(fixture, {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      })
+
+      expect(readFileSync(counterPath, 'utf8')).toBe('2')
+      expect(existsSync(replacementMarker)).toBe(true)
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('frozen tree changed after validation')
+      expect(existsSync(fixture.output)).toBe(false)
     } finally {
       rmSync(fixture.root, { recursive: true, force: true })
     }
