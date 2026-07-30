@@ -2223,43 +2223,39 @@ syncBuiltinESMExports()
     }
   })
 
-  it('fails closed when direct long-runner fixture dependencies drift', () => {
-    const cases = [
-      'db/schema.sql',
-      'db/seed-template.sql',
-      'db/migrations/coverage-drift.txt',
-      'wrangler.toml',
-      'lib/ai-provider-profiles.ts',
-      'lib/ai-post-generator/constants.ts',
-    ]
-
-    for (const path of cases) {
-      const fixture = createSealFixture()
-      try {
-        const filePath = join(fixture.repository, path)
-        if (path === 'db/migrations/coverage-drift.txt') {
-          writeFileSync(filePath, 'drift\n')
-        } else {
-          const comment = path.endsWith('.sql')
-            ? '-- drift'
-            : path === 'wrangler.toml'
-              ? '# drift'
-              : '// drift'
-          writeFileSync(filePath, `${readFileSync(filePath, 'utf8')}\n${comment}\n`)
-        }
-        git(fixture.repository, 'add', path)
-        git(fixture.repository, 'commit', '--quiet', '-m', 'direct dependency drift')
-
-        const input = JSON.parse(readFileSync(fixture.inputPath, 'utf8'))
-        bindInputToCurrentGit(fixture, input)
-        writeFileSync(fixture.inputPath, `${JSON.stringify(input, null, 2)}\n`)
-
-        const result = runSeal(fixture)
-        expect(result.status, path).not.toBe(0)
-        expect(existsSync(fixture.output), path).toBe(false)
-      } finally {
-        rmSync(fixture.root, { recursive: true, force: true })
+  it.each([
+    'db/schema.sql',
+    'db/seed-template.sql',
+    'db/migrations/coverage-drift.txt',
+    'wrangler.toml',
+    'lib/ai-provider-profiles.ts',
+    'lib/ai-post-generator/constants.ts',
+  ])('fails closed when direct long-runner fixture dependency drifts: %s', (path) => {
+    const fixture = createSealFixture()
+    try {
+      const filePath = join(fixture.repository, path)
+      if (path === 'db/migrations/coverage-drift.txt') {
+        writeFileSync(filePath, 'drift\n')
+      } else {
+        const comment = path.endsWith('.sql')
+          ? '-- drift'
+          : path === 'wrangler.toml'
+            ? '# drift'
+            : '// drift'
+        writeFileSync(filePath, `${readFileSync(filePath, 'utf8')}\n${comment}\n`)
       }
+      git(fixture.repository, 'add', path)
+      git(fixture.repository, 'commit', '--quiet', '-m', 'direct dependency drift')
+
+      const input = JSON.parse(readFileSync(fixture.inputPath, 'utf8'))
+      bindInputToCurrentGit(fixture, input)
+      writeFileSync(fixture.inputPath, `${JSON.stringify(input, null, 2)}\n`)
+
+      const result = runSeal(fixture)
+      expect(result.status, path).not.toBe(0)
+      expect(existsSync(fixture.output), path).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
     }
   })
 })
