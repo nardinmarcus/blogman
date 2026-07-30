@@ -19,6 +19,7 @@ import {
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { verifyBuildDirectory } from './issue-23-build-proof.mjs'
 
 export const PHASE_B_STAGES = Object.freeze([
   'pre_cas_local_gates',
@@ -510,6 +511,35 @@ function verifyHeldEvidence(held) {
   }
 }
 
+function heldFileSha256(held) {
+  verifyHeldPath(held)
+  const before = fstatSync(held.descriptor, { bigint: true })
+  const bytes = readHeldBytes(held.descriptor, before.size)
+  const after = fstatSync(held.descriptor, { bigint: true })
+  if (!sameIdentity(before, after)) throw new Error()
+  return sha256Bytes(bytes)
+}
+
+function acceptedVersionId(uploadOutput) {
+  const text = uploadOutput.toString('utf8')
+  if (!Buffer.from(text).equals(uploadOutput)) throw new Error()
+  const records = text.split('\n').filter((line) => line.trim().length > 0).map((line) => {
+    assertUniqueJsonObjectKeys(line)
+    const value = JSON.parse(line)
+    if (!isRecord(value)) throw new Error()
+    return value
+  })
+  const versions = records.filter((record) => (
+    record.type === 'version-upload'
+    && record.version === 1
+    && typeof record.version_id === 'string'
+    && record.version_id.trim() === record.version_id
+    && record.version_id.length > 0
+  ))
+  if (versions.length !== 1) throw new Error()
+  return versions[0].version_id
+}
+
 function snapshotProofBytes(state, proof, destination) {
   return Buffer.from(`${JSON.stringify({
     format: 'blogman-upload-source-snapshot/v1',
@@ -522,19 +552,11 @@ function snapshotProofBytes(state, proof, destination) {
 
 function verifyFrozenSnapshotAgainstArchive(archive, destination, archiveSha256) {
   if (!sha256.test(archiveSha256 || '')) throw new Error()
-  const verification = spawnSync(process.execPath, [
-    join(process.cwd(), 'scripts', 'issue-23-reseal.mjs'),
-    'verify-build-directory',
-    '--archive', archive,
-    '--directory', destination,
-    '--archive-sha256', archiveSha256,
-  ], {
-    cwd: process.cwd(),
-    encoding: 'utf8',
-    env: process.env,
+  const proof = verifyBuildDirectory({
+    archivePath: archive,
+    directoryPath: destination,
+    expectedArchiveSha256: archiveSha256,
   })
-  if (verification.error || verification.status !== 0) throw new Error()
-  const proof = JSON.parse(verification.stdout)
   if (!hasExactKeys(proof, ['archive_sha256', 'file_count', 'format', 'state'])
     || proof.format !== 'blogman-build-directory-proof/v1'
     || proof.state !== 'matched'
@@ -756,7 +778,9 @@ async function runUploadSourceLifecycle({
   const evidence = []
   try {
     held.push(...holdStablePathChain(reportDirectory, 'directory', 0o700))
-    held.push(...holdStablePathChain(config, 'file'))
+    const configChain = holdStablePathChain(config, 'file')
+    const heldConfig = configChain.at(-1)
+    held.push(...configChain)
     held.push(...holdStablePathChain(source, 'directory'))
     held.push(...holdStablePathChain(archive, 'file'))
     const stabilityRoot = commonAncestor([reportDirectory, config, source, archive])
@@ -770,7 +794,14 @@ async function runUploadSourceLifecycle({
     const uploadEvidence = holdEvidenceFile(uploadOutputPath, reportDirectory)
     evidence.push(uploadEvidence)
 
-    await bindUploadAssetsDirectory(config, source)
+    const configuredAssetsDirectory = await bindUploadAssetsDirectory(config, source)
+    const configSha256 = heldFileSha256(heldConfig)
+    const verifyConfigBinding = async () => {
+      if (await bindUploadAssetsDirectory(config, source) !== configuredAssetsDirectory
+        || heldFileSha256(heldConfig) !== configSha256) {
+        throw new Error()
+      }
+    }
     const before = copyUploadSourceSnapshot(source, destination)
     for (const path of held.filter((entry) => entry.path === reportDirectory)) {
       refreshHeldPath(path)
@@ -783,11 +814,12 @@ async function runUploadSourceLifecycle({
       destination,
       archiveSha256,
     )
-    for (const path of held) refreshHeldPath(path)
+    for (const path of held) verifyHeldPath(path)
     writeHeldEvidence(buildEvidence, buildProof)
     writeHeldEvidence(beforeEvidence, snapshotProofBytes('created', before, destination))
     captureHeldEvidence(afterEvidence)
     captureHeldEvidence(uploadEvidence)
+    await verifyConfigBinding()
     for (const path of held) verifyHeldPath(path)
     for (const file of evidence) verifyHeldEvidence(file)
 
@@ -798,7 +830,7 @@ async function runUploadSourceLifecycle({
       '--assets', join(destination, 'assets'),
     ], {
       env: process.env,
-      stdio: 'inherit',
+      stdio: ['inherit', 2, 2],
     })
 
     captureHeldEvidence(uploadEvidence, true)
@@ -813,12 +845,27 @@ async function runUploadSourceLifecycle({
       archiveSha256,
     )
     if (!buildProofAfter.equals(buildProof)) throw new Error()
+    await verifyConfigBinding()
     for (const path of held) verifyHeldPath(path)
     for (const file of evidence) verifyHeldEvidence(file)
     if (upload.error || upload.status !== 0) throw new Error()
+    const versionId = acceptedVersionId(uploadEvidence.expected.bytes)
     writeHeldEvidence(afterEvidence, snapshotProofBytes('matched', after, destination))
     for (const path of held) verifyHeldPath(path)
     for (const file of evidence) verifyHeldEvidence(file)
+    return Object.freeze({
+      format: 'blogman-upload-source-lifecycle-acceptance/v1',
+      state: 'accepted',
+      upload_operation_id: operationId,
+      version_id: versionId,
+      config_sha256: configSha256,
+      snapshot_tree_sha256: after.tree_sha256,
+      snapshot_identity_sha256: after.identity_sha256,
+      snapshot_proof_before_sha256: sha256Bytes(beforeEvidence.expected.bytes),
+      snapshot_proof_after_sha256: sha256Bytes(afterEvidence.expected.bytes),
+      build_directory_proof_sha256: sha256Bytes(buildEvidence.expected.bytes),
+      wrangler_output_sha256: sha256Bytes(uploadEvidence.expected.bytes),
+    })
   } finally {
     for (const file of evidence.reverse()) closeSync(file.descriptor)
     for (const path of held.reverse()) closeSync(path.descriptor)
@@ -845,7 +892,7 @@ async function runCli() {
         || process.argv[19] !== '--build-proof') {
         throw new Error()
       }
-      await runUploadSourceLifecycle({
+      const acceptance = await runUploadSourceLifecycle({
         archive: process.argv[16],
         archiveSha256: process.argv[18],
         buildProofPath: process.argv[20],
@@ -856,6 +903,7 @@ async function runCli() {
         proofBeforePath: process.argv[12],
         proofAfterPath: process.argv[14],
       })
+      process.stdout.write(`${JSON.stringify(acceptance)}\n`)
     } catch {
       process.stderr.write('Invalid Issue #23 upload source lifecycle\n')
       process.exitCode = 1

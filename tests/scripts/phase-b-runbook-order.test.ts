@@ -24,17 +24,19 @@ describe('Issue #23 Phase B runbook order', () => {
       commands.push(command)
     }
     const upload = commands.findIndex((command) => (
-      command.startsWith('WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE"')
+      command.startsWith('UPLOAD_ACCEPTANCE=$(WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE"')
     ))
     const sourceProof = commands.findIndex((command) => (
       command.startsWith('node scripts/issue-23-reseal.mjs verify-build-directory')
       && command.includes('--directory "$UPLOAD_SOURCE_DIRECTORY"')
     ))
     const lifecycle = commands.findIndex((command) => (
-      command.startsWith('WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" node scripts/phase-b-sequence.mjs')
+      command.startsWith('UPLOAD_ACCEPTANCE=$(WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" node scripts/phase-b-sequence.mjs')
       && command.includes('run-upload-source-lifecycle')
     ))
-    const acceptVersion = commands.findIndex((command) => command.startsWith("jq -s -e '[.[] | select(.type == \"version-upload\""))
+    const acceptVersion = commands.findIndex((command) => (
+      command === 'UPLOADED_VERSION_ID=$(jq -er .version_id <<< "$UPLOAD_ACCEPTANCE")'
+    ))
     return sourceProof >= 0
       && lifecycle > sourceProof
       && upload === lifecycle
@@ -49,6 +51,7 @@ describe('Issue #23 Phase B runbook order', () => {
       && commands[lifecycle].includes('--archive-sha256 "$BUILD_SHA256"')
       && commands[lifecycle].includes('--build-proof "$UPLOAD_BUILD_DIRECTORY_PROOF"')
       && acceptVersion > lifecycle
+      && !commands.some((command) => command.includes('select(.type == "version-upload"'))
   }
 
   const hasResetResponseValidationOrder = (runbook: string) => {
@@ -74,7 +77,7 @@ describe('Issue #23 Phase B runbook order', () => {
     const lines = readRunbook().split('\n')
     const adapterLines = lines.flatMap((line, index) => {
       const trimmed = line.trim()
-      if (!/^(?:WRANGLER_OUTPUT_FILE_PATH=.*\s+)?(?:\.\/node_modules\/\.bin\/wrangler|node scripts\/(?:phase-b-sequence|migrations|rollout-safety)\.mjs)/.test(trimmed)) {
+      if (!/^(?:UPLOAD_ACCEPTANCE=\()?\s*(?:WRANGLER_OUTPUT_FILE_PATH=.*\s+)?(?:\.\/node_modules\/\.bin\/wrangler|node scripts\/(?:phase-b-sequence|migrations|rollout-safety)\.mjs)/.test(trimmed)) {
         return []
       }
       let command = trimmed
@@ -99,6 +102,10 @@ describe('Issue #23 Phase B runbook order', () => {
     expect(runbook).toContain('--clean-start-upload-report "$REPORT_DIR/clean-start-upload-report.json"')
     expect(runbook).not.toContain('versions list --json')
     expect(runbook).not.toContain('sort_by(.metadata.created_on) | last')
+    expect(runbook).not.toContain("select(.type == \"version-upload\"")
+    expect(runbook).toContain(
+      'UPLOADED_VERSION_ID=$(jq -er .version_id <<< "$UPLOAD_ACCEPTANCE")',
+    )
   })
 
   it('regenerates the actual upload-source proof immediately before the upload adapter', () => {
@@ -106,7 +113,7 @@ describe('Issue #23 Phase B runbook order', () => {
     expect(runbook).toContain('pre-cas-build-directory-proof.json')
     expect(hasTightUploadSourceProof(runbook)).toBe(true)
     expect(runbook).toContain(
-      'BUILD_DIRECTORY_PROOF_SHA256=$(shasum -a 256 "$UPLOAD_BUILD_DIRECTORY_PROOF"',
+      'BUILD_DIRECTORY_PROOF_SHA256=$(jq -er .build_directory_proof_sha256 <<< "$UPLOAD_ACCEPTANCE")',
     )
     expect(runbook).toContain(
       '--build-directory-proof "$REPORT_DIR/upload-build-directory-proof.json"',
@@ -120,6 +127,10 @@ describe('Issue #23 Phase B runbook order', () => {
     expect(hasTightUploadSourceProof(runbook.replace(
       'run-upload-source-lifecycle',
       'skipped-upload-source-lifecycle',
+    ))).toBe(false)
+    expect(hasTightUploadSourceProof(runbook.replace(
+      'UPLOADED_VERSION_ID=$(jq -er .version_id <<< "$UPLOAD_ACCEPTANCE")',
+      'UPLOADED_VERSION_ID=$(jq -sr ".[-1].version_id" "$UPLOAD_PRIVATE")',
     ))).toBe(false)
   })
 

@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
+  existsSync,
   linkSync,
   lstatSync,
   mkdirSync,
@@ -196,6 +197,7 @@ fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
 function runCurrentUploadLifecycle(
   fixture: ReturnType<typeof uploadSourceLifecycleFixture>,
   environment: NodeJS.ProcessEnv = {},
+  cwd = process.cwd(),
 ) {
   return spawnSync(process.execPath, [
     parserPath,
@@ -210,6 +212,7 @@ function runCurrentUploadLifecycle(
     '--archive-sha256', fixture.archiveSha256,
     '--build-proof', fixture.buildProof,
   ], {
+    cwd,
     encoding: 'utf8',
     env: {
       ...process.env,
@@ -628,6 +631,7 @@ require('node:fs').appendFileSync(
   process.env.WRANGLER_OUTPUT_FILE_PATH,
   JSON.stringify({ type: 'version-upload', version: 1, version_id: 'fixture-version' }) + '\\n',
 )
+process.stdout.write('OpenNext upload log\\n')
 `)
     chmodSync(join(fakeBin, 'npm'), 0o755)
 
@@ -652,7 +656,12 @@ require('node:fs').appendFileSync(
         FORWARDED_ARGS: forwardedArgs,
       },
     })
-    expect(lifecycle).toMatchObject({ status: 0, stdout: '', stderr: '' })
+    expect(lifecycle).toMatchObject({ status: 0, stderr: 'OpenNext upload log\n' })
+    expect(JSON.parse(lifecycle.stdout)).toMatchObject({
+      format: 'blogman-upload-source-lifecycle-acceptance/v1',
+      state: 'accepted',
+      version_id: 'fixture-version',
+    })
     expect(JSON.parse(readFileSync(forwardedArgs, 'utf8'))).toEqual([
       'exec', '--', 'opennextjs-cloudflare', 'upload',
       '-c', config, '--', join(snapshot.destination, 'worker.js'),
@@ -845,6 +854,131 @@ fs.renameSync(process.env.SAVED_TOP, process.env.SWAPPABLE_TOP)
       stderr: 'Invalid Issue #23 upload source lifecycle\n',
     })
     expect(readFileSync(fixture.counter, 'utf8')).toBe('0')
+  })
+
+  it('rejects config mutation during archive proof before invoking upload', () => {
+    const fixture = uploadSourceLifecycleFixture()
+    installCountingUpload(fixture)
+    const mutator = join(fixture.directory, 'mutate-config.mjs')
+    const mutationMarker = join(fixture.directory, 'config-mutated')
+    writeFileSync(mutator, `
+import { existsSync, writeFileSync } from 'node:fs'
+const wait = new Int32Array(new SharedArrayBuffer(4))
+while (!existsSync(process.env.SNAPSHOT_ROOT)) Atomics.wait(wait, 0, 0, 1)
+writeFileSync(
+  process.env.CONFIG_PATH,
+  'name = "malicious-upload-target"\\n[assets]\\ndirectory = '
+    + JSON.stringify(process.env.ASSETS_DIRECTORY) + '\\n',
+)
+writeFileSync(process.env.MUTATION_MARKER, 'mutated\\n')
+`)
+    const mutation = spawn(process.execPath, [mutator], {
+      env: {
+        ...process.env,
+        ASSETS_DIRECTORY: join(fixture.source, 'assets'),
+        CONFIG_PATH: fixture.config,
+        MUTATION_MARKER: mutationMarker,
+        SNAPSHOT_ROOT: fixture.destination,
+      },
+      stdio: 'ignore',
+    })
+
+    const lifecycle = runCurrentUploadLifecycle(fixture)
+    expect(readFileSync(mutationMarker, 'utf8')).toBe('mutated\n')
+    expect(readFileSync(fixture.config, 'utf8')).toContain('malicious-upload-target')
+    expect(lifecycle).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+    })
+    expect(readFileSync(fixture.counter, 'utf8')).toBe('0')
+    mutation.unref()
+  })
+
+  it('ignores a spoofed archive helper pathname and rejects unsealed snapshot bytes', () => {
+    const fixture = uploadSourceLifecycleFixture()
+    installCountingUpload(fixture)
+    writeFileSync(join(fixture.source, 'worker.js'), 'malicious unsealed worker\n')
+    const spoofedCwd = join(fixture.directory, 'spoofed-helper-cwd')
+    const spoofedScripts = join(spoofedCwd, 'scripts')
+    const spoofedHelperMarker = join(fixture.directory, 'spoofed-helper-ran')
+    mkdirSync(spoofedScripts, { recursive: true })
+    writeFileSync(join(spoofedScripts, 'issue-23-reseal.mjs'), `
+import { writeFileSync } from 'node:fs'
+writeFileSync(process.env.SPOOFED_HELPER_MARKER, 'ran\\n')
+process.stdout.write(JSON.stringify({
+  format: 'blogman-build-directory-proof/v1',
+  state: 'matched',
+  archive_sha256: ${JSON.stringify(fixture.archiveSha256)},
+  file_count: 2,
+}) + '\\n')
+`)
+
+    const lifecycle = runCurrentUploadLifecycle(fixture, {
+      SPOOFED_HELPER_MARKER: spoofedHelperMarker,
+    }, spoofedCwd)
+    expect(lifecycle).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+    })
+    expect(readFileSync(fixture.counter, 'utf8')).toBe('0')
+    expect(existsSync(spoofedHelperMarker)).toBe(false)
+  })
+
+  it('returns the accepted version and evidence digests before releasing held FDs', () => {
+    const fixture = uploadSourceLifecycleFixture()
+    installCountingUpload(fixture)
+
+    const lifecycle = runCurrentUploadLifecycle(fixture)
+    expect(lifecycle.status, lifecycle.stderr).toBe(0)
+    const accepted = JSON.parse(lifecycle.stdout) as Record<string, string>
+    const acceptedUploadBytes = readFileSync(fixture.uploadOutput)
+    const acceptedProofAfterBytes = readFileSync(fixture.proofAfter)
+    expect(accepted).toMatchObject({
+      format: 'blogman-upload-source-lifecycle-acceptance/v1',
+      state: 'accepted',
+      version_id: 'fixture-version',
+      upload_operation_id: `issue-23-${'a'.repeat(40)}-upload-1`,
+      wrangler_output_sha256: createHash('sha256').update(acceptedUploadBytes).digest('hex'),
+      snapshot_proof_after_sha256: createHash('sha256')
+        .update(acceptedProofAfterBytes).digest('hex'),
+    })
+
+    writeFileSync(
+      fixture.uploadOutput,
+      '{"type":"version-upload","version":1,"version_id":"replaced-version"}\n',
+    )
+    writeFileSync(fixture.proofAfter, '{"state":"replaced"}\n')
+    expect(accepted.version_id).toBe('fixture-version')
+    expect(accepted.wrangler_output_sha256).not.toBe(
+      createHash('sha256').update(readFileSync(fixture.uploadOutput)).digest('hex'),
+    )
+    expect(accepted.snapshot_proof_after_sha256).not.toBe(
+      createHash('sha256').update(readFileSync(fixture.proofAfter)).digest('hex'),
+    )
+  })
+
+  it('rejects duplicate version-upload records before returning acceptance', () => {
+    const fixture = uploadSourceLifecycleFixture()
+    writeFileSync(join(fixture.fakeBin, 'npm'), `#!/usr/bin/env node
+const fs = require('node:fs')
+fs.writeFileSync(process.env.UPLOAD_COUNTER, '1')
+for (const versionId of ['first-version', 'second-version']) {
+  fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
+    type: 'version-upload', version: 1, version_id: versionId,
+  }) + '\\n')
+}
+`)
+    chmodSync(join(fixture.fakeBin, 'npm'), 0o755)
+
+    const lifecycle = runCurrentUploadLifecycle(fixture)
+    expect(lifecycle).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+    })
+    expect(readFileSync(fixture.counter, 'utf8')).toBe('1')
   })
 
   it('stops at a failed empty-database plan after reset proof and before migrations', async () => {
