@@ -30,30 +30,54 @@ Use absolute paths. Example variable names are placeholders; do not copy identit
 set -euo pipefail
 umask 077
 
-CONFIG=/absolute/private/wrangler.toml
+TOOL_WORKSPACE=/absolute/path/to/blogman-tool-workspace
+FROZEN_ROOT=/absolute/private/frozen
+FROZEN_SNAPSHOT=/absolute/private/frozen/snapshot
+FROZEN_ARTIFACTS=/absolute/private/frozen/artifacts
+OPERATOR_EVIDENCE_ROOT=/absolute/private/issue-23-clean-start
+CONFIG="$OPERATOR_EVIDENCE_ROOT/wrangler.toml"
+LOCAL_CONFIG="$FROZEN_SNAPSHOT/wrangler.toml"
+WRANGLER="$TOOL_WORKSPACE/node_modules/.bin/wrangler"
+LOCKFILE="$FROZEN_SNAPSHOT/package-lock.json"
 DATABASE=blogman-db
-EXPECTED_CANDIDATE=<40-hex-approved-commit>
-RESEAL_REQUEST=/absolute/private/reseal-request.json
-SEALED_PACKAGE=/absolute/private/sealed/package
+EXPECTED_CANDIDATE=replace-with-40-hex-approved-commit
+RESEAL_REQUEST="$FROZEN_ROOT/reseal-input.json"
+INPUT_EVIDENCE_MANIFEST="$(dirname "$RESEAL_REQUEST")/input-evidence-manifest.json"
+SEALED_PACKAGE="$OPERATOR_EVIDENCE_ROOT/sealed/package"
 APPROVAL_PACKET="$SEALED_PACKAGE/approval-packet.json"
-RESET_SQL="$PWD/db/issue-23-clean-start-reset.sql"
-BUILD_ZIP=/absolute/private/build/open-next-build.zip
-UPLOAD_SOURCE_DIRECTORY="$PWD/.open-next"
-REPORT_DIR=/absolute/private/issue-23-clean-start/reports
-PUBLIC_ORIGIN=<approved-public-origin>
-ADMIN_COOKIE_FILE=<operator-owned-private-cookie-file>
+RESET_SQL="$FROZEN_SNAPSHOT/db/issue-23-clean-start-reset.sql"
+BUILD_ZIP="$FROZEN_ARTIFACTS/open-next-build.zip"
+UPLOAD_SOURCE_DIRECTORY="$FROZEN_ARTIFACTS/open-next"
+REPORT_DIR="$OPERATOR_EVIDENCE_ROOT/reports"
+PUBLIC_ORIGIN=https://replace-with-approved-public-origin.invalid
+ADMIN_COOKIE_FILE=/absolute/private/operator-owned-cookie-file
 CLEAN_START_MISSING_SLUG=__issue-23-clean-start-empty__
 
-case "$CONFIG" in
-  /*) ;;
-  *) exit 1 ;;
-esac
-if ! test -f "$CONFIG"; then
-  exit 1
-fi
-test "$(git rev-parse HEAD)" = "$EXPECTED_CANDIDATE"
-test -z "$(git status --porcelain --untracked-files=all)"
+for bound_path in \
+  "$TOOL_WORKSPACE" "$FROZEN_ROOT" "$FROZEN_SNAPSHOT" "$FROZEN_ARTIFACTS" \
+  "$OPERATOR_EVIDENCE_ROOT" "$CONFIG" "$LOCAL_CONFIG" "$WRANGLER" \
+  "$LOCKFILE" "$RESEAL_REQUEST" "$SEALED_PACKAGE" "$REPORT_DIR"
+do
+  case "$bound_path" in
+    /*) ;;
+    *) exit 1 ;;
+  esac
+done
+test -d "$TOOL_WORKSPACE"
+test -d "$FROZEN_ROOT"
+test -d "$FROZEN_SNAPSHOT"
+test -d "$FROZEN_ARTIFACTS"
+test -d "$OPERATOR_EVIDENCE_ROOT"
+test -x "$WRANGLER"
+test -f "$CONFIG"
+test -f "$LOCAL_CONFIG"
+test -f "$LOCKFILE"
+test "$(git -C "$TOOL_WORKSPACE" rev-parse HEAD)" = "$EXPECTED_CANDIDATE"
+test -z "$(git -C "$TOOL_WORKSPACE" status --porcelain --untracked-files=all)"
+test "$(git -C "$FROZEN_SNAPSHOT" rev-parse HEAD)" = "$EXPECTED_CANDIDATE"
+test -z "$(git -C "$FROZEN_SNAPSHOT" status --porcelain --untracked-files=all)"
 test -f "$RESEAL_REQUEST"
+test -f "$INPUT_EVIDENCE_MANIFEST"
 test -d "$SEALED_PACKAGE"
 test -f "$APPROVAL_PACKET"
 test -f "$RESET_SQL"
@@ -75,7 +99,27 @@ verify_config_identity() {
 }
 ```
 
-Validate the canonical v3 request and current v4 package locally with `scripts/issue-23-reseal.mjs validate`; the package must be current, not historical. The later candidate verifier consumes those same original paths and hashes the original bytes. The package must have `production_authorization_granted=false` and all clean-start stage counters at zero before a separate authorization binds its exact package manifest SHA-256. A v2 or v3 package may validate only as historical read-only evidence and cannot start this sequence.
+The reseal must have been prepared in a build/preflight workspace outside its
+frozen evidence root. Dependencies and toolchains, including `node_modules`,
+must remain in `TOOL_WORKSPACE` and outside that root. `FROZEN_SNAPSHOT` is a
+self-contained Git worktree whose effective git-dir, common-dir, index, and
+primary object store are all inside `FROZEN_ROOT`; linked worktrees, object
+alternates, and Git storage environment overrides are forbidden. The root contains only the final snapshot,
+canonical v3 request, canonical input-evidence v2 manifest, and bound artifacts;
+its complete recursive tree has zero symlinks, hardlinked regular files,
+special files, realpath escapes, and transient dependency/toolchain entries.
+
+Validate the canonical input-evidence v2 manifest, canonical v3 request, and
+current v4 package locally with `scripts/issue-23-reseal.mjs`; the package must
+be current, not historical. `prepare`, `seal`, and `verify` all consume the
+fixed sibling `input-evidence-manifest.json` and validate it before any sealed
+output reservation. The later candidate verifier consumes those same original
+paths and hashes the original bytes. The package must have
+`production_authorization_granted=false` and all clean-start stage counters at
+zero before a separate authorization binds its exact package manifest SHA-256.
+A v2 or v3 package may validate only as historical read-only evidence and
+cannot start this sequence. A terminal or blocked lineage is immutable history;
+never patch or continue it in place.
 
 Before every repository or Cloudflare adapter call, recheck the absolute config realpath and SHA-256 captured at PRE-CAS. Do not accept a symlink replacement or a different D1 binding.
 
@@ -85,6 +129,8 @@ Classification: local-only except separately reviewed GitHub status. No Cloudfla
 
 Prove all of the following:
 
+- repository-owned input-evidence v2 canonical bytes/schema/hash pass and its
+  denied terminal lineages are not input dependencies;
 - `HEAD`, tree, `main`, and `origin/main` match the sealed candidate and the worktree is clean;
 - lockfile, build ZIP, Worker, tree manifest, runbook, reset SQL, and migrations have the sealed hashes;
 - approval `delivery_mode=clean-start`, strategy `reset-bound-d1-in-place`, and all three historical dispositions are `NOT_APPLICABLE`;
@@ -96,30 +142,35 @@ Prove all of the following:
 The local empty-D1 rehearsal is:
 
 ```bash
-node scripts/issue-23-reseal.mjs validate --document "$RESEAL_REQUEST" \
+node "$TOOL_WORKSPACE/scripts/issue-23-reseal.mjs" validate --document "$RESEAL_REQUEST" \
   > "$REPORT_DIR/reseal-request-validation.json"
-node scripts/issue-23-reseal.mjs validate --package "$SEALED_PACKAGE" \
+node "$TOOL_WORKSPACE/scripts/issue-23-reseal.mjs" validate --document "$INPUT_EVIDENCE_MANIFEST" \
+  > "$REPORT_DIR/input-evidence-validation.json"
+node "$TOOL_WORKSPACE/scripts/issue-23-reseal.mjs" prepare \
+  --input "$RESEAL_REQUEST" --repo "$FROZEN_SNAPSHOT" --artifacts "$FROZEN_ARTIFACTS" \
+  > "$REPORT_DIR/reseal-input-preparation.json"
+node "$TOOL_WORKSPACE/scripts/issue-23-reseal.mjs" validate --package "$SEALED_PACKAGE" \
   > "$REPORT_DIR/sealed-package-validation.json"
-node scripts/issue-23-reseal.mjs verify-build-directory \
+node "$TOOL_WORKSPACE/scripts/issue-23-reseal.mjs" verify-build-directory \
   --archive "$BUILD_ZIP" --directory "$UPLOAD_SOURCE_DIRECTORY" \
   --archive-sha256 "$BUILD_SHA256" > "$REPORT_DIR/pre-cas-build-directory-proof.json"
 
 LOCAL_D1_STATE=$(mktemp -d)
-node scripts/migrations.mjs apply \
-  --database DB --local --persist-to "$LOCAL_D1_STATE" --config wrangler.toml \
+node "$TOOL_WORKSPACE/scripts/migrations.mjs" apply \
+  --database DB --local --persist-to "$LOCAL_D1_STATE" --config "$LOCAL_CONFIG" \
   --candidate "$EXPECTED_CANDIDATE" > "$REPORT_DIR/local-apply.json"
-node scripts/migrations.mjs verify \
-  --database DB --local --persist-to "$LOCAL_D1_STATE" --config wrangler.toml \
+node "$TOOL_WORKSPACE/scripts/migrations.mjs" verify \
+  --database DB --local --persist-to "$LOCAL_D1_STATE" --config "$LOCAL_CONFIG" \
   > "$REPORT_DIR/local-verify.json"
-node scripts/rollout-safety.mjs reconcile capture \
-  --database DB --local --persist-to "$LOCAL_D1_STATE" --config wrangler.toml \
+node "$TOOL_WORKSPACE/scripts/rollout-safety.mjs" reconcile capture \
+  --database DB --local --persist-to "$LOCAL_D1_STATE" --config "$LOCAL_CONFIG" \
   > "$REPORT_DIR/expected-production-after.json"
-node scripts/rollout-safety.mjs request smoke \
-  --database DB --local --persist-to "$LOCAL_D1_STATE" --config wrangler.toml \
+node "$TOOL_WORKSPACE/scripts/rollout-safety.mjs" request smoke \
+  --database DB --local --persist-to "$LOCAL_D1_STATE" --config "$LOCAL_CONFIG" \
   > "$REPORT_DIR/empty-migrated-workerd-smoke.json"
-node scripts/rollout-safety.mjs reconcile compare \
+node "$TOOL_WORKSPACE/scripts/rollout-safety.mjs" reconcile compare \
   --expected "$REPORT_DIR/expected-production-after.json" \
-  --database DB --local --persist-to "$LOCAL_D1_STATE" --config wrangler.toml \
+  --database DB --local --persist-to "$LOCAL_D1_STATE" --config "$LOCAL_CONFIG" \
   > "$REPORT_DIR/local-reconciliation.json"
 ```
 
@@ -131,12 +182,12 @@ Classification: production read-only. These are the first commands requiring the
 
 ```bash
 verify_config_identity
-./node_modules/.bin/wrangler deployments status --json -c "$CONFIG" \
+"$WRANGLER" deployments status --json -c "$CONFIG" \
   | jq '{id,created_on,versions:[.versions[]|{version_id,percentage}]}' \
   > "$REPORT_DIR/deployment-before.json"
 
 verify_config_identity
-./node_modules/.bin/wrangler d1 info "$DATABASE" --json -c "$CONFIG" \
+"$WRANGLER" d1 info "$DATABASE" --json -c "$CONFIG" \
   | jq '{uuid}' > "$REPORT_DIR/d1-info-before.json"
 ```
 
@@ -150,7 +201,7 @@ Classification: production Worker version write, no traffic change and no D1 wri
 UPLOAD_PRIVATE="$REPORT_DIR/upload-private.jsonl"
 UPLOAD_OPERATION_ID="issue-23-$EXPECTED_CANDIDATE-upload-1"
 install -m 600 /dev/null "$UPLOAD_PRIVATE"
-node scripts/issue-23-reseal.mjs verify-build-directory \
+node "$TOOL_WORKSPACE/scripts/issue-23-reseal.mjs" verify-build-directory \
   --archive "$BUILD_ZIP" --directory "$UPLOAD_SOURCE_DIRECTORY" \
   --archive-sha256 "$BUILD_SHA256" > "$REPORT_DIR/upload-source-directory-proof.json"
 UPLOAD_SOURCE_SNAPSHOT_DIRECTORY="$REPORT_DIR/upload-source-snapshot"
@@ -163,7 +214,7 @@ install -m 600 /dev/null "$UPLOAD_SOURCE_SNAPSHOT_PROOF"
 install -m 600 /dev/null "$UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER"
 install -m 600 /dev/null "$UPLOAD_BUILD_DIRECTORY_PROOF"
 verify_config_identity
-UPLOAD_ACCEPTANCE=$(WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" node scripts/phase-b-sequence.mjs \
+UPLOAD_ACCEPTANCE=$(WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" node "$TOOL_WORKSPACE/scripts/phase-b-sequence.mjs" \
   run-upload-source-lifecycle \
   --config "$CONFIG" \
   --source "$UPLOAD_SOURCE_DIRECTORY" \
@@ -234,18 +285,18 @@ test "$(jq -er .expected_baseline.d1_database_id "$APPROVAL_PACKET")" = "$DATABA
 RESET_PRIVATE="$REPORT_DIR/reset-private.json"
 install -m 600 /dev/null "$RESET_PRIVATE"
 verify_config_identity
-./node_modules/.bin/wrangler deployments status --json -c "$CONFIG" \
+"$WRANGLER" deployments status --json -c "$CONFIG" \
   | jq '{id,created_on,versions:[.versions[]|{version_id,percentage}]}' \
   > "$REPORT_DIR/deployment-before-reset.json"
 cmp "$REPORT_DIR/deployment-before.json" "$REPORT_DIR/deployment-before-reset.json"
 verify_config_identity
-./node_modules/.bin/wrangler d1 info "$DATABASE" --json -c "$CONFIG" \
+"$WRANGLER" d1 info "$DATABASE" --json -c "$CONFIG" \
   | jq '{uuid}' > "$REPORT_DIR/d1-info-before-reset.json"
 test "$(jq -er .uuid "$REPORT_DIR/d1-info-before-reset.json")" = "$DATABASE_ID"
 verify_config_identity
-./node_modules/.bin/wrangler d1 execute "$DATABASE" --remote -c "$CONFIG" --json \
+"$WRANGLER" d1 execute "$DATABASE" --remote -c "$CONFIG" --json \
   --file "$RESET_SQL" > "$RESET_PRIVATE"
-node scripts/phase-b-sequence.mjs validate-wrangler-d1-file-response \
+node "$TOOL_WORKSPACE/scripts/phase-b-sequence.mjs" validate-wrangler-d1-file-response \
   < "$RESET_PRIVATE" >/dev/null
 
 RESET_COMPLETED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
@@ -269,14 +320,14 @@ Classification: production read-only after reset.
 
 ```bash
 verify_config_identity
-./node_modules/.bin/wrangler d1 info "$DATABASE" --json -c "$CONFIG" \
+"$WRANGLER" d1 info "$DATABASE" --json -c "$CONFIG" \
   | jq '{uuid}' > "$REPORT_DIR/d1-info-after-reset.json"
 test "$(jq -er .uuid "$REPORT_DIR/d1-info-after-reset.json")" = "$DATABASE_ID"
 
 EMPTY_PRIVATE="$REPORT_DIR/empty-schema-private.json"
 install -m 600 /dev/null "$EMPTY_PRIVATE"
 verify_config_identity
-./node_modules/.bin/wrangler d1 execute "$DATABASE" --remote -c "$CONFIG" --json \
+"$WRANGLER" d1 execute "$DATABASE" --remote -c "$CONFIG" --json \
   --command "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND NOT (type = 'table' AND (name,tbl_name) IN (('_cf_KV','_cf_KV'),('_cf_METADATA','_cf_METADATA'))) ORDER BY type,name" \
   > "$EMPTY_PRIVATE"
 jq -e 'type == "array" and length > 0 and .[-1].success == true
@@ -291,7 +342,7 @@ jq -n --arg checked "$EMPTY_CHECKED_AT" --arg candidate "$EXPECTED_CANDIDATE" \
   > "$REPORT_DIR/clean-start-empty-report.json"
 
 verify_config_identity
-node scripts/migrations.mjs plan --database "$DATABASE" --remote --config "$CONFIG" \
+node "$TOOL_WORKSPACE/scripts/migrations.mjs" plan --database "$DATABASE" --remote --config "$CONFIG" \
   --failure-report "$REPORT_DIR/production-plan-failure.json" \
   > "$REPORT_DIR/production-plan-empty.json"
 jq -e '.state == "pending" and (.applied|length)==0 and (.pending|length)==6
@@ -319,9 +370,9 @@ This plan must not baseline an existing schema. Any application object, ledger r
 Assemble `blogman-pre-migration-candidate/v2` with `delivery_mode=clean-start`. It binds the approval packet, reset SQL, reset report, empty report, uploaded version, local migration verify, local expected reconciliation, Workerd smoke, test report, and migration set. It has no backup field and cannot satisfy final candidate verification.
 
 ```bash
-node scripts/rollout-safety.mjs candidate verify-pre-migration \
+node "$TOOL_WORKSPACE/scripts/rollout-safety.mjs" candidate verify-pre-migration \
   --evidence "$REPORT_DIR/pre-migration-candidate.json" \
-  --candidate "$EXPECTED_CANDIDATE" --lockfile package-lock.json \
+  --candidate "$EXPECTED_CANDIDATE" --lockfile "$LOCKFILE" \
   --build "$BUILD_ZIP" --version "$UPLOADED_VERSION_ID" --d1-database "$DATABASE_ID" \
   --reseal-request "$RESEAL_REQUEST" --sealed-package "$SEALED_PACKAGE" \
   --build-directory-proof "$REPORT_DIR/upload-build-directory-proof.json" \
@@ -344,10 +395,10 @@ Classification: production D1 write, then read-only verification.
 
 ```bash
 verify_config_identity
-node scripts/migrations.mjs apply --database "$DATABASE" --remote --config "$CONFIG" \
+node "$TOOL_WORKSPACE/scripts/migrations.mjs" apply --database "$DATABASE" --remote --config "$CONFIG" \
   --candidate "$EXPECTED_CANDIDATE" > "$REPORT_DIR/production-apply.json"
 verify_config_identity
-node scripts/migrations.mjs verify --database "$DATABASE" --remote --config "$CONFIG" \
+node "$TOOL_WORKSPACE/scripts/migrations.mjs" verify --database "$DATABASE" --remote --config "$CONFIG" \
   > "$REPORT_DIR/production-verify.json"
 ```
 
@@ -359,9 +410,9 @@ Recheck deployment baseline, uploaded version identity, config, exact D1 UUID, m
 
 ```bash
 verify_config_identity
-./node_modules/.bin/wrangler versions deploy "$UPLOADED_VERSION_ID@100%" -y -c "$CONFIG"
+"$WRANGLER" versions deploy "$UPLOADED_VERSION_ID@100%" -y -c "$CONFIG"
 verify_config_identity
-./node_modules/.bin/wrangler deployments status --json -c "$CONFIG" \
+"$WRANGLER" deployments status --json -c "$CONFIG" \
   | jq '{id,created_on,versions:[.versions[]|{version_id,percentage}]}' \
   > "$REPORT_DIR/deployment-after.json"
 DEPLOYMENT_ID=$(jq -er .id "$REPORT_DIR/deployment-after.json")
@@ -380,7 +431,7 @@ Run the six real GET paths without retaining response bodies. The five collectio
 
 ```bash
 verify_config_identity
-./node_modules/.bin/wrangler d1 info "$DATABASE" --json -c "$CONFIG" \
+"$WRANGLER" d1 info "$DATABASE" --json -c "$CONFIG" \
   | jq '{uuid}' > "$REPORT_DIR/d1-info-t0-before.json"
 test "$(jq -er .uuid "$REPORT_DIR/d1-info-t0-before.json")" = "$DATABASE_ID"
 
@@ -399,13 +450,13 @@ test "$SMOKE_AI_GENERATORS_STATUS" = 200
 SMOKE_CHECKED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
 
 verify_config_identity
-./node_modules/.bin/wrangler deployments status --json -c "$CONFIG" \
+"$WRANGLER" deployments status --json -c "$CONFIG" \
   | jq '{id,created_on,versions:[.versions[]|{version_id,percentage}]}' \
   > "$REPORT_DIR/deployment-after-smoke.json"
 cmp "$REPORT_DIR/deployment-after.json" "$REPORT_DIR/deployment-after-smoke.json"
 
 verify_config_identity
-node scripts/rollout-safety.mjs reconcile compare \
+node "$TOOL_WORKSPACE/scripts/rollout-safety.mjs" reconcile compare \
   --expected "$REPORT_DIR/expected-production-after.json" \
   --database "$DATABASE" --remote --config "$CONFIG" \
   > "$REPORT_DIR/reconciliation-raw.json"
@@ -417,7 +468,7 @@ jq -n --arg checked "$RECON_CHECKED_AT" --arg d1 "$DATABASE_ID" \
   > "$REPORT_DIR/reconciliation-report.json"
 
 verify_config_identity
-./node_modules/.bin/wrangler d1 info "$DATABASE" --json -c "$CONFIG" \
+"$WRANGLER" d1 info "$DATABASE" --json -c "$CONFIG" \
   | jq '{uuid}' > "$REPORT_DIR/d1-info-t0-after.json"
 test "$(jq -er .uuid "$REPORT_DIR/d1-info-t0-after.json")" = "$DATABASE_ID"
 
@@ -466,9 +517,9 @@ Create `blogman-t0-acceptance/v2`; besides the v1 identity/migration/smoke/recon
 Assemble `blogman-rollout-candidate/v3` with `delivery_mode=clean-start` and a `clean_start` object binding the approval packet, reset SQL, reset report, empty report, and all three `NOT_APPLICABLE` dispositions. It has no backup field.
 
 ```bash
-node scripts/rollout-safety.mjs candidate verify \
+node "$TOOL_WORKSPACE/scripts/rollout-safety.mjs" candidate verify \
   --evidence "$REPORT_DIR/candidate.json" \
-  --candidate "$EXPECTED_CANDIDATE" --lockfile package-lock.json --build "$BUILD_ZIP" \
+  --candidate "$EXPECTED_CANDIDATE" --lockfile "$LOCKFILE" --build "$BUILD_ZIP" \
   --deployment "$DEPLOYMENT_ID" --version "$UPLOADED_VERSION_ID" --d1-database "$DATABASE_ID" \
   --reseal-request "$RESEAL_REQUEST" --sealed-package "$SEALED_PACKAGE" \
   --build-directory-proof "$REPORT_DIR/upload-build-directory-proof.json" \

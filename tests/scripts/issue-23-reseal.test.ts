@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
   copyFileSync,
@@ -46,8 +47,188 @@ const historicalPackageManifest = join(
   'v2',
   'package-manifest.json',
 )
+const inputEvidenceSchema = join(
+  repoRoot,
+  'schemas',
+  'issue-23-reseal',
+  'blogman-issue-23-input-evidence-manifest-v2.schema.json',
+)
+const inputEvidenceGolden = join(
+  repoRoot,
+  'tests',
+  'fixtures',
+  'issue-23-reseal',
+  'input-evidence-manifest-v2.json',
+)
+const phaseBRunbook = join(repoRoot, 'docs', 'issue-23-phase-b-runbook.md')
+
+function sha256(value: string | Buffer) {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+interface MutableInputEvidence {
+  authorization: {
+    authorization_consumed: boolean
+    authorization_granted: boolean
+  }
+  contracts: {
+    reseal_request: {
+      path: string
+    }
+  }
+  frozen_tree: {
+    manifest_mode: string
+  }
+  github: {
+    main_push: {
+      head_sha: string
+    }
+  }
+  production_boundary: {
+    stage_counts: {
+      upload: number
+    }
+    worker_write_count?: number
+  }
+  repository: {
+    candidate_commit: string | number
+  }
+  unreviewed?: boolean
+}
 
 describe('Issue #23 local reseal CLI', () => {
+  it('keeps Phase B tool, snapshot, artifact, and evidence paths explicitly separated', () => {
+    const runbook = readFileSync(phaseBRunbook, 'utf8')
+
+    expect(runbook).toContain('TOOL_WORKSPACE=/absolute/path/to/blogman-tool-workspace')
+    expect(runbook).toContain('FROZEN_SNAPSHOT=/absolute/private/frozen/snapshot')
+    expect(runbook).toContain('FROZEN_ARTIFACTS=/absolute/private/frozen/artifacts')
+    expect(runbook).toContain('WRANGLER="$TOOL_WORKSPACE/node_modules/.bin/wrangler"')
+    expect(runbook).toContain('node "$TOOL_WORKSPACE/scripts/issue-23-reseal.mjs"')
+    expect(runbook).toContain('node "$TOOL_WORKSPACE/scripts/migrations.mjs"')
+    expect(runbook).toContain('git -C "$FROZEN_SNAPSHOT" rev-parse HEAD')
+    expect(runbook).toContain('--repo "$FROZEN_SNAPSHOT" --artifacts "$FROZEN_ARTIFACTS"')
+    expect(runbook).not.toMatch(/(?:^|\n)node scripts\//u)
+    expect(runbook).not.toContain('./node_modules/.bin/wrangler')
+    expect(runbook).not.toContain('$PWD')
+    expect(runbook).not.toContain('--config wrangler.toml')
+
+    const bashBlocks = [...runbook.matchAll(/```bash\n([\s\S]*?)\n```/gu)]
+      .map((match) => match[1])
+    expect(bashBlocks.length).toBeGreaterThan(0)
+    const syntax = spawnSync('bash', ['-n'], {
+      encoding: 'utf8',
+      input: `${bashBlocks.join('\n')}\n`,
+    })
+    expect(syntax.status, syntax.stderr).toBe(0)
+  })
+
+  it('validates the canonical input-evidence v2 schema and golden bytes', () => {
+    const schema = JSON.parse(readFileSync(inputEvidenceSchema, 'utf8'))
+    const goldenBytes = readFileSync(inputEvidenceGolden)
+    const golden = JSON.parse(goldenBytes.toString('utf8'))
+
+    expect(schema.$schema).toBe('https://json-schema.org/draft/2020-12/schema')
+    expect(goldenBytes.toString('utf8')).toBe(`${JSON.stringify(golden, null, 2)}\n`)
+
+    const result = spawnSync(process.execPath, [
+      cliPath,
+      'validate',
+      '--document',
+      inputEvidenceGolden,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({
+      format: 'blogman-issue-23-input-evidence-manifest/v2',
+      sha256: sha256(goldenBytes),
+      state: 'valid',
+    })
+  })
+
+  it.each([
+    {
+      name: 'integer candidate commit',
+      mutate(document: MutableInputEvidence) {
+        document.repository.candidate_commit = 23
+      },
+    },
+    {
+      name: 'consumed authorization',
+      mutate(document: MutableInputEvidence) {
+        document.authorization.authorization_consumed = true
+      },
+    },
+    {
+      name: 'unknown production-write field',
+      mutate(document: MutableInputEvidence) {
+        document.production_boundary.worker_write_count = 0
+      },
+    },
+    {
+      name: 'invalid CI head SHA',
+      mutate(document: MutableInputEvidence) {
+        document.github.main_push.head_sha = 'not-a-sha'
+      },
+    },
+    {
+      name: 'unknown top-level field',
+      mutate(document: MutableInputEvidence) {
+        document.unreviewed = false
+      },
+    },
+    {
+      name: 'escaping request path',
+      mutate(document: MutableInputEvidence) {
+        document.contracts.reseal_request.path = '/private/tmp/evidence/../request.json'
+      },
+    },
+    {
+      name: 'invalid manifest mode',
+      mutate(document: MutableInputEvidence) {
+        document.frozen_tree.manifest_mode = '0666'
+      },
+    },
+    {
+      name: 'nonzero Phase B counter',
+      mutate(document: MutableInputEvidence) {
+        document.production_boundary.stage_counts.upload = 1
+      },
+    },
+    {
+      name: 'granted authorization',
+      mutate(document: MutableInputEvidence) {
+        document.authorization.authorization_granted = true
+      },
+    },
+  ])('rejects input-evidence mutation: $name', ({ mutate }) => {
+    const directory = mkdtempSync(join(tmpdir(), 'blogman-input-evidence-mutation-'))
+    try {
+      const document = JSON.parse(
+        readFileSync(inputEvidenceGolden, 'utf8'),
+      ) as MutableInputEvidence
+      mutate(document)
+      const documentPath = join(directory, 'input-evidence-manifest.json')
+      writeFileSync(documentPath, `${JSON.stringify(document, null, 2)}\n`)
+      const result = spawnSync(process.execPath, [
+        cliPath,
+        'validate',
+        '--document',
+        documentPath,
+      ], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      })
+
+      expect(result.status, result.stderr).not.toBe(0)
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it('validates the canonical historical local-preflight v2 fixture', () => {
     const result = spawnSync(process.execPath, [
       cliPath,

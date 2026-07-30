@@ -6,19 +6,21 @@ import {
   copyFileSync,
   cpSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
@@ -49,12 +51,52 @@ function git(cwd: string, ...args: string[]) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
 }
 
+function frozenTreeCounts(root: string) {
+  const counts = {
+    regular_file_count: 0,
+    directory_count: 0,
+    symlink_count: 0,
+    hardlinked_regular_file_count: 0,
+    special_file_count: 0,
+    realpath_escape_count: 0,
+    transient_dependency_entry_count: 0,
+  }
+  const visit = (entryPath: string) => {
+    const stat = lstatSync(entryPath)
+    const relativePath = relative(root, entryPath)
+    const parts = relativePath === '' ? [] : relativePath.split(sep)
+    if (parts.includes('node_modules') || parts[0] === 'toolchain') {
+      counts.transient_dependency_entry_count += 1
+    }
+    if (stat.isSymbolicLink()) {
+      counts.symlink_count += 1
+      return
+    }
+    if (stat.isDirectory()) {
+      counts.directory_count += 1
+      for (const name of readdirSync(entryPath)) visit(join(entryPath, name))
+      return
+    }
+    if (stat.isFile()) {
+      counts.regular_file_count += 1
+      if (stat.nlink !== 1) counts.hardlinked_regular_file_count += 1
+      return
+    }
+    counts.special_file_count += 1
+  }
+  visit(root)
+  return counts
+}
+
 function createSealFixture() {
-  const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-seal-'))
-  const repository = join(root, 'repo')
-  const artifacts = join(root, 'artifacts')
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-23-seal-')))
+  const frozenRoot = join(root, 'frozen')
+  const repository = join(frozenRoot, 'snapshot')
+  const artifacts = join(frozenRoot, 'artifacts')
   const migrations = join(repository, 'db', 'ledger-migrations')
+  mkdirSync(frozenRoot, { mode: 0o700 })
   mkdirSync(join(repository, 'docs'), { recursive: true })
+  mkdirSync(join(repository, 'schemas', 'issue-23-reseal'), { recursive: true })
   mkdirSync(join(repository, 'lib', 'ai-post-generator'), { recursive: true })
   mkdirSync(join(repository, 'scripts'), { recursive: true })
   mkdirSync(join(repository, 'tests', 'migrations'), { recursive: true })
@@ -67,6 +109,24 @@ function createSealFixture() {
   copyFileSync(
     join(projectRoot, 'docs', 'issue-23-phase-b-runbook.md'),
     runbookPath,
+  )
+  copyFileSync(
+    join(projectRoot, 'docs', 'issue-23-local-reseal.md'),
+    join(repository, 'docs', 'issue-23-local-reseal.md'),
+  )
+  copyFileSync(
+    join(
+      projectRoot,
+      'schemas',
+      'issue-23-reseal',
+      'blogman-issue-23-input-evidence-manifest-v2.schema.json',
+    ),
+    join(
+      repository,
+      'schemas',
+      'issue-23-reseal',
+      'blogman-issue-23-input-evidence-manifest-v2.schema.json',
+    ),
   )
   const canonicalMigrations = join(projectRoot, 'db', 'ledger-migrations')
   for (const name of readdirSync(canonicalMigrations)) {
@@ -122,10 +182,15 @@ function createSealFixture() {
   git(repository, 'init', '--quiet')
   git(repository, 'config', 'user.name', 'Blogman Test')
   git(repository, 'config', 'user.email', 'blogman-test@example.invalid')
+  git(repository, 'remote', 'add', 'origin', 'https://github.com/nardinmarcus/blogman.git')
   git(repository, 'add', '.')
   git(repository, 'commit', '--quiet', '-m', 'fixture')
+  git(repository, 'commit', '--quiet', '--allow-empty', '-m', 'candidate')
   const candidate = git(repository, 'rev-parse', 'HEAD')
   const tree = git(repository, 'rev-parse', 'HEAD^{tree}')
+  const parentCommits = git(repository, 'rev-list', '--parents', '-n', '1', 'HEAD')
+    .split(' ')
+    .slice(1)
 
   const workerPath = join(artifacts, 'worker.js')
   writeFileSync(workerPath, 'export default { fetch() { return new Response("ok") } }\n')
@@ -278,8 +343,126 @@ function createSealFixture() {
       historical_baseline_queries: 'NOT_APPLICABLE',
     },
   }
-  const inputPath = join(root, 'reseal-input.json')
+  const inputPath = join(frozenRoot, 'reseal-input.json')
   writeFileSync(inputPath, `${JSON.stringify(input, null, 2)}\n`)
+  chmodSync(inputPath, 0o600)
+  chmodSync(repository, 0o700)
+  chmodSync(artifacts, 0o700)
+
+  const inputEvidencePath = join(frozenRoot, 'input-evidence-manifest.json')
+  const inputEvidence = {
+    format: 'blogman-issue-23-input-evidence-manifest/v2',
+    produced_at: input.produced_at,
+    repository: {
+      canonical_repo: 'nardinmarcus/blogman',
+      origin_url: 'https://github.com/nardinmarcus/blogman.git',
+      candidate_commit: candidate,
+      candidate_tree: tree,
+      parent_commits: parentCommits,
+      tracked_worktree_clean: true,
+    },
+    github: {
+      main_push: {
+        run_id: input.github_evidence.quick.run_id,
+        event: 'push',
+        head_branch: 'main',
+        head_sha: candidate,
+        status: 'completed',
+        conclusion: 'success',
+      },
+    },
+    contracts: {
+      input_evidence_schema: {
+        path: 'schemas/issue-23-reseal/blogman-issue-23-input-evidence-manifest-v2.schema.json',
+        sha256: fileSha256(join(
+          repository,
+          'schemas',
+          'issue-23-reseal',
+          'blogman-issue-23-input-evidence-manifest-v2.schema.json',
+        )),
+      },
+      reseal_request: {
+        path: inputPath,
+        format: input.format,
+        sha256: fileSha256(inputPath),
+      },
+      local_reseal_runbook: {
+        path: 'docs/issue-23-local-reseal.md',
+        sha256: fileSha256(join(repository, 'docs', 'issue-23-local-reseal.md')),
+      },
+      phase_b_runbook: {
+        path: 'docs/issue-23-phase-b-runbook.md',
+        sha256: fileSha256(runbookPath),
+      },
+      build: {
+        artifacts_path: artifacts,
+        archive_path: input.build.archive_path,
+        archive_sha256: input.build.archive_sha256,
+        worker_path: input.build.worker_path,
+        worker_sha256: input.build.worker_sha256,
+        tree_manifest_path: input.build.tree_manifest_path,
+        tree_manifest_sha256: input.build.tree_manifest_sha256,
+      },
+    },
+    frozen_tree: {
+      root_path: frozenRoot,
+      snapshot_path: repository,
+      manifest_path: inputEvidencePath,
+      root_mode: '0700',
+      snapshot_mode: '0700',
+      manifest_mode: '0600',
+      request_mode: '0600',
+      regular_file_count: 1,
+      directory_count: 2,
+      symlink_count: 0,
+      hardlinked_regular_file_count: 0,
+      special_file_count: 0,
+      realpath_escape_count: 0,
+      transient_dependency_entry_count: 0,
+    },
+    authorization: {
+      authorization_granted: false,
+      authorization_consumed: false,
+    },
+    production_boundary: {
+      formal_local_seal_invocation_count: 0,
+      formal_production_entry_invocation_count: 0,
+      cloudflare_read_count: 0,
+      cloudflare_write_count: 0,
+      d1_read_count: 0,
+      d1_write_count: 0,
+      phase_b_mutation_count: 0,
+      stage_counts: {
+        pre_cas_local_gates: 0,
+        cas1: 0,
+        d1_identity: 0,
+        upload: 0,
+        clean_start_reset: 0,
+        clean_start_empty_verify: 0,
+        remote_migration_plan: 0,
+        migrations_001_006: 0,
+        cas2: 0,
+        traffic: 0,
+        smoke_reconcile: 0,
+        t0: 0,
+      },
+    },
+    lineage_policy: {
+      input_dependencies: [],
+      denylist: [{
+        path: '/private/tmp/blogman-issue23-local-reseal-20260730.Pw99oH',
+        terminal_state: 'BLOCK',
+        reuse_allowed: false,
+      }],
+      history: ['validator task 019fb1cb-f016-77d1-b003-7a3f119e1f1f'],
+    },
+  }
+  writeFileSync(inputEvidencePath, `${JSON.stringify(inputEvidence, null, 2)}\n`)
+  chmodSync(inputEvidencePath, 0o600)
+  Object.assign(inputEvidence.frozen_tree, frozenTreeCounts(frozenRoot))
+  writeFileSync(inputEvidencePath, `${JSON.stringify(inputEvidence, null, 2)}\n`)
+  chmodSync(inputEvidencePath, 0o600)
+
   const output = join(root, 'sealed-reservation', 'sealed')
   if (process.env.ISSUE_23_RESEAL_PRECREATE_OUTPUT_PARENT === '1') {
     mkdirSync(dirname(output))
@@ -287,6 +470,8 @@ function createSealFixture() {
 
   return {
     artifacts,
+    frozenRoot,
+    inputEvidencePath,
     inputPath,
     output,
     repository,
@@ -310,11 +495,71 @@ interface CandidateBoundInput {
 
 type SealFixture = ReturnType<typeof createSealFixture>
 
+interface MutableBoundInputEvidence {
+  authorization: {
+    authorization_consumed: boolean
+  }
+  contracts: {
+    input_evidence_schema: {
+      sha256: string
+    }
+    reseal_request: {
+      sha256: string
+    }
+  }
+}
+
 function bindInputToCurrentGit(fixture: SealFixture, input: CandidateBoundInput) {
   input.candidate.commit = git(fixture.repository, 'rev-parse', 'HEAD')
   input.candidate.tree = git(fixture.repository, 'rev-parse', 'HEAD^{tree}')
   input.github_evidence.quick.head_sha = input.candidate.commit
   input.github_evidence.quick.head_tree = input.candidate.tree
+}
+
+function rebindInputEvidence(fixture: SealFixture, { updateCounts = false } = {}) {
+  const input = JSON.parse(readFileSync(fixture.inputPath, 'utf8'))
+  const evidence = JSON.parse(readFileSync(fixture.inputEvidencePath, 'utf8'))
+  evidence.repository.candidate_commit = input.candidate.commit
+  evidence.repository.candidate_tree = input.candidate.tree
+  evidence.repository.parent_commits = git(
+    fixture.repository,
+    'rev-list',
+    '--parents',
+    '-n',
+    '1',
+    'HEAD',
+  ).split(' ').slice(1)
+  evidence.github.main_push.run_id = input.github_evidence.quick.run_id
+  evidence.github.main_push.head_sha = input.github_evidence.quick.head_sha
+  evidence.github.main_push.status = input.github_evidence.quick.status
+  evidence.github.main_push.conclusion = input.github_evidence.quick.conclusion
+  evidence.contracts.reseal_request.path = fixture.inputPath
+  evidence.contracts.reseal_request.format = input.format
+  evidence.contracts.reseal_request.sha256 = fileSha256(fixture.inputPath)
+  evidence.contracts.phase_b_runbook.path = input.repository.runbook.path
+  evidence.contracts.phase_b_runbook.sha256 = input.repository.runbook.sha256
+  evidence.contracts.build = {
+    artifacts_path: fixture.artifacts,
+    archive_path: input.build.archive_path,
+    archive_sha256: input.build.archive_sha256,
+    worker_path: input.build.worker_path,
+    worker_sha256: input.build.worker_sha256,
+    tree_manifest_path: input.build.tree_manifest_path,
+    tree_manifest_sha256: input.build.tree_manifest_sha256,
+  }
+  writeFileSync(
+    fixture.inputEvidencePath,
+    `${JSON.stringify(evidence, null, 2)}\n`,
+  )
+  chmodSync(fixture.inputEvidencePath, 0o600)
+  if (updateCounts) {
+    Object.assign(evidence.frozen_tree, frozenTreeCounts(fixture.frozenRoot))
+    writeFileSync(
+      fixture.inputEvidencePath,
+      `${JSON.stringify(evidence, null, 2)}\n`,
+    )
+    chmodSync(fixture.inputEvidencePath, 0o600)
+  }
 }
 
 function runSeal(fixture: SealFixture, environment: NodeJS.ProcessEnv = process.env) {
@@ -333,6 +578,22 @@ function runSeal(fixture: SealFixture, environment: NodeJS.ProcessEnv = process.
     cwd: projectRoot,
     encoding: 'utf8',
     env: environment,
+  })
+}
+
+function runPrepare(fixture: SealFixture) {
+  return spawnSync(process.execPath, [
+    cliPath,
+    'prepare',
+    '--input',
+    fixture.inputPath,
+    '--repo',
+    fixture.repository,
+    '--artifacts',
+    fixture.artifacts,
+  ], {
+    cwd: projectRoot,
+    encoding: 'utf8',
   })
 }
 
@@ -359,7 +620,628 @@ function runVerify(
   })
 }
 
-describe('Issue #23 local reseal package generation', () => {
+// These tests launch real Git/Node children and hash the complete frozen fixture.
+// The scoped budget is test-only; it does not change any reseal production timeout.
+describe('Issue #23 local reseal package generation', { timeout: 15_000 }, () => {
+  it('prepares a clean full frozen tree without creating a sealed output reservation', () => {
+    const fixture = createSealFixture()
+    try {
+      const prepared = runPrepare(fixture)
+
+      expect(prepared.status, prepared.stderr).toBe(0)
+      expect(JSON.parse(prepared.stdout)).toEqual({
+        candidate_id: git(fixture.repository, 'rev-parse', 'HEAD'),
+        format: 'blogman-issue-23-input-evidence-preparation/v1',
+        input_evidence_manifest_sha256: fileSha256(fixture.inputEvidencePath),
+        production_authorization_granted: false,
+        production_counters_all_zero: true,
+        state: 'prepared-local-only',
+      })
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a real linked worktree whose effective Git storage is outside the frozen root', () => {
+    const fixture = createSealFixture()
+    try {
+      const toolWorkspace = join(fixture.root, 'tool-workspace')
+      const externalRepository = join(toolWorkspace, 'repository')
+      mkdirSync(toolWorkspace)
+      renameSync(fixture.repository, externalRepository)
+      execFileSync('git', [
+        'worktree',
+        'add',
+        '--detach',
+        fixture.repository,
+        'HEAD',
+      ], { cwd: externalRepository })
+      chmodSync(fixture.repository, 0o700)
+      rebindInputEvidence(fixture, { updateCounts: true })
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('Git metadata storage escapes the frozen evidence root')
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects an external Git object alternate declared by repository metadata', () => {
+    const fixture = createSealFixture()
+    try {
+      const externalObjects = join(fixture.root, 'external-objects')
+      const alternatesPath = join(
+        fixture.repository,
+        '.git',
+        'objects',
+        'info',
+        'alternates',
+      )
+      mkdirSync(externalObjects)
+      mkdirSync(dirname(alternatesPath), { recursive: true })
+      writeFileSync(alternatesPath, `${externalObjects}\n`)
+      rebindInputEvidence(fixture, { updateCounts: true })
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('Git object alternates are not allowed')
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects Git storage environment overrides before trusting repository identity', () => {
+    const fixture = createSealFixture()
+    try {
+      const externalObjects = join(fixture.root, 'environment-alternate-objects')
+      mkdirSync(externalObjects)
+
+      const result = runSeal(fixture, {
+        ...process.env,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: externalObjects,
+      })
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('caller Git environment is not allowed')
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('discards non-semantic GIT_PAGER without executing the caller-provided pager', () => {
+    const fixture = createSealFixture()
+    try {
+      const pagerMarker = join(fixture.root, 'caller-pager-executed')
+      const pager = join(fixture.root, 'caller-pager')
+      writeFileSync(pager, `#!/bin/sh\nprintf 'executed\\n' > ${JSON.stringify(pagerMarker)}\ncat\n`)
+      chmodSync(pager, 0o700)
+
+      const result = runSeal(fixture, {
+        ...process.env,
+        GIT_PAGER: pager,
+      })
+
+      expect(result.status, result.stderr).toBe(0)
+      expect(existsSync(pagerMarker)).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects an external graft file before it can replace the bound raw parent list', () => {
+    const fixture = createSealFixture()
+    try {
+      const graftPath = join(fixture.root, 'external-grafts')
+      const candidate = git(fixture.repository, 'rev-parse', 'HEAD')
+      const tree = git(fixture.repository, 'rev-parse', 'HEAD^{tree}')
+      const graftedParent = git(
+        fixture.repository,
+        'commit-tree',
+        tree,
+        '-m',
+        'grafted parent',
+      )
+      rebindInputEvidence(fixture, { updateCounts: true })
+      writeFileSync(graftPath, `${candidate} ${graftedParent}\n`)
+      const evidence = JSON.parse(readFileSync(fixture.inputEvidencePath, 'utf8'))
+      evidence.repository.parent_commits = [graftedParent]
+      writeFileSync(
+        fixture.inputEvidencePath,
+        `${JSON.stringify(evidence, null, 2)}\n`,
+      )
+      chmodSync(fixture.inputEvidencePath, 0o600)
+      const graftBytes = readFileSync(graftPath)
+
+      const result = runSeal(fixture, {
+        ...process.env,
+        GIT_GRAFT_FILE: graftPath,
+      })
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('caller Git environment is not allowed')
+      expect(readFileSync(graftPath)).toEqual(graftBytes)
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a repository-local graft before it can replace the bound raw parent list', () => {
+    const fixture = createSealFixture()
+    try {
+      const candidate = git(fixture.repository, 'rev-parse', 'HEAD')
+      const tree = git(fixture.repository, 'rev-parse', 'HEAD^{tree}')
+      const graftedParent = git(
+        fixture.repository,
+        'commit-tree',
+        tree,
+        '-m',
+        'local grafted parent',
+      )
+      const graftPath = join(fixture.repository, '.git', 'info', 'grafts')
+      writeFileSync(graftPath, `${candidate} ${graftedParent}\n`)
+      const evidence = JSON.parse(readFileSync(fixture.inputEvidencePath, 'utf8'))
+      evidence.repository.parent_commits = [graftedParent]
+      Object.assign(evidence.frozen_tree, frozenTreeCounts(fixture.frozenRoot))
+      writeFileSync(
+        fixture.inputEvidencePath,
+        `${JSON.stringify(evidence, null, 2)}\n`,
+      )
+      chmodSync(fixture.inputEvidencePath, 0o600)
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('Git grafts are not allowed')
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects an external shallow boundary before it can hide a bound raw parent', () => {
+    const fixture = createSealFixture()
+    try {
+      const shallowPath = join(fixture.root, 'external-shallow')
+      const candidate = git(fixture.repository, 'rev-parse', 'HEAD')
+      writeFileSync(shallowPath, `${candidate}\n`)
+      const shallowBytes = readFileSync(shallowPath)
+
+      const result = runSeal(fixture, {
+        ...process.env,
+        GIT_SHALLOW_FILE: shallowPath,
+      })
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('caller Git environment is not allowed')
+      expect(readFileSync(shallowPath)).toEqual(shallowBytes)
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a repository-local shallow boundary before raw parent trust', () => {
+    const fixture = createSealFixture()
+    try {
+      const candidate = git(fixture.repository, 'rev-parse', 'HEAD')
+      writeFileSync(join(fixture.repository, '.git', 'shallow'), `${candidate}\n`)
+      const evidence = JSON.parse(readFileSync(fixture.inputEvidencePath, 'utf8'))
+      Object.assign(evidence.frozen_tree, frozenTreeCounts(fixture.frozenRoot))
+      writeFileSync(
+        fixture.inputEvidencePath,
+        `${JSON.stringify(evidence, null, 2)}\n`,
+      )
+      chmodSync(fixture.inputEvidencePath, 0o600)
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('Git shallow repository state')
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a replacement-ref namespace before it can replace raw commit semantics', () => {
+    const fixture = createSealFixture()
+    try {
+      const candidate = git(fixture.repository, 'rev-parse', 'HEAD')
+      const tree = git(fixture.repository, 'rev-parse', 'HEAD^{tree}')
+      const replacementParent = git(
+        fixture.repository,
+        'commit-tree',
+        tree,
+        '-m',
+        'replacement parent',
+      )
+      const replacement = git(
+        fixture.repository,
+        'commit-tree',
+        tree,
+        '-p',
+        replacementParent,
+        '-m',
+        'replacement candidate commit',
+      )
+      git(
+        fixture.repository,
+        'update-ref',
+        `refs/adversarial-replacements/${candidate}`,
+        replacement,
+      )
+      rebindInputEvidence(fixture, { updateCounts: true })
+      const evidence = JSON.parse(readFileSync(fixture.inputEvidencePath, 'utf8'))
+      evidence.repository.parent_commits = [replacementParent]
+      writeFileSync(
+        fixture.inputEvidencePath,
+        `${JSON.stringify(evidence, null, 2)}\n`,
+      )
+      chmodSync(fixture.inputEvidencePath, 0o600)
+
+      const result = runSeal(fixture, {
+        ...process.env,
+        GIT_REPLACE_REF_BASE: 'refs/adversarial-replacements',
+      })
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('caller Git environment is not allowed')
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects repository-local replacement refs even though Git children disable replacement', () => {
+    const fixture = createSealFixture()
+    try {
+      const candidate = git(fixture.repository, 'rev-parse', 'HEAD')
+      const tree = git(fixture.repository, 'rev-parse', 'HEAD^{tree}')
+      const replacement = git(
+        fixture.repository,
+        'commit-tree',
+        tree,
+        '-m',
+        'local replacement',
+      )
+      git(fixture.repository, 'replace', candidate, replacement)
+      const evidence = JSON.parse(readFileSync(fixture.inputEvidencePath, 'utf8'))
+      Object.assign(evidence.frozen_tree, frozenTreeCounts(fixture.frozenRoot))
+      writeFileSync(
+        fixture.inputEvidencePath,
+        `${JSON.stringify(evidence, null, 2)}\n`,
+      )
+      chmodSync(fixture.inputEvidencePath, 0o600)
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('Git replacement refs are not allowed')
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it.each(['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM'] as const)(
+    'rejects root-external %s config before it can supply canonical origin evidence',
+    (configVariable) => {
+      const fixture = createSealFixture()
+      try {
+        const externalConfig = join(fixture.root, `${configVariable}.config`)
+        writeFileSync(externalConfig, `[remote "origin"]\n\turl = https://github.com/nardinmarcus/blogman.git\n`)
+        git(fixture.repository, 'config', '--unset-all', 'remote.origin.url')
+        rebindInputEvidence(fixture, { updateCounts: true })
+        const configBytes = readFileSync(externalConfig)
+
+        const result = runSeal(fixture, {
+          ...process.env,
+          [configVariable]: externalConfig,
+        })
+
+        expect(result.status).toBe(1)
+        expect(result.stderr).toContain('caller Git environment is not allowed')
+        expect(readFileSync(externalConfig)).toEqual(configBytes)
+        expect(existsSync(dirname(fixture.output))).toBe(false)
+      } finally {
+        rmSync(fixture.root, { recursive: true, force: true })
+      }
+    },
+  )
+
+  it('rejects a local config include before root-external config can restore canonical origin', () => {
+    const fixture = createSealFixture()
+    try {
+      const externalConfig = join(fixture.root, 'included-origin.config')
+      writeFileSync(externalConfig, `[remote "origin"]\n\turl = https://github.com/nardinmarcus/blogman.git\n`)
+      git(fixture.repository, 'config', '--unset-all', 'remote.origin.url')
+      git(fixture.repository, 'config', '--add', 'include.path', externalConfig)
+      rebindInputEvidence(fixture, { updateCounts: true })
+      const configBytes = readFileSync(externalConfig)
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('Git config includes are not allowed')
+      expect(readFileSync(externalConfig)).toEqual(configBytes)
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a missing-object external promisor without hydration or frozen-root mutation', () => {
+    const fixture = createSealFixture()
+    try {
+      const externalSource = join(fixture.root, 'external-promisor.git')
+      const uploadMarker = join(fixture.root, 'external-promisor-uploaded')
+      const uploadPack = join(fixture.root, 'external-git-upload-pack')
+      execFileSync('git', [
+        'clone',
+        '--bare',
+        '--no-hardlinks',
+        fixture.repository,
+        externalSource,
+      ])
+      writeFileSync(uploadPack, `#!/bin/sh\nprintf 'attempted\\n' > ${JSON.stringify(uploadMarker)}\nexec git-upload-pack "$@"\n`)
+      chmodSync(uploadPack, 0o700)
+      git(fixture.repository, 'config', 'core.repositoryformatversion', '1')
+      git(fixture.repository, 'config', 'extensions.partialClone', 'promisor-source')
+      git(fixture.repository, 'config', 'remote.promisor-source.url', externalSource)
+      git(fixture.repository, 'config', 'remote.promisor-source.promisor', 'true')
+      git(fixture.repository, 'config', 'remote.promisor-source.partialclonefilter', 'blob:none')
+      git(fixture.repository, 'config', 'remote.promisor-source.uploadpack', uploadPack)
+
+      const parent = git(fixture.repository, 'rev-parse', 'HEAD^')
+      const missingObject = join(
+        fixture.repository,
+        '.git',
+        'objects',
+        parent.slice(0, 2),
+        parent.slice(2),
+      )
+      expect(existsSync(missingObject)).toBe(true)
+      unlinkSync(missingObject)
+      const evidence = JSON.parse(readFileSync(fixture.inputEvidencePath, 'utf8'))
+      Object.assign(evidence.frozen_tree, frozenTreeCounts(fixture.frozenRoot))
+      writeFileSync(
+        fixture.inputEvidencePath,
+        `${JSON.stringify(evidence, null, 2)}\n`,
+      )
+      chmodSync(fixture.inputEvidencePath, 0o600)
+      const countsBefore = frozenTreeCounts(fixture.frozenRoot)
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('partial-clone or promisor config is not allowed')
+      expect(existsSync(uploadMarker)).toBe(false)
+      expect(existsSync(missingObject)).toBe(false)
+      expect(frozenTreeCounts(fixture.frozenRoot)).toEqual(countsBefore)
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a locally missing bound parent object without attempting object hydration', () => {
+    const fixture = createSealFixture()
+    try {
+      const parent = git(fixture.repository, 'rev-parse', 'HEAD^')
+      const missingObject = join(
+        fixture.repository,
+        '.git',
+        'objects',
+        parent.slice(0, 2),
+        parent.slice(2),
+      )
+      unlinkSync(missingObject)
+      const evidence = JSON.parse(readFileSync(fixture.inputEvidencePath, 'utf8'))
+      Object.assign(evidence.frozen_tree, frozenTreeCounts(fixture.frozenRoot))
+      writeFileSync(
+        fixture.inputEvidencePath,
+        `${JSON.stringify(evidence, null, 2)}\n`,
+      )
+      chmodSync(fixture.inputEvidencePath, 0o600)
+      const countsBefore = frozenTreeCounts(fixture.frozenRoot)
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('could not read Git candidate parent object')
+      expect(existsSync(missingObject)).toBe(false)
+      expect(frozenTreeCounts(fixture.frozenRoot)).toEqual(countsBefore)
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('fails before output reservation when node_modules/.bin is a symlink', () => {
+    const fixture = createSealFixture()
+    try {
+      const externalTool = join(fixture.root, 'build-workspace', 'tool')
+      mkdirSync(dirname(externalTool), { recursive: true })
+      writeFileSync(externalTool, '#!/bin/sh\n')
+      const bin = join(fixture.frozenRoot, 'node_modules', '.bin')
+      mkdirSync(bin, { recursive: true })
+      symlinkSync(externalTool, join(bin, 'tool'))
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('symbolic link')
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('fails before output reservation when the frozen tree contains a hardlink', () => {
+    const fixture = createSealFixture()
+    try {
+      const cache = join(fixture.frozenRoot, 'cache')
+      mkdirSync(cache)
+      const original = join(cache, 'original.bin')
+      writeFileSync(original, 'same inode\n')
+      linkSync(original, join(cache, 'linked.bin'))
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('hardlinked regular file')
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('fails before output reservation when the frozen tree contains a special file', () => {
+    const fixture = createSealFixture()
+    try {
+      execFileSync('mkfifo', [join(fixture.frozenRoot, 'unexpected.pipe')])
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('special file')
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('fails before output reservation when transient dependencies enter the frozen tree', () => {
+    const fixture = createSealFixture()
+    try {
+      const dependencyPath = join(fixture.frozenRoot, 'node_modules', 'package', 'index.js')
+      mkdirSync(dirname(dependencyPath), { recursive: true })
+      writeFileSync(dependencyPath, 'module.exports = {}\n')
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('transient dependency or toolchain entry')
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a symlinked output grandparent into the frozen root before any reservation write', () => {
+    const fixture = createSealFixture()
+    try {
+      const outputAlias = join(fixture.root, 'output-alias')
+      const frozenOutputAnchor = join(fixture.frozenRoot, 'output-anchor')
+      const derivedOutputParent = join(frozenOutputAnchor, 'reservation')
+      const mkdirMarker = join(fixture.root, 'frozen-output-mkdir-attempted')
+      mkdirSync(frozenOutputAnchor)
+      rebindInputEvidence(fixture, { updateCounts: true })
+      const frozenEntries = readdirSync(fixture.frozenRoot).sort()
+      symlinkSync(fixture.frozenRoot, outputAlias)
+      fixture.output = join(outputAlias, 'output-anchor', 'reservation', 'sealed')
+
+      const preloadPath = join(fixture.root, 'observe-frozen-output-mkdir.cjs')
+      writeFileSync(preloadPath, `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const originalMkdirSync = fs.mkdirSync
+fs.mkdirSync = function patchedMkdirSync(path, ...args) {
+  if (String(path) === ${JSON.stringify(derivedOutputParent)}) {
+    fs.writeFileSync(${JSON.stringify(mkdirMarker)}, 'attempted\\n')
+  }
+  return originalMkdirSync.call(this, path, ...args)
+}
+syncBuiltinESMExports()
+`)
+
+      const result = runSeal(fixture, {
+        ...process.env,
+        NODE_OPTIONS: [
+          process.env.NODE_OPTIONS,
+          `--require=${preloadPath}`,
+        ].filter(Boolean).join(' '),
+      })
+
+      expect(result.status).toBe(1)
+      expect(existsSync(mkdirMarker)).toBe(false)
+      expect(existsSync(derivedOutputParent)).toBe(false)
+      expect(readdirSync(fixture.frozenRoot).sort()).toEqual(frozenEntries)
+      expect(result.stderr).toContain('output real path must be outside the frozen evidence root')
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it.each([
+    {
+      name: 'schema hash mismatch',
+      mutate(evidence: MutableBoundInputEvidence) {
+        evidence.contracts.input_evidence_schema.sha256 = '0'.repeat(64)
+      },
+    },
+    {
+      name: 'request hash mismatch',
+      mutate(evidence: MutableBoundInputEvidence) {
+        evidence.contracts.reseal_request.sha256 = '1'.repeat(64)
+      },
+    },
+    {
+      name: 'authorization consumed',
+      mutate(evidence: MutableBoundInputEvidence) {
+        evidence.authorization.authorization_consumed = true
+      },
+    },
+  ])('fails before output reservation on $name', ({ mutate }) => {
+    const fixture = createSealFixture()
+    try {
+      const evidence = JSON.parse(
+        readFileSync(fixture.inputEvidencePath, 'utf8'),
+      ) as MutableBoundInputEvidence
+      mutate(evidence)
+      writeFileSync(
+        fixture.inputEvidencePath,
+        `${JSON.stringify(evidence, null, 2)}\n`,
+      )
+      chmodSync(fixture.inputEvidencePath, 0o600)
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a terminal lineage path that overlaps the frozen inputs', () => {
+    const fixture = createSealFixture()
+    try {
+      const evidence = JSON.parse(readFileSync(fixture.inputEvidencePath, 'utf8'))
+      evidence.lineage_policy.denylist[0].path = fixture.frozenRoot
+      writeFileSync(
+        fixture.inputEvidencePath,
+        `${JSON.stringify(evidence, null, 2)}\n`,
+      )
+      chmodSync(fixture.inputEvidencePath, 0o600)
+
+      const result = runSeal(fixture)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('terminal lineage cannot be an input dependency')
+      expect(existsSync(dirname(fixture.output))).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
   it('rejects upload-time reproof when the source mutates after a successful rehearsal', () => {
     const fixture = createSealFixture()
     try {
@@ -705,6 +1587,7 @@ describe('Issue #23 local reseal package generation', () => {
       input.build.archive_sha256 = fileSha256(archivePath)
       input.build.tree_manifest_sha256 = fileSha256(treeManifestPath)
       writeFileSync(fixture.inputPath, `${JSON.stringify(input, null, 2)}\n`)
+      rebindInputEvidence(fixture)
 
       const result = runSeal(fixture)
 
@@ -766,8 +1649,8 @@ const { copyFileSync, existsSync, writeFileSync } = require('node:fs')
 const { spawnSync } = require('node:child_process')
 const args = process.argv.slice(2)
 if (
-  args[0] === 'rev-parse'
-  && args[1] === 'HEAD:scripts/migrations.mjs'
+  args[0] === 'ls-tree'
+  && args[args.length - 1] === 'scripts/migrations.mjs'
   && !existsSync(${JSON.stringify(markerPath)})
 ) {
   writeFileSync(${JSON.stringify(markerPath)}, 'replaced\\n')
@@ -1295,7 +2178,7 @@ syncBuiltinESMExports()
 const fs = require('node:fs')
 const { spawnSync } = require('node:child_process')
 const args = process.argv.slice(2)
-if (args[0] === 'rev-parse' && args[1] === 'HEAD') {
+if (args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === 'HEAD') {
   const count = fs.existsSync(${JSON.stringify(counterPath)})
     ? Number(fs.readFileSync(${JSON.stringify(counterPath)}, 'utf8'))
     : 0
@@ -1338,7 +2221,7 @@ process.exit(result.status ?? 1)
 const fs = require('node:fs')
 const { spawnSync } = require('node:child_process')
 const args = process.argv.slice(2)
-if (args[0] === 'rev-parse' && args[1] === 'HEAD') {
+if (args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === 'HEAD') {
   const count = fs.existsSync(${JSON.stringify(counterPath)})
     ? Number(fs.readFileSync(${JSON.stringify(counterPath)}, 'utf8'))
     : 0
@@ -1376,6 +2259,55 @@ process.exit(result.status ?? 1)
     }
   })
 
+  it('fails closed on an equal-count frozen-root entry replacement during the final context recheck', () => {
+    const fixture = createSealFixture()
+    try {
+      const originalEntry = join(fixture.frozenRoot, 'unguarded-a.txt')
+      const replacementEntry = join(fixture.frozenRoot, 'unguarded-b.txt')
+      writeFileSync(originalEntry, 'original frozen entry\n')
+      rebindInputEvidence(fixture, { updateCounts: true })
+
+      const fakeBin = join(fixture.root, 'equal-count-frozen-tree-fake-bin')
+      const counterPath = join(fixture.root, 'equal-count-head-check-count')
+      const replacementMarker = join(fixture.root, 'equal-count-entry-replaced')
+      const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
+      mkdirSync(fakeBin)
+      const fakeGitPath = join(fakeBin, 'git')
+      writeFileSync(fakeGitPath, `#!/usr/bin/env node
+const fs = require('node:fs')
+const { spawnSync } = require('node:child_process')
+const args = process.argv.slice(2)
+if (args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === 'HEAD') {
+  const count = fs.existsSync(${JSON.stringify(counterPath)})
+    ? Number(fs.readFileSync(${JSON.stringify(counterPath)}, 'utf8'))
+    : 0
+  fs.writeFileSync(${JSON.stringify(counterPath)}, String(count + 1))
+  if (count + 1 === 2) {
+    fs.unlinkSync(${JSON.stringify(originalEntry)})
+    fs.writeFileSync(${JSON.stringify(replacementEntry)}, 'replacement frozen entry\\n')
+    fs.writeFileSync(${JSON.stringify(replacementMarker)}, 'replaced\\n')
+  }
+}
+const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit' })
+process.exit(result.status ?? 1)
+`)
+      chmodSync(fakeGitPath, 0o700)
+
+      const result = runSeal(fixture, {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      })
+
+      expect(readFileSync(counterPath, 'utf8')).toBe('2')
+      expect(existsSync(replacementMarker)).toBe(true)
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('frozen tree changed after validation')
+      expect(existsSync(fixture.output)).toBe(false)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
   it.each(['seal', 'verify'] as const)(
     'fails closed when the requested %s input path is replaced during processing',
     (command) => {
@@ -1404,7 +2336,12 @@ const fs = require('node:fs')
 const { spawnSync } = require('node:child_process')
 const args = process.argv.slice(2)
 const marker = ${JSON.stringify(replacementMarker)}
-if (!fs.existsSync(marker) && args[0] === 'rev-parse' && args[1] === 'HEAD') {
+if (
+  !fs.existsSync(marker)
+  && args[0] === 'rev-parse'
+  && args[1] === '--verify'
+  && args[2] === 'HEAD'
+) {
   fs.unlinkSync(${JSON.stringify(fixture.inputPath)})
   fs.copyFileSync(${JSON.stringify(replacementInput)}, ${JSON.stringify(fixture.inputPath)})
   fs.writeFileSync(marker, 'replaced\\n')
@@ -1479,8 +2416,8 @@ const args = process.argv.slice(2)
 const marker = ${JSON.stringify(additionMarker)}
 if (
   !fs.existsSync(marker)
-  && args[0] === 'rev-parse'
-  && args[1] === 'HEAD:scripts/migrations.mjs'
+  && args[0] === 'ls-tree'
+  && args[args.length - 1] === 'scripts/migrations.mjs'
 ) {
   fs.writeFileSync(${JSON.stringify(lateMigrationPath)}, '-- ignored late migration\\nSELECT 1;\\n')
   fs.writeFileSync(marker, 'added\\n')
@@ -1511,7 +2448,7 @@ process.exit(result.status ?? 1)
         expect(existsSync(lateMigrationPath)).toBe(true)
         expect(git(fixture.repository, 'status', '--porcelain', '--untracked-files=all')).toBe('')
         expect(result.status).not.toBe(0)
-        expect(result.stderr).toContain('migration directory changed after validation')
+        expect(result.stderr).toContain('Git worktree cleanliness')
         if (command === 'seal') expect(existsSync(fixture.output)).toBe(false)
       } finally {
         rmSync(fixture.root, { recursive: true, force: true })
@@ -1648,6 +2585,7 @@ syncBuiltinESMExports()
       bindInputToCurrentGit(fixture, input)
       input.repository.lockfile.sha256 = fileSha256(lockfilePath)
       writeFileSync(fixture.inputPath, `${JSON.stringify(input, null, 2)}\n`)
+      rebindInputEvidence(fixture, { updateCounts: true })
 
       const outputParent = join(
         realpathSync(fixture.root),

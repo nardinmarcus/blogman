@@ -27,11 +27,11 @@ describe('Issue #23 Phase B runbook order', () => {
       command.startsWith('UPLOAD_ACCEPTANCE=$(WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE"')
     ))
     const sourceProof = commands.findIndex((command) => (
-      command.startsWith('node scripts/issue-23-reseal.mjs verify-build-directory')
+      command.startsWith('node "$TOOL_WORKSPACE/scripts/issue-23-reseal.mjs" verify-build-directory')
       && command.includes('--directory "$UPLOAD_SOURCE_DIRECTORY"')
     ))
     const lifecycle = commands.findIndex((command) => (
-      command.startsWith('UPLOAD_ACCEPTANCE=$(WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" node scripts/phase-b-sequence.mjs')
+      command.startsWith('UPLOAD_ACCEPTANCE=$(WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" node "$TOOL_WORKSPACE/scripts/phase-b-sequence.mjs"')
       && command.includes('run-upload-source-lifecycle')
     ))
     const acceptVersion = commands.findIndex((command) => (
@@ -57,11 +57,11 @@ describe('Issue #23 Phase B runbook order', () => {
 
   const hasResetResponseValidationOrder = (runbook: string) => {
     const reset = runbook.indexOf(
-      './node_modules/.bin/wrangler d1 execute "$DATABASE" --remote -c "$CONFIG" --json \\\n'
+      '"$WRANGLER" d1 execute "$DATABASE" --remote -c "$CONFIG" --json \\\n'
       + '  --file "$RESET_SQL" > "$RESET_PRIVATE"',
     )
     const validator = runbook.indexOf(
-      'node scripts/phase-b-sequence.mjs validate-wrangler-d1-file-response \\\n'
+      'node "$TOOL_WORKSPACE/scripts/phase-b-sequence.mjs" validate-wrangler-d1-file-response \\\n'
       + '  < "$RESET_PRIVATE" >/dev/null',
     )
     const completedAt = runbook.indexOf('RESET_COMPLETED_AT=')
@@ -78,7 +78,7 @@ describe('Issue #23 Phase B runbook order', () => {
     const lines = readRunbook().split('\n')
     const adapterLines = lines.flatMap((line, index) => {
       const trimmed = line.trim()
-      if (!/^(?:UPLOAD_ACCEPTANCE=\()?\s*(?:WRANGLER_OUTPUT_FILE_PATH=.*\s+)?(?:\.\/node_modules\/\.bin\/wrangler|node scripts\/(?:phase-b-sequence|migrations|rollout-safety)\.mjs)/.test(trimmed)) {
+      if (!/^(?:UPLOAD_ACCEPTANCE=\()?\s*(?:WRANGLER_OUTPUT_FILE_PATH=.*\s+)?(?:"\$WRANGLER"|node "\$TOOL_WORKSPACE\/scripts\/(?:phase-b-sequence|migrations|rollout-safety)\.mjs")/.test(trimmed)) {
         return []
       }
       let command = trimmed
@@ -144,7 +144,7 @@ describe('Issue #23 Phase B runbook order', () => {
     const upload = runbook.indexOf('## 3. Upload before the destructive boundary')
     const reset = runbook.indexOf('## 4. Candidate-bound in-place reset')
     const emptyProof = runbook.indexOf('## 5. Empty D1 proof')
-    const remotePlan = runbook.indexOf('scripts/migrations.mjs plan --database "$DATABASE" --remote')
+    const remotePlan = runbook.indexOf('scripts/migrations.mjs" plan --database "$DATABASE" --remote')
 
     expect(upload).toBeGreaterThan(-1)
     expect(reset).toBeGreaterThan(upload)
@@ -161,7 +161,7 @@ describe('Issue #23 Phase B runbook order', () => {
 
   it('validates the reset response before creating reset evidence or entering empty proof', () => {
     const runbook = readRunbook()
-    const validator = 'node scripts/phase-b-sequence.mjs validate-wrangler-d1-file-response \\\n'
+    const validator = 'node "$TOOL_WORKSPACE/scripts/phase-b-sequence.mjs" validate-wrangler-d1-file-response \\\n'
       + '  < "$RESET_PRIVATE" >/dev/null\n'
 
     expect(hasResetResponseValidationOrder(runbook)).toBe(true)

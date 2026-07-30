@@ -21,6 +21,7 @@ import {
   join,
   relative,
   resolve,
+  sep,
 } from 'node:path'
 import { PHASE_B_STAGES } from './phase-b-sequence.mjs'
 import {
@@ -29,7 +30,9 @@ import {
 } from './issue-23-build-proof.mjs'
 
 const MAX_DOCUMENT_BYTES = 1024 * 1024
+const INPUT_EVIDENCE_FILE_NAME = 'input-evidence-manifest.json'
 const PREFLIGHT_FORMAT = 'blogman-local-preflight-candidate/v2'
+const INPUT_EVIDENCE_FORMAT = 'blogman-issue-23-input-evidence-manifest/v2'
 const REQUEST_FORMAT = 'blogman-issue-23-local-reseal-request/v3'
 const HISTORICAL_REQUEST_FORMATS = new Set([
   'blogman-issue-23-local-reseal-request/v1',
@@ -45,6 +48,10 @@ const PACKAGE_FILE_NAMES = Object.freeze([
   'preflight-candidate.json',
 ])
 const SCHEMA_URLS = new Map([
+  [INPUT_EVIDENCE_FORMAT, new URL(
+    '../schemas/issue-23-reseal/blogman-issue-23-input-evidence-manifest-v2.schema.json',
+    import.meta.url,
+  )],
   [PREFLIGHT_FORMAT, new URL(
     '../schemas/issue-23-reseal/blogman-local-preflight-candidate-v2.schema.json',
     import.meta.url,
@@ -170,6 +177,12 @@ function validateSchemaValue(value, schema, path = '$') {
     }
     for (const [index, childSchema] of (schema.prefixItems ?? []).entries()) {
       if (index < value.length) validateSchemaValue(value[index], childSchema, `${path}[${index}]`)
+    }
+    if (schema.items && schema.items !== false) {
+      const start = schema.prefixItems?.length ?? 0
+      for (let index = start; index < value.length; index += 1) {
+        validateSchemaValue(value[index], schema.items, `${path}[${index}]`)
+      }
     }
     if (schema.items === false && value.length > (schema.prefixItems?.length ?? 0)) {
       fail(`${path} has an item that is not allowed`)
@@ -378,7 +391,7 @@ function removeOwnedEmptyReservation(reservation) {
   rmdirSync(reservation.path)
 }
 
-function reserveOutputParent(outputPath, repositoryPath) {
+function reserveOutputParent(outputPath, repositoryPath, frozenRoot) {
   const requestedParent = dirname(outputPath)
   const requestedGrandparent = dirname(requestedParent)
   const realGrandparent = requireDirectory(
@@ -387,6 +400,12 @@ function reserveOutputParent(outputPath, repositoryPath) {
   )
   const outputParent = join(realGrandparent, basename(requestedParent))
   const finalOutputPath = join(outputParent, basename(outputPath))
+  if (
+    pathAtOrWithin(frozenRoot, outputParent)
+    || pathAtOrWithin(frozenRoot, finalOutputPath)
+  ) {
+    fail('Issue #23 reseal output real path must be outside the frozen evidence root')
+  }
   if (
     outputParent === repositoryPath
     || pathWithin(repositoryPath, outputParent)
@@ -457,6 +476,169 @@ function pathWithin(root, child) {
     && childRelativePath !== '..'
     && !childRelativePath.startsWith('../')
     && !isAbsolute(childRelativePath)
+}
+
+function pathAtOrWithin(root, child) {
+  return child === root || pathWithin(root, child)
+}
+
+function posixMode(stat) {
+  return (Number(stat.mode) & 0o7777).toString(8).padStart(4, '0')
+}
+
+function transientDependencyPath(relativePath) {
+  const parts = relativePath.split('/').filter(Boolean)
+  return parts.includes('node_modules') || parts.includes('toolchain')
+}
+
+function scanFrozenTree(rootPath) {
+  const counts = {
+    regular_file_count: 0,
+    directory_count: 0,
+    symlink_count: 0,
+    hardlinked_regular_file_count: 0,
+    special_file_count: 0,
+    realpath_escape_count: 0,
+    transient_dependency_entry_count: 0,
+  }
+  const anomalies = {
+    hardlink: undefined,
+    owner: undefined,
+    realpathEscape: undefined,
+    special: undefined,
+    symlink: undefined,
+    transientDependency: undefined,
+  }
+  const effectiveUid = typeof process.geteuid === 'function'
+    ? BigInt(process.geteuid())
+    : undefined
+  const identityEntries = []
+
+  const visit = (entryPath) => {
+    let stat
+    try {
+      stat = lstatSync(entryPath, { bigint: true })
+    } catch {
+      fail('Issue #23 reseal frozen tree changed during traversal')
+    }
+    const relativePath = relative(rootPath, entryPath).split(sep).join('/')
+    if (relativePath && transientDependencyPath(relativePath)) {
+      counts.transient_dependency_entry_count += 1
+      anomalies.transientDependency ??= relativePath
+    }
+    if (effectiveUid !== undefined && stat.uid !== effectiveUid) {
+      anomalies.owner ??= relativePath || '.'
+    }
+
+    let type
+    let realPath
+    let contentSha256
+    if (stat.isSymbolicLink()) {
+      type = 'symlink'
+      counts.symlink_count += 1
+      anomalies.symlink ??= relativePath || '.'
+      try {
+        realPath = realpathSync(entryPath)
+      } catch {
+        realPath = '<unresolved>'
+      }
+    } else if (stat.isDirectory()) {
+      type = 'directory'
+      counts.directory_count += 1
+      realPath = realpathSync(entryPath)
+    } else if (stat.isFile()) {
+      type = 'regular'
+      counts.regular_file_count += 1
+      if (stat.nlink !== 1n) {
+        counts.hardlinked_regular_file_count += 1
+        anomalies.hardlink ??= relativePath || '.'
+      }
+      realPath = realpathSync(entryPath)
+      try {
+        contentSha256 = sha256(readFileSync(entryPath))
+        const afterRead = lstatSync(entryPath, { bigint: true })
+        if (
+          afterRead.dev !== stat.dev
+          || afterRead.ino !== stat.ino
+          || afterRead.mode !== stat.mode
+          || afterRead.nlink !== stat.nlink
+          || afterRead.size !== stat.size
+          || afterRead.uid !== stat.uid
+          || afterRead.gid !== stat.gid
+        ) {
+          fail('Issue #23 reseal frozen tree changed during traversal')
+        }
+      } catch (error) {
+        if (error?.message === 'Issue #23 reseal frozen tree changed during traversal') {
+          throw error
+        }
+        fail('Issue #23 reseal frozen tree changed during traversal')
+      }
+    } else {
+      type = 'special'
+      counts.special_file_count += 1
+      anomalies.special ??= relativePath || '.'
+      try {
+        realPath = realpathSync(entryPath)
+      } catch {
+        realPath = '<unresolved>'
+      }
+    }
+
+    if (realPath !== '<unresolved>' && !pathAtOrWithin(rootPath, realPath)) {
+      counts.realpath_escape_count += 1
+      anomalies.realpathEscape ??= relativePath || '.'
+    }
+    identityEntries.push({
+      gid: String(stat.gid),
+      mode: posixMode(stat),
+      nlink: String(stat.nlink),
+      path: relativePath || '.',
+      sha256: contentSha256 ?? null,
+      size: String(stat.size),
+      type,
+      uid: String(stat.uid),
+    })
+    if (type === 'directory') {
+      for (const name of readdirSync(entryPath).sort()) {
+        visit(join(entryPath, name))
+      }
+    }
+  }
+
+  visit(rootPath)
+  if (anomalies.symlink) {
+    fail(`Issue #23 reseal frozen tree contains a symbolic link: ${anomalies.symlink}`)
+  }
+  if (anomalies.hardlink) {
+    fail(`Issue #23 reseal frozen tree contains a hardlinked regular file: ${anomalies.hardlink}`)
+  }
+  if (anomalies.special) {
+    fail(`Issue #23 reseal frozen tree contains a special file: ${anomalies.special}`)
+  }
+  if (anomalies.realpathEscape) {
+    fail(`Issue #23 reseal frozen tree contains a realpath escape: ${anomalies.realpathEscape}`)
+  }
+  if (anomalies.transientDependency) {
+    fail(`Issue #23 reseal frozen tree contains a transient dependency or toolchain entry: ${anomalies.transientDependency}`)
+  }
+  if (anomalies.owner) {
+    fail(`Issue #23 reseal frozen tree contains an entry owned by another user: ${anomalies.owner}`)
+  }
+  return {
+    counts,
+    identitySha256: sha256(Buffer.from(`${JSON.stringify(identityEntries)}\n`)),
+  }
+}
+
+function requireMode(entryPath, expectedMode, label) {
+  const stat = lstatSync(entryPath, { bigint: true })
+  if (posixMode(stat) !== expectedMode) {
+    fail(`Issue #23 reseal ${label} must have mode ${expectedMode}`)
+  }
+  if (stat.isFile() && stat.nlink !== 1n) {
+    fail(`Issue #23 reseal ${label} must have link count one`)
+  }
 }
 
 function requireNormalizedRelativePath(value, label) {
@@ -577,15 +759,263 @@ function verifyMigrationDirectorySnapshot(directory) {
   }
 }
 
+function sanitizedGitEnvironment() {
+  const callerGitVariables = Object.keys(process.env)
+    .filter((name) => name.startsWith('GIT_') && name !== 'GIT_PAGER')
+    .sort()
+  if (callerGitVariables.length > 0) {
+    fail('Issue #23 reseal caller Git environment is not allowed')
+  }
+  return {
+    GIT_ATTR_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_NO_LAZY_FETCH: '1',
+    GIT_NO_REPLACE_OBJECTS: '1',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_PROTOCOL_FROM_USER: '0',
+    GIT_TERMINAL_PROMPT: '0',
+    LANG: 'C',
+    LC_ALL: 'C',
+    PATH: process.env.PATH ?? '/usr/bin:/bin',
+  }
+}
+
 function gitValue(repositoryPath, args, label) {
+  const environment = sanitizedGitEnvironment()
   try {
     return execFileSync('git', args, {
       cwd: repositoryPath,
       encoding: 'utf8',
+      env: environment,
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()
   } catch {
     fail(`Issue #23 reseal could not read Git ${label}`)
+  }
+}
+
+function splitNullFields(value) {
+  const fields = value.split('\0')
+  if (fields.at(-1) === '') fields.pop()
+  return fields
+}
+
+function requireGitStoragePathWithinFrozenRoot({
+  expectedType,
+  frozenRoot,
+  label,
+  requestedPath,
+}) {
+  requireAbsolutePath(requestedPath, label)
+  let stat
+  let realPath
+  try {
+    stat = lstatSync(requestedPath)
+    realPath = realpathSync(requestedPath)
+  } catch {
+    fail(`Issue #23 reseal ${label} must exist`)
+  }
+  if (
+    (expectedType === 'directory' && !stat.isDirectory())
+    || (expectedType === 'file' && !stat.isFile())
+  ) {
+    fail(`Issue #23 reseal ${label} has an invalid type`)
+  }
+  if (!pathAtOrWithin(frozenRoot, realPath)) {
+    fail('Issue #23 reseal Git metadata storage escapes the frozen evidence root')
+  }
+  return realPath
+}
+
+function verifyRepositoryLocalGitConfig(repositoryPath, frozenRoot) {
+  const gitDirectoryPath = join(repositoryPath, '.git')
+  let gitDirectoryStat
+  try {
+    gitDirectoryStat = lstatSync(gitDirectoryPath)
+  } catch {
+    fail('Issue #23 reseal Git metadata directory must exist')
+  }
+  if (!gitDirectoryStat.isDirectory()) {
+    fail('Issue #23 reseal Git metadata storage escapes the frozen evidence root')
+  }
+  const gitDirectory = requireGitStoragePathWithinFrozenRoot({
+    expectedType: 'directory',
+    frozenRoot,
+    label: 'Git metadata directory',
+    requestedPath: gitDirectoryPath,
+  })
+  const configPath = requireGitStoragePathWithinFrozenRoot({
+    expectedType: 'file',
+    frozenRoot,
+    label: 'Git local config',
+    requestedPath: join(gitDirectory, 'config'),
+  })
+  const configNames = splitNullFields(gitValue(repositoryPath, [
+    'config',
+    '--file',
+    configPath,
+    '--no-includes',
+    '--null',
+    '--name-only',
+    '--get-regexp',
+    '.*',
+  ], 'local config names'))
+  if (configNames.some((name) => /^include(?:if\..+)?\.path$/iu.test(name))) {
+    fail('Issue #23 reseal Git config includes are not allowed')
+  }
+  if (configNames.some((name) => (
+    /^extensions\.(?:partialclone|worktreeconfig)$/iu.test(name)
+    || /^remote\..+\.(?:partialclonefilter|promisor)$/iu.test(name)
+    || /^promisor\./iu.test(name)
+  ))) {
+    fail('Issue #23 reseal Git partial-clone or promisor config is not allowed')
+  }
+  if (configNames.some((name) => (
+    /^core\.(?:attributesfile|excludesfile|fsmonitor|hookspath|sshcommand)$/iu.test(name)
+    || /^credential\..*helper$/iu.test(name)
+    || /^diff\.external$/iu.test(name)
+    || /^filter\..+\.(?:clean|process|smudge)$/iu.test(name)
+    || /^remote\..+\.uploadpack$/iu.test(name)
+  ))) {
+    fail('Issue #23 reseal Git local config contains an external execution or file hook')
+  }
+}
+
+function verifyEffectiveLocalGitConfigOrigins(repositoryPath, frozenRoot) {
+  const fields = splitNullFields(gitValue(repositoryPath, [
+    'config',
+    '--local',
+    '--no-includes',
+    '--null',
+    '--show-origin',
+    '--name-only',
+    '--get-regexp',
+    '.*',
+  ], 'local config origins'))
+  if (fields.length % 2 !== 0) {
+    fail('Issue #23 reseal Git local config origin output is malformed')
+  }
+  for (let index = 0; index < fields.length; index += 2) {
+    const origin = fields[index]
+    if (!origin.startsWith('file:')) {
+      fail('Issue #23 reseal Git local config origin is not a frozen file')
+    }
+    const originPath = origin.slice('file:'.length)
+    requireGitStoragePathWithinFrozenRoot({
+      expectedType: 'file',
+      frozenRoot,
+      label: 'Git local config origin',
+      requestedPath: isAbsolute(originPath)
+        ? originPath
+        : resolve(repositoryPath, originPath),
+    })
+  }
+}
+
+function verifyGitStorageContainment(repositoryPath, frozenRoot) {
+  verifyRepositoryLocalGitConfig(repositoryPath, frozenRoot)
+
+  const layout = gitValue(repositoryPath, [
+    'rev-parse',
+    '--path-format=absolute',
+    '--is-inside-work-tree',
+    '--is-bare-repository',
+    '--show-toplevel',
+    '--absolute-git-dir',
+    '--git-common-dir',
+    '--git-path',
+    'objects',
+    '--git-path',
+    'index',
+    '--git-path',
+    'objects/info/alternates',
+  ], 'storage layout').split(/\r?\n/u)
+  if (layout.length !== 8) {
+    fail('Issue #23 reseal could not resolve the complete Git storage layout')
+  }
+  const [
+    insideWorktree,
+    bareRepository,
+    requestedTopLevel,
+    requestedGitDirectory,
+    requestedCommonDirectory,
+    requestedObjectDirectory,
+    requestedIndex,
+    alternatesPath,
+  ] = layout
+  requireEqual(insideWorktree, 'true', 'Git worktree state')
+  requireEqual(bareRepository, 'false', 'Git bare repository state')
+  const topLevel = requireGitStoragePathWithinFrozenRoot({
+    expectedType: 'directory',
+    frozenRoot,
+    label: 'Git worktree root',
+    requestedPath: requestedTopLevel,
+  })
+  requireEqual(topLevel, repositoryPath, 'Git worktree root')
+
+  requireGitStoragePathWithinFrozenRoot({
+    expectedType: 'directory',
+    frozenRoot,
+    label: 'absolute Git directory',
+    requestedPath: requestedGitDirectory,
+  })
+  const commonDirectory = requireGitStoragePathWithinFrozenRoot({
+    expectedType: 'directory',
+    frozenRoot,
+    label: 'Git common directory',
+    requestedPath: requestedCommonDirectory,
+  })
+  requireGitStoragePathWithinFrozenRoot({
+    expectedType: 'directory',
+    frozenRoot,
+    label: 'Git object directory',
+    requestedPath: requestedObjectDirectory,
+  })
+  requireGitStoragePathWithinFrozenRoot({
+    expectedType: 'file',
+    frozenRoot,
+    label: 'Git index',
+    requestedPath: requestedIndex,
+  })
+
+  requireAbsolutePath(alternatesPath, 'Git object alternates path')
+  if (pathEntryExists(alternatesPath)) {
+    requireGitStoragePathWithinFrozenRoot({
+      expectedType: 'file',
+      frozenRoot,
+      label: 'Git object alternates file',
+      requestedPath: alternatesPath,
+    })
+    if (readFileSync(alternatesPath).byteLength > 0) {
+      fail('Issue #23 reseal Git object alternates are not allowed')
+    }
+  }
+  const graftsPath = join(commonDirectory, 'info', 'grafts')
+  if (pathEntryExists(graftsPath)) {
+    requireGitStoragePathWithinFrozenRoot({
+      expectedType: 'file',
+      frozenRoot,
+      label: 'Git grafts file',
+      requestedPath: graftsPath,
+    })
+    if (readFileSync(graftsPath).byteLength > 0) {
+      fail('Issue #23 reseal Git grafts are not allowed')
+    }
+  }
+  verifyEffectiveLocalGitConfigOrigins(repositoryPath, frozenRoot)
+  requireEqual(
+    gitValue(repositoryPath, ['rev-parse', '--is-shallow-repository'], 'shallow state'),
+    'false',
+    'Git shallow repository state',
+  )
+  if (gitValue(
+    repositoryPath,
+    ['for-each-ref', '--format=%(refname)', 'refs/replace/'],
+    'replacement refs',
+  ) !== '') {
+    fail('Issue #23 reseal Git replacement refs are not allowed')
   }
 }
 
@@ -681,63 +1111,128 @@ function verifyBuildTree(
   }
 }
 
+function requireLocalGitObject(repositoryPath, objectId, expectedType, label) {
+  requireEqual(
+    gitValue(repositoryPath, ['cat-file', '-t', objectId], `${label} object`),
+    expectedType,
+    `${label} object type`,
+  )
+}
+
+function readRawCommitIdentity(repositoryPath, commitId) {
+  requireLocalGitObject(repositoryPath, commitId, 'commit', 'candidate commit')
+  const rawCommit = gitValue(
+    repositoryPath,
+    ['cat-file', 'commit', commitId],
+    'raw candidate commit',
+  )
+  const header = rawCommit.split('\n\n', 1)[0]
+  const treeLines = header.split('\n').filter((line) => line.startsWith('tree '))
+  const parentCommits = header.split('\n')
+    .filter((line) => line.startsWith('parent '))
+    .map((line) => line.slice('parent '.length))
+  if (
+    treeLines.length !== 1
+    || !/^[a-f0-9]{40}$/u.test(treeLines[0].slice('tree '.length))
+    || parentCommits.some((parent) => !/^[a-f0-9]{40}$/u.test(parent))
+  ) {
+    fail('Issue #23 reseal candidate commit has malformed raw object headers')
+  }
+  const tree = treeLines[0].slice('tree '.length)
+  requireLocalGitObject(repositoryPath, tree, 'tree', 'candidate tree')
+  for (const parent of parentCommits) {
+    requireLocalGitObject(repositoryPath, parent, 'commit', 'candidate parent')
+  }
+  return { parentCommits, tree }
+}
+
+function readRawTreeEntry(repositoryPath, treeId, path, expectedType, label) {
+  const output = gitValue(
+    repositoryPath,
+    ['ls-tree', treeId, '--', path],
+    label,
+  )
+  const match = /^([0-7]{6}) (blob|tree) ([a-f0-9]{40})\t(.+)$/u.exec(output)
+  if (!match || match[2] !== expectedType || match[4] !== path) {
+    fail(`Issue #23 reseal could not resolve the raw ${label}`)
+  }
+  requireLocalGitObject(repositoryPath, match[3], expectedType, label)
+  return match[3]
+}
+
 function verifyLongRunnerCoverage(request, repositoryPath) {
   const longRunnerCoverage = request.github_evidence
     .canonical_long_migration_runner.coverage
-  for (const [binding, path, expectedObject] of [
+  for (const [binding, path, expectedType, expectedObject] of [
     [
       'long-run migration runner source blob',
       'scripts/migrations.mjs',
+      'blob',
       longRunnerCoverage.migration_runner_source_blob,
     ],
     [
       'long-run migration runner test blob',
       'tests/migrations/migration-runner.test.ts',
+      'blob',
       longRunnerCoverage.migration_runner_test_blob,
     ],
     [
       'long-run ledger migrations tree',
       'db/ledger-migrations',
+      'tree',
       longRunnerCoverage.ledger_migrations_tree,
     ],
     [
       'long-run package lock blob',
       'package-lock.json',
+      'blob',
       longRunnerCoverage.package_lock_blob,
     ],
     [
       'long-run schema fixture blob',
       'db/schema.sql',
+      'blob',
       longRunnerCoverage.schema_blob,
     ],
     [
       'long-run seed fixture blob',
       'db/seed-template.sql',
+      'blob',
       longRunnerCoverage.seed_template_blob,
     ],
     [
       'long-run historical migrations tree',
       'db/migrations',
+      'tree',
       longRunnerCoverage.historical_migrations_tree,
     ],
     [
       'long-run Wrangler config blob',
       'wrangler.toml',
+      'blob',
       longRunnerCoverage.wrangler_config_blob,
     ],
     [
       'long-run AI provider profile blob',
       'lib/ai-provider-profiles.ts',
+      'blob',
       longRunnerCoverage.ai_provider_profiles_blob,
     ],
     [
       'long-run AI post generator constants blob',
       'lib/ai-post-generator/constants.ts',
+      'blob',
       longRunnerCoverage.ai_post_generator_constants_blob,
     ],
   ]) {
     requireEqual(
-      gitValue(repositoryPath, ['rev-parse', `HEAD:${path}`], binding),
+      readRawTreeEntry(
+        repositoryPath,
+        request.candidate.tree,
+        path,
+        expectedType,
+        binding,
+      ),
       expectedObject,
       binding,
     )
@@ -746,28 +1241,32 @@ function verifyLongRunnerCoverage(request, repositoryPath) {
 
 function verifyGitIdentity(request, repositoryPath) {
   requireEqual(
-    gitValue(repositoryPath, ['rev-parse', 'HEAD'], 'commit'),
+    gitValue(repositoryPath, ['rev-parse', '--verify', 'HEAD'], 'commit'),
     request.candidate.commit,
     'Git commit',
   )
+  const rawIdentity = readRawCommitIdentity(
+    repositoryPath,
+    request.candidate.commit,
+  )
   requireEqual(
-    gitValue(repositoryPath, ['rev-parse', 'HEAD^{tree}'], 'tree'),
+    rawIdentity.tree,
     request.candidate.tree,
-    'Git tree',
+    'raw Git tree',
   )
   requireEqual(
     gitValue(
       repositoryPath,
-      ['status', '--porcelain', '--untracked-files=all'],
+      ['status', '--porcelain', '--untracked-files=all', '--ignored=matching'],
       'worktree status',
     ),
     '',
     'Git worktree cleanliness',
   )
+  return rawIdentity
 }
 
 function verifySealInputs(request, repositoryPath, artifactsPath) {
-  verifyGitIdentity(request, repositoryPath)
   requireEqual(
     request.github_evidence.quick.head_sha,
     request.candidate.commit,
@@ -1084,6 +1583,221 @@ function resealDocuments(request, toolVersions) {
   ])
 }
 
+function validateInputEvidenceBindings({
+  artifacts,
+  evidenceDocument,
+  repository,
+  requestDocument,
+}) {
+  const evidence = evidenceDocument.value
+  requireEqual(evidence.format, INPUT_EVIDENCE_FORMAT, 'input-evidence format')
+
+  const frozenRoot = requireDirectory(
+    evidence.frozen_tree.root_path,
+    'frozen evidence root',
+  )
+  requireEqual(frozenRoot, evidence.frozen_tree.root_path, 'frozen evidence root realpath')
+  const frozenSnapshot = requireDirectory(
+    evidence.frozen_tree.snapshot_path,
+    'frozen snapshot',
+  )
+  requireEqual(frozenSnapshot, repository, 'frozen snapshot path')
+  requireEqual(evidence.contracts.build.artifacts_path, artifacts, 'frozen artifacts path')
+  if (!pathAtOrWithin(frozenRoot, repository) || !pathAtOrWithin(frozenRoot, artifacts)) {
+    fail('Issue #23 reseal repository and artifacts must be inside the frozen evidence root')
+  }
+  requireEqual(
+    evidence.frozen_tree.manifest_path,
+    evidenceDocument.snapshot.requestedPath,
+    'input-evidence manifest path',
+  )
+  requireEqual(
+    evidenceDocument.snapshot.realPath,
+    evidenceDocument.snapshot.requestedPath,
+    'input-evidence manifest realpath',
+  )
+  requireEqual(
+    evidence.contracts.reseal_request.path,
+    requestDocument.snapshot.requestedPath,
+    'reseal request path',
+  )
+  requireEqual(
+    requestDocument.snapshot.realPath,
+    requestDocument.snapshot.requestedPath,
+    'reseal request realpath',
+  )
+  if (
+    !pathAtOrWithin(frozenRoot, evidenceDocument.snapshot.realPath)
+    || !pathAtOrWithin(frozenRoot, requestDocument.snapshot.realPath)
+  ) {
+    fail('Issue #23 reseal manifest and request must be inside the frozen evidence root')
+  }
+  requireMode(frozenRoot, evidence.frozen_tree.root_mode, 'frozen evidence root')
+  requireMode(frozenSnapshot, evidence.frozen_tree.snapshot_mode, 'frozen snapshot')
+  requireMode(
+    evidenceDocument.snapshot.realPath,
+    evidence.frozen_tree.manifest_mode,
+    'input-evidence manifest',
+  )
+  requireMode(
+    requestDocument.snapshot.realPath,
+    evidence.frozen_tree.request_mode,
+    'reseal request',
+  )
+
+  requireEqual(
+    evidence.contracts.reseal_request.format,
+    requestDocument.value.format,
+    'input-evidence reseal request format',
+  )
+  requireEqual(
+    evidence.contracts.reseal_request.sha256,
+    requestDocument.sha256,
+    'input-evidence reseal request SHA-256',
+  )
+  requireEqual(
+    evidence.repository.candidate_commit,
+    requestDocument.value.candidate.commit,
+    'input-evidence candidate commit',
+  )
+  requireEqual(
+    evidence.repository.candidate_tree,
+    requestDocument.value.candidate.tree,
+    'input-evidence candidate tree',
+  )
+  requireEqual(
+    evidence.github.main_push.run_id,
+    requestDocument.value.github_evidence.quick.run_id,
+    'input-evidence quick CI run',
+  )
+  requireEqual(
+    evidence.github.main_push.head_sha,
+    requestDocument.value.github_evidence.quick.head_sha,
+    'input-evidence quick CI head',
+  )
+  requireEqual(
+    evidence.github.main_push.status,
+    requestDocument.value.github_evidence.quick.status,
+    'input-evidence quick CI status',
+  )
+  requireEqual(
+    evidence.github.main_push.conclusion,
+    requestDocument.value.github_evidence.quick.conclusion,
+    'input-evidence quick CI conclusion',
+  )
+
+  verifyGitStorageContainment(repository, frozenRoot)
+  const rawIdentity = verifyGitIdentity(requestDocument.value, repository)
+  const originUrls = splitNullFields(gitValue(
+    repository,
+    ['config', '--local', '--no-includes', '--null', '--get-all', 'remote.origin.url'],
+    'origin URL',
+  ))
+  requireEqual(
+    JSON.stringify(originUrls),
+    JSON.stringify([evidence.repository.origin_url]),
+    'canonical origin URL',
+  )
+  requireEqual(
+    JSON.stringify(rawIdentity.parentCommits),
+    JSON.stringify(evidence.repository.parent_commits),
+    'raw candidate parent commits',
+  )
+
+  const schemaSnapshot = requireBoundFile(
+    repository,
+    evidence.contracts.input_evidence_schema.path,
+    evidence.contracts.input_evidence_schema.sha256,
+    'input-evidence schema',
+  )
+  const repositorySchemaBytes = schemaSnapshot.bytes
+  const toolSchemaBytes = readFileSync(SCHEMA_URLS.get(INPUT_EVIDENCE_FORMAT))
+  if (!repositorySchemaBytes.equals(toolSchemaBytes)) {
+    fail('Issue #23 reseal input-evidence schema differs from the running repository tool')
+  }
+  const localResealRunbookSnapshot = requireBoundFile(
+    repository,
+    evidence.contracts.local_reseal_runbook.path,
+    evidence.contracts.local_reseal_runbook.sha256,
+    'local reseal runbook',
+  )
+  requireEqual(
+    evidence.contracts.phase_b_runbook.sha256,
+    requestDocument.value.repository.runbook.sha256,
+    'input-evidence Phase B runbook SHA-256',
+  )
+  requireEqual(
+    evidence.contracts.phase_b_runbook.path,
+    requestDocument.value.repository.runbook.path,
+    'input-evidence Phase B runbook path',
+  )
+
+  for (const [binding, actual, expected] of [
+    ['build archive path', evidence.contracts.build.archive_path, requestDocument.value.build.archive_path],
+    ['build archive SHA-256', evidence.contracts.build.archive_sha256, requestDocument.value.build.archive_sha256],
+    ['worker path', evidence.contracts.build.worker_path, requestDocument.value.build.worker_path],
+    ['worker SHA-256', evidence.contracts.build.worker_sha256, requestDocument.value.build.worker_sha256],
+    ['tree manifest path', evidence.contracts.build.tree_manifest_path, requestDocument.value.build.tree_manifest_path],
+    ['tree manifest SHA-256', evidence.contracts.build.tree_manifest_sha256, requestDocument.value.build.tree_manifest_sha256],
+  ]) {
+    requireEqual(actual, expected, `input-evidence ${binding}`)
+  }
+
+  const denylistPaths = evidence.lineage_policy.denylist.map((entry) => entry.path)
+  if (new Set(denylistPaths).size !== denylistPaths.length) {
+    fail('Issue #23 reseal input-evidence denylist paths must be unique')
+  }
+  const boundInputPaths = [
+    frozenRoot,
+    repository,
+    artifacts,
+    evidenceDocument.snapshot.realPath,
+    requestDocument.snapshot.realPath,
+  ]
+  for (const deniedPath of denylistPaths) {
+    if (boundInputPaths.some((boundPath) => (
+      pathAtOrWithin(deniedPath, boundPath)
+      || pathAtOrWithin(boundPath, deniedPath)
+    ))) {
+      fail('Issue #23 reseal terminal lineage cannot be an input dependency')
+    }
+    if (requestDocument.raw.includes(Buffer.from(deniedPath))) {
+      fail('Issue #23 reseal request cannot depend on a terminal lineage')
+    }
+  }
+
+  return {
+    root: frozenRoot,
+    snapshots: [schemaSnapshot, localResealRunbookSnapshot],
+  }
+}
+
+function captureFrozenTree(evidence, frozenRoot) {
+  const snapshot = scanFrozenTree(frozenRoot)
+  for (const [name, actual] of Object.entries(snapshot.counts)) {
+    requireEqual(
+      actual,
+      evidence.frozen_tree[name],
+      `frozen tree ${name}`,
+    )
+  }
+  return {
+    counts: snapshot.counts,
+    identitySha256: snapshot.identitySha256,
+    root: frozenRoot,
+  }
+}
+
+function verifyFrozenTreeSnapshot(snapshot) {
+  const current = scanFrozenTree(snapshot.root)
+  if (
+    JSON.stringify(current.counts) !== JSON.stringify(snapshot.counts)
+    || current.identitySha256 !== snapshot.identitySha256
+  ) {
+    fail('Issue #23 reseal frozen tree changed after validation')
+  }
+}
+
 function loadSealContext(inputPath, repositoryPath, artifactsPath) {
   requireAbsolutePath(inputPath, 'input')
   const repositoryDirectory = captureDirectoryIdentity(repositoryPath, 'repository')
@@ -1093,6 +1807,10 @@ function loadSealContext(inputPath, repositoryPath, artifactsPath) {
   )
   const repository = repositoryDirectory.realPath
   const artifacts = artifactsDirectory.realPath
+  const evidencePath = resolve(dirname(inputPath), INPUT_EVIDENCE_FILE_NAME)
+  const evidenceDocument = readValidatedDocument(evidencePath, {
+    label: 'input-evidence manifest',
+  })
   const requestDocument = readValidatedDocument(inputPath, {
     label: 'request document',
   })
@@ -1100,20 +1818,47 @@ function loadSealContext(inputPath, repositoryPath, artifactsPath) {
     fail('Issue #23 historical reseal request is stale for current sealing')
   }
   requireEqual(requestDocument.value.format, REQUEST_FORMAT, 'request format')
-  const sealInputs = verifySealInputs(requestDocument.value, repository, artifacts)
+  const inputEvidence = validateInputEvidenceBindings({
+    artifacts,
+    evidenceDocument,
+    repository,
+    requestDocument,
+  })
+  const sealInputs = verifySealInputs(
+    requestDocument.value,
+    repository,
+    artifacts,
+  )
+  const frozenTree = captureFrozenTree(evidenceDocument.value, inputEvidence.root)
   return {
     directories: [repositoryDirectory, artifactsDirectory],
+    evidenceDocument,
+    frozenTree,
     migrationDirectory: sealInputs.migrationDirectory,
     repository,
     requestDocument,
-    snapshots: [requestDocument.snapshot, ...sealInputs.snapshots],
+    snapshots: [
+      evidenceDocument.snapshot,
+      requestDocument.snapshot,
+      ...inputEvidence.snapshots,
+      ...sealInputs.snapshots,
+    ],
     toolVersions: sealInputs.toolVersions,
   }
 }
 
 function verifySealContextUnchanged(context) {
   for (const directory of context.directories) verifyDirectoryIdentity(directory)
-  verifyGitIdentity(context.requestDocument.value, context.repository)
+  verifyGitStorageContainment(context.repository, context.frozenTree.root)
+  const rawIdentity = verifyGitIdentity(
+    context.requestDocument.value,
+    context.repository,
+  )
+  requireEqual(
+    JSON.stringify(rawIdentity.parentCommits),
+    JSON.stringify(context.evidenceDocument.value.repository.parent_commits),
+    'raw candidate parent commits',
+  )
   verifyLongRunnerCoverage(
     context.requestDocument.value,
     context.repository,
@@ -1121,11 +1866,28 @@ function verifySealContextUnchanged(context) {
   verifyMigrationDirectorySnapshot(context.migrationDirectory)
   verifyFileSnapshots(context.snapshots)
   verifyMigrationDirectorySnapshot(context.migrationDirectory)
+  verifyFrozenTreeSnapshot(context.frozenTree)
+}
+
+export function prepareInputEvidence({ inputPath, repositoryPath, artifactsPath }) {
+  const context = loadSealContext(inputPath, repositoryPath, artifactsPath)
+  verifySealContextUnchanged(context)
+  return {
+    candidate_id: context.requestDocument.value.candidate.commit,
+    format: 'blogman-issue-23-input-evidence-preparation/v1',
+    input_evidence_manifest_sha256: context.evidenceDocument.sha256,
+    production_authorization_granted: false,
+    production_counters_all_zero: true,
+    state: 'prepared-local-only',
+  }
 }
 
 export function sealPackage({ inputPath, repositoryPath, artifactsPath, outputPath }) {
   const context = loadSealContext(inputPath, repositoryPath, artifactsPath)
   requireAbsolutePath(outputPath, 'output')
+  if (pathAtOrWithin(context.frozenTree.root, outputPath)) {
+    fail('Issue #23 reseal output must be outside the frozen evidence root')
+  }
   if (outputPath === context.repository || pathWithin(context.repository, outputPath)) {
     fail('Issue #23 reseal output must be outside the repository')
   }
@@ -1133,7 +1895,11 @@ export function sealPackage({ inputPath, repositoryPath, artifactsPath, outputPa
     finalOutputPath,
     outputParent,
     reservation,
-  } = reserveOutputParent(outputPath, context.repository)
+  } = reserveOutputParent(
+    outputPath,
+    context.repository,
+    context.frozenTree.root,
+  )
   let stagingPath
   try {
     if (pathEntryExists(finalOutputPath)) fail('Issue #23 reseal output must be fresh')
@@ -1438,6 +2204,25 @@ function runCli(args) {
       })
     }
   }
+  if (args.length === 7 && args[0] === 'prepare') {
+    const options = Object.fromEntries([
+      [args[1], args[2]],
+      [args[3], args[4]],
+      [args[5], args[6]],
+    ])
+    if (
+      Object.keys(options).length === 3
+      && options['--input']
+      && options['--repo']
+      && options['--artifacts']
+    ) {
+      return prepareInputEvidence({
+        inputPath: options['--input'],
+        repositoryPath: options['--repo'],
+        artifactsPath: options['--artifacts'],
+      })
+    }
+  }
   if (args.length === 9 && args[0] === 'seal') {
     const options = Object.fromEntries([
       [args[1], args[2]],
@@ -1482,7 +2267,7 @@ function runCli(args) {
       })
     }
   }
-  fail('Usage: issue-23-reseal validate (--document <path> | --package <path>) | verify-build-directory --archive <path> --directory <path> --archive-sha256 <sha256> | seal --input <path> --repo <path> --artifacts <path> --output <path> | verify --input <path> --repo <path> --artifacts <path> --package <path>')
+  fail('Usage: issue-23-reseal validate (--document <path> | --package <path>) | prepare --input <path> --repo <path> --artifacts <path> | verify-build-directory --archive <path> --directory <path> --archive-sha256 <sha256> | seal --input <path> --repo <path> --artifacts <path> --output <path> | verify --input <path> --repo <path> --artifacts <path> --package <path>')
 }
 
 if (resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

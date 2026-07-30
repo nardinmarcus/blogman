@@ -1,7 +1,10 @@
 # Issue #23 local T0 reseal
 
 `scripts/issue-23-reseal.mjs` is the repository-owned generator and verifier for
-the current local-only Issue #23 T0 quartet:
+the current local-only Issue #23 input evidence and T0 quartet:
+
+- `input-evidence-manifest.json` —
+  `blogman-issue-23-input-evidence-manifest/v2`
 
 - `preflight-candidate.json` — `blogman-local-preflight-candidate/v2`
 - `approval-packet.json` — `blogman-issue-23-approval-packet/v4`
@@ -39,6 +42,33 @@ manifest repeats those three values in its required, closed
 members invalidate the quartet. Historical v2/v3
 packages remain valid byte-for-byte for read-only validation and have
 `acceptance_authority=false`.
+
+## Canonical input evidence
+
+The current input-evidence contract is repository-owned
+`blogman-issue-23-input-evidence-manifest/v2`. The earlier authorized recovery
+recorded v2; an evidence-local v1 schema is not a current-main authority and
+must not be copied into a new lineage. The v2 manifest is always named
+`input-evidence-manifest.json` beside the canonical v3 reseal request. The
+running tool validates its canonical bytes against
+`schemas/issue-23-reseal/blogman-issue-23-input-evidence-manifest-v2.schema.json`
+and verifies that the frozen snapshot contains the same schema bytes and hash.
+
+The manifest fixes `nardinmarcus/blogman`, candidate commit/tree/parents, exact
+completed/success main push CI, request/runbook/schema/build paths and SHA-256
+values, root/file modes, full-tree counts, false authorization flags, zero
+formal production/Cloudflare/D1/Phase B mutation counters, and all twelve zero
+stage counters. Closed objects reject unknown production-write fields. A
+terminal lineage may appear only in `lineage_policy.denylist` or history;
+`input_dependencies` is empty, and denied paths cannot name the frozen root,
+snapshot, request, artifacts, or any request dependency.
+
+`prepare`, `seal`, and `verify` all load this same manifest through the same
+context boundary. A missing, non-canonical, wrong-version, wrong-hash, or
+mutating manifest stops before the seal output parent is reserved.
+The adversarial seal tests have a scoped 15-second per-test budget because they
+launch real Git/Node children and hash complete frozen fixtures; this is test
+budgeting only and does not add or change a reseal runtime timeout.
 
 `canonical_long_migration_runner` accepts the historical `unverified` object
 or the current verified object `{state:"passed",passed:46,failed:0}`. The
@@ -83,9 +113,10 @@ the following Git objects to the same IDs as the immutable long-run head:
 These are the runner, the long test, its dependency lock, and every direct
 repository semantic dependency read or runtime-imported by that test.
 Type-only imports do not expand the runtime coverage set. `seal` and `verify`
-recompute every object with `git rev-parse HEAD:<path>`; a new candidate cannot
-self-report replacement object IDs because the request schema fixes them to
-the immutable long-run evidence.
+resolve every object from the bound candidate tree with raw `git ls-tree`, then
+require the resulting blob/tree locally with `git cat-file -t`; a new candidate
+cannot self-report replacement object IDs because the request schema fixes them
+to the immutable long-run evidence.
 
 The migration-set SHA is:
 
@@ -114,6 +145,37 @@ regular file from its host/type attributes, and decompresses each entry in
 memory from that same captured buffer. It never extracts the archive to disk,
 so a symlink entry cannot pivot a later child write outside a temporary root.
 
+The dependency/build workspace and frozen evidence root are separate. Install
+Node packages, run tests, and build OpenNext in the workspace; then copy only
+the final repository snapshot, canonical request, canonical input-evidence
+manifest, and bound artifacts into a fresh mode-`0700` frozen root. The frozen
+snapshot is also mode `0700`; request and manifest are mode `0600`. Recursively,
+the complete frozen root—not only the governed file index or `.open-next`
+allowlist—must contain no symlink, no regular file with link count other than
+one, no special file, no realpath escape, and no `node_modules` or `toolchain`
+entry. Build dependencies and executable toolchains stay outside that root.
+The repository snapshot must be a self-contained non-bare worktree: its
+effective top-level, absolute git-dir, common-dir, index, and primary object
+directory all resolve inside the frozen root. Linked-worktree metadata, object
+alternates, shallow repositories, replacement refs, partial-clone/promisor
+configuration, config includes, and repository-affecting caller `GIT_*`
+variables are rejected before Git identity is trusted. `GIT_PAGER` is discarded
+as non-semantic; every Git child otherwise receives the same minimal environment
+with system/global config and lazy fetching disabled. Local config is read
+without includes and every effective local origin must resolve inside the frozen
+root. Candidate tree and parents come from the raw bound commit object, and all
+candidate, parent, tree, and inherited path objects must already exist locally.
+
+The first complete-tree traversal captures a deterministic identity digest over
+every relative entry path, type, POSIX mode, owner/group, link count, size, and
+regular-file SHA-256. The final barrier recomputes that digest as well as the
+declared counts, so an equal-count rename or byte replacement is not invisible.
+
+A lineage that reaches `BLOCK`, consumed authorization, or another terminal
+state is immutable history. Do not repair its schema, replace bytes, reseal it,
+or continue in place. Prepare a new root and manifest from reviewed current
+main instead.
+
 All input paths are normalized. Repository and artifact roots, the requested
 seal-input path and root, bound files, and the migration directory retain their
 requested and real identities. Migration membership is the filtered, sorted
@@ -122,8 +184,10 @@ around the final byte recheck. Package validation similarly checks the exact
 four-entry directory before and after reading files, then repeats the complete
 membership and byte check after the final live-context verification.
 
-The output must be an absolute repository-external path whose parent does not
-exist. Its existing real grandparent must also resolve outside the repository.
+The output must be an absolute repository- and frozen-root-external path whose
+parent does not exist. Its existing real grandparent is resolved first; both the
+derived output parent and final output path must be outside the repository and
+the complete frozen root before the first `mkdir`.
 On supported local POSIX filesystems, `seal` reserves the output in one shot by
 creating that dedicated parent with one non-recursive `mkdir`, then forces and
 verifies owner=current effective UID and mode `0700`. `EEXIST` means another or
@@ -148,14 +212,20 @@ cleanup diagnostics are appended without replacing the primary error.
 Use absolute paths:
 
 ```bash
+npm run issue-23:reseal -- prepare \
+  --input /private/issue-23/reseal-input.json \
+  --repo /private/issue-23/snapshot \
+  --artifacts /private/issue-23/artifacts
+
 npm run issue-23:reseal -- seal \
   --input /private/issue-23/reseal-input.json \
-  --repo /absolute/path/to/blogman \
-  --artifacts /private/issue-23/build \
-  --output /private/issue-23-sealed-t0/package
+  --repo /private/issue-23/snapshot \
+  --artifacts /private/issue-23/artifacts \
+  --output /private/issue-23-output/package
 ```
 
-`/private/issue-23-sealed-t0` must not exist before this command.
+`/private/issue-23-output` must not exist before this command and must be
+outside `/private/issue-23`, the frozen evidence root.
 
 The generator creates the missing dedicated output parent as mode `0700`,
 writes a mode-`0700` staging directory inside it, writes the four files as mode
@@ -175,9 +245,9 @@ Re-verify a seal against live local Git and frozen artifacts:
 ```bash
 npm run issue-23:reseal -- verify \
   --input /private/issue-23/reseal-input.json \
-  --repo /absolute/path/to/blogman \
-  --artifacts /private/issue-23/build \
-  --package /private/issue-23/sealed-t0
+  --repo /private/issue-23/snapshot \
+  --artifacts /private/issue-23/artifacts \
+  --package /private/issue-23-output/package
 ```
 
 `verify` regenerates the expected quartet in memory and compares every package
