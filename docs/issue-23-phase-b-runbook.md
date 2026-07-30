@@ -173,7 +173,8 @@ UPLOAD_ACCEPTANCE=$(WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" node scripts/pha
   --proof-after "$UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER" \
   --archive "$BUILD_ZIP" \
   --archive-sha256 "$BUILD_SHA256" \
-  --build-proof "$UPLOAD_BUILD_DIRECTORY_PROOF")
+  --build-proof "$UPLOAD_BUILD_DIRECTORY_PROOF" \
+  --expected-config-sha256 "$CONFIG_SHA256")
 readonly UPLOAD_ACCEPTANCE
 jq -e 'keys == ["build_directory_proof_sha256","config_sha256","format",
     "snapshot_identity_sha256","snapshot_proof_after_sha256",
@@ -209,7 +210,7 @@ jq -n --arg uploaded "$UPLOAD_COMPLETED_AT" --arg candidate "$EXPECTED_CANDIDATE
   > "$REPORT_DIR/clean-start-upload-report.json"
 ```
 
-The upload-source proof is regenerated from the actual `.open-next` directory after CAS1. One `run-upload-source-lifecycle` process opens and holds complete descriptor chains from the filesystem root through the report directory, config, source, sealed archive, and frozen snapshot. Every ancestor pathname must still resolve to its held device and inode; from the critical paths' common candidate root through each leaf, nanosecond ctime, mode, and size must also remain unchanged throughout the upload window. Only the report-directory metadata change caused by exclusive snapshot creation is rebased. Immutable config, archive, snapshot, and path anchors are never refreshed after proof. Config bytes and Wrangler's parsed config-relative `assets.directory` semantics are bound initially, immediately before the child spawn, and after the child returns.
+The upload-source proof is regenerated from the actual `.open-next` directory after CAS1. One `run-upload-source-lifecycle` process opens and holds complete descriptor chains from the filesystem root through the report directory, config, source, sealed archive, and frozen snapshot. Every ancestor pathname must still resolve to its held device and inode; from the critical paths' common candidate root through each leaf, nanosecond ctime, mode, and size must also remain unchanged throughout the upload window. Only the report-directory metadata change caused by exclusive snapshot creation is rebased. Immutable config, archive, snapshot, and path anchors are never refreshed after proof. The PRE-CAS `CONFIG_SHA256` is a required lifecycle input and config bytes are checked through the held descriptor before and after archive proof, as the final gate before the child spawn, and after the child returns. Wrangler's parsed config-relative `assets.directory` semantics are rechecked at the same lifecycle boundaries.
 
 The archive verifier is a shared pure module loaded with the lifecycle process, not a helper launched later through a mutable pathname. The lifecycle proves the snapshot byte-for-byte against the bound sealed archive before invoking OpenNext exactly once, then repeats both snapshot and sealed-archive proofs after the child returns. It writes the terminal proof and only then performs the final anchor check. A complete report-directory, candidate-root, or higher owned-ancestor swap therefore remains observable even if the original path and snapshot subtree are restored before the post-proof.
 

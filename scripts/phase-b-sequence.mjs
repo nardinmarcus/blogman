@@ -530,14 +530,16 @@ function acceptedVersionId(uploadOutput) {
     return value
   })
   const versions = records.filter((record) => (
-    record.type === 'version-upload'
-    && record.version === 1
-    && typeof record.version_id === 'string'
-    && record.version_id.trim() === record.version_id
-    && record.version_id.length > 0
+    record.type === 'version-upload' && record.version === 1
   ))
   if (versions.length !== 1) throw new Error()
-  return versions[0].version_id
+  const version = versions[0]
+  if (typeof version.version_id !== 'string'
+    || version.version_id.trim() !== version.version_id
+    || version.version_id.length === 0) {
+    throw new Error()
+  }
+  return version.version_id
 }
 
 function snapshotProofBytes(state, proof, destination) {
@@ -765,13 +767,15 @@ async function runUploadSourceLifecycle({
   archiveSha256,
   buildProofPath,
   config,
+  expectedConfigSha256,
   source,
   destination,
   operationId,
   proofBeforePath,
   proofAfterPath,
 }) {
-  if (!uploadOperationId.test(operationId || '')) throw new Error()
+  if (!uploadOperationId.test(operationId || '')
+    || !sha256.test(expectedConfigSha256 || '')) throw new Error()
   const reportDirectory = dirname(destination)
   const uploadOutputPath = process.env.WRANGLER_OUTPUT_FILE_PATH
   const held = []
@@ -794,11 +798,11 @@ async function runUploadSourceLifecycle({
     const uploadEvidence = holdEvidenceFile(uploadOutputPath, reportDirectory)
     evidence.push(uploadEvidence)
 
+    if (heldFileSha256(heldConfig) !== expectedConfigSha256) throw new Error()
     const configuredAssetsDirectory = await bindUploadAssetsDirectory(config, source)
-    const configSha256 = heldFileSha256(heldConfig)
     const verifyConfigBinding = async () => {
       if (await bindUploadAssetsDirectory(config, source) !== configuredAssetsDirectory
-        || heldFileSha256(heldConfig) !== configSha256) {
+        || heldFileSha256(heldConfig) !== expectedConfigSha256) {
         throw new Error()
       }
     }
@@ -809,19 +813,21 @@ async function runUploadSourceLifecycle({
     const snapshotChain = holdStablePathChain(destination, 'directory', 0o500)
     for (const path of snapshotChain) path.strictMetadata = isWithin(stabilityRoot, path.path)
     held.push(...snapshotChain)
+    await verifyConfigBinding()
     const buildProof = verifyFrozenSnapshotAgainstArchive(
       archive,
       destination,
       archiveSha256,
     )
+    await verifyConfigBinding()
     for (const path of held) verifyHeldPath(path)
     writeHeldEvidence(buildEvidence, buildProof)
     writeHeldEvidence(beforeEvidence, snapshotProofBytes('created', before, destination))
     captureHeldEvidence(afterEvidence)
     captureHeldEvidence(uploadEvidence)
-    await verifyConfigBinding()
     for (const path of held) verifyHeldPath(path)
     for (const file of evidence) verifyHeldEvidence(file)
+    await verifyConfigBinding()
 
     const upload = spawnSync('npm', [
       'exec', '--', 'opennextjs-cloudflare', 'upload',
@@ -834,6 +840,7 @@ async function runUploadSourceLifecycle({
     })
 
     captureHeldEvidence(uploadEvidence, true)
+    await verifyConfigBinding()
     const after = verifyUploadSourceSnapshot(
       destination,
       before.tree_sha256,
@@ -858,7 +865,7 @@ async function runUploadSourceLifecycle({
       state: 'accepted',
       upload_operation_id: operationId,
       version_id: versionId,
-      config_sha256: configSha256,
+      config_sha256: expectedConfigSha256,
       snapshot_tree_sha256: after.tree_sha256,
       snapshot_identity_sha256: after.identity_sha256,
       snapshot_proof_before_sha256: sha256Bytes(beforeEvidence.expected.bytes),
@@ -880,7 +887,7 @@ function isMainModule() {
 async function runCli() {
   if (process.argv[2] === 'run-upload-source-lifecycle') {
     try {
-      if (process.argv.length !== 21
+      if (process.argv.length !== 23
         || process.argv[3] !== '--config'
         || process.argv[5] !== '--source'
         || process.argv[7] !== '--destination'
@@ -889,7 +896,8 @@ async function runCli() {
         || process.argv[13] !== '--proof-after'
         || process.argv[15] !== '--archive'
         || process.argv[17] !== '--archive-sha256'
-        || process.argv[19] !== '--build-proof') {
+        || process.argv[19] !== '--build-proof'
+        || process.argv[21] !== '--expected-config-sha256') {
         throw new Error()
       }
       const acceptance = await runUploadSourceLifecycle({
@@ -897,6 +905,7 @@ async function runCli() {
         archiveSha256: process.argv[18],
         buildProofPath: process.argv[20],
         config: process.argv[4],
+        expectedConfigSha256: process.argv[22],
         source: process.argv[6],
         destination: process.argv[8],
         operationId: process.argv[10],

@@ -50,6 +50,7 @@ describe('Issue #23 Phase B runbook order', () => {
       && commands[lifecycle].includes('--archive "$BUILD_ZIP"')
       && commands[lifecycle].includes('--archive-sha256 "$BUILD_SHA256"')
       && commands[lifecycle].includes('--build-proof "$UPLOAD_BUILD_DIRECTORY_PROOF"')
+      && commands[lifecycle].includes('--expected-config-sha256 "$CONFIG_SHA256"')
       && acceptVersion > lifecycle
       && !commands.some((command) => command.includes('select(.type == "version-upload"'))
   }
@@ -131,6 +132,10 @@ describe('Issue #23 Phase B runbook order', () => {
     expect(hasTightUploadSourceProof(runbook.replace(
       'UPLOADED_VERSION_ID=$(jq -er .version_id <<< "$UPLOAD_ACCEPTANCE")',
       'UPLOADED_VERSION_ID=$(jq -sr ".[-1].version_id" "$UPLOAD_PRIVATE")',
+    ))).toBe(false)
+    expect(hasTightUploadSourceProof(runbook.replace(
+      '--expected-config-sha256 "$CONFIG_SHA256"',
+      '--expected-config-sha256 "$BUILD_SHA256"',
     ))).toBe(false)
   })
 
