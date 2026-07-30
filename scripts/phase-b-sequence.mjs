@@ -396,6 +396,46 @@ function commonAncestor(paths) {
   return common
 }
 
+function processCanWriteAndSearch(directoryStat) {
+  if (typeof process.geteuid !== 'function'
+    || typeof process.getegid !== 'function'
+    || typeof process.getgroups !== 'function') {
+    throw new Error()
+  }
+  const uid = BigInt(process.geteuid())
+  if (uid === 0n) return true
+  const groups = new Set([
+    process.getegid(),
+    ...process.getgroups(),
+  ].map((group) => BigInt(group)))
+  const permissions = directoryStat.mode & 0o777n
+  const applicable = directoryStat.uid === uid
+    ? permissions >> 6n
+    : groups.has(directoryStat.gid) ? permissions >> 3n : permissions
+  return (applicable & 0o3n) === 0o3n
+}
+
+function processCanReplaceEntry(parentStat, entryStat) {
+  if (!processCanWriteAndSearch(parentStat)) return false
+  if ((parentStat.mode & 0o1000n) === 0n) return true
+  const uid = BigInt(process.geteuid())
+  return uid === 0n || uid === parentStat.uid || uid === entryStat.uid
+}
+
+function bindStrictPathMetadata(held, stabilityRoot) {
+  for (const entry of held) {
+    if (entry.path === '/') {
+      entry.strictMetadata = false
+      continue
+    }
+    const parentPath = dirname(entry.path)
+    const parent = held.find((candidate) => candidate.path === parentPath)
+    if (!parent) throw new Error()
+    entry.strictMetadata = isWithin(stabilityRoot, entry.path)
+      || processCanReplaceEntry(parent.before, entry.before)
+  }
+}
+
 function refreshHeldPath(held) {
   const after = fstatSync(held.descriptor, { bigint: true })
   const current = lstatSync(held.path, { bigint: true })
@@ -788,7 +828,7 @@ async function runUploadSourceLifecycle({
     held.push(...holdStablePathChain(source, 'directory'))
     held.push(...holdStablePathChain(archive, 'file'))
     const stabilityRoot = commonAncestor([reportDirectory, config, source, archive])
-    for (const path of held) path.strictMetadata = isWithin(stabilityRoot, path.path)
+    bindStrictPathMetadata(held, stabilityRoot)
     const beforeEvidence = holdEvidenceFile(proofBeforePath, reportDirectory)
     evidence.push(beforeEvidence)
     const afterEvidence = holdEvidenceFile(proofAfterPath, reportDirectory)
@@ -811,8 +851,8 @@ async function runUploadSourceLifecycle({
       refreshHeldPath(path)
     }
     const snapshotChain = holdStablePathChain(destination, 'directory', 0o500)
-    for (const path of snapshotChain) path.strictMetadata = isWithin(stabilityRoot, path.path)
     held.push(...snapshotChain)
+    bindStrictPathMetadata(held, stabilityRoot)
     await verifyConfigBinding()
     const buildProof = verifyFrozenSnapshotAgainstArchive(
       archive,

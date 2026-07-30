@@ -41,6 +41,7 @@ const bindings: Readonly<PhaseBBindings> = Object.freeze({
   }),
 })
 const temporaryDirectories: string[] = []
+const sharedTemporaryDirectory = realpathSync('/tmp')
 const wranglerFilePrefix = '\u251c Checking if file needs uploading\n\u2502\n'
 const successfulFileEnvelope = [{
   results: [{
@@ -98,7 +99,10 @@ function snapshotVerificationArgs(directory: string, proof: UploadSourceSnapshot
 }
 
 function uploadSourceSnapshotFixture() {
-  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-upload-source-snapshot-')))
+  const directory = realpathSync(mkdtempSync(join(
+    sharedTemporaryDirectory,
+    'blogman-upload-source-snapshot-',
+  )))
   temporaryDirectories.push(directory)
   const source = join(directory, 'snapshot-repository', '.open-next')
   const asset = join(source, 'assets', 'asset.txt')
@@ -125,8 +129,11 @@ function sealedBuildArchive(directory: string, source: string) {
   }
 }
 
-function uploadSourceLifecycleFixture() {
-  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-upload-lifecycle-')))
+function uploadSourceLifecycleFixture(parentDirectory = sharedTemporaryDirectory) {
+  const directory = realpathSync(mkdtempSync(join(
+    parentDirectory,
+    'blogman-upload-lifecycle-',
+  )))
   temporaryDirectories.push(directory)
   const top = join(directory, 'swappable-top')
   const project = join(top, 'candidate')
@@ -141,7 +148,7 @@ function uploadSourceLifecycleFixture() {
   const uploadOutput = join(reportDirectory, 'upload-private.jsonl')
   const counter = join(directory, 'upload-count.txt')
   const fakeBin = join(directory, 'fake-bin')
-  const archiveDirectory = join(directory, 'sealed-build')
+  const archiveDirectory = join(project, 'sealed-build')
   const archive = join(archiveDirectory, 'open-next-build.zip')
   mkdirSync(join(source, 'assets'), { recursive: true })
   mkdirSync(reportDirectory, { recursive: true })
@@ -773,8 +780,9 @@ fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
     expect(readFileSync(proofAfter, 'utf8')).toBe('')
   })
 
-  it('rejects a higher-ancestor swap after the uploader reads malicious Worker and asset bytes', () => {
+  it('rejects an owner-replaceable ancestor above the common input root', () => {
     const fixture = uploadSourceLifecycleFixture()
+    const topCtimeBefore = statSync(fixture.top, { bigint: true }).ctimeNs
     const savedTop = `${fixture.top}.saved`
     const capturedUpload = join(fixture.directory, 'captured-higher-ancestor.json')
     writeFileSync(capturedUpload, '')
@@ -792,7 +800,7 @@ fs.writeFileSync(process.env.CAPTURED_UPLOAD, JSON.stringify({
   worker: fs.readFileSync(path.join(process.env.SNAPSHOT_ROOT, 'worker.js'), 'utf8'),
   asset: fs.readFileSync(path.join(process.env.SNAPSHOT_ROOT, 'assets', 'asset.txt'), 'utf8'),
 }))
-fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
+fs.appendFileSync(process.env.SAVED_UPLOAD_OUTPUT, JSON.stringify({
   type: 'version-upload', version: 1, version_id: 'malicious-version',
 }) + '\\n')
 fs.rmSync(process.env.SWAPPABLE_TOP, { recursive: true, force: true })
@@ -805,8 +813,10 @@ fs.renameSync(process.env.SAVED_TOP, process.env.SWAPPABLE_TOP)
       SAVED_TOP: savedTop,
       SNAPSHOT_ROOT: fixture.destination,
       CAPTURED_UPLOAD: capturedUpload,
+      SAVED_UPLOAD_OUTPUT: fixture.uploadOutput.replace(fixture.top, savedTop),
     })
     expect(readFileSync(fixture.counter, 'utf8')).toBe('1')
+    expect(statSync(fixture.top, { bigint: true }).ctimeNs).not.toBe(topCtimeBefore)
     expect(JSON.parse(readFileSync(capturedUpload, 'utf8'))).toEqual({
       worker: 'malicious ancestor worker\n',
       asset: 'malicious ancestor asset\n',
@@ -817,7 +827,39 @@ fs.renameSync(process.env.SAVED_TOP, process.env.SWAPPABLE_TOP)
       stderr: 'Invalid Issue #23 upload source lifecycle\n',
     })
     expect(readFileSync(fixture.proofAfter, 'utf8')).toBe('')
-    expect(readFileSync(fixture.uploadOutput, 'utf8')).toBe('')
+    expect(readFileSync(fixture.uploadOutput, 'utf8')).toContain('malicious-version')
+  })
+
+  it('allows unrelated ctime changes in a system-owned shared temp ancestor', () => {
+    const sharedTemp = realpathSync('/tmp')
+    const fixture = uploadSourceLifecycleFixture(sharedTemp)
+    const sharedCtimeBefore = statSync(sharedTemp, { bigint: true }).ctimeNs
+    const unrelated = join(
+      sharedTemp,
+      `blogman-unrelated-${process.pid}-${Date.now()}`,
+    )
+    writeFileSync(join(fixture.fakeBin, 'npm'), `#!/usr/bin/env node
+const fs = require('node:fs')
+const count = Number(fs.readFileSync(process.env.UPLOAD_COUNTER, 'utf8')) + 1
+fs.writeFileSync(process.env.UPLOAD_COUNTER, String(count))
+fs.mkdirSync(process.env.UNRELATED_SHARED_ENTRY)
+fs.rmSync(process.env.UNRELATED_SHARED_ENTRY, { recursive: true })
+fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
+  type: 'version-upload', version: 1, version_id: 'fixture-version',
+}) + '\\n')
+`)
+    chmodSync(join(fixture.fakeBin, 'npm'), 0o755)
+
+    const lifecycle = runCurrentUploadLifecycle(fixture, {
+      UNRELATED_SHARED_ENTRY: unrelated,
+    })
+    expect(readFileSync(fixture.counter, 'utf8')).toBe('1')
+    expect(statSync(sharedTemp, { bigint: true }).ctimeNs).not.toBe(sharedCtimeBefore)
+    expect(lifecycle.status, lifecycle.stderr).toBe(0)
+    expect(JSON.parse(lifecycle.stdout)).toMatchObject({
+      state: 'accepted',
+      version_id: 'fixture-version',
+    })
   })
 
   it('proves the frozen snapshot against the sealed archive before invoking upload', () => {
@@ -1028,6 +1070,28 @@ for (const versionId of ['fixture-version', '']) {
       stderr: 'Invalid Issue #23 upload source lifecycle\n',
     })
     expect(readFileSync(fixture.counter, 'utf8')).toBe('1')
+  })
+
+  it('rejects two malformed version-upload records after the child writes them', () => {
+    const fixture = uploadSourceLifecycleFixture()
+    writeFileSync(join(fixture.fakeBin, 'npm'), `#!/usr/bin/env node
+const fs = require('node:fs')
+fs.writeFileSync(process.env.UPLOAD_COUNTER, '1')
+for (const versionId of ['', ' invalid ']) {
+  fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
+    type: 'version-upload', version: 1, version_id: versionId,
+  }) + '\\n')
+}
+`)
+    chmodSync(join(fixture.fakeBin, 'npm'), 0o755)
+
+    const lifecycle = runCurrentUploadLifecycle(fixture)
+    expect(readFileSync(fixture.counter, 'utf8')).toBe('1')
+    expect(lifecycle).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+    })
   })
 
   it('stops at a failed empty-database plan after reset proof and before migrations', async () => {
