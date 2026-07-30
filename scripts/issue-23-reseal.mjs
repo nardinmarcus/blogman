@@ -1047,8 +1047,7 @@ function verifyLongRunnerCoverage(request, repositoryPath) {
   }
 }
 
-function verifyGitIdentity(request, repositoryPath, frozenRoot) {
-  verifyGitStorageContainment(repositoryPath, frozenRoot)
+function verifyGitIdentity(request, repositoryPath) {
   requireEqual(
     gitValue(repositoryPath, ['rev-parse', 'HEAD'], 'commit'),
     request.candidate.commit,
@@ -1070,8 +1069,7 @@ function verifyGitIdentity(request, repositoryPath, frozenRoot) {
   )
 }
 
-function verifySealInputs(request, repositoryPath, artifactsPath, frozenRoot) {
-  verifyGitIdentity(request, repositoryPath, frozenRoot)
+function verifySealInputs(request, repositoryPath, artifactsPath) {
   requireEqual(
     request.github_evidence.quick.head_sha,
     request.candidate.commit,
@@ -1508,6 +1506,7 @@ function validateInputEvidenceBindings({
     JSON.stringify(evidence.repository.parent_commits),
     'candidate parent commits',
   )
+  verifyGitIdentity(requestDocument.value, repository)
 
   const schemaSnapshot = requireBoundFile(
     repository,
@@ -1633,7 +1632,6 @@ function loadSealContext(inputPath, repositoryPath, artifactsPath) {
     requestDocument.value,
     repository,
     artifacts,
-    inputEvidence.root,
   )
   const frozenTree = captureFrozenTree(evidenceDocument.value, inputEvidence.root)
   return {
@@ -1655,11 +1653,8 @@ function loadSealContext(inputPath, repositoryPath, artifactsPath) {
 
 function verifySealContextUnchanged(context) {
   for (const directory of context.directories) verifyDirectoryIdentity(directory)
-  verifyGitIdentity(
-    context.requestDocument.value,
-    context.repository,
-    context.frozenTree.root,
-  )
+  verifyGitStorageContainment(context.repository, context.frozenTree.root)
+  verifyGitIdentity(context.requestDocument.value, context.repository)
   verifyLongRunnerCoverage(
     context.requestDocument.value,
     context.repository,

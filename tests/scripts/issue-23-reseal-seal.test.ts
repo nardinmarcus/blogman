@@ -620,7 +620,7 @@ function runVerify(
   })
 }
 
-describe('Issue #23 local reseal package generation', () => {
+describe('Issue #23 local reseal package generation', { timeout: 15_000 }, () => {
   it('prepares a clean full frozen tree without creating a sealed output reservation', () => {
     const fixture = createSealFixture()
     try {

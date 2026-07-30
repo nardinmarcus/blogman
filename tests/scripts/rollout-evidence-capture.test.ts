@@ -75,11 +75,13 @@ describe('rollout evidence capture', () => {
       .filter((line) => (
         line.trimStart().startsWith('npm run rollout:safety ')
         || line.trimStart().startsWith('node scripts/rollout-safety.mjs ')
+        || line.trimStart().startsWith('node "$TOOL_WORKSPACE/scripts/rollout-safety.mjs" ')
       ))
 
     expect(commandLines.length).toBeGreaterThan(0)
     expect(commandLines.every((line) => (
       line.trimStart().startsWith('node scripts/rollout-safety.mjs ')
+      || line.trimStart().startsWith('node "$TOOL_WORKSPACE/scripts/rollout-safety.mjs" ')
     ))).toBe(true)
   })
 })
