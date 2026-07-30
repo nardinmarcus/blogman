@@ -1,0 +1,109 @@
+{
+  "format": "blogman-issue-23-input-evidence-manifest/v2",
+  "produced_at": "2026-07-30T07:00:01.000Z",
+  "repository": {
+    "canonical_repo": "nardinmarcus/blogman",
+    "origin_url": "https://github.com/nardinmarcus/blogman.git",
+    "candidate_commit": "3eadca83d2d38c38b8d2be700818243681e9e046",
+    "candidate_tree": "3c1bc07239ad9a489cf313dbb0308a549e26b4dc",
+    "parent_commits": [
+      "3cc678730197d41e2f5a321bd49d661b0250e973",
+      "33bb40b31ecad182031b24aaccea80f6a0b6e2a5"
+    ],
+    "tracked_worktree_clean": true
+  },
+  "github": {
+    "main_push": {
+      "run_id": 30518484470,
+      "event": "push",
+      "head_branch": "main",
+      "head_sha": "3eadca83d2d38c38b8d2be700818243681e9e046",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  },
+  "contracts": {
+    "input_evidence_schema": {
+      "path": "schemas/issue-23-reseal/blogman-issue-23-input-evidence-manifest-v2.schema.json",
+      "sha256": "1f977ddfed82ca36b3e776d6454f9e0b308697775cd544fc3d91a5e8a78f2555"
+    },
+    "reseal_request": {
+      "path": "/private/tmp/blogman-issue23-fresh/reseal-input.json",
+      "format": "blogman-issue-23-local-reseal-request/v3",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "local_reseal_runbook": {
+      "path": "docs/issue-23-local-reseal.md",
+      "sha256": "650a3e29ecfa72bf1c59cb5839bc4188ba79ac3e70b25e32f0333fd07aecfcf6"
+    },
+    "phase_b_runbook": {
+      "path": "docs/issue-23-phase-b-runbook.md",
+      "sha256": "cf9bad3a9eaa381977ec016a61573164bf63a6bd74532515698f04c870e626cb"
+    },
+    "build": {
+      "artifacts_path": "/private/tmp/blogman-issue23-fresh/artifacts",
+      "archive_path": "open-next-build.zip",
+      "archive_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "worker_path": "worker.js",
+      "worker_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "tree_manifest_path": "open-next-source-manifest.json",
+      "tree_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  },
+  "frozen_tree": {
+    "root_path": "/private/tmp/blogman-issue23-fresh",
+    "snapshot_path": "/private/tmp/blogman-issue23-fresh/snapshot",
+    "manifest_path": "/private/tmp/blogman-issue23-fresh/input-evidence-manifest.json",
+    "root_mode": "0700",
+    "snapshot_mode": "0700",
+    "manifest_mode": "0600",
+    "request_mode": "0600",
+    "regular_file_count": 100,
+    "directory_count": 20,
+    "symlink_count": 0,
+    "hardlinked_regular_file_count": 0,
+    "special_file_count": 0,
+    "realpath_escape_count": 0,
+    "transient_dependency_entry_count": 0
+  },
+  "authorization": {
+    "authorization_granted": false,
+    "authorization_consumed": false
+  },
+  "production_boundary": {
+    "formal_local_seal_invocation_count": 0,
+    "formal_production_entry_invocation_count": 0,
+    "cloudflare_read_count": 0,
+    "cloudflare_write_count": 0,
+    "d1_read_count": 0,
+    "d1_write_count": 0,
+    "phase_b_mutation_count": 0,
+    "stage_counts": {
+      "pre_cas_local_gates": 0,
+      "cas1": 0,
+      "d1_identity": 0,
+      "upload": 0,
+      "clean_start_reset": 0,
+      "clean_start_empty_verify": 0,
+      "remote_migration_plan": 0,
+      "migrations_001_006": 0,
+      "cas2": 0,
+      "traffic": 0,
+      "smoke_reconcile": 0,
+      "t0": 0
+    }
+  },
+  "lineage_policy": {
+    "input_dependencies": [],
+    "denylist": [
+      {
+        "path": "/private/tmp/blogman-issue23-local-reseal-20260730.Pw99oH",
+        "terminal_state": "BLOCK",
+        "reuse_allowed": false
+      }
+    ],
+    "history": [
+      "validator task 019fb1cb-f016-77d1-b003-7a3f119e1f1f"
+    ]
+  }
+}

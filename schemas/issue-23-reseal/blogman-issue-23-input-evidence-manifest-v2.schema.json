@@ -1,0 +1,514 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blogman.local/schemas/issue-23-reseal/blogman-issue-23-input-evidence-manifest-v2.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "produced_at",
+    "repository",
+    "github",
+    "contracts",
+    "frozen_tree",
+    "authorization",
+    "production_boundary",
+    "lineage_policy"
+  ],
+  "properties": {
+    "format": {
+      "type": "string",
+      "const": "blogman-issue-23-input-evidence-manifest/v2"
+    },
+    "produced_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_repo",
+        "origin_url",
+        "candidate_commit",
+        "candidate_tree",
+        "parent_commits",
+        "tracked_worktree_clean"
+      ],
+      "properties": {
+        "canonical_repo": {
+          "type": "string",
+          "const": "nardinmarcus/blogman"
+        },
+        "origin_url": {
+          "type": "string",
+          "const": "https://github.com/nardinmarcus/blogman.git"
+        },
+        "candidate_commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "candidate_tree": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "parent_commits": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{40}$"
+          }
+        },
+        "tracked_worktree_clean": {
+          "type": "boolean",
+          "const": true
+        }
+      }
+    },
+    "github": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "main_push"
+      ],
+      "properties": {
+        "main_push": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "run_id",
+            "event",
+            "head_branch",
+            "head_sha",
+            "status",
+            "conclusion"
+          ],
+          "properties": {
+            "run_id": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "event": {
+              "type": "string",
+              "const": "push"
+            },
+            "head_branch": {
+              "type": "string",
+              "const": "main"
+            },
+            "head_sha": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{40}$"
+            },
+            "status": {
+              "type": "string",
+              "const": "completed"
+            },
+            "conclusion": {
+              "type": "string",
+              "const": "success"
+            }
+          }
+        }
+      }
+    },
+    "contracts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_evidence_schema",
+        "reseal_request",
+        "local_reseal_runbook",
+        "phase_b_runbook",
+        "build"
+      ],
+      "properties": {
+        "input_evidence_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "const": "schemas/issue-23-reseal/blogman-issue-23-input-evidence-manifest-v2.schema.json"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "reseal_request": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "format",
+            "sha256"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^/(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000\\\\]+$"
+            },
+            "format": {
+              "type": "string",
+              "const": "blogman-issue-23-local-reseal-request/v3"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "local_reseal_runbook": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "const": "docs/issue-23-local-reseal.md"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "phase_b_runbook": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "const": "docs/issue-23-phase-b-runbook.md"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "build": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "artifacts_path",
+            "archive_path",
+            "archive_sha256",
+            "worker_path",
+            "worker_sha256",
+            "tree_manifest_path",
+            "tree_manifest_sha256"
+          ],
+          "properties": {
+            "artifacts_path": {
+              "type": "string",
+              "pattern": "^/(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000\\\\]+$"
+            },
+            "archive_path": {
+              "type": "string",
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000\\\\]+$"
+            },
+            "archive_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "worker_path": {
+              "type": "string",
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000\\\\]+$"
+            },
+            "worker_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "tree_manifest_path": {
+              "type": "string",
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000\\\\]+$"
+            },
+            "tree_manifest_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        }
+      }
+    },
+    "frozen_tree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_path",
+        "snapshot_path",
+        "manifest_path",
+        "root_mode",
+        "snapshot_mode",
+        "manifest_mode",
+        "request_mode",
+        "regular_file_count",
+        "directory_count",
+        "symlink_count",
+        "hardlinked_regular_file_count",
+        "special_file_count",
+        "realpath_escape_count",
+        "transient_dependency_entry_count"
+      ],
+      "properties": {
+        "root_path": {
+          "type": "string",
+          "pattern": "^/(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000\\\\]+$"
+        },
+        "snapshot_path": {
+          "type": "string",
+          "pattern": "^/(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000\\\\]+$"
+        },
+        "manifest_path": {
+          "type": "string",
+          "pattern": "^/(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000\\\\]+$"
+        },
+        "root_mode": {
+          "type": "string",
+          "const": "0700"
+        },
+        "snapshot_mode": {
+          "type": "string",
+          "const": "0700"
+        },
+        "manifest_mode": {
+          "type": "string",
+          "const": "0600"
+        },
+        "request_mode": {
+          "type": "string",
+          "const": "0600"
+        },
+        "regular_file_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "directory_count": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "symlink_count": {
+          "type": "integer",
+          "const": 0
+        },
+        "hardlinked_regular_file_count": {
+          "type": "integer",
+          "const": 0
+        },
+        "special_file_count": {
+          "type": "integer",
+          "const": 0
+        },
+        "realpath_escape_count": {
+          "type": "integer",
+          "const": 0
+        },
+        "transient_dependency_entry_count": {
+          "type": "integer",
+          "const": 0
+        }
+      }
+    },
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authorization_granted",
+        "authorization_consumed"
+      ],
+      "properties": {
+        "authorization_granted": {
+          "type": "boolean",
+          "const": false
+        },
+        "authorization_consumed": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    },
+    "production_boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "formal_local_seal_invocation_count",
+        "formal_production_entry_invocation_count",
+        "cloudflare_read_count",
+        "cloudflare_write_count",
+        "d1_read_count",
+        "d1_write_count",
+        "phase_b_mutation_count",
+        "stage_counts"
+      ],
+      "properties": {
+        "formal_local_seal_invocation_count": {
+          "type": "integer",
+          "const": 0
+        },
+        "formal_production_entry_invocation_count": {
+          "type": "integer",
+          "const": 0
+        },
+        "cloudflare_read_count": {
+          "type": "integer",
+          "const": 0
+        },
+        "cloudflare_write_count": {
+          "type": "integer",
+          "const": 0
+        },
+        "d1_read_count": {
+          "type": "integer",
+          "const": 0
+        },
+        "d1_write_count": {
+          "type": "integer",
+          "const": 0
+        },
+        "phase_b_mutation_count": {
+          "type": "integer",
+          "const": 0
+        },
+        "stage_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "pre_cas_local_gates",
+            "cas1",
+            "d1_identity",
+            "upload",
+            "clean_start_reset",
+            "clean_start_empty_verify",
+            "remote_migration_plan",
+            "migrations_001_006",
+            "cas2",
+            "traffic",
+            "smoke_reconcile",
+            "t0"
+          ],
+          "properties": {
+            "pre_cas_local_gates": {
+              "type": "integer",
+              "const": 0
+            },
+            "cas1": {
+              "type": "integer",
+              "const": 0
+            },
+            "d1_identity": {
+              "type": "integer",
+              "const": 0
+            },
+            "upload": {
+              "type": "integer",
+              "const": 0
+            },
+            "clean_start_reset": {
+              "type": "integer",
+              "const": 0
+            },
+            "clean_start_empty_verify": {
+              "type": "integer",
+              "const": 0
+            },
+            "remote_migration_plan": {
+              "type": "integer",
+              "const": 0
+            },
+            "migrations_001_006": {
+              "type": "integer",
+              "const": 0
+            },
+            "cas2": {
+              "type": "integer",
+              "const": 0
+            },
+            "traffic": {
+              "type": "integer",
+              "const": 0
+            },
+            "smoke_reconcile": {
+              "type": "integer",
+              "const": 0
+            },
+            "t0": {
+              "type": "integer",
+              "const": 0
+            }
+          }
+        }
+      }
+    },
+    "lineage_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_dependencies",
+        "denylist",
+        "history"
+      ],
+      "properties": {
+        "input_dependencies": {
+          "type": "array",
+          "maxItems": 0,
+          "items": {
+            "type": "string",
+            "pattern": "^/(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000\\\\]+$"
+          }
+        },
+        "denylist": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "terminal_state",
+              "reuse_allowed"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^/(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000\\\\]+$"
+              },
+              "terminal_state": {
+                "type": "string",
+                "const": "BLOCK"
+              },
+              "reuse_allowed": {
+                "type": "boolean",
+                "const": false
+              }
+            }
+          }
+        },
+        "history": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

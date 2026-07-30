@@ -34,6 +34,7 @@ CONFIG=/absolute/private/wrangler.toml
 DATABASE=blogman-db
 EXPECTED_CANDIDATE=<40-hex-approved-commit>
 RESEAL_REQUEST=/absolute/private/reseal-request.json
+INPUT_EVIDENCE_MANIFEST="$(dirname "$RESEAL_REQUEST")/input-evidence-manifest.json"
 SEALED_PACKAGE=/absolute/private/sealed/package
 APPROVAL_PACKET="$SEALED_PACKAGE/approval-packet.json"
 RESET_SQL="$PWD/db/issue-23-clean-start-reset.sql"
@@ -54,6 +55,7 @@ fi
 test "$(git rev-parse HEAD)" = "$EXPECTED_CANDIDATE"
 test -z "$(git status --porcelain --untracked-files=all)"
 test -f "$RESEAL_REQUEST"
+test -f "$INPUT_EVIDENCE_MANIFEST"
 test -d "$SEALED_PACKAGE"
 test -f "$APPROVAL_PACKET"
 test -f "$RESET_SQL"
@@ -75,7 +77,24 @@ verify_config_identity() {
 }
 ```
 
-Validate the canonical v3 request and current v4 package locally with `scripts/issue-23-reseal.mjs validate`; the package must be current, not historical. The later candidate verifier consumes those same original paths and hashes the original bytes. The package must have `production_authorization_granted=false` and all clean-start stage counters at zero before a separate authorization binds its exact package manifest SHA-256. A v2 or v3 package may validate only as historical read-only evidence and cannot start this sequence.
+The reseal must have been prepared in a build/preflight workspace outside its
+frozen evidence root. Dependencies and toolchains, including `node_modules`,
+must remain outside that root. The root contains only the final snapshot,
+canonical v3 request, canonical input-evidence v2 manifest, and bound artifacts;
+its complete recursive tree has zero symlinks, hardlinked regular files,
+special files, realpath escapes, and transient dependency/toolchain entries.
+
+Validate the canonical input-evidence v2 manifest, canonical v3 request, and
+current v4 package locally with `scripts/issue-23-reseal.mjs`; the package must
+be current, not historical. `prepare`, `seal`, and `verify` all consume the
+fixed sibling `input-evidence-manifest.json` and validate it before any sealed
+output reservation. The later candidate verifier consumes those same original
+paths and hashes the original bytes. The package must have
+`production_authorization_granted=false` and all clean-start stage counters at
+zero before a separate authorization binds its exact package manifest SHA-256.
+A v2 or v3 package may validate only as historical read-only evidence and
+cannot start this sequence. A terminal or blocked lineage is immutable history;
+never patch or continue it in place.
 
 Before every repository or Cloudflare adapter call, recheck the absolute config realpath and SHA-256 captured at PRE-CAS. Do not accept a symlink replacement or a different D1 binding.
 
@@ -85,6 +104,8 @@ Classification: local-only except separately reviewed GitHub status. No Cloudfla
 
 Prove all of the following:
 
+- repository-owned input-evidence v2 canonical bytes/schema/hash pass and its
+  denied terminal lineages are not input dependencies;
 - `HEAD`, tree, `main`, and `origin/main` match the sealed candidate and the worktree is clean;
 - lockfile, build ZIP, Worker, tree manifest, runbook, reset SQL, and migrations have the sealed hashes;
 - approval `delivery_mode=clean-start`, strategy `reset-bound-d1-in-place`, and all three historical dispositions are `NOT_APPLICABLE`;
@@ -98,6 +119,11 @@ The local empty-D1 rehearsal is:
 ```bash
 node scripts/issue-23-reseal.mjs validate --document "$RESEAL_REQUEST" \
   > "$REPORT_DIR/reseal-request-validation.json"
+node scripts/issue-23-reseal.mjs validate --document "$INPUT_EVIDENCE_MANIFEST" \
+  > "$REPORT_DIR/input-evidence-validation.json"
+node scripts/issue-23-reseal.mjs prepare \
+  --input "$RESEAL_REQUEST" --repo "$PWD" --artifacts "$(dirname "$BUILD_ZIP")" \
+  > "$REPORT_DIR/reseal-input-preparation.json"
 node scripts/issue-23-reseal.mjs validate --package "$SEALED_PACKAGE" \
   > "$REPORT_DIR/sealed-package-validation.json"
 node scripts/issue-23-reseal.mjs verify-build-directory \
