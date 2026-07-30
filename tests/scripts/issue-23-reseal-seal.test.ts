@@ -180,6 +180,7 @@ function createSealFixture() {
   )
 
   git(repository, 'init', '--quiet')
+  git(repository, 'config', '--local', 'maintenance.auto', 'false')
   git(repository, 'config', 'user.name', 'Blogman Test')
   git(repository, 'config', 'user.email', 'blogman-test@example.invalid')
   git(repository, 'remote', 'add', 'origin', 'https://github.com/nardinmarcus/blogman.git')
@@ -626,6 +627,8 @@ describe('Issue #23 local reseal package generation', { timeout: 15_000 }, () =>
   it('prepares a clean full frozen tree without creating a sealed output reservation', () => {
     const fixture = createSealFixture()
     try {
+      expect(git(fixture.repository, 'config', '--local', '--get', 'maintenance.auto'))
+        .toBe('false')
       const prepared = runPrepare(fixture)
 
       expect(prepared.status, prepared.stderr).toBe(0)
