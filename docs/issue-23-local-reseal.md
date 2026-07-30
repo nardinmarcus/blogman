@@ -66,6 +66,9 @@ snapshot, request, artifacts, or any request dependency.
 `prepare`, `seal`, and `verify` all load this same manifest through the same
 context boundary. A missing, non-canonical, wrong-version, wrong-hash, or
 mutating manifest stops before the seal output parent is reserved.
+The adversarial seal tests have a scoped 15-second per-test budget because they
+launch real Git/Node children and hash complete frozen fixtures; this is test
+budgeting only and does not add or change a reseal runtime timeout.
 
 `canonical_long_migration_runner` accepts the historical `unverified` object
 or the current verified object `{state:"passed",passed:46,failed:0}`. The
@@ -110,9 +113,10 @@ the following Git objects to the same IDs as the immutable long-run head:
 These are the runner, the long test, its dependency lock, and every direct
 repository semantic dependency read or runtime-imported by that test.
 Type-only imports do not expand the runtime coverage set. `seal` and `verify`
-recompute every object with `git rev-parse HEAD:<path>`; a new candidate cannot
-self-report replacement object IDs because the request schema fixes them to
-the immutable long-run evidence.
+resolve every object from the bound candidate tree with raw `git ls-tree`, then
+require the resulting blob/tree locally with `git cat-file -t`; a new candidate
+cannot self-report replacement object IDs because the request schema fixes them
+to the immutable long-run evidence.
 
 The migration-set SHA is:
 
@@ -153,8 +157,14 @@ entry. Build dependencies and executable toolchains stay outside that root.
 The repository snapshot must be a self-contained non-bare worktree: its
 effective top-level, absolute git-dir, common-dir, index, and primary object
 directory all resolve inside the frozen root. Linked-worktree metadata, object
-alternates, and Git storage environment overrides are rejected before Git
-identity is trusted.
+alternates, shallow repositories, replacement refs, partial-clone/promisor
+configuration, config includes, and repository-affecting caller `GIT_*`
+variables are rejected before Git identity is trusted. `GIT_PAGER` is discarded
+as non-semantic; every Git child otherwise receives the same minimal environment
+with system/global config and lazy fetching disabled. Local config is read
+without includes and every effective local origin must resolve inside the frozen
+root. Candidate tree and parents come from the raw bound commit object, and all
+candidate, parent, tree, and inherited path objects must already exist locally.
 
 The first complete-tree traversal captures a deterministic identity digest over
 every relative entry path, type, POSIX mode, owner/group, link count, size, and

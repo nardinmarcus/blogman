@@ -31,15 +31,6 @@ import {
 
 const MAX_DOCUMENT_BYTES = 1024 * 1024
 const INPUT_EVIDENCE_FILE_NAME = 'input-evidence-manifest.json'
-const GIT_STORAGE_ENVIRONMENT_OVERRIDES = Object.freeze([
-  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-  'GIT_COMMON_DIR',
-  'GIT_DIR',
-  'GIT_INDEX_FILE',
-  'GIT_OBJECT_DIRECTORY',
-  'GIT_QUARANTINE_PATH',
-  'GIT_WORK_TREE',
-])
 const PREFLIGHT_FORMAT = 'blogman-local-preflight-candidate/v2'
 const INPUT_EVIDENCE_FORMAT = 'blogman-issue-23-input-evidence-manifest/v2'
 const REQUEST_FORMAT = 'blogman-issue-23-local-reseal-request/v3'
@@ -768,16 +759,47 @@ function verifyMigrationDirectorySnapshot(directory) {
   }
 }
 
+function sanitizedGitEnvironment() {
+  const callerGitVariables = Object.keys(process.env)
+    .filter((name) => name.startsWith('GIT_') && name !== 'GIT_PAGER')
+    .sort()
+  if (callerGitVariables.length > 0) {
+    fail('Issue #23 reseal caller Git environment is not allowed')
+  }
+  return {
+    GIT_ATTR_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_NO_LAZY_FETCH: '1',
+    GIT_NO_REPLACE_OBJECTS: '1',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_PROTOCOL_FROM_USER: '0',
+    GIT_TERMINAL_PROMPT: '0',
+    LANG: 'C',
+    LC_ALL: 'C',
+    PATH: process.env.PATH ?? '/usr/bin:/bin',
+  }
+}
+
 function gitValue(repositoryPath, args, label) {
+  const environment = sanitizedGitEnvironment()
   try {
     return execFileSync('git', args, {
       cwd: repositoryPath,
       encoding: 'utf8',
+      env: environment,
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()
   } catch {
     fail(`Issue #23 reseal could not read Git ${label}`)
   }
+}
+
+function splitNullFields(value) {
+  const fields = value.split('\0')
+  if (fields.at(-1) === '') fields.pop()
+  return fields
 }
 
 function requireGitStoragePathWithinFrozenRoot({
@@ -807,13 +829,93 @@ function requireGitStoragePathWithinFrozenRoot({
   return realPath
 }
 
-function verifyGitStorageContainment(repositoryPath, frozenRoot) {
-  const activeOverrides = GIT_STORAGE_ENVIRONMENT_OVERRIDES.filter(
-    (name) => Object.hasOwn(process.env, name),
-  )
-  if (activeOverrides.length > 0) {
-    fail('Issue #23 reseal Git storage environment overrides are not allowed')
+function verifyRepositoryLocalGitConfig(repositoryPath, frozenRoot) {
+  const gitDirectoryPath = join(repositoryPath, '.git')
+  let gitDirectoryStat
+  try {
+    gitDirectoryStat = lstatSync(gitDirectoryPath)
+  } catch {
+    fail('Issue #23 reseal Git metadata directory must exist')
   }
+  if (!gitDirectoryStat.isDirectory()) {
+    fail('Issue #23 reseal Git metadata storage escapes the frozen evidence root')
+  }
+  const gitDirectory = requireGitStoragePathWithinFrozenRoot({
+    expectedType: 'directory',
+    frozenRoot,
+    label: 'Git metadata directory',
+    requestedPath: gitDirectoryPath,
+  })
+  const configPath = requireGitStoragePathWithinFrozenRoot({
+    expectedType: 'file',
+    frozenRoot,
+    label: 'Git local config',
+    requestedPath: join(gitDirectory, 'config'),
+  })
+  const configNames = splitNullFields(gitValue(repositoryPath, [
+    'config',
+    '--file',
+    configPath,
+    '--no-includes',
+    '--null',
+    '--name-only',
+    '--get-regexp',
+    '.*',
+  ], 'local config names'))
+  if (configNames.some((name) => /^include(?:if\..+)?\.path$/iu.test(name))) {
+    fail('Issue #23 reseal Git config includes are not allowed')
+  }
+  if (configNames.some((name) => (
+    /^extensions\.(?:partialclone|worktreeconfig)$/iu.test(name)
+    || /^remote\..+\.(?:partialclonefilter|promisor)$/iu.test(name)
+    || /^promisor\./iu.test(name)
+  ))) {
+    fail('Issue #23 reseal Git partial-clone or promisor config is not allowed')
+  }
+  if (configNames.some((name) => (
+    /^core\.(?:attributesfile|excludesfile|fsmonitor|hookspath|sshcommand)$/iu.test(name)
+    || /^credential\..*helper$/iu.test(name)
+    || /^diff\.external$/iu.test(name)
+    || /^filter\..+\.(?:clean|process|smudge)$/iu.test(name)
+    || /^remote\..+\.uploadpack$/iu.test(name)
+  ))) {
+    fail('Issue #23 reseal Git local config contains an external execution or file hook')
+  }
+}
+
+function verifyEffectiveLocalGitConfigOrigins(repositoryPath, frozenRoot) {
+  const fields = splitNullFields(gitValue(repositoryPath, [
+    'config',
+    '--local',
+    '--no-includes',
+    '--null',
+    '--show-origin',
+    '--name-only',
+    '--get-regexp',
+    '.*',
+  ], 'local config origins'))
+  if (fields.length % 2 !== 0) {
+    fail('Issue #23 reseal Git local config origin output is malformed')
+  }
+  for (let index = 0; index < fields.length; index += 2) {
+    const origin = fields[index]
+    if (!origin.startsWith('file:')) {
+      fail('Issue #23 reseal Git local config origin is not a frozen file')
+    }
+    const originPath = origin.slice('file:'.length)
+    requireGitStoragePathWithinFrozenRoot({
+      expectedType: 'file',
+      frozenRoot,
+      label: 'Git local config origin',
+      requestedPath: isAbsolute(originPath)
+        ? originPath
+        : resolve(repositoryPath, originPath),
+    })
+  }
+}
+
+function verifyGitStorageContainment(repositoryPath, frozenRoot) {
+  verifyRepositoryLocalGitConfig(repositoryPath, frozenRoot)
 
   const layout = gitValue(repositoryPath, [
     'rev-parse',
@@ -859,7 +961,7 @@ function verifyGitStorageContainment(repositoryPath, frozenRoot) {
     label: 'absolute Git directory',
     requestedPath: requestedGitDirectory,
   })
-  requireGitStoragePathWithinFrozenRoot({
+  const commonDirectory = requireGitStoragePathWithinFrozenRoot({
     expectedType: 'directory',
     frozenRoot,
     label: 'Git common directory',
@@ -889,6 +991,31 @@ function verifyGitStorageContainment(repositoryPath, frozenRoot) {
     if (readFileSync(alternatesPath).byteLength > 0) {
       fail('Issue #23 reseal Git object alternates are not allowed')
     }
+  }
+  const graftsPath = join(commonDirectory, 'info', 'grafts')
+  if (pathEntryExists(graftsPath)) {
+    requireGitStoragePathWithinFrozenRoot({
+      expectedType: 'file',
+      frozenRoot,
+      label: 'Git grafts file',
+      requestedPath: graftsPath,
+    })
+    if (readFileSync(graftsPath).byteLength > 0) {
+      fail('Issue #23 reseal Git grafts are not allowed')
+    }
+  }
+  verifyEffectiveLocalGitConfigOrigins(repositoryPath, frozenRoot)
+  requireEqual(
+    gitValue(repositoryPath, ['rev-parse', '--is-shallow-repository'], 'shallow state'),
+    'false',
+    'Git shallow repository state',
+  )
+  if (gitValue(
+    repositoryPath,
+    ['for-each-ref', '--format=%(refname)', 'refs/replace/'],
+    'replacement refs',
+  ) !== '') {
+    fail('Issue #23 reseal Git replacement refs are not allowed')
   }
 }
 
@@ -984,63 +1111,128 @@ function verifyBuildTree(
   }
 }
 
+function requireLocalGitObject(repositoryPath, objectId, expectedType, label) {
+  requireEqual(
+    gitValue(repositoryPath, ['cat-file', '-t', objectId], `${label} object`),
+    expectedType,
+    `${label} object type`,
+  )
+}
+
+function readRawCommitIdentity(repositoryPath, commitId) {
+  requireLocalGitObject(repositoryPath, commitId, 'commit', 'candidate commit')
+  const rawCommit = gitValue(
+    repositoryPath,
+    ['cat-file', 'commit', commitId],
+    'raw candidate commit',
+  )
+  const header = rawCommit.split('\n\n', 1)[0]
+  const treeLines = header.split('\n').filter((line) => line.startsWith('tree '))
+  const parentCommits = header.split('\n')
+    .filter((line) => line.startsWith('parent '))
+    .map((line) => line.slice('parent '.length))
+  if (
+    treeLines.length !== 1
+    || !/^[a-f0-9]{40}$/u.test(treeLines[0].slice('tree '.length))
+    || parentCommits.some((parent) => !/^[a-f0-9]{40}$/u.test(parent))
+  ) {
+    fail('Issue #23 reseal candidate commit has malformed raw object headers')
+  }
+  const tree = treeLines[0].slice('tree '.length)
+  requireLocalGitObject(repositoryPath, tree, 'tree', 'candidate tree')
+  for (const parent of parentCommits) {
+    requireLocalGitObject(repositoryPath, parent, 'commit', 'candidate parent')
+  }
+  return { parentCommits, tree }
+}
+
+function readRawTreeEntry(repositoryPath, treeId, path, expectedType, label) {
+  const output = gitValue(
+    repositoryPath,
+    ['ls-tree', treeId, '--', path],
+    label,
+  )
+  const match = /^([0-7]{6}) (blob|tree) ([a-f0-9]{40})\t(.+)$/u.exec(output)
+  if (!match || match[2] !== expectedType || match[4] !== path) {
+    fail(`Issue #23 reseal could not resolve the raw ${label}`)
+  }
+  requireLocalGitObject(repositoryPath, match[3], expectedType, label)
+  return match[3]
+}
+
 function verifyLongRunnerCoverage(request, repositoryPath) {
   const longRunnerCoverage = request.github_evidence
     .canonical_long_migration_runner.coverage
-  for (const [binding, path, expectedObject] of [
+  for (const [binding, path, expectedType, expectedObject] of [
     [
       'long-run migration runner source blob',
       'scripts/migrations.mjs',
+      'blob',
       longRunnerCoverage.migration_runner_source_blob,
     ],
     [
       'long-run migration runner test blob',
       'tests/migrations/migration-runner.test.ts',
+      'blob',
       longRunnerCoverage.migration_runner_test_blob,
     ],
     [
       'long-run ledger migrations tree',
       'db/ledger-migrations',
+      'tree',
       longRunnerCoverage.ledger_migrations_tree,
     ],
     [
       'long-run package lock blob',
       'package-lock.json',
+      'blob',
       longRunnerCoverage.package_lock_blob,
     ],
     [
       'long-run schema fixture blob',
       'db/schema.sql',
+      'blob',
       longRunnerCoverage.schema_blob,
     ],
     [
       'long-run seed fixture blob',
       'db/seed-template.sql',
+      'blob',
       longRunnerCoverage.seed_template_blob,
     ],
     [
       'long-run historical migrations tree',
       'db/migrations',
+      'tree',
       longRunnerCoverage.historical_migrations_tree,
     ],
     [
       'long-run Wrangler config blob',
       'wrangler.toml',
+      'blob',
       longRunnerCoverage.wrangler_config_blob,
     ],
     [
       'long-run AI provider profile blob',
       'lib/ai-provider-profiles.ts',
+      'blob',
       longRunnerCoverage.ai_provider_profiles_blob,
     ],
     [
       'long-run AI post generator constants blob',
       'lib/ai-post-generator/constants.ts',
+      'blob',
       longRunnerCoverage.ai_post_generator_constants_blob,
     ],
   ]) {
     requireEqual(
-      gitValue(repositoryPath, ['rev-parse', `HEAD:${path}`], binding),
+      readRawTreeEntry(
+        repositoryPath,
+        request.candidate.tree,
+        path,
+        expectedType,
+        binding,
+      ),
       expectedObject,
       binding,
     )
@@ -1049,24 +1241,29 @@ function verifyLongRunnerCoverage(request, repositoryPath) {
 
 function verifyGitIdentity(request, repositoryPath) {
   requireEqual(
-    gitValue(repositoryPath, ['rev-parse', 'HEAD'], 'commit'),
+    gitValue(repositoryPath, ['rev-parse', '--verify', 'HEAD'], 'commit'),
     request.candidate.commit,
     'Git commit',
   )
+  const rawIdentity = readRawCommitIdentity(
+    repositoryPath,
+    request.candidate.commit,
+  )
   requireEqual(
-    gitValue(repositoryPath, ['rev-parse', 'HEAD^{tree}'], 'tree'),
+    rawIdentity.tree,
     request.candidate.tree,
-    'Git tree',
+    'raw Git tree',
   )
   requireEqual(
     gitValue(
       repositoryPath,
-      ['status', '--porcelain', '--untracked-files=all'],
+      ['status', '--porcelain', '--untracked-files=all', '--ignored=matching'],
       'worktree status',
     ),
     '',
     'Git worktree cleanliness',
   )
+  return rawIdentity
 }
 
 function verifySealInputs(request, repositoryPath, artifactsPath) {
@@ -1490,23 +1687,22 @@ function validateInputEvidenceBindings({
   )
 
   verifyGitStorageContainment(repository, frozenRoot)
-  const originUrl = gitValue(
+  const rawIdentity = verifyGitIdentity(requestDocument.value, repository)
+  const originUrls = splitNullFields(gitValue(
     repository,
-    ['config', '--get', 'remote.origin.url'],
+    ['config', '--local', '--no-includes', '--null', '--get-all', 'remote.origin.url'],
     'origin URL',
-  )
-  requireEqual(originUrl, evidence.repository.origin_url, 'canonical origin URL')
-  const parentCommits = gitValue(
-    repository,
-    ['rev-list', '--parents', '-n', '1', 'HEAD'],
-    'parent commits',
-  ).split(/\s+/u).slice(1)
+  ))
   requireEqual(
-    JSON.stringify(parentCommits),
-    JSON.stringify(evidence.repository.parent_commits),
-    'candidate parent commits',
+    JSON.stringify(originUrls),
+    JSON.stringify([evidence.repository.origin_url]),
+    'canonical origin URL',
   )
-  verifyGitIdentity(requestDocument.value, repository)
+  requireEqual(
+    JSON.stringify(rawIdentity.parentCommits),
+    JSON.stringify(evidence.repository.parent_commits),
+    'raw candidate parent commits',
+  )
 
   const schemaSnapshot = requireBoundFile(
     repository,
@@ -1654,7 +1850,15 @@ function loadSealContext(inputPath, repositoryPath, artifactsPath) {
 function verifySealContextUnchanged(context) {
   for (const directory of context.directories) verifyDirectoryIdentity(directory)
   verifyGitStorageContainment(context.repository, context.frozenTree.root)
-  verifyGitIdentity(context.requestDocument.value, context.repository)
+  const rawIdentity = verifyGitIdentity(
+    context.requestDocument.value,
+    context.repository,
+  )
+  requireEqual(
+    JSON.stringify(rawIdentity.parentCommits),
+    JSON.stringify(context.evidenceDocument.value.repository.parent_commits),
+    'raw candidate parent commits',
+  )
   verifyLongRunnerCoverage(
     context.requestDocument.value,
     context.repository,

@@ -34,7 +34,7 @@
     },
     "local_reseal_runbook": {
       "path": "docs/issue-23-local-reseal.md",
-      "sha256": "ad0c27a48e9e780cf99e42c21eec3d01972d1844c5ef671983289db593ff945f"
+      "sha256": "a516ac4214b2f19fd26526a326eee02f857c5409a746265d97b71dfe3835208b"
     },
     "phase_b_runbook": {
       "path": "docs/issue-23-phase-b-runbook.md",
