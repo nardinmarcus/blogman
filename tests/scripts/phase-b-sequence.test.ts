@@ -42,6 +42,10 @@ const bindings: Readonly<PhaseBBindings> = Object.freeze({
 })
 const temporaryDirectories: string[] = []
 const sharedTemporaryDirectory = realpathSync('/tmp')
+const crossRootTemporaryDirectory = realpathSync(
+  existsSync('/Users/Shared') ? '/Users/Shared'
+    : existsSync('/dev/shm') ? '/dev/shm' : process.cwd(),
+)
 const wranglerFilePrefix = '\u251c Checking if file needs uploading\n\u2502\n'
 const successfulFileEnvelope = [{
   results: [{
@@ -129,7 +133,10 @@ function sealedBuildArchive(directory: string, source: string) {
   }
 }
 
-function uploadSourceLifecycleFixture(parentDirectory = sharedTemporaryDirectory) {
+function uploadSourceLifecycleFixture(
+  parentDirectory = sharedTemporaryDirectory,
+  sourceParentDirectory?: string,
+) {
   const directory = realpathSync(mkdtempSync(join(
     parentDirectory,
     'blogman-upload-lifecycle-',
@@ -137,7 +144,11 @@ function uploadSourceLifecycleFixture(parentDirectory = sharedTemporaryDirectory
   temporaryDirectories.push(directory)
   const top = join(directory, 'swappable-top')
   const project = join(top, 'candidate')
-  const source = join(project, 'snapshot-repository', '.open-next')
+  const sourceRoot = sourceParentDirectory
+    ? realpathSync(mkdtempSync(join(sourceParentDirectory, '.blogman-upload-source-')))
+    : join(project, 'snapshot-repository')
+  if (sourceParentDirectory) temporaryDirectories.push(sourceRoot)
+  const source = join(sourceRoot, '.open-next')
   const destination = join(project, 'private-evidence', 'upload-source-snapshot')
   const reportDirectory = dirname(destination)
   const operatorDirectory = join(project, 'operator')
@@ -830,9 +841,10 @@ fs.renameSync(process.env.SAVED_TOP, process.env.SWAPPABLE_TOP)
     expect(readFileSync(fixture.uploadOutput, 'utf8')).toContain('malicious-version')
   })
 
-  it('allows unrelated ctime changes in a system-owned shared temp ancestor', () => {
+  it('allows shared ancestor churn when upload inputs have only root in common', () => {
     const sharedTemp = realpathSync('/tmp')
-    const fixture = uploadSourceLifecycleFixture(sharedTemp)
+    const fixture = uploadSourceLifecycleFixture(sharedTemp, crossRootTemporaryDirectory)
+    expect(fixture.source.split('/')[1]).not.toBe(fixture.reportDirectory.split('/')[1])
     const sharedCtimeBefore = statSync(sharedTemp, { bigint: true }).ctimeNs
     const unrelated = join(
       sharedTemp,
@@ -850,12 +862,17 @@ fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
 `)
     chmodSync(join(fixture.fakeBin, 'npm'), 0o755)
 
-    const lifecycle = runCurrentUploadLifecycle(fixture, {
-      UNRELATED_SHARED_ENTRY: unrelated,
-    })
+    let lifecycle
+    try {
+      lifecycle = runCurrentUploadLifecycle(fixture, {
+        UNRELATED_SHARED_ENTRY: unrelated,
+      })
+    } finally {
+      rmSync(unrelated, { recursive: true, force: true })
+    }
+    expect(lifecycle.status, lifecycle.stderr).toBe(0)
     expect(readFileSync(fixture.counter, 'utf8')).toBe('1')
     expect(statSync(sharedTemp, { bigint: true }).ctimeNs).not.toBe(sharedCtimeBefore)
-    expect(lifecycle.status, lifecycle.stderr).toBe(0)
     expect(JSON.parse(lifecycle.stdout)).toMatchObject({
       state: 'accepted',
       version_id: 'fixture-version',

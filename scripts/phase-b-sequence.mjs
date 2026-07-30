@@ -422,6 +422,19 @@ function processCanReplaceEntry(parentStat, entryStat) {
   return uid === 0n || uid === parentStat.uid || uid === entryStat.uid
 }
 
+function privateStabilityRoot(held, commonRoot) {
+  if (typeof process.geteuid !== 'function') throw new Error()
+  if (commonRoot === '/') return undefined
+  const uid = BigInt(process.geteuid())
+  const entry = held.find((candidate) => candidate.path === commonRoot)
+  if (!entry?.before.isDirectory()
+    || entry.before.uid !== uid
+    || (entry.before.mode & 0o077n) !== 0n) {
+    return undefined
+  }
+  return commonRoot
+}
+
 function bindStrictPathMetadata(held, stabilityRoot) {
   for (const entry of held) {
     if (entry.path === '/') {
@@ -431,7 +444,8 @@ function bindStrictPathMetadata(held, stabilityRoot) {
     const parentPath = dirname(entry.path)
     const parent = held.find((candidate) => candidate.path === parentPath)
     if (!parent) throw new Error()
-    entry.strictMetadata = isWithin(stabilityRoot, entry.path)
+    entry.strictMetadata = (stabilityRoot !== undefined
+      && isWithin(stabilityRoot, entry.path))
       || processCanReplaceEntry(parent.before, entry.before)
   }
 }
@@ -827,7 +841,10 @@ async function runUploadSourceLifecycle({
     held.push(...configChain)
     held.push(...holdStablePathChain(source, 'directory'))
     held.push(...holdStablePathChain(archive, 'file'))
-    const stabilityRoot = commonAncestor([reportDirectory, config, source, archive])
+    const stabilityRoot = privateStabilityRoot(
+      held,
+      commonAncestor([reportDirectory, config, source, archive]),
+    )
     bindStrictPathMetadata(held, stabilityRoot)
     const beforeEvidence = holdEvidenceFile(proofBeforePath, reportDirectory)
     evidence.push(beforeEvidence)
