@@ -152,16 +152,53 @@ UPLOAD_OPERATION_ID="issue-23-$EXPECTED_CANDIDATE-upload-1"
 install -m 600 /dev/null "$UPLOAD_PRIVATE"
 node scripts/issue-23-reseal.mjs verify-build-directory \
   --archive "$BUILD_ZIP" --directory "$UPLOAD_SOURCE_DIRECTORY" \
-  --archive-sha256 "$BUILD_SHA256" > "$REPORT_DIR/upload-build-directory-proof.json"
+  --archive-sha256 "$BUILD_SHA256" > "$REPORT_DIR/upload-source-directory-proof.json"
+UPLOAD_SOURCE_SNAPSHOT_DIRECTORY="$REPORT_DIR/upload-source-snapshot"
+readonly UPLOAD_SOURCE_SNAPSHOT_DIRECTORY
+UPLOAD_SOURCE_SNAPSHOT_PROOF="$REPORT_DIR/upload-source-snapshot.json"
+UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER="$REPORT_DIR/upload-source-snapshot-after.json"
+UPLOAD_BUILD_DIRECTORY_PROOF="$REPORT_DIR/upload-build-directory-proof.json"
+readonly UPLOAD_SOURCE_SNAPSHOT_PROOF UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER UPLOAD_BUILD_DIRECTORY_PROOF
+install -m 600 /dev/null "$UPLOAD_SOURCE_SNAPSHOT_PROOF"
+install -m 600 /dev/null "$UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER"
+install -m 600 /dev/null "$UPLOAD_BUILD_DIRECTORY_PROOF"
 verify_config_identity
-WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" npm exec -- opennextjs-cloudflare upload \
-  -c "$CONFIG" -- --message "$UPLOAD_OPERATION_ID"
-jq -s -e '[.[] | select(.type == "version-upload" and .version == 1
-  and (.version_id | type == "string"))] | length == 1' "$UPLOAD_PRIVATE" >/dev/null
-UPLOADED_VERSION_ID=$(jq -sr '[.[] | select(.type == "version-upload" and .version == 1)][0].version_id' "$UPLOAD_PRIVATE")
+UPLOAD_ACCEPTANCE=$(WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" node scripts/phase-b-sequence.mjs \
+  run-upload-source-lifecycle \
+  --config "$CONFIG" \
+  --source "$UPLOAD_SOURCE_DIRECTORY" \
+  --destination "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY" \
+  --operation-id "$UPLOAD_OPERATION_ID" \
+  --proof-before "$UPLOAD_SOURCE_SNAPSHOT_PROOF" \
+  --proof-after "$UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER" \
+  --archive "$BUILD_ZIP" \
+  --archive-sha256 "$BUILD_SHA256" \
+  --build-proof "$UPLOAD_BUILD_DIRECTORY_PROOF" \
+  --expected-config-sha256 "$CONFIG_SHA256")
+readonly UPLOAD_ACCEPTANCE
+jq -e 'keys == ["build_directory_proof_sha256","config_sha256","format",
+    "snapshot_identity_sha256","snapshot_proof_after_sha256",
+    "snapshot_proof_before_sha256","snapshot_tree_sha256","state",
+    "upload_operation_id","version_id","wrangler_output_sha256"]
+  and .format == "blogman-upload-source-lifecycle-acceptance/v1"
+  and .state == "accepted" and .upload_operation_id == $operation
+  and (.version_id | type == "string" and length > 0)
+  and ([.config_sha256,.snapshot_identity_sha256,.snapshot_proof_after_sha256,
+    .snapshot_proof_before_sha256,.snapshot_tree_sha256,
+    .build_directory_proof_sha256,.wrangler_output_sha256]
+    | all(test("^[a-f0-9]{64}$")))' \
+  --arg operation "$UPLOAD_OPERATION_ID" <<< "$UPLOAD_ACCEPTANCE" >/dev/null
+UPLOADED_VERSION_ID=$(jq -er .version_id <<< "$UPLOAD_ACCEPTANCE")
+UPLOAD_OUTPUT_SHA256=$(jq -er .wrangler_output_sha256 <<< "$UPLOAD_ACCEPTANCE")
+BUILD_DIRECTORY_PROOF_SHA256=$(jq -er .build_directory_proof_sha256 <<< "$UPLOAD_ACCEPTANCE")
+UPLOAD_SOURCE_SNAPSHOT_PROOF_SHA256=$(jq -er .snapshot_proof_before_sha256 <<< "$UPLOAD_ACCEPTANCE")
+UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER_SHA256=$(jq -er .snapshot_proof_after_sha256 <<< "$UPLOAD_ACCEPTANCE")
+test "$(jq -er .config_sha256 <<< "$UPLOAD_ACCEPTANCE")" = "$CONFIG_SHA256"
+test "$(shasum -a 256 "$UPLOAD_PRIVATE" | awk '{print $1}')" = "$UPLOAD_OUTPUT_SHA256"
+test "$(shasum -a 256 "$UPLOAD_BUILD_DIRECTORY_PROOF" | awk '{print $1}')" = "$BUILD_DIRECTORY_PROOF_SHA256"
+test "$(shasum -a 256 "$UPLOAD_SOURCE_SNAPSHOT_PROOF" | awk '{print $1}')" = "$UPLOAD_SOURCE_SNAPSHOT_PROOF_SHA256"
+test "$(shasum -a 256 "$UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER" | awk '{print $1}')" = "$UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER_SHA256"
 UPLOAD_COMPLETED_AT=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
-UPLOAD_OUTPUT_SHA256=$(shasum -a 256 "$UPLOAD_PRIVATE" | awk '{print $1}')
-BUILD_DIRECTORY_PROOF_SHA256=$(shasum -a 256 "$REPORT_DIR/upload-build-directory-proof.json" | awk '{print $1}')
 jq -n --arg uploaded "$UPLOAD_COMPLETED_AT" --arg candidate "$EXPECTED_CANDIDATE" \
   --arg build "$BUILD_SHA256" --arg proof "$BUILD_DIRECTORY_PROOF_SHA256" \
   --arg output "$UPLOAD_OUTPUT_SHA256" --arg operation "$UPLOAD_OPERATION_ID" \
@@ -173,7 +210,15 @@ jq -n --arg uploaded "$UPLOAD_COMPLETED_AT" --arg candidate "$EXPECTED_CANDIDATE
   > "$REPORT_DIR/clean-start-upload-report.json"
 ```
 
-The upload-source proof is regenerated from the actual `.open-next` directory after CAS1 and immediately before the mandatory adjacent config check plus upload adapter. Any directory mutation after PRE-CAS therefore stops before upload; the earlier rehearsal proof cannot be reused. The output file may contain other Wrangler records from the OpenNext upload path, but it must contain exactly one `version-upload/v1` record. The version ID comes only from that record; `versions list | last` is forbidden. Freeze the report and prove it belongs to this candidate, sealed build bytes, fresh upload-source proof, and operation. Re-run CAS1 and D1 identity immediately before reset. If another writer changed deployment, config, D1 identity, or upload attribution, stop without reset.
+The upload-source proof is regenerated from the actual `.open-next` directory after CAS1. One `run-upload-source-lifecycle` process opens and holds complete descriptor chains from the filesystem root through the report directory, config, source, sealed archive, and frozen snapshot. Every ancestor pathname must still resolve to its held device and inode. The critical paths' string common ancestor becomes an unconditional metadata-strict root only when it is not `/`, is owned by the effective user, and grants no group or other permissions. Until that verified private candidate root is reached, only ancestor entries that the effective user can rename or replace under POSIX parent write/search and sticky-owner rules must retain nanosecond ctime, mode, and size throughout the upload window. System-owned shared ancestors whose entries the effective user cannot replace retain descriptor/path identity checks without treating unrelated directory-content ctime changes as candidate drift, including when otherwise valid inputs have only `/` in common. Only the report-directory metadata change caused by exclusive snapshot creation is rebased. Immutable config, archive, snapshot, and path anchors are never refreshed after proof. The PRE-CAS `CONFIG_SHA256` is a required lifecycle input and config bytes are checked through the held descriptor before and after archive proof, as the final gate before the child spawn, and after the child returns. Wrangler's parsed config-relative `assets.directory` semantics are rechecked at the same lifecycle boundaries.
+
+The archive verifier is a shared pure module loaded with the lifecycle process, not a helper launched later through a mutable pathname. The lifecycle proves the snapshot byte-for-byte against the bound sealed archive before invoking OpenNext exactly once, then repeats both snapshot and sealed-archive proofs after the child returns. It writes the terminal proof and only then performs the final anchor check. A complete report-directory, candidate-root, or higher owned-ancestor swap therefore remains observable even if the original path and snapshot subtree are restored before the post-proof.
+
+Both snapshot proof files, the sealed-build proof, and Wrangler's private output are empty mode-`0600` regular files created before the lifecycle. The lifecycle opens each with `O_NOFOLLOW`, requires the current owner, link count one, exact pathname device/inode, and empty initial bytes, and keeps all four descriptors open across the upload. Repository-generated evidence is written through the held descriptors; child-generated Wrangler output is captured as an exact held-descriptor byte boundary. OpenNext child stdout is routed to lifecycle stderr so lifecycle stdout contains only the machine-readable acceptance JSON. While those descriptors and every path anchor remain held, the lifecycle validates exactly one `version-upload/v1` record, the matched proof states, and all final bytes, then returns the accepted version ID and evidence SHA-256 values as one JSON stdout value. The shell derives its decision values only from that atomic return. Subsequent pathname hashes are audits that must equal the already accepted digests; they cannot replace the accepted version or evidence.
+
+Writing the precreated evidence files does not add a directory entry to the held report directory, avoiding a self-trigger before the terminal identity check. Snapshot root, every directory, and every file remain separately bound by the identity hash and byte-tree hash. The snapshot's absolute `worker.js` is the positional Wrangler script and its sibling `assets` directory is the explicit `--assets` source, so the complete Worker version comes from the same frozen and sealed snapshot even when the external config has a different or missing `main`. Any failed pre-upload archive or config proof leaves the unique child invocation count at zero; no version record or report is accepted unless every post-upload proof and final anchor check succeeds. The no-other-production-writer reservation established at PRE-CAS must remain held through version acceptance.
+
+OpenNext 1.19.10 internally forwards Wrangler arguments with `shell:true`, so every path entering this adapter must already be absolute, normalized, and match the conservative `^/[A-Za-z0-9._/-]+$` character set. Paths containing whitespace or shell metacharacters fail closed before snapshot creation or forwarding. This remains correct when the operator config directory is outside the snapshot repository. Any config or upload-directory mismatch, path alias, content mutation, symlink swap, or snapshot reuse therefore stops without accepting the upload; the earlier rehearsal proof cannot be reused. The output file may contain other Wrangler records from the OpenNext upload path, but it must contain exactly one `version-upload/v1` record. The version ID comes only from that record; `versions list | last` is forbidden. Freeze the report and prove it belongs to this candidate, sealed build bytes, fresh upload-source proof, and operation. Re-run CAS1 and D1 identity immediately before reset. If another writer changed deployment, config, D1 identity, or upload attribution, stop without reset.
 
 ## 4. Candidate-bound in-place reset
 

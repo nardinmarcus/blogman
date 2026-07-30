@@ -24,17 +24,35 @@ describe('Issue #23 Phase B runbook order', () => {
       commands.push(command)
     }
     const upload = commands.findIndex((command) => (
-      command.startsWith('WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE"')
+      command.startsWith('UPLOAD_ACCEPTANCE=$(WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE"')
     ))
-    return upload >= 2
-      && commands[upload - 1] === 'verify_config_identity'
-      && commands[upload - 2].startsWith(
-        'node scripts/issue-23-reseal.mjs verify-build-directory',
-      )
-      && commands[upload - 2].includes('--directory "$UPLOAD_SOURCE_DIRECTORY"')
-      && commands[upload - 2].includes(
-        '> "$REPORT_DIR/upload-build-directory-proof.json"',
-      )
+    const sourceProof = commands.findIndex((command) => (
+      command.startsWith('node scripts/issue-23-reseal.mjs verify-build-directory')
+      && command.includes('--directory "$UPLOAD_SOURCE_DIRECTORY"')
+    ))
+    const lifecycle = commands.findIndex((command) => (
+      command.startsWith('UPLOAD_ACCEPTANCE=$(WRANGLER_OUTPUT_FILE_PATH="$UPLOAD_PRIVATE" node scripts/phase-b-sequence.mjs')
+      && command.includes('run-upload-source-lifecycle')
+    ))
+    const acceptVersion = commands.findIndex((command) => (
+      command === 'UPLOADED_VERSION_ID=$(jq -er .version_id <<< "$UPLOAD_ACCEPTANCE")'
+    ))
+    return sourceProof >= 0
+      && lifecycle > sourceProof
+      && upload === lifecycle
+      && commands.includes('UPLOAD_BUILD_DIRECTORY_PROOF="$REPORT_DIR/upload-build-directory-proof.json"')
+      && commands.includes('install -m 600 /dev/null "$UPLOAD_BUILD_DIRECTORY_PROOF"')
+      && commands[lifecycle - 1] === 'verify_config_identity'
+      && commands[lifecycle].includes('--source "$UPLOAD_SOURCE_DIRECTORY"')
+      && commands[lifecycle].includes('--destination "$UPLOAD_SOURCE_SNAPSHOT_DIRECTORY"')
+      && commands[lifecycle].includes('--proof-before "$UPLOAD_SOURCE_SNAPSHOT_PROOF"')
+      && commands[lifecycle].includes('--proof-after "$UPLOAD_SOURCE_SNAPSHOT_PROOF_AFTER"')
+      && commands[lifecycle].includes('--archive "$BUILD_ZIP"')
+      && commands[lifecycle].includes('--archive-sha256 "$BUILD_SHA256"')
+      && commands[lifecycle].includes('--build-proof "$UPLOAD_BUILD_DIRECTORY_PROOF"')
+      && commands[lifecycle].includes('--expected-config-sha256 "$CONFIG_SHA256"')
+      && acceptVersion > lifecycle
+      && !commands.some((command) => command.includes('select(.type == "version-upload"'))
   }
 
   const hasResetResponseValidationOrder = (runbook: string) => {
@@ -60,7 +78,7 @@ describe('Issue #23 Phase B runbook order', () => {
     const lines = readRunbook().split('\n')
     const adapterLines = lines.flatMap((line, index) => {
       const trimmed = line.trim()
-      if (!/^(?:WRANGLER_OUTPUT_FILE_PATH=.*\s+)?(?:\.\/node_modules\/\.bin\/wrangler|npm exec -- opennextjs-cloudflare|node scripts\/(?:migrations|rollout-safety)\.mjs)/.test(trimmed)) {
+      if (!/^(?:UPLOAD_ACCEPTANCE=\()?\s*(?:WRANGLER_OUTPUT_FILE_PATH=.*\s+)?(?:\.\/node_modules\/\.bin\/wrangler|node scripts\/(?:phase-b-sequence|migrations|rollout-safety)\.mjs)/.test(trimmed)) {
         return []
       }
       let command = trimmed
@@ -85,6 +103,10 @@ describe('Issue #23 Phase B runbook order', () => {
     expect(runbook).toContain('--clean-start-upload-report "$REPORT_DIR/clean-start-upload-report.json"')
     expect(runbook).not.toContain('versions list --json')
     expect(runbook).not.toContain('sort_by(.metadata.created_on) | last')
+    expect(runbook).not.toContain("select(.type == \"version-upload\"")
+    expect(runbook).toContain(
+      'UPLOADED_VERSION_ID=$(jq -er .version_id <<< "$UPLOAD_ACCEPTANCE")',
+    )
   })
 
   it('regenerates the actual upload-source proof immediately before the upload adapter', () => {
@@ -92,7 +114,7 @@ describe('Issue #23 Phase B runbook order', () => {
     expect(runbook).toContain('pre-cas-build-directory-proof.json')
     expect(hasTightUploadSourceProof(runbook)).toBe(true)
     expect(runbook).toContain(
-      'BUILD_DIRECTORY_PROOF_SHA256=$(shasum -a 256 "$REPORT_DIR/upload-build-directory-proof.json"',
+      'BUILD_DIRECTORY_PROOF_SHA256=$(jq -er .build_directory_proof_sha256 <<< "$UPLOAD_ACCEPTANCE")',
     )
     expect(runbook).toContain(
       '--build-directory-proof "$REPORT_DIR/upload-build-directory-proof.json"',
@@ -103,6 +125,18 @@ describe('Issue #23 Phase B runbook order', () => {
       'pre-cas-build-directory-proof.json',
     )
     expect(hasTightUploadSourceProof(staleProofMutation)).toBe(false)
+    expect(hasTightUploadSourceProof(runbook.replace(
+      'run-upload-source-lifecycle',
+      'skipped-upload-source-lifecycle',
+    ))).toBe(false)
+    expect(hasTightUploadSourceProof(runbook.replace(
+      'UPLOADED_VERSION_ID=$(jq -er .version_id <<< "$UPLOAD_ACCEPTANCE")',
+      'UPLOADED_VERSION_ID=$(jq -sr ".[-1].version_id" "$UPLOAD_PRIVATE")',
+    ))).toBe(false)
+    expect(hasTightUploadSourceProof(runbook.replace(
+      '--expected-config-sha256 "$CONFIG_SHA256"',
+      '--expected-config-sha256 "$BUILD_SHA256"',
+    ))).toBe(false)
   })
 
   it('uploads before the bound reset and plans only after the empty-D1 proof', () => {

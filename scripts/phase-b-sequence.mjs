@@ -1,6 +1,25 @@
-import { lstatSync, readFileSync } from 'node:fs'
-import { isAbsolute, resolve } from 'node:path'
+import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  fstatSync,
+  fsyncSync,
+  ftruncateSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { verifyBuildDirectory } from './issue-23-build-proof.mjs'
 
 export const PHASE_B_STAGES = Object.freeze([
   'pre_cas_local_gates',
@@ -19,6 +38,8 @@ export const PHASE_B_STAGES = Object.freeze([
 
 const sha256 = /^[a-f0-9]{64}$/
 const candidate = /^[a-f0-9]{40}$/
+const shellSafeAbsolutePath = /^\/[A-Za-z0-9._/-]+$/
+const uploadOperationId = /^issue-23-[a-f0-9]{40}-upload-1$/
 const wranglerD1FilePrefix = '\u251c Checking if file needs uploading\n\u2502\n'
 const envelopeKeys = ['finalBookmark', 'meta', 'results', 'success']
 const resultKeys = [
@@ -247,12 +268,776 @@ export async function runPhaseBSequence({ configPath, bindings, runStage }) {
   return Object.freeze(counts)
 }
 
+async function bindUploadAssetsDirectory(configPath, uploadSourceDirectory) {
+  if (!isAbsolute(configPath) || configPath !== resolve(configPath)
+    || !shellSafeAbsolutePath.test(configPath)
+    || !isAbsolute(uploadSourceDirectory) || uploadSourceDirectory !== resolve(uploadSourceDirectory)
+    || !shellSafeAbsolutePath.test(uploadSourceDirectory)) {
+    throw new Error()
+  }
+  if (!lstatSync(configPath).isFile() || realpathSync(configPath) !== configPath
+    || !lstatSync(uploadSourceDirectory).isDirectory()
+    || realpathSync(uploadSourceDirectory) !== uploadSourceDirectory) {
+    throw new Error()
+  }
+
+  const uploadAssetsDirectory = resolve(uploadSourceDirectory, 'assets')
+  if (!lstatSync(uploadAssetsDirectory).isDirectory()
+    || realpathSync(uploadAssetsDirectory) !== uploadAssetsDirectory) {
+    throw new Error()
+  }
+
+  const { unstable_readConfig: readWranglerConfig } = await import('wrangler')
+  const config = await readWranglerConfig({ config: configPath }, { hideWarnings: true })
+  if (config.configPath !== configPath
+    || typeof config.assets?.directory !== 'string'
+    || config.assets.directory.length === 0) {
+    throw new Error()
+  }
+  const configuredAssetsDirectory = resolve(
+    dirname(config.configPath),
+    config.assets.directory,
+  )
+  if (configuredAssetsDirectory !== uploadAssetsDirectory) throw new Error()
+  return uploadAssetsDirectory
+}
+
+function isWithin(parent, child) {
+  const path = relative(parent, child)
+  return path === '' || (!path.startsWith('..') && !isAbsolute(path))
+}
+
+function sha256Bytes(bytes) {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+function sameIdentity(left, right) {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.ctimeNs === right.ctimeNs
+    && left.mode === right.mode
+    && left.size === right.size
+}
+
+function identityEntry(path, type, stat) {
+  return Object.freeze({
+    path,
+    type,
+    dev: stat.dev.toString(),
+    ino: stat.ino.toString(),
+    ctime_ns: stat.ctimeNs.toString(),
+    mode: Number(stat.mode & 0o7777n),
+    size: stat.size.toString(),
+  })
+}
+
+function holdStablePath(path, type, mode) {
+  if (!isAbsolute(path) || path !== resolve(path)
+    || (path !== '/' && !shellSafeAbsolutePath.test(path))) {
+    throw new Error()
+  }
+  const descriptor = openSync(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW
+      | (type === 'directory' ? constants.O_DIRECTORY : 0),
+  )
+  try {
+    const before = fstatSync(descriptor, { bigint: true })
+    const current = lstatSync(path, { bigint: true })
+    if ((type === 'directory' ? !before.isDirectory() : !before.isFile())
+      || (mode !== undefined && (before.mode & 0o777n) !== BigInt(mode))
+      || !sameIdentity(before, current)
+      || realpathSync(path) !== path) {
+      throw new Error()
+    }
+    return { before, descriptor, expectedMode: mode, path, type }
+  } catch (error) {
+    closeSync(descriptor)
+    throw error
+  }
+}
+
+function absolutePathChain(path) {
+  if (!isAbsolute(path) || path !== resolve(path) || !shellSafeAbsolutePath.test(path)) {
+    throw new Error()
+  }
+  const chain = ['/']
+  let current = '/'
+  for (const component of path.split('/').filter(Boolean)) {
+    current = join(current, component)
+    chain.push(current)
+  }
+  return chain
+}
+
+function holdStablePathChain(path, type, mode) {
+  const chain = absolutePathChain(path)
+  const held = []
+  try {
+    for (const [index, entry] of chain.entries()) {
+      held.push(holdStablePath(
+        entry,
+        index === chain.length - 1 ? type : 'directory',
+        index === chain.length - 1 ? mode : undefined,
+      ))
+    }
+    return held
+  } catch (error) {
+    for (const path of held.reverse()) closeSync(path.descriptor)
+    throw error
+  }
+}
+
+function commonAncestor(paths) {
+  const [first, ...rest] = paths
+  const candidates = absolutePathChain(first).reverse()
+  const common = candidates.find((path) => rest.every((entry) => isWithin(path, entry)))
+  if (!common) throw new Error()
+  return common
+}
+
+function processCanWriteAndSearch(directoryStat) {
+  if (typeof process.geteuid !== 'function'
+    || typeof process.getegid !== 'function'
+    || typeof process.getgroups !== 'function') {
+    throw new Error()
+  }
+  const uid = BigInt(process.geteuid())
+  if (uid === 0n) return true
+  const groups = new Set([
+    process.getegid(),
+    ...process.getgroups(),
+  ].map((group) => BigInt(group)))
+  const permissions = directoryStat.mode & 0o777n
+  const applicable = directoryStat.uid === uid
+    ? permissions >> 6n
+    : groups.has(directoryStat.gid) ? permissions >> 3n : permissions
+  return (applicable & 0o3n) === 0o3n
+}
+
+function processCanReplaceEntry(parentStat, entryStat) {
+  if (!processCanWriteAndSearch(parentStat)) return false
+  if ((parentStat.mode & 0o1000n) === 0n) return true
+  const uid = BigInt(process.geteuid())
+  return uid === 0n || uid === parentStat.uid || uid === entryStat.uid
+}
+
+function privateStabilityRoot(held, commonRoot) {
+  if (typeof process.geteuid !== 'function') throw new Error()
+  if (commonRoot === '/') return undefined
+  const uid = BigInt(process.geteuid())
+  const entry = held.find((candidate) => candidate.path === commonRoot)
+  if (!entry?.before.isDirectory()
+    || entry.before.uid !== uid
+    || (entry.before.mode & 0o077n) !== 0n) {
+    return undefined
+  }
+  return commonRoot
+}
+
+function bindStrictPathMetadata(held, stabilityRoot) {
+  for (const entry of held) {
+    if (entry.path === '/') {
+      entry.strictMetadata = false
+      continue
+    }
+    const parentPath = dirname(entry.path)
+    const parent = held.find((candidate) => candidate.path === parentPath)
+    if (!parent) throw new Error()
+    entry.strictMetadata = (stabilityRoot !== undefined
+      && isWithin(stabilityRoot, entry.path))
+      || processCanReplaceEntry(parent.before, entry.before)
+  }
+}
+
+function refreshHeldPath(held) {
+  const after = fstatSync(held.descriptor, { bigint: true })
+  const current = lstatSync(held.path, { bigint: true })
+  if ((held.type === 'directory' ? !after.isDirectory() : !after.isFile())
+    || (held.expectedMode !== undefined
+      && (after.mode & 0o777n) !== BigInt(held.expectedMode))
+    || !sameIdentity(after, current)
+    || realpathSync(held.path) !== held.path) {
+    throw new Error()
+  }
+  held.before = after
+}
+
+function verifyHeldPath(held) {
+  const after = fstatSync(held.descriptor, { bigint: true })
+  const current = lstatSync(held.path, { bigint: true })
+  if ((held.type === 'directory' ? !after.isDirectory() : !after.isFile())
+    || (held.expectedMode !== undefined
+      && (after.mode & 0o777n) !== BigInt(held.expectedMode))
+    || (held.strictMetadata
+      ? !sameIdentity(held.before, after)
+      : held.before.dev !== after.dev || held.before.ino !== after.ino)
+    || !sameIdentity(after, current)
+    || realpathSync(held.path) !== held.path) {
+    throw new Error(`held path changed: ${held.path}`)
+  }
+}
+
+function readHeldBytes(descriptor, size) {
+  if (size > 16n * 1024n * 1024n || size > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error()
+  }
+  const bytes = Buffer.alloc(Number(size))
+  let offset = 0
+  while (offset < bytes.length) {
+    const count = readSync(descriptor, bytes, offset, bytes.length - offset, offset)
+    if (count === 0) throw new Error()
+    offset += count
+  }
+  return bytes
+}
+
+function evidenceState(held) {
+  const stat = fstatSync(held.descriptor, { bigint: true })
+  const current = lstatSync(held.path, { bigint: true })
+  if (!stat.isFile()
+    || stat.dev !== held.dev || stat.ino !== held.ino
+    || stat.uid !== held.uid || stat.nlink !== 1n
+    || (stat.mode & 0o777n) !== 0o600n
+    || !sameIdentity(stat, current)
+    || realpathSync(held.path) !== held.path) {
+    throw new Error()
+  }
+  return Object.freeze({ bytes: readHeldBytes(held.descriptor, stat.size), stat })
+}
+
+function holdEvidenceFile(path, reportDirectory) {
+  if (!isAbsolute(path) || path !== resolve(path) || !shellSafeAbsolutePath.test(path)
+    || dirname(path) !== reportDirectory) {
+    throw new Error()
+  }
+  const descriptor = openSync(path, constants.O_RDWR | constants.O_NOFOLLOW)
+  try {
+    const stat = fstatSync(descriptor, { bigint: true })
+    const held = {
+      descriptor,
+      dev: stat.dev,
+      ino: stat.ino,
+      path,
+      uid: BigInt(process.getuid()),
+    }
+    const initial = evidenceState(held)
+    if (initial.bytes.length !== 0) throw new Error()
+    return held
+  } catch (error) {
+    closeSync(descriptor)
+    throw error
+  }
+}
+
+function writeHeldEvidence(held, bytes) {
+  const contents = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
+  ftruncateSync(held.descriptor, 0)
+  let offset = 0
+  while (offset < contents.length) {
+    offset += writeSync(
+      held.descriptor,
+      contents,
+      offset,
+      contents.length - offset,
+      offset,
+    )
+  }
+  fsyncSync(held.descriptor)
+  const state = evidenceState(held)
+  if (!state.bytes.equals(contents)) throw new Error()
+  held.expected = Object.freeze({ bytes: contents, stat: state.stat })
+}
+
+function captureHeldEvidence(held, requireNonempty = false) {
+  const state = evidenceState(held)
+  if (requireNonempty && state.bytes.length === 0) throw new Error()
+  held.expected = state
+  return state.bytes
+}
+
+function verifyHeldEvidence(held) {
+  const state = evidenceState(held)
+  if (!held.expected
+    || !sameIdentity(held.expected.stat, state.stat)
+    || !held.expected.bytes.equals(state.bytes)) {
+    throw new Error()
+  }
+}
+
+function heldFileSha256(held) {
+  verifyHeldPath(held)
+  const before = fstatSync(held.descriptor, { bigint: true })
+  const bytes = readHeldBytes(held.descriptor, before.size)
+  const after = fstatSync(held.descriptor, { bigint: true })
+  if (!sameIdentity(before, after)) throw new Error()
+  return sha256Bytes(bytes)
+}
+
+function acceptedVersionId(uploadOutput) {
+  const text = uploadOutput.toString('utf8')
+  if (!Buffer.from(text).equals(uploadOutput)) throw new Error()
+  const records = text.split('\n').filter((line) => line.trim().length > 0).map((line) => {
+    assertUniqueJsonObjectKeys(line)
+    const value = JSON.parse(line)
+    if (!isRecord(value)) throw new Error()
+    return value
+  })
+  const versions = records.filter((record) => (
+    record.type === 'version-upload' && record.version === 1
+  ))
+  if (versions.length !== 1) throw new Error()
+  const version = versions[0]
+  if (typeof version.version_id !== 'string'
+    || version.version_id.trim() !== version.version_id
+    || version.version_id.length === 0) {
+    throw new Error()
+  }
+  return version.version_id
+}
+
+function snapshotProofBytes(state, proof, destination) {
+  return Buffer.from(`${JSON.stringify({
+    format: 'blogman-upload-source-snapshot/v1',
+    state,
+    worker_script: join(destination, 'worker.js'),
+    assets_directory: join(destination, 'assets'),
+    ...proof,
+  })}\n`)
+}
+
+function verifyFrozenSnapshotAgainstArchive(archive, destination, archiveSha256) {
+  if (!sha256.test(archiveSha256 || '')) throw new Error()
+  const proof = verifyBuildDirectory({
+    archivePath: archive,
+    directoryPath: destination,
+    expectedArchiveSha256: archiveSha256,
+  })
+  if (!hasExactKeys(proof, ['archive_sha256', 'file_count', 'format', 'state'])
+    || proof.format !== 'blogman-build-directory-proof/v1'
+    || proof.state !== 'matched'
+    || proof.archive_sha256 !== archiveSha256
+    || !isPositiveSafeInteger(proof.file_count)) {
+    throw new Error()
+  }
+  return Buffer.from(`${JSON.stringify(proof)}\n`)
+}
+
+function stableRegularFileBytes(path) {
+  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const before = fstatSync(descriptor, { bigint: true })
+    if (!before.isFile()) throw new Error()
+    const bytes = readFileSync(descriptor)
+    const after = fstatSync(descriptor, { bigint: true })
+    const current = lstatSync(path, { bigint: true })
+    if (!after.isFile()
+      || !sameIdentity(before, after)
+      || !sameIdentity(current, after)
+      || realpathSync(path) !== path) {
+      throw new Error()
+    }
+    return Object.freeze({ bytes, stat: before })
+  } finally {
+    closeSync(descriptor)
+  }
+}
+
+function snapshotProof(entries, identities) {
+  const canonical = Buffer.from(`${JSON.stringify(entries)}\n`)
+  const canonicalIdentities = Buffer.from(`${JSON.stringify(identities)}\n`)
+  return Object.freeze({
+    file_count: entries.length,
+    tree_sha256: sha256Bytes(canonical),
+    identity_sha256: sha256Bytes(canonicalIdentities),
+  })
+}
+
+function requireCanonicalDirectory(path, mode) {
+  if (!isAbsolute(path) || path !== resolve(path) || !shellSafeAbsolutePath.test(path)) {
+    throw new Error()
+  }
+  const stat = lstatSync(path)
+  if (!stat.isDirectory() || realpathSync(path) !== path
+    || (mode !== undefined && (stat.mode & 0o777) !== mode)) {
+    throw new Error()
+  }
+  return stat
+}
+
+function copyUploadSourceSnapshot(source, destination) {
+  requireCanonicalDirectory(source)
+  requireCanonicalDirectory(dirname(destination), 0o700)
+  if (!isAbsolute(destination) || destination !== resolve(destination)
+    || !shellSafeAbsolutePath.test(destination)
+    || isWithin(source, destination) || isWithin(destination, source)) {
+    throw new Error()
+  }
+  mkdirSync(destination, { mode: 0o700 })
+
+  const visit = (sourceDirectory, destinationDirectory, relativeDirectory = '') => {
+    const before = requireCanonicalDirectory(sourceDirectory)
+    const names = readdirSync(sourceDirectory).sort((left, right) => left.localeCompare(right))
+    for (const name of names) {
+      const sourcePath = join(sourceDirectory, name)
+      const destinationPath = join(destinationDirectory, name)
+      const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name
+      const stat = lstatSync(sourcePath)
+      if (stat.isDirectory() && realpathSync(sourcePath) === sourcePath) {
+        mkdirSync(destinationPath, { mode: 0o700 })
+        visit(sourcePath, destinationPath, relativePath)
+        chmodSync(destinationPath, 0o500)
+      } else if (stat.isFile() && realpathSync(sourcePath) === sourcePath) {
+        const { bytes } = stableRegularFileBytes(sourcePath)
+        const descriptor = openSync(
+          destinationPath,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+          0o400,
+        )
+        try {
+          writeFileSync(descriptor, bytes)
+        } finally {
+          closeSync(descriptor)
+        }
+        chmodSync(destinationPath, 0o400)
+      } else {
+        throw new Error()
+      }
+    }
+    const after = requireCanonicalDirectory(sourceDirectory)
+    if (before.dev !== after.dev || before.ino !== after.ino
+      || JSON.stringify(readdirSync(sourceDirectory).sort((left, right) => left.localeCompare(right)))
+        !== JSON.stringify(names)) {
+      throw new Error()
+    }
+  }
+  visit(source, destination)
+  chmodSync(destination, 0o500)
+  return collectUploadSourceSnapshotProof(destination)
+}
+
+function collectUploadSourceSnapshotProof(directory) {
+  requireCanonicalDirectory(directory, 0o500)
+  requireCanonicalDirectory(dirname(directory), 0o700)
+  const entries = []
+  const identities = []
+  const parent = dirname(directory)
+  const parentDescriptor = openSync(
+    parent,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  )
+  try {
+    const parentBefore = fstatSync(parentDescriptor, { bigint: true })
+    const parentCurrent = lstatSync(parent, { bigint: true })
+    if (!parentBefore.isDirectory()
+      || (parentBefore.mode & 0o777n) !== 0o700n
+      || !sameIdentity(parentBefore, parentCurrent)
+      || realpathSync(parent) !== parent) {
+      throw new Error()
+    }
+
+    const visit = (path, relativeDirectory = '') => {
+      const descriptor = openSync(
+        path,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      )
+      try {
+        const before = fstatSync(descriptor, { bigint: true })
+        const current = lstatSync(path, { bigint: true })
+        if (!before.isDirectory()
+          || (before.mode & 0o777n) !== 0o500n
+          || !sameIdentity(before, current)
+          || realpathSync(path) !== path) {
+          throw new Error()
+        }
+        identities.push(identityEntry(relativeDirectory || '.', 'directory', before))
+        const names = readdirSync(path).sort((left, right) => left.localeCompare(right))
+        for (const name of names) {
+          const entryPath = join(path, name)
+          const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name
+          const stat = lstatSync(entryPath, { bigint: true })
+          if (stat.isDirectory() && (stat.mode & 0o777n) === 0o500n
+            && realpathSync(entryPath) === entryPath) {
+            visit(entryPath, relativePath)
+          } else if (stat.isFile() && (stat.mode & 0o777n) === 0o400n
+            && realpathSync(entryPath) === entryPath) {
+            const stable = stableRegularFileBytes(entryPath)
+            if ((stable.stat.mode & 0o777n) !== 0o400n) throw new Error()
+            identities.push(identityEntry(relativePath, 'file', stable.stat))
+            entries.push({
+              path: relativePath,
+              bytes: stable.bytes.byteLength,
+              sha256: sha256Bytes(stable.bytes),
+            })
+          } else {
+            throw new Error()
+          }
+        }
+        const after = fstatSync(descriptor, { bigint: true })
+        const currentAfter = lstatSync(path, { bigint: true })
+        if (!sameIdentity(before, after)
+          || !sameIdentity(after, currentAfter)
+          || JSON.stringify(readdirSync(path).sort((left, right) => left.localeCompare(right)))
+            !== JSON.stringify(names)) {
+          throw new Error()
+        }
+      } finally {
+        closeSync(descriptor)
+      }
+    }
+
+    visit(directory)
+    if (!identities.some((entry) => entry.path === 'worker.js' && entry.type === 'file')
+      || !identities.some((entry) => entry.path === 'assets' && entry.type === 'directory')) {
+      throw new Error()
+    }
+    const parentAfter = fstatSync(parentDescriptor, { bigint: true })
+    const parentCurrentAfter = lstatSync(parent, { bigint: true })
+    if (!sameIdentity(parentBefore, parentAfter)
+      || !sameIdentity(parentAfter, parentCurrentAfter)) {
+      throw new Error()
+    }
+  } finally {
+    closeSync(parentDescriptor)
+  }
+  return snapshotProof(entries, identities)
+}
+
+function verifyUploadSourceSnapshot(directory, expectedTreeSha256, expectedIdentitySha256) {
+  if (!sha256.test(expectedTreeSha256 || '')
+    || !sha256.test(expectedIdentitySha256 || '')) {
+    throw new Error()
+  }
+  const proof = collectUploadSourceSnapshotProof(directory)
+  if (proof.tree_sha256 !== expectedTreeSha256
+    || proof.identity_sha256 !== expectedIdentitySha256) {
+    throw new Error()
+  }
+  return proof
+}
+
+async function runUploadSourceLifecycle({
+  archive,
+  archiveSha256,
+  buildProofPath,
+  config,
+  expectedConfigSha256,
+  source,
+  destination,
+  operationId,
+  proofBeforePath,
+  proofAfterPath,
+}) {
+  if (!uploadOperationId.test(operationId || '')
+    || !sha256.test(expectedConfigSha256 || '')) throw new Error()
+  const reportDirectory = dirname(destination)
+  const uploadOutputPath = process.env.WRANGLER_OUTPUT_FILE_PATH
+  const held = []
+  const evidence = []
+  try {
+    held.push(...holdStablePathChain(reportDirectory, 'directory', 0o700))
+    const configChain = holdStablePathChain(config, 'file')
+    const heldConfig = configChain.at(-1)
+    held.push(...configChain)
+    held.push(...holdStablePathChain(source, 'directory'))
+    held.push(...holdStablePathChain(archive, 'file'))
+    const stabilityRoot = privateStabilityRoot(
+      held,
+      commonAncestor([reportDirectory, config, source, archive]),
+    )
+    bindStrictPathMetadata(held, stabilityRoot)
+    const beforeEvidence = holdEvidenceFile(proofBeforePath, reportDirectory)
+    evidence.push(beforeEvidence)
+    const afterEvidence = holdEvidenceFile(proofAfterPath, reportDirectory)
+    evidence.push(afterEvidence)
+    const buildEvidence = holdEvidenceFile(buildProofPath, reportDirectory)
+    evidence.push(buildEvidence)
+    const uploadEvidence = holdEvidenceFile(uploadOutputPath, reportDirectory)
+    evidence.push(uploadEvidence)
+
+    if (heldFileSha256(heldConfig) !== expectedConfigSha256) throw new Error()
+    const configuredAssetsDirectory = await bindUploadAssetsDirectory(config, source)
+    const verifyConfigBinding = async () => {
+      if (await bindUploadAssetsDirectory(config, source) !== configuredAssetsDirectory
+        || heldFileSha256(heldConfig) !== expectedConfigSha256) {
+        throw new Error()
+      }
+    }
+    const before = copyUploadSourceSnapshot(source, destination)
+    for (const path of held.filter((entry) => entry.path === reportDirectory)) {
+      refreshHeldPath(path)
+    }
+    const snapshotChain = holdStablePathChain(destination, 'directory', 0o500)
+    held.push(...snapshotChain)
+    bindStrictPathMetadata(held, stabilityRoot)
+    await verifyConfigBinding()
+    const buildProof = verifyFrozenSnapshotAgainstArchive(
+      archive,
+      destination,
+      archiveSha256,
+    )
+    await verifyConfigBinding()
+    for (const path of held) verifyHeldPath(path)
+    writeHeldEvidence(buildEvidence, buildProof)
+    writeHeldEvidence(beforeEvidence, snapshotProofBytes('created', before, destination))
+    captureHeldEvidence(afterEvidence)
+    captureHeldEvidence(uploadEvidence)
+    for (const path of held) verifyHeldPath(path)
+    for (const file of evidence) verifyHeldEvidence(file)
+    await verifyConfigBinding()
+
+    const upload = spawnSync('npm', [
+      'exec', '--', 'opennextjs-cloudflare', 'upload',
+      '-c', config, '--', join(destination, 'worker.js'),
+      '--message', operationId,
+      '--assets', join(destination, 'assets'),
+    ], {
+      env: process.env,
+      stdio: ['inherit', 2, 2],
+    })
+
+    captureHeldEvidence(uploadEvidence, true)
+    await verifyConfigBinding()
+    const after = verifyUploadSourceSnapshot(
+      destination,
+      before.tree_sha256,
+      before.identity_sha256,
+    )
+    const buildProofAfter = verifyFrozenSnapshotAgainstArchive(
+      archive,
+      destination,
+      archiveSha256,
+    )
+    if (!buildProofAfter.equals(buildProof)) throw new Error()
+    await verifyConfigBinding()
+    for (const path of held) verifyHeldPath(path)
+    for (const file of evidence) verifyHeldEvidence(file)
+    if (upload.error || upload.status !== 0) throw new Error()
+    const versionId = acceptedVersionId(uploadEvidence.expected.bytes)
+    writeHeldEvidence(afterEvidence, snapshotProofBytes('matched', after, destination))
+    for (const path of held) verifyHeldPath(path)
+    for (const file of evidence) verifyHeldEvidence(file)
+    return Object.freeze({
+      format: 'blogman-upload-source-lifecycle-acceptance/v1',
+      state: 'accepted',
+      upload_operation_id: operationId,
+      version_id: versionId,
+      config_sha256: expectedConfigSha256,
+      snapshot_tree_sha256: after.tree_sha256,
+      snapshot_identity_sha256: after.identity_sha256,
+      snapshot_proof_before_sha256: sha256Bytes(beforeEvidence.expected.bytes),
+      snapshot_proof_after_sha256: sha256Bytes(afterEvidence.expected.bytes),
+      build_directory_proof_sha256: sha256Bytes(buildEvidence.expected.bytes),
+      wrangler_output_sha256: sha256Bytes(uploadEvidence.expected.bytes),
+    })
+  } finally {
+    for (const file of evidence.reverse()) closeSync(file.descriptor)
+    for (const path of held.reverse()) closeSync(path.descriptor)
+  }
+}
+
 function isMainModule() {
   return process.argv[1]
     && import.meta.url === pathToFileURL(resolve(process.argv[1])).href
 }
 
-if (isMainModule()) {
+async function runCli() {
+  if (process.argv[2] === 'run-upload-source-lifecycle') {
+    try {
+      if (process.argv.length !== 23
+        || process.argv[3] !== '--config'
+        || process.argv[5] !== '--source'
+        || process.argv[7] !== '--destination'
+        || process.argv[9] !== '--operation-id'
+        || process.argv[11] !== '--proof-before'
+        || process.argv[13] !== '--proof-after'
+        || process.argv[15] !== '--archive'
+        || process.argv[17] !== '--archive-sha256'
+        || process.argv[19] !== '--build-proof'
+        || process.argv[21] !== '--expected-config-sha256') {
+        throw new Error()
+      }
+      const acceptance = await runUploadSourceLifecycle({
+        archive: process.argv[16],
+        archiveSha256: process.argv[18],
+        buildProofPath: process.argv[20],
+        config: process.argv[4],
+        expectedConfigSha256: process.argv[22],
+        source: process.argv[6],
+        destination: process.argv[8],
+        operationId: process.argv[10],
+        proofBeforePath: process.argv[12],
+        proofAfterPath: process.argv[14],
+      })
+      process.stdout.write(`${JSON.stringify(acceptance)}\n`)
+    } catch {
+      process.stderr.write('Invalid Issue #23 upload source lifecycle\n')
+      process.exitCode = 1
+    }
+    return
+  }
+
+  if (process.argv[2] === 'create-upload-source-snapshot') {
+    try {
+      if (process.argv.length !== 7
+        || process.argv[3] !== '--source'
+        || process.argv[5] !== '--destination') {
+        throw new Error()
+      }
+      const proof = copyUploadSourceSnapshot(process.argv[4], process.argv[6])
+      process.stdout.write(`${JSON.stringify({
+        format: 'blogman-upload-source-snapshot/v1',
+        state: 'created',
+        ...proof,
+      })}\n`)
+    } catch {
+      process.stderr.write('Invalid Issue #23 upload source snapshot\n')
+      process.exitCode = 1
+    }
+    return
+  }
+
+  if (process.argv[2] === 'verify-upload-source-snapshot') {
+    try {
+      if (process.argv.length !== 9
+        || process.argv[3] !== '--directory'
+        || process.argv[5] !== '--tree-sha256'
+        || process.argv[7] !== '--identity-sha256') {
+        throw new Error()
+      }
+      const proof = verifyUploadSourceSnapshot(
+        process.argv[4],
+        process.argv[6],
+        process.argv[8],
+      )
+      process.stdout.write(`${JSON.stringify({
+        format: 'blogman-upload-source-snapshot/v1',
+        state: 'matched',
+        ...proof,
+      })}\n`)
+    } catch {
+      process.stderr.write('Invalid Issue #23 upload source snapshot\n')
+      process.exitCode = 1
+    }
+    return
+  }
+
+  if (process.argv[2] === 'bind-upload-assets-directory') {
+    try {
+      if (process.argv.length !== 7
+        || process.argv[3] !== '--config'
+        || process.argv[5] !== '--upload-source-directory') {
+        throw new Error()
+      }
+      const assetsDirectory = await bindUploadAssetsDirectory(process.argv[4], process.argv[6])
+      process.stdout.write(`${assetsDirectory}\n`)
+    } catch {
+      process.stderr.write('Invalid Issue #23 upload assets binding\n')
+      process.exitCode = 1
+    }
+    return
+  }
+
   try {
     if (process.argv.length !== 3 || process.argv[2] !== 'validate-wrangler-d1-file-response') {
       invalidWranglerD1FileResponse()
@@ -264,3 +1049,5 @@ if (isMainModule()) {
     process.exitCode = 1
   }
 }
+
+if (isMainModule()) await runCli()
