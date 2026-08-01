@@ -1,0 +1,3 @@
+# Run one fixed fail-closed state machine
+
+After Authorization consumption, execute these Stages exactly once and strictly in order: `authorization_accept` (30 seconds), `live_preconditions` (120 seconds), `d1_identity` (120 seconds), `clean_start_reset` (300 seconds), `empty_d1_proof` (300 seconds), `migrations_001_006` (2,100 seconds), `reconciliation` (300 seconds), `worker_deploy` (600 seconds), `version_traffic_verification` (300 seconds), and `smoke_control_t0` (300 seconds), with a 5,400-second overall deadline. Timeouts are frozen in the manifest and accept no runtime override. The first non-PASS outcome stops the sequence; the failed Stage records one attempt and every suffix Stage remains zero in the Terminal Result.
