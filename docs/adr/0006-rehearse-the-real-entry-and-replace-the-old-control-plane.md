@@ -1,0 +1,3 @@
+# Rehearse the real entry and replace the old control plane
+
+Delivery Preparation must exercise the formal production entry on the target macOS runtime with the same parsers and command construction used by `execute`, using internal no-network adapters so the rehearsal cannot produce production side effects. CI also runs that entry on macOS, while synthetic output remains test evidence and can never satisfy production acceptance. Tests move to the `prepare` and `execute` interface and replace, rather than layer on top of, callback-sequence and executable-runbook tests. The old runbook becomes short operator documentation, and historical v1–v7 schemas remain available only through a read-only audit adapter that is not imported by new production execution.
