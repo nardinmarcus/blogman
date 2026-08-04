@@ -284,6 +284,35 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(() => prepareFixture(topLevel)).toThrow(/not allowed/u)
   })
 
+  it('rejects a repository symlink whose target is outside the canonical root', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-symlink-'))
+    const externalPath = join(directory, 'operator-material.bin')
+    const linkPath = join(repoRoot, 'tests', 'scripts', '.issue-23-external-link.bin')
+    const externalBytes = Buffer.from('private operator material\n', 'utf8')
+    writeFileSync(externalPath, externalBytes)
+    symlinkSync(externalPath, linkPath)
+
+    try {
+      const config = baseConfig()
+      config.artifact.worker.path = 'tests/scripts/.issue-23-external-link.bin'
+
+      let thrown: Error | undefined
+      try {
+        prepareFixture(config)
+      } catch (error) {
+        thrown = error as Error
+      }
+      expect(thrown?.message).toMatch(/escapes repository/u)
+      expect(thrown?.message).not.toContain(externalPath)
+      expect(thrown?.message).not.toContain(externalBytes.toString('utf8'))
+      expect(thrown?.message).not.toContain(sha256(externalBytes))
+      expect(thrown?.message).not.toContain(String(externalBytes.length))
+    } finally {
+      rmSync(linkPath, { force: true })
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it('rejects missing identity, non-canonical bytes, and identity mismatch', () => {
     const missing = baseConfig()
     Reflect.deleteProperty(missing.artifact.file_tree, 'sha256')
@@ -328,8 +357,13 @@ describe('Issue #23 Delivery Preparation', () => {
 
   it('does not trust caller-supplied repository facts', () => {
     const forged = baseConfig()
+    const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim()
+    const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoRoot, encoding: 'utf8' }).trim()
 
-    expect(() => prepare(forged, { repositoryPath: repoRoot })).toThrow(
+    expect(() => prepare(forged, {
+      repositoryPath: repoRoot,
+      repositoryResolver: () => ({ commit, tree, clean: true }),
+    })).toThrow(
       /resolved repository identity/u,
     )
   })
@@ -343,6 +377,7 @@ describe('Issue #23 Delivery Preparation', () => {
 
     expect(() => prepare(dirty, {
       repositoryPath: repoRoot,
+      repositoryResolver: () => ({ commit: dirty.repository.commit, tree: dirty.repository.tree, clean: false }),
       ciResolver: (_path, source, repository) => ({ ...source.ci, run_id: 1, attempt: 1, event: 'pull_request', head_sha: repository.commit, tree: repository.tree, conclusion: 'success' }),
       rehearsalRunner: () => ({ runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node }, network: 'disabled', status: 'PASS', receipt_sha256: hash('a'), production_write_adapter_calls: 0 }),
     })).toThrow(/valid Git commit\/tree/u)
@@ -380,8 +415,9 @@ describe('Issue #23 Delivery Preparation', () => {
     copyFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-prepare.mjs'), join(fixtureRepo, 'scripts', 'issue-23-delivery-prepare.mjs'))
     copyFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-entry.mjs'), join(fixtureRepo, 'scripts', 'issue-23-delivery-entry.mjs'))
     copyFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-rehearsal.mjs'), join(fixtureRepo, 'scripts', 'issue-23-delivery-rehearsal.mjs'))
+    writeFileSync(join(fixtureRepo, 'fixture-marker.txt'), 'Issue #23 prepare fixture\n')
     symlinkSync(join(repoRoot, 'node_modules'), join(fixtureRepo, 'node_modules'))
-    execFileSync('git', ['add', 'scripts/issue-23-delivery-prepare.mjs', 'scripts/issue-23-delivery-entry.mjs', 'scripts/issue-23-delivery-rehearsal.mjs'], { cwd: fixtureRepo })
+    execFileSync('git', ['add', 'fixture-marker.txt', 'scripts/issue-23-delivery-prepare.mjs', 'scripts/issue-23-delivery-entry.mjs', 'scripts/issue-23-delivery-rehearsal.mjs'], { cwd: fixtureRepo })
     execFileSync('git', ['commit', '-m', 'test fixture'], { cwd: fixtureRepo, env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' } })
     const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: fixtureRepo, encoding: 'utf8' }).trim()
     const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: fixtureRepo, encoding: 'utf8' }).trim()

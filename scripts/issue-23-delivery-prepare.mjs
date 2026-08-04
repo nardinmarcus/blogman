@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { readFileSync, realpathSync, statSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { runLocalRehearsal } from './issue-23-delivery-rehearsal.mjs'
 
 const MANIFEST_SCHEMA_URL = new URL(
@@ -157,17 +157,32 @@ function command(repositoryPath, name, args) {
 }
 
 function resolveFile(repositoryPath, path, label, includeBytes = false) {
-  const absolute = resolve(repositoryPath, path)
-  if (!absolute.startsWith(`${resolve(repositoryPath)}/`)) fail(`${label} escapes repository`)
-  let bytes
-  try {
-    bytes = readFileSync(absolute)
-  } catch (error) {
-    fail(`${label} could not be resolved: ${error.message}`)
+  const lexicalRoot = resolve(repositoryPath)
+  const absolute = resolve(lexicalRoot, path)
+  if (absolute !== lexicalRoot && !absolute.startsWith(`${lexicalRoot}${sep}`)) {
+    fail(`${label} escapes repository`)
   }
-  return includeBytes
-    ? { path, sha256: sha256(bytes), bytes: statSync(absolute).size }
-    : { path, sha256: sha256(bytes) }
+
+  let canonicalRoot
+  let canonicalTarget
+  try {
+    canonicalRoot = realpathSync(lexicalRoot)
+    canonicalTarget = realpathSync(absolute)
+  } catch {
+    fail(`${label} could not be resolved`)
+  }
+  if (canonicalTarget !== canonicalRoot && !canonicalTarget.startsWith(`${canonicalRoot}${sep}`)) {
+    fail(`${label} escapes repository`)
+  }
+
+  try {
+    const bytes = readFileSync(canonicalTarget)
+    return includeBytes
+      ? { path, sha256: sha256(bytes), bytes: statSync(canonicalTarget).size }
+      : { path, sha256: sha256(bytes) }
+  } catch {
+    fail(`${label} could not be resolved`)
+  }
 }
 
 function resolveRepositoryFacts(repositoryPath) {
@@ -227,6 +242,9 @@ function resolveFacts(config, {
   productionWriteAdapter,
 } = {}) {
   const repository = repositoryResolver(repositoryPath)
+  if (repository.clean !== true) {
+    fail('resolved repository identity is not a valid Git commit/tree')
+  }
   if (config.repository.commit !== repository.commit || config.repository.tree !== repository.tree) {
     fail('caller-supplied repository identity does not match the resolved repository identity')
   }
