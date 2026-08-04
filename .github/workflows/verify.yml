@@ -37,6 +37,32 @@ jobs:
           NEXT_TELEMETRY_DISABLED: '1'
         run: npm run verify:quick
 
+  verify-target-macos:
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Assert target runtime
+        run: test "$(node -p 'process.platform')" = "darwin"
+
+      - name: Run formal prepare and no-network rehearsal
+        env:
+          CI: true
+          NEXT_TELEMETRY_DISABLED: '1'
+        run: npm run test:run -- tests/scripts/issue-23-delivery-prepare.test.ts --reporter=verbose
+
   verify-migrations:
     runs-on: ubuntu-latest
     timeout-minutes: 55

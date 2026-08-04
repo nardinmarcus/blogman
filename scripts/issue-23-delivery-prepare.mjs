@@ -49,6 +49,8 @@ const EXPECTED_EVIDENCE_EXCLUSIONS = Object.freeze([
   'private_operator_paths',
 ])
 const EXPECTED_MIGRATIONS = Object.freeze(['001', '002', '003', '004', '005', '006'])
+const ARTIFACT_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._/-]+$/u
+const ARTIFACT_EXCLUDED_PATH_PATTERN = /(^|\/)(?:private|operator|secret|credential|tmp)(?:\/|$)/iu
 
 const CONFIG_SCHEMA = Object.freeze({
   ...MANIFEST_SCHEMA,
@@ -156,6 +158,13 @@ function command(repositoryPath, name, args) {
   }
 }
 
+function resolveExecutable(repositoryPath, name) {
+  const lookup = process.platform === 'win32' ? 'where.exe' : 'which'
+  const executable = command(repositoryPath, lookup, [name]).split(/\r?\n/u)[0]?.trim()
+  if (!executable) fail(`could not resolve ${name} executable path`)
+  return executable
+}
+
 function resolveFile(repositoryPath, path, label, includeBytes = false) {
   const lexicalRoot = resolve(repositoryPath)
   const absolute = resolve(lexicalRoot, path)
@@ -183,6 +192,22 @@ function resolveFile(repositoryPath, path, label, includeBytes = false) {
   } catch {
     fail(`${label} could not be resolved`)
   }
+}
+
+function enumerateArtifactPaths(repositoryPath, configuredFiles) {
+  const paths = command(repositoryPath, 'git', ['ls-tree', '-r', '--name-only', '-z', 'HEAD'])
+    .split('\0')
+    .filter((path) => path.length > 0)
+    .filter((path) => ARTIFACT_PATH_PATTERN.test(path))
+    .filter((path) => !ARTIFACT_EXCLUDED_PATH_PATTERN.test(path))
+    .sort()
+  const available = new Set(paths)
+  for (const file of configuredFiles) {
+    if (!available.has(file.path)) {
+      fail(`artifact file ${file.path} is not in the complete public artifact tree`)
+    }
+  }
+  return paths
 }
 
 function resolveRepositoryFacts(repositoryPath) {
@@ -255,30 +280,33 @@ function resolveFacts(config, {
     manifest_schema: resolveFile(repositoryPath, config.preparation.manifest_schema.path, 'manifest schema'),
   }
   const ci = ciResolver(repositoryPath, config, repository)
-  const npmVersion = command(repositoryPath, process.execPath, ['--version']).replace(/^v/u, '')
+  const npmExecutable = resolveExecutable(repositoryPath, 'npm')
+  const npmVersion = command(repositoryPath, npmExecutable, ['--version']).replace(/^v/u, '')
   const wranglerVersion = command(repositoryPath, join(repositoryPath, 'node_modules', '.bin', 'wrangler'), ['--version'])
     .match(/([0-9]+\.[0-9]+\.[0-9]+)/u)?.[1]
   if (!wranglerVersion) fail('resolved Wrangler version is invalid')
-  const packageJson = JSON.parse(readFileSync(join(repositoryPath, 'package.json'), 'utf8'))
-  const openNextVersion = packageJson.dependencies?.['@opennextjs/cloudflare']?.replace(/^\^/u, '')
+  const packageJsonBytes = readFileSync(join(repositoryPath, 'package.json'))
+  const lockfileBytes = readFileSync(join(repositoryPath, 'package-lock.json'))
+  const lockfile = JSON.parse(lockfileBytes.toString('utf8'))
+  const openNextVersion = lockfile.packages?.['node_modules/@opennextjs/cloudflare']?.version
   if (!openNextVersion) fail('resolved OpenNext version is missing')
   const toolchain = {
     ...config.toolchain,
     node: { version: process.versions.node, identity_sha256: sha256(readFileSync(process.execPath)) },
-    npm: { version: npmVersion, identity_sha256: sha256(Buffer.from(npmVersion)) },
+    npm: { version: npmVersion, identity_sha256: sha256(readFileSync(npmExecutable)) },
     wrangler: { version: wranglerVersion, identity_sha256: sha256(Buffer.from(wranglerVersion)) },
     opennextjs_cloudflare: { version: openNextVersion, identity_sha256: sha256(Buffer.from(openNextVersion)) },
-    package_json_sha256: sha256(readFileSync(join(repositoryPath, 'package.json'))),
-    lockfile_sha256: sha256(readFileSync(join(repositoryPath, 'package-lock.json'))),
+    package_json_sha256: sha256(packageJsonBytes),
+    lockfile_sha256: sha256(lockfileBytes),
   }
+  const artifactPaths = enumerateArtifactPaths(repositoryPath, config.artifact.file_tree.files)
   const artifact = {
     ...config.artifact,
     archive: resolveFile(repositoryPath, config.artifact.archive.path, 'artifact archive', true),
     worker: resolveFile(repositoryPath, config.artifact.worker.path, 'worker artifact', true),
     file_tree: {
       ...config.artifact.file_tree,
-      files: config.artifact.file_tree.files.map((file) => resolveFile(repositoryPath, file.path, 'artifact file', true))
-        .sort((left, right) => left.path.localeCompare(right.path)),
+      files: artifactPaths.map((path) => resolveFile(repositoryPath, path, 'artifact file', true)),
     },
   }
   const migration = {

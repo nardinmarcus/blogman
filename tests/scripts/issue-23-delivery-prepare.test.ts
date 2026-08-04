@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -14,6 +14,8 @@ import {
 
 const SHA40 = 'a'.repeat(40)
 const SHA40_B = 'b'.repeat(40)
+const FORMAL_CLI_CHILD_TIMEOUT_MS = 240_000
+const FORMAL_CLI_TEST_TIMEOUT_MS = FORMAL_CLI_CHILD_TIMEOUT_MS + 60_000
 
 function hash(character: string) {
   return character.repeat(64)
@@ -163,7 +165,8 @@ function sha256(bytes: Buffer) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
-function withMacosRuntime<T>(callback: () => T): T {
+function withTargetMacosRuntime<T>(callback: () => T): T {
+  if (process.platform === 'darwin') return callback()
   const originalPlatform = process.platform
   Object.defineProperty(process, 'platform', { value: 'darwin' })
   try {
@@ -171,6 +174,30 @@ function withMacosRuntime<T>(callback: () => T): T {
   } finally {
     Object.defineProperty(process, 'platform', { value: originalPlatform })
   }
+}
+
+function withTemporaryDirectory<T>(prefix: string, callback: (directory: string) => T): T {
+  const directory = mkdtempSync(join(tmpdir(), prefix))
+  try {
+    return callback(directory)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+}
+
+function runBoundedChild(
+  executable: string,
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv },
+  timeoutMs = FORMAL_CLI_CHILD_TIMEOUT_MS,
+) {
+  return spawnSync(executable, args, {
+    ...options,
+    timeout: timeoutMs,
+    killSignal: 'SIGTERM',
+    maxBuffer: 16 * 1024 * 1024,
+    encoding: 'buffer',
+  })
 }
 
 function prepareFixture(config: ReturnType<typeof baseConfig>, options: Record<string, unknown> = {}) {
@@ -232,6 +259,15 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(text).not.toContain('PRIVATE')
     expect(text).not.toContain('DROP TABLE')
     expect(parseCanonicalManifest(result.bytes, result.sha256)).toEqual(result.value)
+  })
+
+  it('enumerates the complete public artifact tree independently of caller-listed files', () => {
+    const result = prepareFixture(baseConfig())
+    const paths = result.value.artifact.file_tree.files.map((file) => file.path)
+
+    expect(result.value.artifact.file_tree.complete).toBe(true)
+    expect(paths.length).toBeGreaterThan(baseConfig().artifact.file_tree.files.length)
+    expect(paths).toContain('.github/workflows/verify.yml')
   })
 
   it('is repeatable and changes identity for meaningful input changes', () => {
@@ -378,6 +414,19 @@ describe('Issue #23 Delivery Preparation', () => {
     )
   })
 
+  it('binds the actual npm executable and the lockfile OpenNext version', () => {
+    const result = prepareFixture(baseConfig())
+    const npmVersion = execFileSync('npm', ['--version'], { cwd: repoRoot, encoding: 'utf8' })
+      .trim()
+      .replace(/^v/u, '')
+    const lockfile = JSON.parse(readFileSync(join(repoRoot, 'package-lock.json'), 'utf8'))
+
+    expect(result.value.toolchain.npm.version).toBe(npmVersion)
+    expect(result.value.toolchain.npm.version).not.toBe(process.versions.node)
+    expect(result.value.toolchain.opennextjs_cloudflare.version)
+      .toBe(lockfile.packages['node_modules/@opennextjs/cloudflare'].version)
+  })
+
   it('rejects a dirty production repository even when identities match', () => {
     const dirty = baseConfig()
     dirty.repository.commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim()
@@ -416,52 +465,59 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(adapter.calls).toBe(0)
   })
 
-  it('writes only canonical manifest bytes through the formal CLI entry', { timeout: 120_000 }, () => {
-    const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-prepare-'))
-    const configPath = join(directory, 'prepare-config.json')
-    const fixtureRepo = join(directory, 'repo')
-    execFileSync('git', ['clone', '--local', repoRoot, fixtureRepo])
-    execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/nardinmarcus/blogman.git'], { cwd: fixtureRepo })
-    copyFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-prepare.mjs'), join(fixtureRepo, 'scripts', 'issue-23-delivery-prepare.mjs'))
-    copyFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-entry.mjs'), join(fixtureRepo, 'scripts', 'issue-23-delivery-entry.mjs'))
-    copyFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-rehearsal.mjs'), join(fixtureRepo, 'scripts', 'issue-23-delivery-rehearsal.mjs'))
-    writeFileSync(join(fixtureRepo, 'fixture-marker.txt'), 'Issue #23 prepare fixture\n')
-    symlinkSync(join(repoRoot, 'node_modules'), join(fixtureRepo, 'node_modules'))
-    execFileSync('git', ['add', 'fixture-marker.txt', 'scripts/issue-23-delivery-prepare.mjs', 'scripts/issue-23-delivery-entry.mjs', 'scripts/issue-23-delivery-rehearsal.mjs'], { cwd: fixtureRepo })
-    execFileSync('git', ['commit', '-m', 'test fixture'], { cwd: fixtureRepo, env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' } })
-    const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: fixtureRepo, encoding: 'utf8' }).trim()
-    const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: fixtureRepo, encoding: 'utf8' }).trim()
-    const expectedConfig = baseConfig()
-    expectedConfig.repository.commit = commit
-    expectedConfig.repository.tree = tree
-    expectedConfig.ci.head_sha = commit
-    expectedConfig.ci.tree = tree
-    const expected = withMacosRuntime(() => prepare(expectedConfig, {
-      repositoryPath: fixtureRepo,
-      ciResolver: (_path, source, repository) => ({ ...source.ci, run_id: 1, attempt: 1, event: 'pull_request', head_sha: repository.commit, tree: repository.tree, conclusion: 'success' }),
-    }))
-    const config = expectedConfig
-    writeFileSync(configPath, JSON.stringify(config, null, 2))
-    const fakeBin = join(directory, 'bin')
-    mkdirSync(fakeBin)
-    const fakeGh = join(fakeBin, 'gh')
-    const runtimeShim = join(directory, 'formal-cli-macos.cjs')
-    writeFileSync(runtimeShim, "if (process.argv[1]?.endsWith('issue-23-delivery-prepare.mjs')) Object.defineProperty(process, 'platform', { value: 'darwin' })\n")
-    writeFileSync(fakeGh, '#!/bin/sh\nprintf \'[{"databaseId":1,"headSha":"%s","status":"completed","conclusion":"success","event":"pull_request","attempt":1}]\n\' "$BLOGMAN_TEST_HEAD"\n')
-    chmodSync(fakeGh, 0o755)
+  it('writes only canonical manifest bytes through the formal CLI entry', { timeout: FORMAL_CLI_TEST_TIMEOUT_MS }, () => (
+    withTemporaryDirectory('blogman-issue-23-prepare-', (directory) => {
+      const configPath = join(directory, 'prepare-config.json')
+      const fixtureRepo = join(directory, 'repo')
+      execFileSync('git', ['clone', '--local', repoRoot, fixtureRepo])
+      execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/nardinmarcus/blogman.git'], { cwd: fixtureRepo })
+      copyFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-prepare.mjs'), join(fixtureRepo, 'scripts', 'issue-23-delivery-prepare.mjs'))
+      copyFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-entry.mjs'), join(fixtureRepo, 'scripts', 'issue-23-delivery-entry.mjs'))
+      copyFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-rehearsal.mjs'), join(fixtureRepo, 'scripts', 'issue-23-delivery-rehearsal.mjs'))
+      writeFileSync(join(fixtureRepo, 'fixture-marker.txt'), 'Issue #23 prepare fixture\n')
+      symlinkSync(join(repoRoot, 'node_modules'), join(fixtureRepo, 'node_modules'))
+      execFileSync('git', ['add', 'fixture-marker.txt', 'scripts/issue-23-delivery-prepare.mjs', 'scripts/issue-23-delivery-entry.mjs', 'scripts/issue-23-delivery-rehearsal.mjs'], { cwd: fixtureRepo })
+      execFileSync('git', ['commit', '-m', 'test fixture'], { cwd: fixtureRepo, env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' } })
+      const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: fixtureRepo, encoding: 'utf8' }).trim()
+      const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: fixtureRepo, encoding: 'utf8' }).trim()
+      const expectedConfig = baseConfig()
+      expectedConfig.repository.commit = commit
+      expectedConfig.repository.tree = tree
+      expectedConfig.ci.head_sha = commit
+      expectedConfig.ci.tree = tree
+      const expected = withTargetMacosRuntime(() => prepare(expectedConfig, {
+        repositoryPath: fixtureRepo,
+        ciResolver: (_path, source, repository) => ({ ...source.ci, run_id: 1, attempt: 1, event: 'pull_request', head_sha: repository.commit, tree: repository.tree, conclusion: 'success' }),
+      }))
+      const config = expectedConfig
+      writeFileSync(configPath, JSON.stringify(config, null, 2))
+      const fakeBin = join(directory, 'bin')
+      mkdirSync(fakeBin)
+      const fakeGh = join(fakeBin, 'gh')
+      const runtimeShim = join(directory, 'formal-cli-macos.cjs')
+      if (process.platform !== 'darwin') {
+        writeFileSync(runtimeShim, "if (process.argv[1]?.endsWith('issue-23-delivery-prepare.mjs')) Object.defineProperty(process, 'platform', { value: 'darwin' })\n")
+      }
+      writeFileSync(fakeGh, '#!/bin/sh\nprintf \'[{"databaseId":1,"headSha":"%s","status":"completed","conclusion":"success","event":"pull_request","attempt":1}]\n\' "$BLOGMAN_TEST_HEAD"\n')
+      chmodSync(fakeGh, 0o755)
 
-    try {
-      const result = spawnSync(process.execPath, [join(fixtureRepo, 'scripts', 'issue-23-delivery-prepare.mjs'), '--config', configPath], {
-        cwd: fixtureRepo,
-        env: {
-          ...process.env,
-          PATH: `${fakeBin}:${process.env.PATH}`,
-          NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${runtimeShim}`.trim(),
-          BLOGMAN_TEST_HEAD: commit,
-        },
-        encoding: 'buffer',
-      })
+      const childEnv = {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        BLOGMAN_TEST_HEAD: commit,
+      }
+      if (process.platform === 'darwin') {
+        delete childEnv.NODE_OPTIONS
+      } else {
+        childEnv.NODE_OPTIONS = `${process.env.NODE_OPTIONS ?? ''} --require=${runtimeShim}`.trim()
+      }
+      const result = runBoundedChild(
+        process.execPath,
+        [join(fixtureRepo, 'scripts', 'issue-23-delivery-prepare.mjs'), '--config', configPath],
+        { cwd: fixtureRepo, env: childEnv },
+      )
 
+      expect(result.error, JSON.stringify({ error: result.error?.message, signal: result.signal })).toBeUndefined()
       expect(result.status, result.stderr.toString('utf8')).toBe(0)
       expect(result.stderr.toString('utf8')).toBe('')
       expect(JSON.parse(result.stdout.toString('utf8')).rehearsal).toMatchObject({
@@ -471,8 +527,26 @@ describe('Issue #23 Delivery Preparation', () => {
         production_write_adapter_calls: 0,
       })
       expect(result.stdout, JSON.stringify({ status: result.status, stdoutLength: result.stdout.length, stderr: result.stderr.toString('utf8') })).toEqual(expected.bytes)
-    } finally {
-      rmSync(directory, { recursive: true, force: true })
-    }
+    })
+  ))
+
+  it('cleans temporary projections after a bounded child timeout', () => {
+    let directory = ''
+    withTemporaryDirectory('blogman-issue-23-timeout-', (root) => {
+      directory = root
+      const target = join(root, 'node-modules-target')
+      writeFileSync(target, 'projection\n')
+      symlinkSync(target, join(root, 'node_modules'))
+      const result = runBoundedChild(
+        process.execPath,
+        ['-e', 'setTimeout(() => {}, 60_000)'],
+        { cwd: root, env: { ...process.env } },
+        50,
+      )
+
+      expect(result.error?.code).toBe('ETIMEDOUT')
+      expect(result.signal).toBe('SIGTERM')
+    })
+    expect(existsSync(directory)).toBe(false)
   })
 })

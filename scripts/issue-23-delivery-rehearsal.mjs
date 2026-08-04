@@ -12,6 +12,7 @@ import {
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const migrations = join(repoRoot, 'scripts', 'migrations.mjs')
+const LOCAL_REHEARSAL_CHILD_TIMEOUT_MS = 60_000
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
@@ -58,6 +59,9 @@ export function runLocalRehearsal({
   ], {
     cwd: repositoryPath,
     env,
+    timeout: LOCAL_REHEARSAL_CHILD_TIMEOUT_MS,
+    killSignal: 'SIGTERM',
+    maxBuffer: 16 * 1024 * 1024,
     encoding: 'utf8',
   })
   const outputs = []
