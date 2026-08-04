@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,7 +27,7 @@ function baseConfig() {
         sha256: hash('c'),
       },
       execute_entry: {
-        path: 'scripts/issue-23-delivery-execute.mjs',
+        path: 'scripts/phase-b-sequence.mjs',
         sha256: hash('d'),
       },
       manifest_schema: {
@@ -61,21 +61,21 @@ function baseConfig() {
       lockfile_sha256: hash('e'),
     },
     artifact: {
-      archive: { path: 'artifacts/worker.zip', sha256: hash('f'), bytes: 123 },
-      worker: { path: 'artifacts/worker.js', sha256: hash('a'), bytes: 456 },
+      archive: { path: 'scripts/issue-23-delivery-prepare.mjs', sha256: hash('f'), bytes: 123 },
+      worker: { path: 'worker.ts', sha256: hash('a'), bytes: 456 },
       file_tree: {
         sha256: hash('b'),
         complete: true,
         files: [
-          { path: 'assets/index.html', sha256: hash('d'), bytes: 789 },
-          { path: 'worker.js', sha256: hash('c'), bytes: 456 },
+          { path: 'package.json', sha256: hash('d'), bytes: 789 },
+          { path: 'worker.ts', sha256: hash('c'), bytes: 456 },
         ],
       },
     },
     migration: {
       delivery_mode: 'clean-start',
       reset_sql: {
-        path: 'db/issue-23-clean-start-reset.sql',
+        path: 'db/schema.sql',
         sha256: hash('f'),
       },
       runner: { path: 'scripts/migrations.mjs', sha256: hash('e') },
@@ -84,7 +84,7 @@ function baseConfig() {
         sha256: hash('a'),
         migrations: [
           { id: '001', path: 'db/ledger-migrations/001_initial_schema.sql', sha256: hash('b') },
-          { id: '002', path: 'db/ledger-migrations/002_add_ai_image_configuration.sql', sha256: hash('c') },
+        { id: '002', path: 'db/ledger-migrations/002_add_ai_image_configuration.sql', sha256: hash('c') },
           { id: '003', path: 'db/ledger-migrations/003_migrate_runtime_ai_configuration.sql', sha256: hash('d') },
           { id: '004', path: 'db/ledger-migrations/004_complete_historical_text_ai_schema.sql', sha256: hash('e') },
           { id: '005', path: 'db/ledger-migrations/005_fix_posts_fts_sync.sql', sha256: hash('f') },
@@ -163,12 +163,42 @@ function sha256(bytes: Buffer) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
+function prepareFixture(config: ReturnType<typeof baseConfig>, options: Record<string, unknown> = {}) {
+  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim()
+  const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoRoot, encoding: 'utf8' }).trim()
+  const fixture = structuredClone(config)
+  fixture.repository.commit = commit
+  fixture.repository.tree = tree
+  fixture.ci.head_sha = commit
+  fixture.ci.tree = tree
+  return prepare(fixture, {
+    repositoryPath: repoRoot,
+    repositoryResolver: () => ({ commit, tree, clean: true }),
+    ciResolver: (_path, source, repository) => ({
+      ...source.ci,
+      run_id: 1,
+      attempt: 1,
+      event: 'pull_request',
+      head_sha: repository.commit,
+      tree: repository.tree,
+      conclusion: 'success',
+    }),
+    rehearsalRunner: () => ({
+      runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
+      network: 'disabled',
+      status: 'PASS',
+      receipt_sha256: hash('a'),
+      production_write_adapter_calls: 0,
+    }),
+    ...options,
+  })
+}
+
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const cliPath = join(repoRoot, 'scripts', 'issue-23-delivery-prepare.mjs')
 
 describe('Issue #23 Delivery Preparation', () => {
   it('emits schema-ordered canonical bytes with an exact-byte identity', () => {
-    const result = prepare(baseConfig())
+    const result = prepareFixture(baseConfig())
     const text = result.bytes.toString('utf8')
 
     expect(result.value.format).toBe(CANONICAL_MANIFEST_FORMAT)
@@ -195,11 +225,11 @@ describe('Issue #23 Delivery Preparation', () => {
   })
 
   it('is repeatable and changes identity for meaningful input changes', () => {
-    const first = prepare(baseConfig())
-    const second = prepare(baseConfig())
+    const first = prepareFixture(baseConfig())
+    const second = prepareFixture(baseConfig())
     const changed = baseConfig()
-    changed.toolchain.wrangler.version = '4.85.0'
-    const changedResult = prepare(changed)
+    changed.artifact.worker.path = 'scripts/issue-23-delivery-prepare.mjs'
+    const changedResult = prepareFixture(changed)
 
     expect(second.bytes).toEqual(first.bytes)
     expect(second.sha256).toBe(first.sha256)
@@ -208,7 +238,7 @@ describe('Issue #23 Delivery Preparation', () => {
   })
 
   it('freezes the Issue #23 stage order and timeout policy', () => {
-    const result = prepare(baseConfig())
+    const result = prepareFixture(baseConfig())
 
     expect(result.value.policy.stages).toEqual([
       { name: 'authorization_accept', timeout_seconds: 30 },
@@ -233,33 +263,33 @@ describe('Issue #23 Delivery Preparation', () => {
     stages[0] = { name: 'authorization_accept', timeout_seconds: 31 }
     Reflect.set(mutated.policy, 'stages', stages)
 
-    expect(() => prepare(mutated)).toThrow(/fixed Issue #23 order and timeouts/u)
+    expect(() => prepareFixture(mutated)).toThrow(/fixed Issue #23 order and timeouts/u)
   })
 
   it('rejects unknown fields and material secret, SQL, or private-path input', () => {
     const unknown = baseConfig()
     Reflect.set(unknown.policy.authorization.credential_slots[0], 'value', 'secret-value')
-    expect(() => prepare(unknown)).toThrow(/not allowed/u)
+    expect(() => prepareFixture(unknown)).toThrow(/not allowed/u)
 
     const sqlBody = baseConfig()
     Reflect.set(sqlBody.migration.reset_sql, 'sql', 'DROP TABLE posts')
-    expect(() => prepare(sqlBody)).toThrow(/not allowed/u)
+    expect(() => prepareFixture(sqlBody)).toThrow(/not allowed/u)
 
     const privatePath = baseConfig()
     privatePath.artifact.worker.path = '/private/operator/worker.js'
-    expect(() => prepare(privatePath)).toThrow(/path/u)
+    expect(() => prepareFixture(privatePath)).toThrow(/path/u)
 
     const topLevel = baseConfig()
     Reflect.set(topLevel, 'unexpected', true)
-    expect(() => prepare(topLevel)).toThrow(/not allowed/u)
+    expect(() => prepareFixture(topLevel)).toThrow(/not allowed/u)
   })
 
   it('rejects missing identity, non-canonical bytes, and identity mismatch', () => {
     const missing = baseConfig()
     Reflect.deleteProperty(missing.artifact.file_tree, 'sha256')
-    expect(() => prepare(missing)).toThrow(/sha256.*required/u)
+    expect(() => prepareFixture(missing)).toThrow(/sha256.*required/u)
 
-    const result = prepare(baseConfig())
+    const result = prepareFixture(baseConfig())
     expect(() => parseCanonicalManifest(result.bytes)).toThrow(/identity is required/u)
     expect(() => parseCanonicalManifest(result.bytes, '0'.repeat(64))).toThrow(/identity mismatch/u)
 
@@ -290,27 +320,98 @@ describe('Issue #23 Delivery Preparation', () => {
       },
     }
 
-    const result = prepare(baseConfig(), { productionWriteAdapter: adapter })
+    const result = prepareFixture(baseConfig(), { productionWriteAdapter: adapter })
 
     expect(adapter.calls).toBe(0)
     expect(result.value.rehearsal.production_write_adapter_calls).toBe(0)
   })
 
-  it('writes only canonical manifest bytes through the formal CLI entry', () => {
+  it('does not trust caller-supplied repository facts', () => {
+    const forged = baseConfig()
+
+    expect(() => prepare(forged, { repositoryPath: repoRoot })).toThrow(
+      /resolved repository identity/u,
+    )
+  })
+
+  it('rejects a dirty production repository even when identities match', () => {
+    const dirty = baseConfig()
+    dirty.repository.commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim()
+    dirty.repository.tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoRoot, encoding: 'utf8' }).trim()
+    dirty.ci.head_sha = dirty.repository.commit
+    dirty.ci.tree = dirty.repository.tree
+
+    expect(() => prepare(dirty, {
+      repositoryPath: repoRoot,
+      ciResolver: (_path, source, repository) => ({ ...source.ci, run_id: 1, attempt: 1, event: 'pull_request', head_sha: repository.commit, tree: repository.tree, conclusion: 'success' }),
+      rehearsalRunner: () => ({ runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node }, network: 'disabled', status: 'PASS', receipt_sha256: hash('a'), production_write_adapter_calls: 0 }),
+    })).toThrow(/valid Git commit\/tree/u)
+  })
+
+  it('invokes the disposable no-network rehearsal seam', () => {
+    let invocations = 0
+
+    const adapter = { calls: 0 }
+    prepareFixture(baseConfig(), {
+      repositoryPath: repoRoot,
+      productionWriteAdapter: adapter,
+      rehearsalRunner: () => {
+        invocations += 1
+        return {
+          runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
+          network: 'disabled',
+          status: 'PASS',
+          receipt_sha256: hash('a'),
+          production_write_adapter_calls: 0,
+        }
+      },
+    })
+
+    expect(invocations).toBe(1)
+    expect(adapter.calls).toBe(0)
+  })
+
+  it('writes only canonical manifest bytes through the formal CLI entry', { timeout: 120_000 }, () => {
     const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-prepare-'))
     const configPath = join(directory, 'prepare-config.json')
-    const expected = prepare(baseConfig())
-    writeFileSync(configPath, JSON.stringify(baseConfig(), null, 2))
+    const fixtureRepo = join(directory, 'repo')
+    execFileSync('git', ['clone', '--local', repoRoot, fixtureRepo])
+    execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/nardinmarcus/blogman.git'], { cwd: fixtureRepo })
+    copyFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-prepare.mjs'), join(fixtureRepo, 'scripts', 'issue-23-delivery-prepare.mjs'))
+    copyFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-entry.mjs'), join(fixtureRepo, 'scripts', 'issue-23-delivery-entry.mjs'))
+    copyFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-rehearsal.mjs'), join(fixtureRepo, 'scripts', 'issue-23-delivery-rehearsal.mjs'))
+    symlinkSync(join(repoRoot, 'node_modules'), join(fixtureRepo, 'node_modules'))
+    execFileSync('git', ['add', 'scripts/issue-23-delivery-prepare.mjs', 'scripts/issue-23-delivery-entry.mjs', 'scripts/issue-23-delivery-rehearsal.mjs'], { cwd: fixtureRepo })
+    execFileSync('git', ['commit', '-m', 'test fixture'], { cwd: fixtureRepo, env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' } })
+    const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: fixtureRepo, encoding: 'utf8' }).trim()
+    const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: fixtureRepo, encoding: 'utf8' }).trim()
+    const expectedConfig = baseConfig()
+    expectedConfig.repository.commit = commit
+    expectedConfig.repository.tree = tree
+    expectedConfig.ci.head_sha = commit
+    expectedConfig.ci.tree = tree
+    const expected = prepare(expectedConfig, {
+      repositoryPath: fixtureRepo,
+      ciResolver: (_path, source, repository) => ({ ...source.ci, run_id: 1, attempt: 1, event: 'pull_request', head_sha: repository.commit, tree: repository.tree, conclusion: 'success' }),
+    })
+    const config = expectedConfig
+    writeFileSync(configPath, JSON.stringify(config, null, 2))
+    const fakeBin = join(directory, 'bin')
+    mkdirSync(fakeBin)
+    const fakeGh = join(fakeBin, 'gh')
+    writeFileSync(fakeGh, '#!/bin/sh\nprintf \'[{"databaseId":1,"headSha":"%s","status":"completed","conclusion":"success","event":"pull_request","attempt":1}]\n\' "$BLOGMAN_TEST_HEAD"\n')
+    chmodSync(fakeGh, 0o755)
 
     try {
-      const result = spawnSync(process.execPath, [cliPath, '--config', configPath], {
-        cwd: repoRoot,
+      const result = spawnSync(process.execPath, [join(fixtureRepo, 'scripts', 'issue-23-delivery-prepare.mjs'), '--config', configPath], {
+        cwd: fixtureRepo,
+        env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, BLOGMAN_TEST_HEAD: commit },
         encoding: 'buffer',
       })
 
       expect(result.status, result.stderr.toString('utf8')).toBe(0)
       expect(result.stderr.toString('utf8')).toBe('')
-      expect(result.stdout).toEqual(expected.bytes)
+      expect(result.stdout, JSON.stringify({ status: result.status, stdoutLength: result.stdout.length, stderr: result.stderr.toString('utf8') })).toEqual(expected.bytes)
     } finally {
       rmSync(directory, { recursive: true, force: true })
     }

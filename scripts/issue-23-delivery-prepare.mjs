@@ -1,13 +1,16 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { readFileSync, realpathSync, statSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { runLocalRehearsal } from './issue-23-delivery-rehearsal.mjs'
 
 const MANIFEST_SCHEMA_URL = new URL(
   '../schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
   import.meta.url,
 )
 const MANIFEST_SCHEMA = JSON.parse(readFileSync(MANIFEST_SCHEMA_URL, 'utf8'))
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 export const CANONICAL_MANIFEST_FORMAT = 'blogman-issue-23-canonical-frozen-manifest/v1'
 
@@ -143,6 +146,170 @@ function orderBySchema(value, schema) {
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
+}
+
+function command(repositoryPath, name, args) {
+  try {
+    return execFileSync(name, args, { cwd: repositoryPath, encoding: 'utf8' }).trim()
+  } catch (error) {
+    fail(`could not resolve ${name}: ${error.message}`)
+  }
+}
+
+function resolveFile(repositoryPath, path, label, includeBytes = false) {
+  const absolute = resolve(repositoryPath, path)
+  if (!absolute.startsWith(`${resolve(repositoryPath)}/`)) fail(`${label} escapes repository`)
+  let bytes
+  try {
+    bytes = readFileSync(absolute)
+  } catch (error) {
+    fail(`${label} could not be resolved: ${error.message}`)
+  }
+  return includeBytes
+    ? { path, sha256: sha256(bytes), bytes: statSync(absolute).size }
+    : { path, sha256: sha256(bytes) }
+}
+
+function resolveRepositoryFacts(repositoryPath) {
+  const commit = command(repositoryPath, 'git', ['rev-parse', 'HEAD'])
+  const tree = command(repositoryPath, 'git', ['rev-parse', 'HEAD^{tree}'])
+  const status = command(repositoryPath, 'git', ['status', '--porcelain'])
+  const remote = command(repositoryPath, 'git', ['remote', 'get-url', 'origin'])
+  if (!/^[a-f0-9]{40}$/u.test(commit) || !/^[a-f0-9]{40}$/u.test(tree) || status !== '') {
+    fail('resolved repository identity is not a valid Git commit/tree')
+  }
+  if (remote !== 'https://github.com/nardinmarcus/blogman.git') {
+    fail('resolved repository remote is not canonical')
+  }
+  return { commit, tree, clean: true }
+}
+
+function resolveCiFacts(repositoryPath, config, repository) {
+  const rows = JSON.parse(command(repositoryPath, 'gh', [
+    'run', 'list', '--repo', 'nardinmarcus/blogman', '--workflow', config.ci.workflow,
+    '--commit', repository.commit, '--json',
+    'databaseId,headSha,status,conclusion,event,attempt', '--limit', '20',
+  ]))
+  const run = rows.find((candidate) => (
+    candidate.headSha === repository.commit
+      && candidate.status === 'completed'
+      && candidate.conclusion === 'success'
+  ))
+  if (!run) fail('resolved CI identity has no successful exact-head run')
+  return {
+    ...config.ci,
+    run_id: run.databaseId,
+    attempt: run.attempt,
+    event: run.event,
+    head_sha: repository.commit,
+    tree: repository.tree,
+    conclusion: run.conclusion,
+  }
+}
+
+function resolveTargetFacts(target) {
+  if (!isRecord(target) || !isRecord(target.baseline)
+    || target.baseline.d1_database_id !== target.d1_database_id
+    || target.baseline.traffic?.length !== 1
+    || target.baseline.traffic[0]?.version_id !== target.baseline.version_id
+    || target.baseline.traffic[0]?.percentage !== 100) {
+    fail('resolved target facts are incomplete or inconsistent')
+  }
+  return structuredClone(target)
+}
+
+function resolveFacts(config, {
+  repositoryPath = REPO_ROOT,
+  ciResolver = resolveCiFacts,
+  rehearsalRunner = runLocalRehearsal,
+  targetResolver = resolveTargetFacts,
+  repositoryResolver = resolveRepositoryFacts,
+  productionWriteAdapter,
+} = {}) {
+  const repository = repositoryResolver(repositoryPath)
+  if (config.repository.commit !== repository.commit || config.repository.tree !== repository.tree) {
+    fail('caller-supplied repository identity does not match the resolved repository identity')
+  }
+  const preparation = {
+    ...config.preparation,
+    prepare_entry: resolveFile(repositoryPath, config.preparation.prepare_entry.path, 'prepare entry'),
+    execute_entry: resolveFile(repositoryPath, config.preparation.execute_entry.path, 'execute entry'),
+    manifest_schema: resolveFile(repositoryPath, config.preparation.manifest_schema.path, 'manifest schema'),
+  }
+  const ci = ciResolver(repositoryPath, config, repository)
+  const npmVersion = command(repositoryPath, process.execPath, ['--version']).replace(/^v/u, '')
+  const wranglerVersion = command(repositoryPath, join(repositoryPath, 'node_modules', '.bin', 'wrangler'), ['--version'])
+    .match(/([0-9]+\.[0-9]+\.[0-9]+)/u)?.[1]
+  if (!wranglerVersion) fail('resolved Wrangler version is invalid')
+  const packageJson = JSON.parse(readFileSync(join(repositoryPath, 'package.json'), 'utf8'))
+  const openNextVersion = packageJson.dependencies?.['@opennextjs/cloudflare']?.replace(/^\^/u, '')
+  if (!openNextVersion) fail('resolved OpenNext version is missing')
+  const toolchain = {
+    ...config.toolchain,
+    node: { version: process.versions.node, identity_sha256: sha256(readFileSync(process.execPath)) },
+    npm: { version: npmVersion, identity_sha256: sha256(Buffer.from(npmVersion)) },
+    wrangler: { version: wranglerVersion, identity_sha256: sha256(Buffer.from(wranglerVersion)) },
+    opennextjs_cloudflare: { version: openNextVersion, identity_sha256: sha256(Buffer.from(openNextVersion)) },
+    package_json_sha256: sha256(readFileSync(join(repositoryPath, 'package.json'))),
+    lockfile_sha256: sha256(readFileSync(join(repositoryPath, 'package-lock.json'))),
+  }
+  const artifact = {
+    ...config.artifact,
+    archive: resolveFile(repositoryPath, config.artifact.archive.path, 'artifact archive', true),
+    worker: resolveFile(repositoryPath, config.artifact.worker.path, 'worker artifact', true),
+    file_tree: {
+      ...config.artifact.file_tree,
+      files: config.artifact.file_tree.files.map((file) => resolveFile(repositoryPath, file.path, 'artifact file', true))
+        .sort((left, right) => left.path.localeCompare(right.path)),
+    },
+  }
+  const migration = {
+    ...config.migration,
+    reset_sql: resolveFile(repositoryPath, config.migration.reset_sql.path, 'reset SQL'),
+    runner: resolveFile(repositoryPath, config.migration.runner.path, 'migration runner'),
+    catalog: {
+      ...config.migration.catalog,
+      migrations: config.migration.catalog.migrations.map((entry) => ({
+        ...entry,
+        ...resolveFile(repositoryPath, entry.path, `migration ${entry.id}`),
+      })),
+    },
+  }
+  const catalogBytes = Buffer.from(command(repositoryPath, process.execPath, [
+    join(repositoryPath, 'scripts', 'migrations.mjs'), 'catalog',
+  ]))
+  const resolvedCatalog = JSON.parse(catalogBytes.toString('utf8'))
+  const configuredIds = config.migration.catalog.migrations.map((entry) => entry.id)
+  const resolvedIds = resolvedCatalog.migrations.map((entry) => String(entry.number).padStart(3, '0'))
+  if (JSON.stringify(configuredIds) !== JSON.stringify(resolvedIds)) {
+    fail('resolved migration catalog does not match the configured migration set')
+  }
+  migration.catalog = {
+    ...migration.catalog,
+    sha256: sha256(catalogBytes),
+    migrations: migration.catalog.migrations.map((entry, index) => ({
+      ...entry,
+      id: resolvedIds[index],
+    })),
+  }
+  const target = targetResolver(config.target)
+  const resolved = {
+    ...config,
+    preparation,
+    repository: { ...config.repository, ...repository },
+    ci,
+    toolchain,
+    artifact: { ...artifact, file_tree: { ...artifact.file_tree, sha256: sha256(Buffer.from(JSON.stringify(artifact.file_tree.files))) } },
+    migration,
+    target,
+  }
+  delete resolved.rehearsal
+  const manifestDraftSha256 = sha256(Buffer.from(JSON.stringify(resolved)))
+  const rehearsal = rehearsalRunner({ repositoryPath, manifestDraftSha256, productionWriteAdapter })
+  if (rehearsal.production_write_adapter_calls !== 0) {
+    fail('rehearsal observed a production-write adapter call')
+  }
+  return { ...resolved, target, rehearsal }
 }
 
 function jsonEqual(left, right) {
@@ -390,9 +557,12 @@ function validateConfig(config) {
   return orderBySchema(manifest, MANIFEST_SCHEMA)
 }
 
-export function prepare(config, { productionWriteAdapter } = {}) {
+export function prepare(config, options = {}) {
+  const { productionWriteAdapter } = options
   const callsBefore = readProductionWriteCallCount(productionWriteAdapter)
-  const value = validateConfig(config)
+  validateSchemaValue(config, CONFIG_SCHEMA, '$.config')
+  const resolvedConfig = resolveFacts(config, options)
+  const value = validateConfig(resolvedConfig)
   const bytes = canonicalBytes(value)
   const callsAfter = readProductionWriteCallCount(productionWriteAdapter)
   if (callsBefore !== undefined && callsAfter !== callsBefore) {
@@ -415,11 +585,11 @@ function runCli(argv) {
   if (configIndex === -1 || !argv[configIndex + 1]) {
     throw new Error('Usage: node scripts/issue-23-delivery-prepare.mjs --config <path>')
   }
-  const result = prepare(readConfig(argv[configIndex + 1]))
+  const result = prepare(readConfig(argv[configIndex + 1]), { repositoryPath: REPO_ROOT })
   process.stdout.write(result.bytes)
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url))) {
   try {
     runCli(process.argv.slice(2))
   } catch (error) {
