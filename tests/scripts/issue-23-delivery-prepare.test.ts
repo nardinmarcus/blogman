@@ -163,6 +163,16 @@ function sha256(bytes: Buffer) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
+function withMacosRuntime<T>(callback: () => T): T {
+  const originalPlatform = process.platform
+  Object.defineProperty(process, 'platform', { value: 'darwin' })
+  try {
+    return callback()
+  } finally {
+    Object.defineProperty(process, 'platform', { value: originalPlatform })
+  }
+}
+
 function prepareFixture(config: ReturnType<typeof baseConfig>, options: Record<string, unknown> = {}) {
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim()
   const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoRoot, encoding: 'utf8' }).trim()
@@ -426,27 +436,40 @@ describe('Issue #23 Delivery Preparation', () => {
     expectedConfig.repository.tree = tree
     expectedConfig.ci.head_sha = commit
     expectedConfig.ci.tree = tree
-    const expected = prepare(expectedConfig, {
+    const expected = withMacosRuntime(() => prepare(expectedConfig, {
       repositoryPath: fixtureRepo,
       ciResolver: (_path, source, repository) => ({ ...source.ci, run_id: 1, attempt: 1, event: 'pull_request', head_sha: repository.commit, tree: repository.tree, conclusion: 'success' }),
-    })
+    }))
     const config = expectedConfig
     writeFileSync(configPath, JSON.stringify(config, null, 2))
     const fakeBin = join(directory, 'bin')
     mkdirSync(fakeBin)
     const fakeGh = join(fakeBin, 'gh')
+    const runtimeShim = join(directory, 'formal-cli-macos.cjs')
+    writeFileSync(runtimeShim, "if (process.argv[1]?.endsWith('issue-23-delivery-prepare.mjs')) Object.defineProperty(process, 'platform', { value: 'darwin' })\n")
     writeFileSync(fakeGh, '#!/bin/sh\nprintf \'[{"databaseId":1,"headSha":"%s","status":"completed","conclusion":"success","event":"pull_request","attempt":1}]\n\' "$BLOGMAN_TEST_HEAD"\n')
     chmodSync(fakeGh, 0o755)
 
     try {
       const result = spawnSync(process.execPath, [join(fixtureRepo, 'scripts', 'issue-23-delivery-prepare.mjs'), '--config', configPath], {
         cwd: fixtureRepo,
-        env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, BLOGMAN_TEST_HEAD: commit },
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH}`,
+          NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${runtimeShim}`.trim(),
+          BLOGMAN_TEST_HEAD: commit,
+        },
         encoding: 'buffer',
       })
 
       expect(result.status, result.stderr.toString('utf8')).toBe(0)
       expect(result.stderr.toString('utf8')).toBe('')
+      expect(JSON.parse(result.stdout.toString('utf8')).rehearsal).toMatchObject({
+        runtime: { os: 'macos' },
+        network: 'disabled',
+        status: 'PASS',
+        production_write_adapter_calls: 0,
+      })
       expect(result.stdout, JSON.stringify({ status: result.status, stdoutLength: result.stdout.length, stderr: result.stderr.toString('utf8') })).toEqual(expected.bytes)
     } finally {
       rmSync(directory, { recursive: true, force: true })
