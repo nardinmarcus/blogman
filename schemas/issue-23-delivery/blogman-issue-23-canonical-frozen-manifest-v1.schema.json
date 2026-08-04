@@ -1,0 +1,635 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blogman.local/schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json",
+  "title": "Blogman Issue #23 Canonical Frozen Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "preparation",
+    "repository",
+    "ci",
+    "toolchain",
+    "artifact",
+    "migration",
+    "target",
+    "policy",
+    "rehearsal"
+  ],
+  "properties": {
+    "format": {
+      "const": "blogman-issue-23-canonical-frozen-manifest/v1"
+    },
+    "preparation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prepare_entry", "execute_entry", "manifest_schema"],
+      "properties": {
+        "prepare_entry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "execute_entry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "manifest_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical", "remote", "commit", "tree", "clean"],
+      "properties": {
+        "canonical": {
+          "const": "nardinmarcus/blogman"
+        },
+        "remote": {
+          "const": "https://github.com/nardinmarcus/blogman.git"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "tree": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "clean": {
+          "const": true
+        }
+      }
+    },
+    "ci": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "workflow",
+        "run_id",
+        "attempt",
+        "event",
+        "head_sha",
+        "tree",
+        "conclusion"
+      ],
+      "properties": {
+        "provider": {
+          "const": "github-actions"
+        },
+        "workflow": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+        },
+        "run_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "attempt": {
+          "const": 1
+        },
+        "event": {
+          "enum": ["push", "pull_request"]
+        },
+        "head_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "tree": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "conclusion": {
+          "const": "success"
+        }
+      }
+    },
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "npm",
+        "wrangler",
+        "opennextjs_cloudflare",
+        "package_json_sha256",
+        "lockfile_sha256"
+      ],
+      "properties": {
+        "node": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "identity_sha256"],
+          "properties": {
+            "version": {
+              "type": "string",
+              "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}(?:[-+][A-Za-z0-9._-]+)?$"
+            },
+            "identity_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "npm": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "identity_sha256"],
+          "properties": {
+            "version": {
+              "type": "string",
+              "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}(?:[-+][A-Za-z0-9._-]+)?$"
+            },
+            "identity_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "wrangler": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "identity_sha256"],
+          "properties": {
+            "version": {
+              "type": "string",
+              "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}(?:[-+][A-Za-z0-9._-]+)?$"
+            },
+            "identity_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "opennextjs_cloudflare": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "identity_sha256"],
+          "properties": {
+            "version": {
+              "type": "string",
+              "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}(?:[-+][A-Za-z0-9._-]+)?$"
+            },
+            "identity_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "package_json_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "lockfile_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["archive", "worker", "file_tree"],
+      "properties": {
+        "archive": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "bytes"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "bytes": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "worker": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "bytes"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "bytes": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "file_tree": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "complete", "files"],
+          "properties": {
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "complete": {
+              "const": true
+            },
+            "files": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "sha256", "bytes"],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "bytes": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "delivery_mode",
+        "reset_sql",
+        "runner",
+        "catalog",
+        "historical_data_disposition"
+      ],
+      "properties": {
+        "delivery_mode": {
+          "const": "clean-start"
+        },
+        "reset_sql": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "runner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "catalog": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "migrations"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "migrations": {
+              "type": "array",
+              "minItems": 6,
+              "maxItems": 6,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "path", "sha256"],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^00[1-6]$"
+                  },
+                  "path": {
+                    "type": "string",
+                    "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "historical_data_disposition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["production_export", "double_restore", "historical_baseline_queries"],
+          "properties": {
+            "production_export": {
+              "const": "NOT_APPLICABLE"
+            },
+            "double_restore": {
+              "const": "NOT_APPLICABLE"
+            },
+            "historical_baseline_queries": {
+              "const": "NOT_APPLICABLE"
+            }
+          }
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "d1_database_id", "worker_name", "origin", "baseline"],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "d1_database_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "worker_name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "origin": {
+          "type": "string",
+          "pattern": "^https://[A-Za-z0-9._/-]+$"
+        },
+        "baseline": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["deployment_id", "version_id", "d1_database_id", "traffic"],
+          "properties": {
+            "deployment_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]+$"
+            },
+            "version_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]+$"
+            },
+            "d1_database_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$"
+            },
+            "traffic": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["version_id", "percentage"],
+                "properties": {
+                  "version_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9._-]+$"
+                  },
+                  "percentage": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authorization", "stages", "overall_timeout_seconds", "drift", "evidence"],
+      "properties": {
+        "authorization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["manifest_binding", "one_shot", "credential_slots"],
+          "properties": {
+            "manifest_binding": {
+              "const": "manifest_sha256"
+            },
+            "one_shot": {
+              "const": true
+            },
+            "credential_slots": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "scopes"],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_:-]*$"
+                  },
+                  "scopes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_:-]*$"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "stages": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "timeout_seconds"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]*$"
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        },
+        "overall_timeout_seconds": {
+          "const": 5400
+        },
+        "drift": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["frozen_preconditions", "observations", "mismatch_classification"],
+          "properties": {
+            "frozen_preconditions": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_.-]*$"
+              }
+            },
+            "observations": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_.-]*$"
+              }
+            },
+            "mismatch_classification": {
+              "const": "Manifest Drift"
+            }
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "allowed_hash_algorithm",
+            "excluded",
+            "production_evidence",
+            "local_rehearsal_evidence"
+          ],
+          "properties": {
+            "allowed_hash_algorithm": {
+              "const": "sha256"
+            },
+            "excluded": {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "secret_values",
+                  "raw_private_adapter_output",
+                  "sql_bodies",
+                  "private_operator_paths"
+                ]
+              }
+            },
+            "production_evidence": {
+              "const": "real_adapters_only"
+            },
+            "local_rehearsal_evidence": {
+              "const": "test_only"
+            }
+          }
+        }
+      }
+    },
+    "rehearsal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "network", "status", "receipt_sha256", "production_write_adapter_calls"],
+      "properties": {
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["os", "architecture", "node_version"],
+          "properties": {
+            "os": {
+              "const": "macos"
+            },
+            "architecture": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]+$"
+            },
+            "node_version": {
+              "type": "string",
+              "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}(?:[-+][A-Za-z0-9._-]+)?$"
+            }
+          }
+        },
+        "network": {
+          "const": "disabled"
+        },
+        "status": {
+          "const": "PASS"
+        },
+        "receipt_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "production_write_adapter_calls": {
+          "const": 0
+        }
+      }
+    }
+  }
+}

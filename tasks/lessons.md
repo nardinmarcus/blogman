@@ -1,5 +1,7 @@
 # Lessons
 
+- Canonical manifest tests must distinguish an allowed exclusion label such as `secret_values` from an actual secret value; mutate a non-cross-linked fact when proving identity changes, or clone frozen policy fixtures before testing drift rejection.
+
 - Before invoking a repository verification script, read `package.json` and use an existing script name; this repository has no `typecheck` script.
 - Local Wrangler D1 integration tests routinely exceed Vitest's 5-second default; give the individual test an explicit bounded timeout and treat an earlier timeout as failed evidence, not a product failure or pass.
 - Generated reseal package files are intentionally mode `0400`; mutation tests must explicitly make only their temporary fixture file writable before changing it, rather than weakening production package permissions.
