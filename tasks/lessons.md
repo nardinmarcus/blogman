@@ -1,5 +1,7 @@
 # Lessons
 
+- Canonical identity mutation tests must compare semantic object values with key-order-independent normalization; raw `JSON.stringify` comparisons can reject the exact insertion-order equivalence that the identity invariant is meant to prove.
+- A no-network rehearsal guard must preserve the existing local loopback migration transport; blocking higher-level HTTP wrappers without accounting for Wrangler's local path can turn a valid local rehearsal into a false NON_PASS.
 - Canonical manifest tests must distinguish an allowed exclusion label such as `secret_values` from an actual secret value; mutate a non-cross-linked fact when proving identity changes, or clone frozen policy fixtures before testing drift rejection.
 
 - Before invoking a repository verification script, read `package.json` and use an existing script name; this repository has no `typecheck` script.

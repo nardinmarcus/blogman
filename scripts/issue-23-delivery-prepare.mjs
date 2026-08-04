@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
-import { readFileSync, realpathSync, statSync } from 'node:fs'
-import { dirname, join, resolve, sep } from 'node:path'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, utimesSync } from 'node:fs'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { runLocalRehearsal } from './issue-23-delivery-rehearsal.mjs'
 
 const MANIFEST_SCHEMA_URL = new URL(
@@ -146,16 +146,25 @@ function orderBySchema(value, schema) {
   return value
 }
 
+function canonicalDraftBytes(value) {
+  const ordered = orderBySchema({ format: CANONICAL_MANIFEST_FORMAT, ...value }, MANIFEST_SCHEMA)
+  return Buffer.from(`${JSON.stringify(ordered, null, 2)}\n`, 'utf8')
+}
+
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
-function command(repositoryPath, name, args) {
+function command(repositoryPath, name, args, { cwd = repositoryPath } = {}) {
   try {
-    return execFileSync(name, args, { cwd: repositoryPath, encoding: 'utf8' }).trim()
+    return execFileSync(name, args, { cwd, encoding: 'utf8' }).trim()
   } catch (error) {
     fail(`could not resolve ${name}: ${error.message}`)
   }
+}
+
+function runOpenNextBuild(repositoryPath) {
+  command(repositoryPath, 'npx', ['--no-install', 'opennextjs-cloudflare', 'build'])
 }
 
 function resolveExecutable(repositoryPath, name) {
@@ -194,10 +203,61 @@ function resolveFile(repositoryPath, path, label, includeBytes = false) {
   }
 }
 
-function enumerateArtifactPaths(repositoryPath, configuredFiles) {
-  const paths = command(repositoryPath, 'git', ['ls-tree', '-r', '--name-only', '-z', 'HEAD'])
-    .split('\0')
-    .filter((path) => path.length > 0)
+function enumerateBuildFiles(repositoryPath) {
+  const buildRoot = resolve(repositoryPath, '.open-next')
+  const files = []
+  const visit = (directory, prefix) => {
+    let entries
+    try {
+      entries = readdirSync(directory, { withFileTypes: true })
+    } catch {
+      fail('final OpenNext artifact directory could not be read')
+    }
+    for (const entry of entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))) {
+      const path = prefix ? `${prefix}/${entry.name}` : entry.name
+      const absolute = join(directory, entry.name)
+      if (entry.isDirectory()) {
+        visit(absolute, path)
+      } else if (entry.isFile() || entry.isSymbolicLink()) {
+        files.push(path)
+      } else {
+        fail(`final OpenNext artifact contains unsupported entry ${path}`)
+      }
+    }
+  }
+  try {
+    if (!statSync(buildRoot).isDirectory()) fail('final OpenNext artifact directory is not a directory')
+  } catch {
+    fail('final OpenNext artifact directory is missing')
+  }
+  visit(buildRoot, '')
+  return files.sort()
+}
+
+function createBuildArchive(repositoryPath, archivePath) {
+  const buildRoot = resolve(repositoryPath, '.open-next')
+  const absoluteArchive = resolve(repositoryPath, archivePath)
+  if (dirname(absoluteArchive) !== buildRoot) {
+    fail('artifact archive must be created directly under .open-next')
+  }
+  const archiveName = basename(absoluteArchive)
+  const files = enumerateBuildFiles(repositoryPath).filter((path) => path !== archiveName)
+  if (files.length === 0) fail('final OpenNext artifact is empty')
+  const fixedTime = new Date('1980-01-01T00:00:00.000Z')
+  for (const path of files) {
+    resolveFile(repositoryPath, `.open-next/${path}`, 'final artifact file')
+    utimesSync(join(buildRoot, path), fixedTime, fixedTime)
+  }
+  if (existsSync(absoluteArchive)) unlinkSync(absoluteArchive)
+  command(repositoryPath, 'zip', ['-X', '-q', archiveName, ...files], { cwd: buildRoot })
+}
+
+function enumerateArtifactPaths(repositoryPath, configuredFiles, archivePath) {
+  const archiveAbsolute = resolve(repositoryPath, archivePath)
+  const buildPaths = enumerateBuildFiles(repositoryPath)
+    .filter((path) => join(resolve(repositoryPath, '.open-next'), path) !== archiveAbsolute)
+    .map((path) => `.open-next/${path}`)
+  const paths = [...buildPaths, 'wrangler.toml']
     .filter((path) => ARTIFACT_PATH_PATTERN.test(path))
     .filter((path) => !ARTIFACT_EXCLUDED_PATH_PATTERN.test(path))
     .sort()
@@ -262,6 +322,7 @@ function resolveFacts(config, {
   repositoryPath = REPO_ROOT,
   ciResolver = resolveCiFacts,
   rehearsalRunner = runLocalRehearsal,
+  buildRunner = runOpenNextBuild,
   targetResolver = resolveTargetFacts,
   repositoryResolver = resolveRepositoryFacts,
   productionWriteAdapter,
@@ -299,7 +360,13 @@ function resolveFacts(config, {
     package_json_sha256: sha256(packageJsonBytes),
     lockfile_sha256: sha256(lockfileBytes),
   }
-  const artifactPaths = enumerateArtifactPaths(repositoryPath, config.artifact.file_tree.files)
+  buildRunner(repositoryPath, { artifact: config.artifact, config })
+  createBuildArchive(repositoryPath, config.artifact.archive.path)
+  const artifactPaths = enumerateArtifactPaths(
+    repositoryPath,
+    config.artifact.file_tree.files,
+    config.artifact.archive.path,
+  )
   const artifact = {
     ...config.artifact,
     archive: resolveFile(repositoryPath, config.artifact.archive.path, 'artifact archive', true),
@@ -322,7 +389,7 @@ function resolveFacts(config, {
     },
   }
   const catalogBytes = Buffer.from(command(repositoryPath, process.execPath, [
-    join(repositoryPath, 'scripts', 'migrations.mjs'), 'catalog',
+    resolve(repositoryPath, migration.runner.path), 'catalog',
   ]))
   const resolvedCatalog = JSON.parse(catalogBytes.toString('utf8'))
   const configuredIds = config.migration.catalog.migrations.map((entry) => entry.id)
@@ -350,16 +417,31 @@ function resolveFacts(config, {
     target,
   }
   delete resolved.rehearsal
-  const manifestDraftSha256 = sha256(Buffer.from(JSON.stringify(resolved)))
-  const rehearsal = rehearsalRunner({ repositoryPath, manifestDraftSha256, productionWriteAdapter })
+  const manifestDraftSha256 = sha256(canonicalDraftBytes(resolved))
+  const rehearsal = rehearsalRunner({
+    repositoryPath,
+    manifestDraftSha256,
+    migrationRunnerPath: migration.runner.path,
+    productionWriteAdapter,
+  })
   if (rehearsal.production_write_adapter_calls !== 0) {
     fail('rehearsal observed a production-write adapter call')
   }
   return { ...resolved, target, rehearsal }
 }
 
+function canonicalComparable(value) {
+  if (Array.isArray(value)) return value.map(canonicalComparable)
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, canonicalComparable(value[key])]),
+    )
+  }
+  return value
+}
+
 function jsonEqual(left, right) {
-  return JSON.stringify(left) === JSON.stringify(right)
+  return JSON.stringify(canonicalComparable(left)) === JSON.stringify(canonicalComparable(right))
 }
 
 function assertPublicPath(path, label) {
@@ -614,10 +696,14 @@ export function prepare(config, options = {}) {
   if (callsBefore !== undefined && callsAfter !== callsBefore) {
     fail('production-write adapter was called during read-only preparation')
   }
+  const canonical = Buffer.from(bytes)
+  const identity = sha256(canonical)
   return Object.freeze({
-    value: deepFreeze(JSON.parse(bytes.toString('utf8'))),
-    bytes,
-    sha256: sha256(bytes),
+    value: deepFreeze(JSON.parse(canonical.toString('utf8'))),
+    get bytes() {
+      return Buffer.from(canonical)
+    },
+    sha256: identity,
   })
 }
 

@@ -11,6 +11,7 @@ import {
   parseCanonicalManifest,
   prepare,
 } from '../../scripts/issue-23-delivery-prepare.mjs'
+import { runLocalRehearsal } from '../../scripts/issue-23-delivery-rehearsal.mjs'
 
 const SHA40 = 'a'.repeat(40)
 const SHA40_B = 'b'.repeat(40)
@@ -63,14 +64,15 @@ function baseConfig() {
       lockfile_sha256: hash('e'),
     },
     artifact: {
-      archive: { path: 'scripts/issue-23-delivery-prepare.mjs', sha256: hash('f'), bytes: 123 },
-      worker: { path: 'worker.ts', sha256: hash('a'), bytes: 456 },
+      archive: { path: '.open-next/open-next-build.zip', sha256: hash('f'), bytes: 123 },
+      worker: { path: '.open-next/worker.js', sha256: hash('a'), bytes: 456 },
       file_tree: {
         sha256: hash('b'),
         complete: true,
         files: [
-          { path: 'package.json', sha256: hash('d'), bytes: 789 },
-          { path: 'worker.ts', sha256: hash('c'), bytes: 456 },
+          { path: '.open-next/assets/index.html', sha256: hash('d'), bytes: 789 },
+          { path: '.open-next/worker.js', sha256: hash('c'), bytes: 456 },
+          { path: 'wrangler.toml', sha256: hash('e'), bytes: 456 },
         ],
       },
     },
@@ -185,6 +187,33 @@ function withTemporaryDirectory<T>(prefix: string, callback: (directory: string)
   }
 }
 
+function fixtureBuild(repositoryPath: string, { artifact }: { artifact: ReturnType<typeof baseConfig>['artifact'] }) {
+  const outputRoot = join(repositoryPath, '.open-next')
+  rmSync(outputRoot, { recursive: true, force: true })
+  for (const file of artifact.file_tree.files) {
+    if (file.path === 'wrangler.toml') continue
+    const path = join(repositoryPath, file.path)
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, `fixture artifact: ${file.path}\n`)
+  }
+  const workerPath = join(repositoryPath, artifact.worker.path)
+  mkdirSync(dirname(workerPath), { recursive: true })
+  writeFileSync(workerPath, `fixture worker: ${artifact.worker.path}\n`)
+  writeFileSync(join(outputRoot, 'runtime.js'), 'fixture runtime\n')
+}
+
+function reverseObjectKeys<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(reverseObjectKeys) as T
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .reverse()
+        .map(([key, child]) => [key, reverseObjectKeys(child)]),
+    ) as T
+  }
+  return value
+}
+
 function runBoundedChild(
   executable: string,
   args: string[],
@@ -227,6 +256,7 @@ function prepareFixture(config: ReturnType<typeof baseConfig>, options: Record<s
       receipt_sha256: hash('a'),
       production_write_adapter_calls: 0,
     }),
+    buildRunner: fixtureBuild,
     ...options,
   })
 }
@@ -261,26 +291,104 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(parseCanonicalManifest(result.bytes, result.sha256)).toEqual(result.value)
   })
 
+  it('returns an isolated bytes copy so mutation cannot diverge from its identity', () => {
+    const result = prepareFixture(baseConfig())
+    const originalBytes = Buffer.from(result.bytes)
+    const mutableAccess = result.bytes
+    mutableAccess[0] ^= 1
+
+    expect(result.bytes).toEqual(originalBytes)
+    expect(result.sha256).toBe(sha256(originalBytes))
+    expect(parseCanonicalManifest(result.bytes, result.sha256)).toEqual(result.value)
+  })
+
+  it('binds the configured migration runner to catalog and rehearsal', () => {
+    const runnerPath = 'tests/scripts/.issue-23-configured-runner.mjs'
+    const catalog = {
+      source: 'configured-runner',
+      migrations: [1, 2, 3, 4, 5, 6].map((number) => ({ number })),
+    }
+    writeFileSync(join(repoRoot, runnerPath), `process.stdout.write(${JSON.stringify(JSON.stringify(catalog))})\n`)
+
+    try {
+      const config = baseConfig()
+      config.migration.runner.path = runnerPath
+      let rehearsalRunnerPath = ''
+      const result = prepareFixture(config, {
+        rehearsalRunner: ({ migrationRunnerPath }: { migrationRunnerPath: string }) => {
+          rehearsalRunnerPath = migrationRunnerPath
+          return {
+            runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
+            network: 'disabled',
+            status: 'PASS',
+            receipt_sha256: hash('a'),
+            production_write_adapter_calls: 0,
+          }
+        },
+      })
+
+      expect(result.value.migration.catalog.sha256).toBe(sha256(Buffer.from(JSON.stringify(catalog))))
+      expect(rehearsalRunnerPath).toBe(runnerPath)
+    } finally {
+      rmSync(join(repoRoot, runnerPath), { force: true })
+    }
+  })
+
   it('enumerates the complete public artifact tree independently of caller-listed files', () => {
     const result = prepareFixture(baseConfig())
     const paths = result.value.artifact.file_tree.files.map((file) => file.path)
 
     expect(result.value.artifact.file_tree.complete).toBe(true)
     expect(paths.length).toBeGreaterThan(baseConfig().artifact.file_tree.files.length)
-    expect(paths).toContain('.github/workflows/verify.yml')
+    expect(paths).toContain('.open-next/assets/index.html')
+  })
+
+  it('binds generated deployable bytes and final config bytes, not the committed source tree', () => {
+    const result = prepareFixture(baseConfig())
+    const archiveBytes = readFileSync(join(repoRoot, '.open-next/open-next-build.zip'))
+    const workerBytes = readFileSync(join(repoRoot, '.open-next/worker.js'))
+    const configBytes = readFileSync(join(repoRoot, 'wrangler.toml'))
+    const paths = result.value.artifact.file_tree.files.map((file) => file.path)
+
+    expect(result.value.artifact.worker.path).toBe('.open-next/worker.js')
+    expect(result.value.artifact.worker.sha256).toBe(sha256(workerBytes))
+    expect(result.value.artifact.worker.bytes).toBe(workerBytes.byteLength)
+    expect(result.value.artifact.archive.sha256).toBe(sha256(archiveBytes))
+    expect(result.value.artifact.archive.bytes).toBe(archiveBytes.byteLength)
+    expect(paths).toContain('wrangler.toml')
+    expect(result.value.artifact.file_tree.files.find((file) => file.path === 'wrangler.toml'))
+      .toMatchObject({ sha256: sha256(configBytes), bytes: configBytes.byteLength })
+    expect(paths).not.toContain('package.json')
   })
 
   it('is repeatable and changes identity for meaningful input changes', () => {
     const first = prepareFixture(baseConfig())
     const second = prepareFixture(baseConfig())
     const changed = baseConfig()
-    changed.artifact.worker.path = 'scripts/issue-23-delivery-prepare.mjs'
+    changed.artifact.worker.path = '.open-next/worker-alt.js'
     const changedResult = prepareFixture(changed)
 
     expect(second.bytes).toEqual(first.bytes)
     expect(second.sha256).toBe(first.sha256)
     expect(changedResult.bytes).not.toEqual(first.bytes)
     expect(changedResult.sha256).not.toBe(first.sha256)
+  })
+
+  it('derives draft and receipt identity from schema-ordered bytes, not key insertion order', () => {
+    const receiptRunner = ({ manifestDraftSha256 }: { manifestDraftSha256: string }) => ({
+      runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
+      network: 'disabled',
+      status: 'PASS',
+      receipt_sha256: manifestDraftSha256,
+      production_write_adapter_calls: 0,
+    })
+    const first = prepareFixture(baseConfig(), { rehearsalRunner: receiptRunner })
+    const reordered = reverseObjectKeys(baseConfig())
+    const second = prepareFixture(reordered, { rehearsalRunner: receiptRunner })
+
+    expect(second.bytes).toEqual(first.bytes)
+    expect(second.sha256).toBe(first.sha256)
+    expect(second.value.rehearsal.receipt_sha256).toBe(first.value.rehearsal.receipt_sha256)
   })
 
   it('freezes the Issue #23 stage order and timeout policy', () => {
@@ -488,18 +596,22 @@ describe('Issue #23 Delivery Preparation', () => {
       const expected = withTargetMacosRuntime(() => prepare(expectedConfig, {
         repositoryPath: fixtureRepo,
         ciResolver: (_path, source, repository) => ({ ...source.ci, run_id: 1, attempt: 1, event: 'pull_request', head_sha: repository.commit, tree: repository.tree, conclusion: 'success' }),
+        buildRunner: fixtureBuild,
       }))
       const config = expectedConfig
       writeFileSync(configPath, JSON.stringify(config, null, 2))
       const fakeBin = join(directory, 'bin')
       mkdirSync(fakeBin)
       const fakeGh = join(fakeBin, 'gh')
+      const fakeNpx = join(fakeBin, 'npx')
       const runtimeShim = join(directory, 'formal-cli-macos.cjs')
       if (process.platform !== 'darwin') {
         writeFileSync(runtimeShim, "if (process.argv[1]?.endsWith('issue-23-delivery-prepare.mjs')) Object.defineProperty(process, 'platform', { value: 'darwin' })\n")
       }
       writeFileSync(fakeGh, '#!/bin/sh\nprintf \'[{"databaseId":1,"headSha":"%s","status":"completed","conclusion":"success","event":"pull_request","attempt":1}]\n\' "$BLOGMAN_TEST_HEAD"\n')
       chmodSync(fakeGh, 0o755)
+      writeFileSync(fakeNpx, '#!/bin/sh\nmkdir -p .open-next/assets\nprintf \'%s\\n\' \'fixture artifact: .open-next/assets/index.html\' > .open-next/assets/index.html\nprintf \'%s\\n\' \'fixture worker: .open-next/worker.js\' > .open-next/worker.js\nprintf \'%s\\n\' \'fixture runtime\' > .open-next/runtime.js\n')
+      chmodSync(fakeNpx, 0o755)
 
       const childEnv = {
         ...process.env,
@@ -548,5 +660,60 @@ describe('Issue #23 Delivery Preparation', () => {
       expect(result.signal).toBe('SIGTERM')
     })
     expect(existsSync(directory)).toBe(false)
+  })
+
+  it('cleans a descendant on rehearsal timeout and blocks its network attempt', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-88-descendant-'))
+    const runnerPath = 'tests/scripts/.issue-23-descendant-runner.mjs'
+    const probeBase = join(directory, 'probe')
+    const runner = `
+      import { spawn } from 'node:child_process'
+      import { writeFileSync } from 'node:fs'
+      const command = process.argv[2]
+      if (command === 'catalog') {
+        process.stdout.write(JSON.stringify({ migrations: [1, 2, 3, 4, 5, 6].map((number) => ({ number })) }))
+      } else if (command === 'apply') {
+        const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+        writeFileSync(process.env.BLOGMAN_ISSUE_88_PROBE_PID, String(child.pid))
+        try {
+          await fetch('https://example.com')
+        } catch {
+          writeFileSync(process.env.BLOGMAN_ISSUE_88_PROBE_NETWORK, 'blocked')
+        }
+        setTimeout(() => {}, 60_000)
+      } else {
+        process.stdout.write(JSON.stringify({ state: 'current' }))
+      }
+    `
+    writeFileSync(join(repoRoot, runnerPath), runner)
+    const adapter = { calls: 0 }
+
+    try {
+      expect(() => runLocalRehearsal({
+        repositoryPath: repoRoot,
+        runnerPath,
+        manifestDraftSha256: hash('a'),
+        productionWriteAdapter: adapter,
+        childTimeoutMs: 100,
+        environment: {
+          BLOGMAN_ISSUE_88_PROBE_PID: `${probeBase}.pid`,
+          BLOGMAN_ISSUE_88_PROBE_NETWORK: `${probeBase}.network`,
+        },
+      })).toThrow()
+
+      const descendantPid = Number(readFileSync(`${probeBase}.pid`, 'utf8'))
+      let descendantExists = true
+      try {
+        process.kill(descendantPid, 0)
+      } catch {
+        descendantExists = false
+      }
+      expect(descendantExists).toBe(false)
+      expect(readFileSync(`${probeBase}.network`, 'utf8')).toBe('blocked')
+      expect(adapter.calls).toBe(0)
+    } finally {
+      rmSync(join(repoRoot, runnerPath), { force: true })
+      rmSync(directory, { recursive: true, force: true })
+    }
   })
 })
