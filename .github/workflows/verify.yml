@@ -57,7 +57,7 @@ jobs:
       - name: Assert target runtime
         run: test "$(node -p 'process.platform')" = "darwin"
 
-      - name: Run formal prepare and no-network rehearsal
+      - name: Run formal prepare, real OpenNext artifact, and no-network rehearsal
         env:
           CI: true
           NEXT_TELEMETRY_DISABLED: '1'

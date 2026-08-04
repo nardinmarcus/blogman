@@ -44,6 +44,26 @@ describe('Issue #23 pure local entry seam', () => {
       .toThrow(/did not complete successfully/u)
     expect(() => parseLocalCommandResult({ status: 0, stdout: 'not-json', stderr: '' }, 'apply'))
       .toThrow(/did not return JSON/u)
+    expect(() => parseLocalCommandResult({
+      status: 0,
+      stdout: JSON.stringify({
+        format: 'blogman-issue-23-supervisor/v1',
+        status: 'timed_out',
+        stdout: '',
+        stderr: '',
+      }),
+      stderr: '',
+    }, 'apply')).toThrow(/timed out/u)
+    expect(() => parseLocalCommandResult({
+      status: 0,
+      stdout: JSON.stringify({
+        format: 'blogman-issue-23-supervisor/v1',
+        status: 'output_overflow',
+        stdout: '',
+        stderr: '',
+      }),
+      stderr: '',
+    }, 'catalog')).toThrow(/output exceeded/u)
   })
 
   it('binds receipt identity to draft, commands, outputs, adapters, and cleanup', () => {
@@ -56,7 +76,8 @@ describe('Issue #23 pure local entry seam', () => {
       ],
       runtime: { os: 'macos', architecture: 'arm64', node_version: '22.14.0' },
       network: 'disabled',
-      disposableState: { identity: 'b'.repeat(64), created: true, cleaned: true },
+      disposableState: { identity: 'b'.repeat(64), created: true, cleaned: true, observed_absent: true },
+      networkEvidence: { boundary: 'node-guard-only', external_probe: 'blocked' },
       adapterOutputs: [{ name: 'production-write', calls: 0 }],
     }
     const first = buildLocalEntryReceipt({ manifestDraftSha256: draft, ...input })
@@ -65,6 +86,18 @@ describe('Issue #23 pure local entry seam', () => {
     expect(first.sha256).not.toBe(changed.sha256)
     expect(first.value.manifest_draft_sha256).toBe(draft)
     expect(first.value.disposable_state.cleaned).toBe(true)
+  })
+
+  it('rejects cleanup claims without a post-cleanup absence observation', () => {
+    expect(() => buildLocalEntryReceipt({
+      manifestDraftSha256: draft,
+      commands: [],
+      outputs: [],
+      runtime: { os: 'macos', architecture: 'arm64', node_version: '22.14.0' },
+      network: 'disabled',
+      networkEvidence: { boundary: 'node-guard-only', external_probe: 'blocked' },
+      disposableState: { identity: 'b'.repeat(64), created: true, cleaned: true, observed_absent: false },
+    })).toThrow(/evidence is incomplete/u)
   })
 
   it('fails closed when network or disposable cleanup proof is absent', () => {

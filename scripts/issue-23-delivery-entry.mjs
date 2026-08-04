@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 
 export const LOCAL_ENTRY_FORMAT = 'blogman-issue-23-local-entry/v1'
+export const LOCAL_SUPERVISOR_FORMAT = 'blogman-issue-23-supervisor/v1'
 
 function fail(message) {
   throw new Error(`Issue #23 local entry: ${message}`)
@@ -50,14 +51,38 @@ export function buildLocalRehearsalCommands({ runnerPath, configPath, stateToken
 }
 
 export function parseLocalCommandResult(result, name) {
-  if (!result || result.status !== 0 || typeof result.stdout !== 'string' || result.stderr !== '') {
+  if (result?.error?.code === 'ETIMEDOUT') {
+    fail(`${name} command timed out`)
+  }
+  if (!result || typeof result.stdout !== 'string' || result.stderr !== '') {
     fail(`${name} command did not complete successfully`)
   }
+  if (result.status !== 0 || result.signal) {
+    fail(`${name} command did not complete successfully`)
+  }
+  let parsed
   try {
-    return JSON.parse(result.stdout)
+    parsed = JSON.parse(result.stdout)
   } catch {
     fail(`${name} command did not return JSON`)
   }
+  if (parsed?.format === LOCAL_SUPERVISOR_FORMAT) {
+    if (parsed.status === 'timed_out') fail(`${name} command timed out`)
+    if (parsed.status === 'output_overflow') fail(`${name} command output exceeded the bounded limit`)
+    if (parsed.status === 'residual_process_group') fail(`${name} command left a residual process group`)
+    if (parsed.status !== 'completed' || parsed.residual_process_group !== false) {
+      fail(`${name} command did not complete successfully`)
+    }
+    if (typeof parsed.stdout !== 'string' || parsed.stderr !== '') {
+      fail(`${name} command did not complete successfully`)
+    }
+    try {
+      return JSON.parse(parsed.stdout)
+    } catch {
+      fail(`${name} command did not return JSON`)
+    }
+  }
+  return parsed
 }
 
 export function buildLocalEntryReceipt({
@@ -66,6 +91,7 @@ export function buildLocalEntryReceipt({
   outputs,
   runtime,
   network,
+  networkEvidence,
   disposableState,
   adapterOutputs,
 }) {
@@ -73,7 +99,12 @@ export function buildLocalEntryReceipt({
   if (!Array.isArray(commands) || !Array.isArray(outputs) || commands.length !== outputs.length) {
     fail('command and output identities must have equal lengths')
   }
-  if (!runtime || network !== 'disabled' || !disposableState?.created || !disposableState?.cleaned) {
+  if (!runtime || network !== 'disabled'
+    || !['macos-sandbox-exec-loopback', 'node-guard-only'].includes(networkEvidence?.boundary)
+    || networkEvidence.external_probe !== 'blocked'
+    || !disposableState?.created
+    || !disposableState?.cleaned
+    || !disposableState?.observed_absent) {
     fail('runtime, network, and disposable-state evidence is incomplete')
   }
   const commandInputs = commands.map(({ name, args }) => ({ name, args }))
@@ -89,6 +120,7 @@ export function buildLocalEntryReceipt({
     adapter_output_identities: adapterOutputs ?? [],
     runtime,
     network,
+    network_evidence: networkEvidence,
     disposable_state: disposableState,
   }
   const bytes = canonicalBytes(receipt)

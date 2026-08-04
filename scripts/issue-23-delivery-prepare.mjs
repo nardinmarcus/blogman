@@ -174,6 +174,15 @@ function resolveExecutable(repositoryPath, name) {
   return executable
 }
 
+function resolveExecutableBytes(path, label) {
+  try {
+    const canonicalPath = realpathSync(path)
+    return { path: canonicalPath, bytes: readFileSync(canonicalPath) }
+  } catch {
+    fail(`could not resolve ${label} executable bytes`)
+  }
+}
+
 function resolveFile(repositoryPath, path, label, includeBytes = false) {
   const lexicalRoot = resolve(repositoryPath)
   const absolute = resolve(lexicalRoot, path)
@@ -343,7 +352,12 @@ function resolveFacts(config, {
   const ci = ciResolver(repositoryPath, config, repository)
   const npmExecutable = resolveExecutable(repositoryPath, 'npm')
   const npmVersion = command(repositoryPath, npmExecutable, ['--version']).replace(/^v/u, '')
-  const wranglerVersion = command(repositoryPath, join(repositoryPath, 'node_modules', '.bin', 'wrangler'), ['--version'])
+  const wranglerExecutable = resolve(repositoryPath, 'node_modules', '.bin', 'wrangler')
+  const openNextExecutable = resolve(repositoryPath, 'node_modules', '.bin', 'opennextjs-cloudflare')
+  const npmExecutableBytes = resolveExecutableBytes(npmExecutable, 'npm')
+  const wranglerExecutableBytes = resolveExecutableBytes(wranglerExecutable, 'Wrangler')
+  const openNextExecutableBytes = resolveExecutableBytes(openNextExecutable, 'OpenNext')
+  const wranglerVersion = command(repositoryPath, wranglerExecutable, ['--version'])
     .match(/([0-9]+\.[0-9]+\.[0-9]+)/u)?.[1]
   if (!wranglerVersion) fail('resolved Wrangler version is invalid')
   const packageJsonBytes = readFileSync(join(repositoryPath, 'package.json'))
@@ -354,9 +368,9 @@ function resolveFacts(config, {
   const toolchain = {
     ...config.toolchain,
     node: { version: process.versions.node, identity_sha256: sha256(readFileSync(process.execPath)) },
-    npm: { version: npmVersion, identity_sha256: sha256(readFileSync(npmExecutable)) },
-    wrangler: { version: wranglerVersion, identity_sha256: sha256(Buffer.from(wranglerVersion)) },
-    opennextjs_cloudflare: { version: openNextVersion, identity_sha256: sha256(Buffer.from(openNextVersion)) },
+    npm: { version: npmVersion, identity_sha256: sha256(npmExecutableBytes.bytes) },
+    wrangler: { version: wranglerVersion, identity_sha256: sha256(wranglerExecutableBytes.bytes) },
+    opennextjs_cloudflare: { version: openNextVersion, identity_sha256: sha256(openNextExecutableBytes.bytes) },
     package_json_sha256: sha256(packageJsonBytes),
     lockfile_sha256: sha256(lockfileBytes),
   }

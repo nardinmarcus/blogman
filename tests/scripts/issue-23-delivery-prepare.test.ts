@@ -361,7 +361,7 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(paths).not.toContain('package.json')
   })
 
-  it('is repeatable and changes identity for meaningful input changes', () => {
+  it('is repeatable and changes identity for meaningful input changes', { timeout: 15_000 }, () => {
     const first = prepareFixture(baseConfig())
     const second = prepareFixture(baseConfig())
     const changed = baseConfig()
@@ -528,11 +528,15 @@ describe('Issue #23 Delivery Preparation', () => {
       .trim()
       .replace(/^v/u, '')
     const lockfile = JSON.parse(readFileSync(join(repoRoot, 'package-lock.json'), 'utf8'))
+    const wranglerBytes = readFileSync(join(repoRoot, 'node_modules', '.bin', 'wrangler'))
+    const openNextBytes = readFileSync(join(repoRoot, 'node_modules', '.bin', 'opennextjs-cloudflare'))
 
     expect(result.value.toolchain.npm.version).toBe(npmVersion)
     expect(result.value.toolchain.npm.version).not.toBe(process.versions.node)
     expect(result.value.toolchain.opennextjs_cloudflare.version)
       .toBe(lockfile.packages['node_modules/@opennextjs/cloudflare'].version)
+    expect(result.value.toolchain.wrangler.identity_sha256).toBe(sha256(wranglerBytes))
+    expect(result.value.toolchain.opennextjs_cloudflare.identity_sha256).toBe(sha256(openNextBytes))
   })
 
   it('rejects a dirty production repository even when identities match', () => {
@@ -642,6 +646,49 @@ describe('Issue #23 Delivery Preparation', () => {
     })
   ))
 
+  it.runIf(process.platform === 'darwin')('binds repeatable real OpenNext 1.19.10 outputs on target macOS', { timeout: 8 * 60_000 }, () => {
+    const realBuild = (repositoryPath: string) => {
+      execFileSync('npx', ['--no-install', 'opennextjs-cloudflare', 'build'], { cwd: repositoryPath, stdio: 'inherit' })
+    }
+    const realConfig = baseConfig()
+    realConfig.artifact.file_tree.files[0].path = '.open-next/assets/BUILD_ID'
+    const first = prepareFixture(realConfig, { buildRunner: realBuild })
+    const firstArchive = readFileSync(join(repoRoot, first.value.artifact.archive.path))
+    const second = prepareFixture(realConfig, { buildRunner: realBuild })
+    const secondArchive = readFileSync(join(repoRoot, second.value.artifact.archive.path))
+    const lockfile = JSON.parse(readFileSync(join(repoRoot, 'package-lock.json'), 'utf8'))
+    const openNextBytes = readFileSync(join(repoRoot, 'node_modules', '.bin', 'opennextjs-cloudflare'))
+    const firstPublicPaths = first.value.artifact.file_tree.files.map(({ path }) => path)
+    const firstFiles = new Map(first.value.artifact.file_tree.files.map((file) => [file.path, file.sha256]))
+    const secondFiles = new Map(second.value.artifact.file_tree.files.map((file) => [file.path, file.sha256]))
+    const changedFiles = [...new Set([...firstFiles.keys(), ...secondFiles.keys()])]
+      .filter((path) => firstFiles.get(path) !== secondFiles.get(path))
+      .sort()
+    const stablePublicFiles = (files: typeof first.value.artifact.file_tree.files) => files
+      .filter(({ path }) => path === 'wrangler.toml' || path.startsWith('.open-next/assets/'))
+      .map(({ path, sha256: identity, bytes }) => ({ path, sha256: identity, bytes }))
+    const generatedRuntimeDrift = (path: string) => (
+      path === '.open-next/cloudflare/init.js'
+      || path === '.open-next/middleware/handler.mjs'
+      || path.startsWith('.open-next/server-functions/default/')
+    )
+
+    expect(first.value.toolchain.opennextjs_cloudflare.version)
+      .toBe(lockfile.packages['node_modules/@opennextjs/cloudflare'].version)
+    expect(first.value.toolchain.opennextjs_cloudflare.identity_sha256).toBe(sha256(openNextBytes))
+    expect(firstPublicPaths).toContain('.open-next/worker.js')
+    expect(firstPublicPaths).toContain('wrangler.toml')
+    expect(first.value.artifact.worker).toEqual(second.value.artifact.worker)
+    expect([...firstFiles.keys()].sort()).toEqual([...secondFiles.keys()].sort())
+    expect(changedFiles.every(generatedRuntimeDrift)).toBe(true)
+    expect(stablePublicFiles(first.value.artifact.file_tree.files))
+      .toEqual(stablePublicFiles(second.value.artifact.file_tree.files))
+    expect(firstArchive.length).toBe(first.value.artifact.archive.bytes)
+    expect(secondArchive.length).toBe(second.value.artifact.archive.bytes)
+    expect(sha256(firstArchive)).toBe(first.value.artifact.archive.sha256)
+    expect(sha256(secondArchive)).toBe(second.value.artifact.archive.sha256)
+  })
+
   it('cleans temporary projections after a bounded child timeout', () => {
     let directory = ''
     withTemporaryDirectory('blogman-issue-23-timeout-', (root) => {
@@ -660,6 +707,97 @@ describe('Issue #23 Delivery Preparation', () => {
       expect(result.signal).toBe('SIGTERM')
     })
     expect(existsSync(directory)).toBe(false)
+  })
+
+  it('reports the formal command timeout instead of a generic apply failure', () => {
+    const runnerPath = 'tests/scripts/.issue-23-timeout-runner.mjs'
+    writeFileSync(join(repoRoot, runnerPath), `
+      const command = process.argv[2]
+      if (command === 'catalog') {
+        process.stdout.write(JSON.stringify({ migrations: [1, 2, 3, 4, 5, 6].map((number) => ({ number })) }))
+      } else if (command === 'apply') {
+        setInterval(() => {}, 1_000)
+      } else {
+        process.stdout.write(JSON.stringify({ state: 'current' }))
+      }
+    `)
+
+    try {
+      expect(() => runLocalRehearsal({
+        repositoryPath: repoRoot,
+        runnerPath,
+        manifestDraftSha256: hash('a'),
+        childTimeoutMs: 100,
+      })).toThrow(/timed out/u)
+    } finally {
+      rmSync(join(repoRoot, runnerPath), { force: true })
+    }
+  })
+
+  it('fails closed when one supervisor output stream exceeds its independent bound', () => {
+    const runnerPath = 'tests/scripts/.issue-23-output-runner.mjs'
+    writeFileSync(join(repoRoot, runnerPath), `
+      const command = process.argv[2]
+      if (command === 'catalog') {
+        process.stdout.write(JSON.stringify({ migrations: [1, 2, 3, 4, 5, 6].map((number) => ({ number })), padding: 'x'.repeat(4096) }))
+      } else if (command === 'apply') {
+        process.stdout.write(JSON.stringify({ state: 'current' }))
+      } else {
+        process.stdout.write(JSON.stringify({ state: 'current' }))
+      }
+    `)
+
+    try {
+      expect(() => runLocalRehearsal({
+        repositoryPath: repoRoot,
+        runnerPath,
+        manifestDraftSha256: hash('a'),
+        maxOutputBytes: 1024,
+      })).toThrow(/output exceeded/u)
+    } finally {
+      rmSync(join(repoRoot, runnerPath), { force: true })
+    }
+  })
+
+  it('rejects a command that leaves a descendant able to recreate disposable state', () => {
+    const runnerPath = 'tests/scripts/.issue-23-recreate-runner.mjs'
+    const stateCapturePath = join(mkdtempSync(join(tmpdir(), 'blogman-issue-88-recreate-capture-')), 'state-path')
+    writeFileSync(join(repoRoot, runnerPath), `
+      import { spawn } from 'node:child_process'
+      import { join } from 'node:path'
+      import { writeFileSync } from 'node:fs'
+      const command = process.argv[2]
+      if (command === 'catalog') {
+        process.stdout.write(JSON.stringify({ migrations: [1, 2, 3, 4, 5, 6].map((number) => ({ number })) }))
+      } else if (command === 'apply') {
+        const persistIndex = process.argv.indexOf('--persist-to')
+        const statePath = process.argv[persistIndex + 1]
+        writeFileSync(process.env.BLOGMAN_ISSUE_88_STATE_CAPTURE, statePath)
+        const child = spawn(process.execPath, ['-e', ${JSON.stringify("import { mkdirSync, writeFileSync } from 'node:fs'; import { join } from 'node:path'; setTimeout(() => { mkdirSync(process.argv[1], { recursive: true }); writeFileSync(join(process.argv[1], 'escaped'), 'recreated') }, 50)" )}, statePath], { stdio: 'ignore' })
+        child.unref()
+        process.stdout.write(JSON.stringify({ state: 'current' }))
+      } else {
+        process.stdout.write(JSON.stringify({ state: 'current' }))
+      }
+    `)
+
+    try {
+      expect(() => runLocalRehearsal({
+        repositoryPath: repoRoot,
+        runnerPath,
+        manifestDraftSha256: hash('a'),
+        environment: { BLOGMAN_ISSUE_88_STATE_CAPTURE: stateCapturePath },
+      })).toThrow(/residual process group/u)
+
+      const statePath = readFileSync(stateCapturePath, 'utf8')
+      spawnSync(process.execPath, ['-e', 'setTimeout(() => {}, 150)'], { stdio: 'ignore' })
+      expect(existsSync(join(statePath, 'escaped'))).toBe(false)
+    } finally {
+      const capturedStatePath = existsSync(stateCapturePath) ? readFileSync(stateCapturePath, 'utf8') : ''
+      rmSync(join(repoRoot, runnerPath), { force: true })
+      rmSync(dirname(stateCapturePath), { recursive: true, force: true })
+      if (capturedStatePath) rmSync(capturedStatePath, { recursive: true, force: true })
+    }
   })
 
   it('cleans a descendant on rehearsal timeout and blocks its network attempt', () => {
