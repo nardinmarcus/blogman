@@ -498,7 +498,11 @@ describe('Issue #23 Delivery Preparation', () => {
         BLOGMAN_BUILD_PREVIEW_MODE_SIGNING_KEY: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
         BLOGMAN_BUILD_PREVIEW_MODE_ENCRYPTION_KEY: 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210',
       })
-      expect(capturedOptions.buildEpochMs).toBe(1785915122000)
+      const expectedBuildEpochMs = Number(execFileSync('git', ['show', '-s', '--format=%ct', 'HEAD'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      }).trim()) * 1000
+      expect(capturedOptions.buildEpochMs).toBe(expectedBuildEpochMs)
     } finally {
       if (previousNodeEnv === undefined) delete process.env.NODE_ENV
       else process.env.NODE_ENV = previousNodeEnv
