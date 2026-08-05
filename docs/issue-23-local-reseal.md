@@ -90,10 +90,10 @@ and v2 bytes remain valid under their original schemas, but current `seal` and
 - an existing build ZIP, worker, and canonical source-tree manifest;
 - local test/build/review gates;
 - the current quick-CI head/tree, terminal result, counts, and raw log SHA;
-- immutable long-runner run `30980976783`, job `92225128585`, accepted head
-  `dd5f9bc13afc0297747756e5ae731d4d29d27a8c`, tree
-  `3fdce4111059f5047213d66be4710b3c4880da41`, 46/46 result, raw log SHA
-  `90801ccabe8e11569b721379531867a6a2220d2498734bcb2ed012039bdcd424`,
+- immutable long-runner run `31048131997`, job `92448630134`, accepted head
+  `712f7d964ca3468727f018d2308f56cf311d9b8c`, tree
+  `6db5e3fd5ef04d1b394177d7418840f4b6eb11b8`, 46/46 result, raw log SHA
+  `a0adee0ca544a33f3f5b8fb9ab16e1f52bfeecbd309da1ea6f15c801eb3f22b3`,
   migration runner source blob `e026c61529c6f96d30f4415a0697ad70a8ba38c4`,
   and the other nine unchanged repository coverage objects;
 - the expected production deployment/version/D1 baseline.
