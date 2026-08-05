@@ -15,6 +15,8 @@ import { runLocalRehearsal } from '../../scripts/issue-23-delivery-rehearsal.mjs
 
 const SHA40 = 'a'.repeat(40)
 const SHA40_B = 'b'.repeat(40)
+const ZERO_ACTIONS_TEST_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+const SERVER_REFERENCE_TEST_PLACEHOLDER = 'process.env.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY'
 const FORMAL_CLI_CHILD_TIMEOUT_MS = 240_000
 const FORMAL_CLI_TEST_TIMEOUT_MS = FORMAL_CLI_CHILD_TIMEOUT_MS + 60_000
 
@@ -187,6 +189,15 @@ function withTemporaryDirectory<T>(prefix: string, callback: (directory: string)
   }
 }
 
+function writeEmptyServerReferenceManifests(repositoryPath: string) {
+  const serverDirectory = join(repositoryPath, '.next', 'server')
+  const jsonManifest = JSON.stringify({ node: {}, edge: {}, encryptionKey: ZERO_ACTIONS_TEST_KEY })
+  const jsManifest = JSON.stringify({ node: {}, edge: {}, encryptionKey: SERVER_REFERENCE_TEST_PLACEHOLDER })
+  mkdirSync(serverDirectory, { recursive: true })
+  writeFileSync(join(serverDirectory, 'server-reference-manifest.json'), jsonManifest)
+  writeFileSync(join(serverDirectory, 'server-reference-manifest.js'), `self.__RSC_SERVER_MANIFEST=${JSON.stringify(jsManifest)}`)
+}
+
 function fixtureBuild(repositoryPath: string, { artifact }: { artifact: ReturnType<typeof baseConfig>['artifact'] }) {
   const outputRoot = join(repositoryPath, '.open-next')
   rmSync(outputRoot, { recursive: true, force: true })
@@ -200,6 +211,7 @@ function fixtureBuild(repositoryPath: string, { artifact }: { artifact: ReturnTy
   mkdirSync(dirname(workerPath), { recursive: true })
   writeFileSync(workerPath, `fixture worker: ${artifact.worker.path}\n`)
   writeFileSync(join(outputRoot, 'runtime.js'), 'fixture runtime\n')
+  writeEmptyServerReferenceManifests(repositoryPath)
 }
 
 function reverseObjectKeys<T>(value: T): T {
@@ -237,6 +249,8 @@ function prepareFixture(config: ReturnType<typeof baseConfig>, options: Record<s
   fixture.repository.tree = tree
   fixture.ci.head_sha = commit
   fixture.ci.tree = tree
+  const fixtureOptions = { ...options }
+  if (!Object.hasOwn(fixtureOptions, 'buildRunner')) fixtureOptions.buildRunner = fixtureBuild
   return prepare(fixture, {
     repositoryPath: repoRoot,
     repositoryResolver: () => ({ commit, tree, clean: true }),
@@ -256,9 +270,15 @@ function prepareFixture(config: ReturnType<typeof baseConfig>, options: Record<s
       receipt_sha256: hash('a'),
       production_write_adapter_calls: 0,
     }),
-    buildRunner: fixtureBuild,
-    ...options,
+    ...fixtureOptions,
   })
+}
+
+function expectPreArchiveFailure(callback: () => unknown) {
+  const archivePath = join(repoRoot, '.open-next', 'open-next-build.zip')
+  rmSync(archivePath, { force: true })
+  expect(callback).toThrow()
+  expect(existsSync(archivePath)).toBe(false)
 }
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -359,6 +379,85 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(result.value.artifact.file_tree.files.find((file) => file.path === 'wrangler.toml'))
       .toMatchObject({ sha256: sha256(configBytes), bytes: configBytes.byteLength })
     expect(paths).not.toContain('package.json')
+  })
+
+  it('accepts an explicit zero-actions server-reference manifest', () => {
+    expect(Buffer.from(ZERO_ACTIONS_TEST_KEY, 'base64').byteLength).toBe(32)
+    expect(Buffer.from(ZERO_ACTIONS_TEST_KEY, 'base64').toString('base64')).toBe(ZERO_ACTIONS_TEST_KEY)
+    expect(() => prepareFixture(baseConfig())).not.toThrow()
+  })
+
+  it('rejects a node action before archive identity', () => {
+    const action = { 'action-id': { workers: {}, layer: {} } }
+    expectPreArchiveFailure(() => prepareFixture(baseConfig(), {
+      buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
+        fixtureBuild(repositoryPath, options)
+        const serverDirectory = join(repositoryPath, '.next', 'server')
+        writeFileSync(join(serverDirectory, 'server-reference-manifest.json'), JSON.stringify({ node: action, edge: {}, encryptionKey: ZERO_ACTIONS_TEST_KEY }))
+        writeFileSync(join(serverDirectory, 'server-reference-manifest.js'), `self.__RSC_SERVER_MANIFEST=${JSON.stringify(JSON.stringify({ node: action, edge: {}, encryptionKey: SERVER_REFERENCE_TEST_PLACEHOLDER }))}`)
+      },
+    }))
+  })
+
+  it('rejects an edge action before archive identity', () => {
+    const action = { 'action-id': { workers: {}, layer: {} } }
+    expectPreArchiveFailure(() => prepareFixture(baseConfig(), {
+      buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
+        fixtureBuild(repositoryPath, options)
+        const serverDirectory = join(repositoryPath, '.next', 'server')
+        writeFileSync(join(serverDirectory, 'server-reference-manifest.json'), JSON.stringify({ node: {}, edge: action, encryptionKey: ZERO_ACTIONS_TEST_KEY }))
+        writeFileSync(join(serverDirectory, 'server-reference-manifest.js'), `self.__RSC_SERVER_MANIFEST=${JSON.stringify(JSON.stringify({ node: {}, edge: action, encryptionKey: SERVER_REFERENCE_TEST_PLACEHOLDER }))}`)
+      },
+    }))
+  })
+
+  it('rejects a missing server-reference manifest before archive identity', () => {
+    expectPreArchiveFailure(() => prepareFixture(baseConfig(), {
+      buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
+        fixtureBuild(repositoryPath, options)
+        rmSync(join(repositoryPath, '.next', 'server', 'server-reference-manifest.json'))
+      },
+    }))
+  })
+
+  it('rejects malformed or unexpected-shape server-reference manifests', () => {
+    expectPreArchiveFailure(() => prepareFixture(baseConfig(), {
+      buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
+        fixtureBuild(repositoryPath, options)
+        writeFileSync(join(repositoryPath, '.next', 'server', 'server-reference-manifest.json'), '{"node":')
+      },
+    }))
+    expectPreArchiveFailure(() => prepareFixture(baseConfig(), {
+      buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
+        fixtureBuild(repositoryPath, options)
+        writeFileSync(join(repositoryPath, '.next', 'server', 'server-reference-manifest.json'), JSON.stringify({ node: [], edge: {}, encryptionKey: ZERO_ACTIONS_TEST_KEY }))
+      },
+    }))
+  })
+
+  it('rejects an unexpected key or wrapper placeholder', () => {
+    expectPreArchiveFailure(() => prepareFixture(baseConfig(), {
+      buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
+        fixtureBuild(repositoryPath, options)
+        writeFileSync(join(repositoryPath, '.next', 'server', 'server-reference-manifest.json'), JSON.stringify({ node: {}, edge: {}, encryptionKey: 'unexpected-key' }))
+      },
+    }))
+    expectPreArchiveFailure(() => prepareFixture(baseConfig(), {
+      buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
+        fixtureBuild(repositoryPath, options)
+        writeFileSync(join(repositoryPath, '.next', 'server', 'server-reference-manifest.js'), `self.__RSC_SERVER_MANIFEST=${JSON.stringify(JSON.stringify({ node: {}, edge: {}, encryptionKey: ZERO_ACTIONS_TEST_KEY }))}`)
+      },
+    }))
+  })
+
+  it('rejects JSON and JS semantic mismatch before archive identity', () => {
+    const action = { 'action-id': { workers: {}, layer: {} } }
+    expectPreArchiveFailure(() => prepareFixture(baseConfig(), {
+      buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
+        fixtureBuild(repositoryPath, options)
+        writeFileSync(join(repositoryPath, '.next', 'server', 'server-reference-manifest.js'), `self.__RSC_SERVER_MANIFEST=${JSON.stringify(JSON.stringify({ node: action, edge: {}, encryptionKey: SERVER_REFERENCE_TEST_PLACEHOLDER }))}`)
+      },
+    }))
   })
 
   it('is repeatable and changes identity for meaningful input changes', { timeout: 15_000 }, () => {
@@ -647,14 +746,11 @@ describe('Issue #23 Delivery Preparation', () => {
   ))
 
   it.runIf(process.platform === 'darwin')('binds repeatable real OpenNext 1.19.10 outputs on target macOS', { timeout: 8 * 60_000 }, () => {
-    const realBuild = (repositoryPath: string) => {
-      execFileSync('npx', ['--no-install', 'opennextjs-cloudflare', 'build'], { cwd: repositoryPath, stdio: 'inherit' })
-    }
     const realConfig = baseConfig()
     realConfig.artifact.file_tree.files[0].path = '.open-next/assets/BUILD_ID'
-    const first = prepareFixture(realConfig, { buildRunner: realBuild })
+    const first = prepareFixture(realConfig, { buildRunner: undefined })
     const firstArchive = readFileSync(join(repoRoot, first.value.artifact.archive.path))
-    const second = prepareFixture(realConfig, { buildRunner: realBuild })
+    const second = prepareFixture(realConfig, { buildRunner: undefined })
     const secondArchive = readFileSync(join(repoRoot, second.value.artifact.archive.path))
     const lockfile = JSON.parse(readFileSync(join(repoRoot, 'package-lock.json'), 'utf8'))
     const openNextBytes = readFileSync(join(repoRoot, 'node_modules', '.bin', 'opennextjs-cloudflare'))

@@ -51,6 +51,7 @@ const EXPECTED_EVIDENCE_EXCLUSIONS = Object.freeze([
 const EXPECTED_MIGRATIONS = Object.freeze(['001', '002', '003', '004', '005', '006'])
 const ARTIFACT_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._/-]+$/u
 const ARTIFACT_EXCLUDED_PATH_PATTERN = /(^|\/)(?:private|operator|secret|credential|tmp)(?:\/|$)/iu
+const ZERO_ACTIONS_ENCRYPTION_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
 
 const CONFIG_SCHEMA = Object.freeze({
   ...MANIFEST_SCHEMA,
@@ -155,16 +156,21 @@ function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
-function command(repositoryPath, name, args, { cwd = repositoryPath } = {}) {
+function command(repositoryPath, name, args, { cwd = repositoryPath, env = process.env } = {}) {
   try {
-    return execFileSync(name, args, { cwd, encoding: 'utf8' }).trim()
+    return execFileSync(name, args, { cwd, env, encoding: 'utf8' }).trim()
   } catch (error) {
     fail(`could not resolve ${name}: ${error.message}`)
   }
 }
 
 function runOpenNextBuild(repositoryPath) {
-  command(repositoryPath, 'npx', ['--no-install', 'opennextjs-cloudflare', 'build'])
+  command(repositoryPath, 'npx', ['--no-install', 'opennextjs-cloudflare', 'build'], {
+    env: {
+      ...process.env,
+      NEXT_SERVER_ACTIONS_ENCRYPTION_KEY: ZERO_ACTIONS_ENCRYPTION_KEY,
+    },
+  })
 }
 
 function resolveExecutable(repositoryPath, name) {
@@ -241,6 +247,77 @@ function enumerateBuildFiles(repositoryPath) {
   }
   visit(buildRoot, '')
   return files.sort()
+}
+
+function assertZeroActionsBuild(repositoryPath) {
+  const wrapperPrefix = 'self.__RSC_SERVER_MANIFEST='
+  const readManifest = (path, label) => {
+    try {
+      return readFileSync(resolve(repositoryPath, path))
+    } catch {
+      fail(`${label} is missing`)
+    }
+  }
+  const parseShape = (value, expectedEncryptionKey, label) => {
+    if (!isRecord(value)
+      || Object.keys(value).length !== 3
+      || !Object.hasOwn(value, 'node')
+      || !Object.hasOwn(value, 'edge')
+      || !Object.hasOwn(value, 'encryptionKey')
+      || !isRecord(value.node)
+      || !isRecord(value.edge)
+      || value.encryptionKey !== expectedEncryptionKey) {
+      fail(`${label} has an unexpected shape or encryption key`)
+    }
+    return value
+  }
+
+  let jsonManifest
+  try {
+    jsonManifest = parseShape(
+      parseStrictJson(readManifest(
+        '.next/server/server-reference-manifest.json',
+        'server reference manifest JSON',
+      )),
+      ZERO_ACTIONS_ENCRYPTION_KEY,
+      'server reference manifest JSON',
+    )
+  } catch {
+    fail('server reference manifest JSON is malformed')
+  }
+
+  const wrapperBytes = readManifest(
+    '.next/server/server-reference-manifest.js',
+    'server reference manifest JS wrapper',
+  )
+  const wrapper = wrapperBytes.toString('utf8')
+  if (!Buffer.from(wrapper, 'utf8').equals(wrapperBytes) || !wrapper.startsWith(wrapperPrefix)) {
+    fail('server reference manifest JS wrapper has an unexpected shape')
+  }
+
+  let jsManifest
+  try {
+    const serializedManifest = JSON.parse(wrapper.slice(wrapperPrefix.length))
+    if (typeof serializedManifest !== 'string') throw new Error('unexpected wrapper payload')
+    jsManifest = parseShape(
+      parseStrictJson(Buffer.from(serializedManifest, 'utf8')),
+      'process.env.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY',
+      'server reference manifest JS wrapper',
+    )
+  } catch {
+    fail('server reference manifest JS wrapper is malformed')
+  }
+
+  if (!jsonEqual(jsonManifest.node, jsManifest.node)
+    || !jsonEqual(jsonManifest.edge, jsManifest.edge)) {
+    fail('server reference manifest JSON and JS action maps do not match')
+  }
+  if (Object.keys(jsonManifest.node).length !== 0) {
+    fail('server reference manifest node action map is not empty')
+  }
+  if (Object.keys(jsonManifest.edge).length !== 0) {
+    fail('server reference manifest edge action map is not empty')
+  }
 }
 
 function createBuildArchive(repositoryPath, archivePath) {
@@ -375,6 +452,7 @@ function resolveFacts(config, {
     lockfile_sha256: sha256(lockfileBytes),
   }
   buildRunner(repositoryPath, { artifact: config.artifact, config })
+  assertZeroActionsBuild(repositoryPath)
   createBuildArchive(repositoryPath, config.artifact.archive.path)
   const artifactPaths = enumerateArtifactPaths(
     repositoryPath,

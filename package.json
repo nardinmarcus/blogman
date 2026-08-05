@@ -69,6 +69,10 @@
     "vitest": "^4.1.5",
     "wrangler": "^4.84.1"
   },
+  "optionalDependencies": {
+    "@img/sharp-darwin-arm64": "0.34.5",
+    "@img/sharp-libvips-darwin-arm64": "1.2.4"
+  },
   "description": "Open-source Cloudflare blog starter with Next.js 16, D1, R2, built-in themes, and AI provider presets.",
   "license": "MIT",
   "repository": {
