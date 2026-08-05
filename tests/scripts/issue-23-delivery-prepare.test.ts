@@ -212,6 +212,21 @@ function fixtureBuild(repositoryPath: string, { artifact }: { artifact: ReturnTy
   writeFileSync(workerPath, `fixture worker: ${artifact.worker.path}\n`)
   writeFileSync(join(outputRoot, 'runtime.js'), 'fixture runtime\n')
   writeEmptyServerReferenceManifests(repositoryPath)
+  const nextServerDirectory = join(repositoryPath, '.next', 'server')
+  mkdirSync(nextServerDirectory, { recursive: true })
+  writeFileSync(join(nextServerDirectory, 'app-paths-manifest.json'), '{}')
+  writeFileSync(join(nextServerDirectory, 'pages-manifest.json'), '{}')
+  writeFileSync(join(nextServerDirectory, 'middleware-manifest.json'), JSON.stringify({
+    version: 3,
+    middleware: {},
+    functions: {},
+    sortedMiddleware: [],
+  }))
+  writeFileSync(join(repositoryPath, '.next', 'routes-manifest.json'), JSON.stringify({
+    staticRoutes: [],
+    dynamicRoutes: [],
+    rewrites: { beforeFiles: [], afterFiles: [], fallback: [] },
+  }))
 }
 
 function reverseObjectKeys<T>(value: T): T {
@@ -281,9 +296,86 @@ function expectPreArchiveFailure(callback: () => unknown) {
   expect(existsSync(archivePath)).toBe(false)
 }
 
+function readPatchContract(relativePath: string) {
+  const patchPath = join(repoRoot, relativePath)
+  return existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : ''
+}
+
+function buildFileMap(result: ReturnType<typeof prepareFixture>) {
+  const artifactPaths = new Set(
+    result.value.artifact.file_tree.files
+      .map(({ path }) => path)
+      .filter((path) => path.startsWith('.open-next/')),
+  )
+  artifactPaths.add(result.value.artifact.archive.path)
+  return [...artifactPaths]
+    .sort()
+    .map((path) => {
+      const bytes = readFileSync(join(repoRoot, path))
+      return { path, bytes: bytes.byteLength, sha256: sha256(bytes) }
+    })
+}
+
+function fileMapDiff(
+  first: ReturnType<typeof buildFileMap>,
+  second: ReturnType<typeof buildFileMap>,
+) {
+  const firstByPath = new Map(first.map((file) => [file.path, file]))
+  const secondByPath = new Map(second.map((file) => [file.path, file]))
+  const allPaths = [...new Set([...firstByPath.keys(), ...secondByPath.keys()])].sort()
+  return {
+    added: allPaths.filter((path) => !firstByPath.has(path)),
+    removed: allPaths.filter((path) => !secondByPath.has(path)),
+    changed: allPaths
+      .filter((path) => firstByPath.has(path) && secondByPath.has(path))
+      .filter((path) => JSON.stringify(firstByPath.get(path)) !== JSON.stringify(secondByPath.get(path)))
+      .map((path) => ({ path, first: firstByPath.get(path), second: secondByPath.get(path) })),
+  }
+}
+
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 describe('Issue #23 Delivery Preparation', () => {
+  it('manifest-order contract: stabilizes Next CJS pages-manifest serialization', () => {
+    const patch = readPatchContract('patches/next+16.2.6.patch')
+
+    expect(patch).toContain('a/node_modules/next/dist/build/webpack/plugins/pages-manifest-plugin.js')
+    expect(patch).toContain('sortManifestObjectKeys')
+    expect(patch).toContain('Array.isArray')
+  })
+
+  it('manifest-order contract: stabilizes Next ESM pages-manifest serialization', () => {
+    const patch = readPatchContract('patches/next+16.2.6.patch')
+
+    expect(patch).toContain('a/node_modules/next/dist/esm/build/webpack/plugins/pages-manifest-plugin.js')
+    expect(patch).toContain('sortManifestObjectKeys')
+    expect(patch).toContain('Array.isArray')
+  })
+
+  it('manifest-order contract: stabilizes Next CJS flight-manifest serialization', () => {
+    const patch = readPatchContract('patches/next+16.2.6.patch')
+
+    expect(patch).toContain('a/node_modules/next/dist/build/webpack/plugins/flight-manifest-plugin.js')
+    expect(patch).toContain('sortManifestObjectKeys')
+    expect(patch).toContain('Array.isArray')
+  })
+
+  it('manifest-order contract: stabilizes Next ESM flight-manifest serialization', () => {
+    const patch = readPatchContract('patches/next+16.2.6.patch')
+
+    expect(patch).toContain('a/node_modules/next/dist/esm/build/webpack/plugins/flight-manifest-plugin.js')
+    expect(patch).toContain('sortManifestObjectKeys')
+    expect(patch).toContain('Array.isArray')
+  })
+
+  it('manifest-order contract: tie-breaks OpenNext manifest glob ordering lexically', () => {
+    const patch = readPatchContract('patches/@opennextjs+cloudflare+1.19.10.patch')
+
+    expect(patch).toContain('a/node_modules/@opennextjs/cloudflare/dist/cli/build/patches/plugins/load-manifest.js')
+    expect(patch).toContain('manifestPaths.sort')
+    expect(patch).toContain('localeCompare')
+  })
+
   it('emits schema-ordered canonical bytes with an exact-byte identity', () => {
     const result = prepareFixture(baseConfig())
     const text = result.bytes.toString('utf8')
@@ -385,6 +477,32 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(Buffer.from(ZERO_ACTIONS_TEST_KEY, 'base64').byteLength).toBe(32)
     expect(Buffer.from(ZERO_ACTIONS_TEST_KEY, 'base64').toString('base64')).toBe(ZERO_ACTIONS_TEST_KEY)
     expect(() => prepareFixture(baseConfig())).not.toThrow()
+  })
+
+  it('S3-W33 sentinel boundary exposes deterministic build inputs under NODE_ENV=test', () => {
+    const previousNodeEnv = process.env.NODE_ENV
+    let capturedOptions: Record<string, unknown> = {}
+    const buildRunnerSentinel = new Error('S3-W33 build runner input sentinel')
+
+    process.env.NODE_ENV = 'test'
+    try {
+      expect(() => prepareFixture(baseConfig(), {
+        buildRunner: (_repositoryPath: string, options: Record<string, unknown>) => {
+          capturedOptions = options
+          throw buildRunnerSentinel
+        },
+      })).toThrow(buildRunnerSentinel)
+
+      expect(capturedOptions.buildEnv).toEqual({
+        BLOGMAN_BUILD_PREVIEW_MODE_ID: '0123456789abcdef0123456789abcdef',
+        BLOGMAN_BUILD_PREVIEW_MODE_SIGNING_KEY: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+        BLOGMAN_BUILD_PREVIEW_MODE_ENCRYPTION_KEY: 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210',
+      })
+      expect(capturedOptions.buildEpochMs).toBe(1785915122000)
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV
+      else process.env.NODE_ENV = previousNodeEnv
+    }
   })
 
   it('rejects a node action before archive identity', () => {
@@ -745,44 +863,51 @@ describe('Issue #23 Delivery Preparation', () => {
     })
   ))
 
-  it.runIf(process.platform === 'darwin')('binds repeatable real OpenNext 1.19.10 outputs on target macOS', { timeout: 8 * 60_000 }, () => {
+  it.runIf(process.platform === 'darwin')('[F1] binds repeatable real OpenNext 1.19.10 outputs on target macOS', { timeout: 8 * 60_000 }, () => {
     const realConfig = baseConfig()
     realConfig.artifact.file_tree.files[0].path = '.open-next/assets/BUILD_ID'
-    const first = prepareFixture(realConfig, { buildRunner: undefined })
-    const firstArchive = readFileSync(join(repoRoot, first.value.artifact.archive.path))
-    const second = prepareFixture(realConfig, { buildRunner: undefined })
-    const secondArchive = readFileSync(join(repoRoot, second.value.artifact.archive.path))
-    const lockfile = JSON.parse(readFileSync(join(repoRoot, 'package-lock.json'), 'utf8'))
-    const openNextBytes = readFileSync(join(repoRoot, 'node_modules', '.bin', 'opennextjs-cloudflare'))
-    const firstPublicPaths = first.value.artifact.file_tree.files.map(({ path }) => path)
-    const firstFiles = new Map(first.value.artifact.file_tree.files.map((file) => [file.path, file.sha256]))
-    const secondFiles = new Map(second.value.artifact.file_tree.files.map((file) => [file.path, file.sha256]))
-    const changedFiles = [...new Set([...firstFiles.keys(), ...secondFiles.keys()])]
-      .filter((path) => firstFiles.get(path) !== secondFiles.get(path))
-      .sort()
-    const stablePublicFiles = (files: typeof first.value.artifact.file_tree.files) => files
-      .filter(({ path }) => path === 'wrangler.toml' || path.startsWith('.open-next/assets/'))
-      .map(({ path, sha256: identity, bytes }) => ({ path, sha256: identity, bytes }))
-    const generatedRuntimeDrift = (path: string) => (
-      path === '.open-next/cloudflare/init.js'
-      || path === '.open-next/middleware/handler.mjs'
-      || path.startsWith('.open-next/server-functions/default/')
-    )
+    const snapshotRoot = mkdtempSync(join('/tmp', 'blogman-s3w23-f1.'))
+    const handlerPaths = [
+      '.open-next/middleware/handler.mjs',
+      '.open-next/server-functions/default/handler.mjs',
+      '.open-next/server-functions/default/handler.mjs.meta.json',
+    ]
 
-    expect(first.value.toolchain.opennextjs_cloudflare.version)
-      .toBe(lockfile.packages['node_modules/@opennextjs/cloudflare'].version)
-    expect(first.value.toolchain.opennextjs_cloudflare.identity_sha256).toBe(sha256(openNextBytes))
-    expect(firstPublicPaths).toContain('.open-next/worker.js')
-    expect(firstPublicPaths).toContain('wrangler.toml')
-    expect(first.value.artifact.worker).toEqual(second.value.artifact.worker)
-    expect([...firstFiles.keys()].sort()).toEqual([...secondFiles.keys()].sort())
-    expect(changedFiles.every(generatedRuntimeDrift)).toBe(true)
-    expect(stablePublicFiles(first.value.artifact.file_tree.files))
-      .toEqual(stablePublicFiles(second.value.artifact.file_tree.files))
-    expect(firstArchive.length).toBe(first.value.artifact.archive.bytes)
-    expect(secondArchive.length).toBe(second.value.artifact.archive.bytes)
-    expect(sha256(firstArchive)).toBe(first.value.artifact.archive.sha256)
-    expect(sha256(secondArchive)).toBe(second.value.artifact.archive.sha256)
+    const captureRun = (run: number) => {
+      rmSync(join(repoRoot, '.next'), { recursive: true, force: true })
+      rmSync(join(repoRoot, '.open-next'), { recursive: true, force: true })
+      const result = prepareFixture(realConfig, { buildRunner: undefined })
+      const fileMap = buildFileMap(result)
+      const snapshot = {
+        run,
+        manifest: { bytes: result.bytes.byteLength, sha256: result.sha256 },
+        artifact: result.value.artifact,
+        handlerFiles: handlerPaths.map((path) => fileMap.find((file) => file.path === path)),
+        fileMap,
+      }
+      writeFileSync(join(snapshotRoot, `run${run}.json`), `${JSON.stringify(snapshot, null, 2)}\n`)
+      writeFileSync(join(snapshotRoot, `run${run}-file-map.json`), `${JSON.stringify(fileMap, null, 2)}\n`)
+      return { result, fileMap, snapshot }
+    }
+
+    const first = captureRun(1)
+    const second = captureRun(2)
+    const diff = fileMapDiff(first.fileMap, second.fileMap)
+    const report = {
+      format: 'blogman-s3w23-f1/v1',
+      snapshotRoot,
+      runs: [first.snapshot, second.snapshot],
+      diff,
+      equalityAssertionsPerformed: false,
+    }
+    writeFileSync(join(snapshotRoot, 'diff-manifest.json'), `${JSON.stringify(diff, null, 2)}\n`)
+    writeFileSync(join(snapshotRoot, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
+
+    expect(diff).toEqual({ added: [], removed: [], changed: [] })
+    expect(first.fileMap).toEqual(second.fileMap)
+    expect(first.result.bytes).toEqual(second.result.bytes)
+    expect(first.result.sha256).toBe(second.result.sha256)
+    expect(first.snapshot.handlerFiles).toEqual(second.snapshot.handlerFiles)
   })
 
   it('cleans temporary projections after a bounded child timeout', () => {

@@ -52,6 +52,18 @@ const EXPECTED_MIGRATIONS = Object.freeze(['001', '002', '003', '004', '005', '0
 const ARTIFACT_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._/-]+$/u
 const ARTIFACT_EXCLUDED_PATH_PATTERN = /(^|\/)(?:private|operator|secret|credential|tmp)(?:\/|$)/iu
 const ZERO_ACTIONS_ENCRYPTION_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+const BUILD_PREVIEW_MODE_ID_ENV = 'BLOGMAN_BUILD_PREVIEW_MODE_ID'
+const BUILD_PREVIEW_MODE_SIGNING_KEY_ENV = 'BLOGMAN_BUILD_PREVIEW_MODE_SIGNING_KEY'
+const BUILD_PREVIEW_MODE_ENCRYPTION_KEY_ENV = 'BLOGMAN_BUILD_PREVIEW_MODE_ENCRYPTION_KEY'
+const BUILD_EPOCH_MS_ENV = 'BLOGMAN_BUILD_EPOCH_MS'
+const SAFE_ZERO_PREVIEW = Object.freeze({
+  [BUILD_PREVIEW_MODE_ID_ENV]: '0123456789abcdef0123456789abcdef',
+  [BUILD_PREVIEW_MODE_SIGNING_KEY_ENV]: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+  [BUILD_PREVIEW_MODE_ENCRYPTION_KEY_ENV]: 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210',
+})
+const REACHABLE_PREVIEW_PATTERN = /\b(?:draftMode|previewData|setPreviewData|clearPreviewData|__next_preview_data|__prerender_bypass|previewMode(?:Id|SigningKey|EncryptionKey))\b|(?:preview|draft)[-_ ]?(?:cookie|data|mode)/iu
+const REACHABLE_PREVIEW_ROUTE_PATTERN = /(?:^|\/)(?:preview|draft(?:mode|data)?)(?:\/|$)/iu
+const SOURCE_EXTENSIONS = new Set(['.cjs', '.js', '.jsx', '.mjs', '.ts', '.tsx'])
 
 const CONFIG_SCHEMA = Object.freeze({
   ...MANIFEST_SCHEMA,
@@ -164,12 +176,32 @@ function command(repositoryPath, name, args, { cwd = repositoryPath, env = proce
   }
 }
 
-function runOpenNextBuild(repositoryPath) {
+function resolveBuildEpochMs(repositoryPath, commit) {
+  const secondsText = command(repositoryPath, 'git', ['show', '-s', '--format=%ct', commit])
+  if (!/^\d+$/u.test(secondsText)) fail('resolved candidate commit timestamp is invalid')
+  const milliseconds = Number(secondsText) * 1000
+  if (!Number.isSafeInteger(milliseconds) || milliseconds < 0) {
+    fail('resolved candidate commit timestamp is outside the safe millisecond range')
+  }
+  return milliseconds
+}
+
+function resolveProductionBuildInputs(repositoryPath, repository) {
+  return {
+    buildEnv: { ...SAFE_ZERO_PREVIEW },
+    buildEpochMs: resolveBuildEpochMs(repositoryPath, repository.commit),
+  }
+}
+
+function runOpenNextBuild(repositoryPath, { buildEnv, buildEpochMs } = {}) {
+  const environment = {
+    ...process.env,
+    ...(buildEnv ?? {}),
+    NEXT_SERVER_ACTIONS_ENCRYPTION_KEY: ZERO_ACTIONS_ENCRYPTION_KEY,
+  }
+  if (buildEpochMs !== undefined) environment[BUILD_EPOCH_MS_ENV] = String(buildEpochMs)
   command(repositoryPath, 'npx', ['--no-install', 'opennextjs-cloudflare', 'build'], {
-    env: {
-      ...process.env,
-      NEXT_SERVER_ACTIONS_ENCRYPTION_KEY: ZERO_ACTIONS_ENCRYPTION_KEY,
-    },
+    env: environment,
   })
 }
 
@@ -451,7 +483,12 @@ function resolveFacts(config, {
     package_json_sha256: sha256(packageJsonBytes),
     lockfile_sha256: sha256(lockfileBytes),
   }
-  buildRunner(repositoryPath, { artifact: config.artifact, config })
+  buildRunner(repositoryPath, {
+    artifact: config.artifact,
+    config,
+    ...resolveProductionBuildInputs(repositoryPath, repository),
+  })
+  assertNoReachablePreviewBuildEvidence(repositoryPath)
   assertZeroActionsBuild(repositoryPath)
   createBuildArchive(repositoryPath, config.artifact.archive.path)
   const artifactPaths = enumerateArtifactPaths(
@@ -733,6 +770,126 @@ function parseStrictJson(bytes) {
   } catch (error) {
     fail(`manifest JSON is invalid: ${error.message}`)
   }
+}
+
+function readTextEvidence(repositoryPath, path, label) {
+  let bytes
+  try {
+    bytes = readFileSync(resolve(repositoryPath, path))
+  } catch {
+    fail(`${label} is missing or unreadable`)
+  }
+  if (!Buffer.from(bytes.toString('utf8'), 'utf8').equals(bytes)) {
+    fail(`${label} is not valid UTF-8`)
+  }
+  return bytes.toString('utf8')
+}
+
+function readBuildEvidenceJson(repositoryPath, path, label) {
+  const bytes = Buffer.from(readTextEvidence(repositoryPath, path, label), 'utf8')
+  try {
+    return parseStrictJson(bytes)
+  } catch {
+    fail(`${label} is malformed`)
+  }
+}
+
+function assertNoReachablePreviewText(value, label) {
+  if (REACHABLE_PREVIEW_PATTERN.test(value)) {
+    fail(`${label} contains reachable Preview/Draft Mode evidence`)
+  }
+}
+
+function scanApplicationSource(repositoryPath, relativePath, seenSource) {
+  const absolute = resolve(repositoryPath, relativePath)
+  if (!existsSync(absolute)) return
+  let entries
+  try {
+    entries = readdirSync(absolute, { withFileTypes: true })
+  } catch {
+    fail(`application source evidence ${relativePath} is unreadable`)
+  }
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    const childPath = join(relativePath, entry.name)
+    if (entry.isSymbolicLink()) fail(`application source evidence ${childPath} is unexpected`)
+    if (entry.isDirectory()) {
+      scanApplicationSource(repositoryPath, childPath, seenSource)
+      continue
+    }
+    const extension = entry.name.slice(entry.name.lastIndexOf('.'))
+    if (!entry.isFile() || !SOURCE_EXTENSIONS.has(extension)) continue
+    seenSource.count += 1
+    const source = readTextEvidence(repositoryPath, childPath, `application source ${childPath}`)
+    assertNoReachablePreviewText(source, `application source ${childPath}`)
+  }
+}
+
+function assertApplicationSourceHasNoPreview(repositoryPath) {
+  const sourceRoots = ['app', 'pages', 'src/app', 'src/pages']
+  const seenSource = { count: 0 }
+  for (const sourceRoot of sourceRoots) scanApplicationSource(repositoryPath, sourceRoot, seenSource)
+  for (const name of ['middleware.cjs', 'middleware.js', 'middleware.mjs', 'middleware.ts', 'middleware.tsx', 'src/middleware.cjs', 'src/middleware.js', 'src/middleware.mjs', 'src/middleware.ts', 'src/middleware.tsx']) {
+    const sourcePath = resolve(repositoryPath, name)
+    if (!existsSync(sourcePath)) continue
+    seenSource.count += 1
+    assertNoReachablePreviewText(readTextEvidence(repositoryPath, name, `application source ${name}`), `application source ${name}`)
+  }
+  if (seenSource.count === 0) fail('application source evidence is missing')
+}
+
+function assertCompiledPathMap(repositoryPath, value, label, prefixes) {
+  if (!isRecord(value)) fail(`${label} is malformed`)
+  for (const [route, compiledPath] of Object.entries(value)) {
+    if (typeof compiledPath !== 'string' || !prefixes.some((prefix) => compiledPath.startsWith(prefix))) {
+      fail(`${label} contains an unexpected compiled entry`)
+    }
+    if (REACHABLE_PREVIEW_ROUTE_PATTERN.test(route) || REACHABLE_PREVIEW_ROUTE_PATTERN.test(compiledPath)) {
+      fail(`${label} contains a reachable Preview/Draft Mode route`)
+    }
+    assertNoReachablePreviewText(`${route}\n${compiledPath}`, label)
+    readTextEvidence(repositoryPath, `.next/server/${compiledPath}`, `${label} compiled entry ${compiledPath}`)
+  }
+}
+
+function assertNoReachablePreviewBuildEvidence(repositoryPath) {
+  assertApplicationSourceHasNoPreview(repositoryPath)
+
+  const appPaths = readBuildEvidenceJson(repositoryPath, '.next/server/app-paths-manifest.json', 'app paths manifest')
+  const pages = readBuildEvidenceJson(repositoryPath, '.next/server/pages-manifest.json', 'pages manifest')
+  const middleware = readBuildEvidenceJson(repositoryPath, '.next/server/middleware-manifest.json', 'middleware manifest')
+  const routes = readBuildEvidenceJson(repositoryPath, '.next/routes-manifest.json', 'routes manifest')
+
+  assertCompiledPathMap(repositoryPath, appPaths, 'app paths manifest', ['app/', 'pages/'])
+  assertCompiledPathMap(repositoryPath, pages, 'pages manifest', ['pages/'])
+  if (!isRecord(middleware)
+    || middleware.version !== 3
+    || !isRecord(middleware.middleware)
+    || !isRecord(middleware.functions)
+    || !Array.isArray(middleware.sortedMiddleware)
+    || middleware.sortedMiddleware.some((entry) => typeof entry !== 'string')) {
+    fail('middleware manifest is unexpected')
+  }
+  assertNoReachablePreviewText(JSON.stringify(middleware), 'middleware manifest')
+
+  if (!isRecord(routes)
+    || !Array.isArray(routes.staticRoutes)
+    || !Array.isArray(routes.dynamicRoutes)
+    || !isRecord(routes.rewrites)
+    || !Array.isArray(routes.rewrites.beforeFiles)
+    || !Array.isArray(routes.rewrites.afterFiles)
+    || !Array.isArray(routes.rewrites.fallback)) {
+    fail('routes manifest is unexpected')
+  }
+  for (const routeList of [routes.staticRoutes, routes.dynamicRoutes]) {
+    for (const route of routeList) {
+      if (!isRecord(route) || typeof route.page !== 'string') fail('routes manifest contains an unexpected route')
+      if (REACHABLE_PREVIEW_ROUTE_PATTERN.test(route.page)) {
+        fail('routes manifest contains a reachable Preview/Draft Mode route')
+      }
+      assertNoReachablePreviewText(JSON.stringify(route), 'routes manifest')
+    }
+  }
+  assertNoReachablePreviewText(JSON.stringify(routes.rewrites), 'routes manifest rewrites')
 }
 
 function deepFreeze(value) {

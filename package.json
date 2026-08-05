@@ -20,7 +20,8 @@
     "issue-23:reseal": "node scripts/issue-23-reseal.mjs",
     "rollout:safety": "node scripts/rollout-safety.mjs",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@opennextjs/cloudflare": "^1.19.1",
@@ -64,6 +65,7 @@
     "esbuild": "^0.28.0",
     "eslint": "^9",
     "eslint-config-next": "^16.2.6",
+    "patch-package": "8.0.1",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.5",

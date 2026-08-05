@@ -1,0 +1,82 @@
+diff --git a/node_modules/@opennextjs/cloudflare/dist/cli/build/bundle-server.js b/node_modules/@opennextjs/cloudflare/dist/cli/build/bundle-server.js
+index be3f893..7a55bd4 100644
+--- a/node_modules/@opennextjs/cloudflare/dist/cli/build/bundle-server.js
++++ b/node_modules/@opennextjs/cloudflare/dist/cli/build/bundle-server.js
+@@ -28,6 +28,15 @@
+ import { needsExperimentalReact } from "./utils/needs-experimental-react.js";
+ /** The dist directory of the Cloudflare adapter package */
+ const packageDistDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../..");
++function canonicalizeMetafile(value) {
++    if (Array.isArray(value)) return value.map(canonicalizeMetafile);
++    if (value && typeof value === "object") {
++        return Object.fromEntries(Object.entries(value)
++            .sort(([left], [right])=>left < right ? -1 : left > right ? 1 : 0)
++            .map(([key, child])=>[key, canonicalizeMetafile(child)]));
++    }
++    return value;
++}
+ /**
+  * List of optional Next.js dependencies.
+  * They are not required for Next.js to run but only needed to enabled specific features.
+@@ -151,7 +160,7 @@
+         },
+         platform: "node",
+     });
+-    fs.writeFileSync(openNextServerBundle + ".meta.json", JSON.stringify(result.metafile, null, 2));
++    fs.writeFileSync(openNextServerBundle + ".meta.json", JSON.stringify(canonicalizeMetafile(result.metafile), null, 2));
+     await updateWorkerBundledCode(openNextServerBundle);
+     const isMonorepo = monorepoRoot !== appPath;
+     if (isMonorepo) {
+diff --git a/node_modules/@opennextjs/cloudflare/dist/cli/build/open-next/compile-init.js b/node_modules/@opennextjs/cloudflare/dist/cli/build/open-next/compile-init.js
+index fe90393..4cb922e 100644
+--- a/node_modules/@opennextjs/cloudflare/dist/cli/build/open-next/compile-init.js
++++ b/node_modules/@opennextjs/cloudflare/dist/cli/build/open-next/compile-init.js
+@@ -2,6 +2,19 @@
+ import { fileURLToPath } from "node:url";
+ import { loadConfig } from "@opennextjs/aws/adapters/config/util.js";
+ import { build } from "esbuild";
++const BUILD_EPOCH_MS_ENV = "BLOGMAN_BUILD_EPOCH_MS";
++function resolveBuildTimestampMs() {
++    const value = process.env[BUILD_EPOCH_MS_ENV];
++    if (value === undefined) return Date.now();
++    if (!/^(?:0|[1-9]\d{0,15})$/.test(value)) {
++        throw new Error(`Invalid ${BUILD_EPOCH_MS_ENV}: expected non-negative integer milliseconds`);
++    }
++    const timestamp = Number(value);
++    if (!Number.isSafeInteger(timestamp) || timestamp < 0) {
++        throw new Error(`Invalid ${BUILD_EPOCH_MS_ENV}: value is outside the safe integer range`);
++    }
++    return timestamp;
++}
+ /**
+  * Compiles the initialization code for the workerd runtime
+  */
+@@ -22,7 +35,7 @@
+         target: "esnext",
+         platform: "node",
+         define: {
+-            __BUILD_TIMESTAMP_MS__: JSON.stringify(Date.now()),
++            __BUILD_TIMESTAMP_MS__: JSON.stringify(resolveBuildTimestampMs()),
+             __NEXT_BASE_PATH__: JSON.stringify(basePath),
+             __ASSETS_RUN_WORKER_FIRST__: JSON.stringify(wranglerConfig.assets?.run_worker_first ?? false),
+             __DEPLOYMENT_ID__: JSON.stringify(deploymentId),
+diff --git a/node_modules/@opennextjs/cloudflare/dist/cli/build/patches/plugins/load-manifest.js b/node_modules/@opennextjs/cloudflare/dist/cli/build/patches/plugins/load-manifest.js
+--- a/node_modules/@opennextjs/cloudflare/dist/cli/build/patches/plugins/load-manifest.js
++++ b/node_modules/@opennextjs/cloudflare/dist/cli/build/patches/plugins/load-manifest.js
+@@ -80,6 +80,7 @@
+     const manifestPaths = await glob(join(baseDir, "**/*_client-reference-manifest.js"), {
+         windowsPathsNoEscape: true,
+     });
++    manifestPaths.sort((a, b) => a.localeCompare(b));
+     // Map of factored large objects (variable name -> {...})
+     const factoredObjects = new Map();
+     // Map of manifest path -> factored manifest content
+@@ -119,7 +120,7 @@
+     const returnManifests = manifestPaths
+         // Sort by path length descending so longer (more specific) paths match first,
+         // preventing suffix collisions in the `.endsWith()` chain (see #1156).
+-        .toSorted((a, b) => b.length - a.length)
++        .toSorted((a, b) => b.length - a.length || a.localeCompare(b))
+         .map((path) => {
+         let manifest;
+         if (factoredManifest.has(path)) {
