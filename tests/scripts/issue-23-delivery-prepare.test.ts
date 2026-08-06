@@ -949,6 +949,92 @@ describe('Issue #23 Delivery Preparation', () => {
     }
   })
 
+  it('rejects a repository catalog-directory symlink before external catalog bytes drive preparation', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-catalog-symlink-'))
+    const externalCatalogDirectory = join(directory, 'catalog')
+    const externalCatalogPath = join(externalCatalogDirectory, 'catalog.json')
+    const reachedPath = join(externalCatalogDirectory, 'reached')
+    const linkPath = join(repoRoot, 'tests', 'scripts', '.issue-23-external-catalog-directory')
+    const runnerPath = 'tests/scripts/.issue-23-external-catalog-runner.mjs'
+    const catalog = {
+      format: 'blogman-migration-catalog/v1',
+      migrations: baseConfig().migration.catalog.migrations.map((entry, index) => ({
+        number: index + 1,
+        name: entry.path.slice(entry.path.lastIndexOf('/') + 1).replace(/\.sql$/u, ''),
+        checksum: hash(String(index + 1)),
+      })),
+    }
+    const catalogBytes = Buffer.from(JSON.stringify(catalog))
+
+    mkdirSync(externalCatalogDirectory, { recursive: true })
+    writeFileSync(externalCatalogPath, catalogBytes)
+    writeFileSync(join(repoRoot, runnerPath), `
+      import { appendFileSync, readFileSync } from 'node:fs'
+      import { join } from 'node:path'
+      const args = process.argv.slice(2)
+      const directory = args[args.indexOf('--migrations-dir') + 1]
+      appendFileSync(${JSON.stringify(reachedPath)}, directory)
+      process.stdout.write(readFileSync(join(directory, 'catalog.json')))
+    `)
+    symlinkSync(externalCatalogDirectory, linkPath)
+
+    try {
+      const config = baseConfig()
+      config.migration.runner.path = runnerPath
+      config.migration.runner.sha256 = sha256(readFileSync(join(repoRoot, runnerPath)))
+      config.migration.catalog.path = 'tests/scripts/.issue-23-external-catalog-directory'
+      config.migration.catalog.sha256 = sha256(catalogBytes)
+
+      let thrown: Error | undefined
+      try {
+        prepareFixture(config)
+      } catch (error) {
+        thrown = error as Error
+      }
+
+      expect(existsSync(reachedPath)).toBe(false)
+      expect(thrown?.message).toMatch(/escapes repository/u)
+    } finally {
+      rmSync(linkPath, { force: true })
+      rmSync(join(repoRoot, runnerPath), { force: true })
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a repository catalog-directory symlink before building local rehearsal argv', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-rehearsal-catalog-symlink-'))
+    const reachedPath = join(directory, 'reached')
+    const linkPath = join(repoRoot, 'tests', 'scripts', '.issue-23-rehearsal-catalog-directory')
+    const runnerPath = 'tests/scripts/.issue-23-rehearsal-catalog-runner.mjs'
+    writeFileSync(join(repoRoot, runnerPath), `
+      import { appendFileSync } from 'node:fs'
+      appendFileSync(${JSON.stringify(reachedPath)}, JSON.stringify(process.argv.slice(2)))
+      process.stdout.write(JSON.stringify({ state: 'current' }))
+    `)
+    symlinkSync(directory, linkPath)
+
+    try {
+      let thrown: Error | undefined
+      try {
+        runLocalRehearsal({
+          repositoryPath: repoRoot,
+          runnerPath,
+          migrationCatalogPath: 'tests/scripts/.issue-23-rehearsal-catalog-directory',
+          manifestDraftSha256: hash('a'),
+        })
+      } catch (error) {
+        thrown = error as Error
+      }
+
+      expect(existsSync(reachedPath)).toBe(false)
+      expect(thrown?.message).toMatch(/escapes repository/u)
+    } finally {
+      rmSync(linkPath, { force: true })
+      rmSync(join(repoRoot, runnerPath), { force: true })
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it('rejects missing identity, non-canonical bytes, and identity mismatch', () => {
     const missing = baseConfig()
     Reflect.deleteProperty(missing.artifact.file_tree, 'sha256')

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, utimesSync } from 'node:fs'
-import { basename, dirname, join, resolve, sep } from 'node:path'
+import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { runLocalRehearsal } from './issue-23-delivery-rehearsal.mjs'
 
 const MANIFEST_SCHEMA_URL = new URL(
@@ -248,6 +248,34 @@ function resolveFile(repositoryPath, path, label, includeBytes = false) {
   } catch {
     fail(`${label} could not be resolved`)
   }
+}
+
+function resolveDirectory(repositoryPath, path, label) {
+  const lexicalRoot = resolve(repositoryPath)
+  const absolute = resolve(lexicalRoot, path)
+  if (absolute !== lexicalRoot && !absolute.startsWith(`${lexicalRoot}${sep}`)) {
+    fail(`${label} escapes repository`)
+  }
+
+  let canonicalRoot
+  let canonicalTarget
+  try {
+    canonicalRoot = realpathSync(lexicalRoot)
+    canonicalTarget = realpathSync(absolute)
+  } catch {
+    fail(`${label} could not be resolved`)
+  }
+  if (canonicalTarget === canonicalRoot || !canonicalTarget.startsWith(`${canonicalRoot}${sep}`)) {
+    fail(`${label} escapes repository`)
+  }
+
+  try {
+    if (!statSync(canonicalTarget).isDirectory()) fail(`${label} is not a directory`)
+  } catch (error) {
+    if (error instanceof Error && / is not a directory$/u.test(error.message)) throw error
+    fail(`${label} could not be resolved`)
+  }
+  return relative(canonicalRoot, canonicalTarget).split(sep).join('/')
 }
 
 function resolveDeclaredFile(repositoryPath, declaration, label) {
@@ -555,6 +583,7 @@ function resolveFacts(config, {
     runner: resolveDeclaredFile(repositoryPath, config.migration.runner, 'migration runner'),
     catalog: {
       ...config.migration.catalog,
+      path: resolveDirectory(repositoryPath, config.migration.catalog.path, 'migration catalog'),
       migrations: config.migration.catalog.migrations.map((entry) => ({
         ...entry,
         ...resolveDeclaredFile(repositoryPath, entry, `migration ${entry.id}`),

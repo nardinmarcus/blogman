@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
+import { join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   buildLocalEntryReceipt,
@@ -113,6 +113,37 @@ function resolveConfiguredRunner(repositoryPath, configuredRunnerPath) {
   }
 }
 
+function resolveMigrationCatalogDirectory(repositoryPath, configuredCatalogPath) {
+  const lexicalRoot = resolve(repositoryPath)
+  const lexicalCatalog = resolve(lexicalRoot, configuredCatalogPath)
+  if (lexicalCatalog !== lexicalRoot && !lexicalCatalog.startsWith(`${lexicalRoot}${sep}`)) {
+    throw new Error('Issue #23 local rehearsal migration catalog escapes repository')
+  }
+
+  let canonicalRoot
+  let canonicalCatalog
+  try {
+    canonicalRoot = realpathSync(lexicalRoot)
+    canonicalCatalog = realpathSync(lexicalCatalog)
+  } catch {
+    throw new Error('Issue #23 local rehearsal migration catalog could not be resolved')
+  }
+  if (canonicalCatalog === canonicalRoot || !canonicalCatalog.startsWith(`${canonicalRoot}${sep}`)) {
+    throw new Error('Issue #23 local rehearsal migration catalog escapes repository')
+  }
+
+  let isDirectory
+  try {
+    isDirectory = statSync(canonicalCatalog).isDirectory()
+  } catch {
+    throw new Error('Issue #23 local rehearsal migration catalog could not be resolved')
+  }
+  if (!isDirectory) {
+    throw new Error('Issue #23 local rehearsal migration catalog is not a directory')
+  }
+  return relative(canonicalRoot, canonicalCatalog).split(sep).join('/')
+}
+
 function verifyNetworkBoundary(env, actualMacOS) {
   if (actualMacOS && !existsSync(MACOS_SANDBOX_EXECUTABLE)) {
     throw new Error('Issue #23 local rehearsal requires macOS sandbox-exec')
@@ -173,6 +204,7 @@ export function runLocalRehearsal({
     throw new Error('Issue #23 local rehearsal output bound is invalid')
   }
   const runnerAbsolutePath = resolveConfiguredRunner(repositoryPath, configuredRunnerPath)
+  const canonicalMigrationCatalogPath = resolveMigrationCatalogDirectory(repositoryPath, migrationCatalogPath)
   const actualMacOS = isActualMacOS()
   let stateDirectory = ''
   let stateCreated = false
@@ -199,8 +231,8 @@ export function runLocalRehearsal({
       candidate: 'issue-23-local-rehearsal',
     }).map((command) => ({
       ...command,
-      args: [command.args[0], '--migrations-dir', migrationCatalogPath, ...command.args.slice(1)],
-      argv: [configuredRunnerPath, command.args[0], '--migrations-dir', migrationCatalogPath, ...command.args.slice(1)],
+      args: [command.args[0], '--migrations-dir', canonicalMigrationCatalogPath, ...command.args.slice(1)],
+      argv: [configuredRunnerPath, command.args[0], '--migrations-dir', canonicalMigrationCatalogPath, ...command.args.slice(1)],
     }))
     const run = ({ argv }) => {
       const supervisorArgs = [
