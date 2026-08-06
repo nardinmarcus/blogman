@@ -47,6 +47,19 @@ function authorizationHash(record: ReturnType<typeof authorization>) {
 const expectedStageCounts = {
   authorization_accept: 1,
   live_preconditions: 1,
+  d1_identity: 1,
+  clean_start_reset: 0,
+  empty_d1_proof: 0,
+  migrations_001_006: 0,
+  reconciliation: 0,
+  worker_deploy: 0,
+  version_traffic_verification: 0,
+  smoke_control_t0: 0,
+}
+
+const expectedStageDurations = {
+  authorization_accept: 0,
+  live_preconditions: 0,
   d1_identity: 0,
   clean_start_reset: 0,
   empty_d1_proof: 0,
@@ -56,6 +69,8 @@ const expectedStageCounts = {
   version_traffic_verification: 0,
   smoke_control_t0: 0,
 }
+
+const EXPECTED_TRACE_SHA256 = '5254fe4ae57c5438e76d40aae510b80488cb71fbd74c53c476009474bb8cf889'
 
 function commands() {
   return buildLocalRehearsalCommands({
@@ -67,7 +82,7 @@ function commands() {
 }
 
 describe('Issue #23 pure local entry seam', () => {
-  it('executes the accepted public execute entry once and returns a secret-safe deferred Terminal Result', () => {
+  it('executes the deterministic synthetic serial prefix and stops at the first adapter failure', () => {
     const manifest = preparedManifest('accepted-manifest')
     const auth = authorization(manifest, 'authorization-accepted-once')
 
@@ -84,11 +99,12 @@ describe('Issue #23 pure local entry seam', () => {
       attempt_id: expect.stringMatching(/^[a-f0-9]{64}$/u),
       authorization_consumed: true,
       outcome: 'NON_PASS',
-      first_terminal_stage: 'live_preconditions',
-      failure: { classification: 'slice_deferred' },
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'synthetic_adapter_non_pass' },
       stage_counts: expectedStageCounts,
+      stage_durations_ms: expectedStageDurations,
       mutation_counts: { production_writes: 0 },
-      evidence: { source: 'synthetic', hashes: [] },
+      evidence: { source: 'synthetic', hashes: [EXPECTED_TRACE_SHA256] },
       finalized: true,
     })
     expect(result.bytes).toEqual(Buffer.from(`${JSON.stringify(result.value, null, 2)}\n`, 'utf8'))
@@ -96,6 +112,9 @@ describe('Issue #23 pure local entry seam', () => {
     expect(result.value).not.toHaveProperty('commands')
     expect(result.value).not.toHaveProperty('target')
     expect(result.value).not.toHaveProperty('adapters')
+    expect(result.value).not.toHaveProperty('trace')
+    expect(result.value).not.toHaveProperty('raw_output')
+    expect(result.value).not.toHaveProperty('secrets')
     expect(result.value).not.toHaveProperty('production_evidence')
   })
 

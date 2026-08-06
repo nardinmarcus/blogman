@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { runSyntheticStage } from './issue-23-delivery-synthetic-adapter.mjs'
 
 export const LOCAL_ENTRY_FORMAT = 'blogman-issue-23-local-entry/v1'
 export const LOCAL_SUPERVISOR_FORMAT = 'blogman-issue-23-supervisor/v1'
@@ -241,8 +242,17 @@ function acceptAuthorization(manifestSha256, authorization) {
   return authorizationDigest
 }
 
-function stageCounts() {
-  return Object.fromEntries(DELIVERY_STAGES.map((stage, index) => [stage, index < 2 ? 1 : 0]))
+function stageCounts(trace) {
+  const counts = Object.fromEntries(DELIVERY_STAGES.map((stage) => [stage, 0]))
+  counts.authorization_accept = 1
+  for (const entry of trace) counts[entry.stage] += 1
+  return counts
+}
+
+function stageDurations(trace) {
+  const durations = Object.fromEntries(DELIVERY_STAGES.map((stage) => [stage, 0]))
+  for (const entry of trace) durations[entry.stage] += entry.duration_ms
+  return durations
 }
 
 export function execute(manifest, authorization) {
@@ -257,17 +267,32 @@ export function execute(manifest, authorization) {
     format: 'blogman-issue-23-attempt/v1',
     ...identities,
   }))
+  const trace = []
+  for (const stage of DELIVERY_STAGES.slice(1)) {
+    const result = runSyntheticStage(stage)
+    const entry = {
+      stage,
+      outcome: result.outcome,
+      ...(result.classification ? { classification: result.classification } : {}),
+      duration_ms: result.duration_ms,
+    }
+    trace.push(entry)
+    if (result.outcome !== 'PASS') break
+  }
+  const terminal = trace.at(-1)
+  if (!terminal || terminal.outcome !== 'NON_PASS') fail('synthetic prefix did not terminate')
   const value = {
     format: TERMINAL_RESULT_FORMAT,
     identities,
     attempt_id: attemptId,
     authorization_consumed: true,
     outcome: 'NON_PASS',
-    first_terminal_stage: 'live_preconditions',
-    failure: { classification: 'slice_deferred' },
-    stage_counts: stageCounts(),
+    first_terminal_stage: terminal.stage,
+    failure: { classification: terminal.classification },
+    stage_counts: stageCounts(trace),
+    stage_durations_ms: stageDurations(trace),
     mutation_counts: { production_writes: 0 },
-    evidence: { source: 'synthetic', hashes: [] },
+    evidence: { source: 'synthetic', hashes: [sha256(canonicalJsonBytes(trace))] },
     finalized: true,
   }
   const bytes = canonicalJsonBytes(value)
