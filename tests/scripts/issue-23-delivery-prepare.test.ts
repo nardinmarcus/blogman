@@ -476,6 +476,34 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(archiveEntries).toContain('assets/index.html')
   })
 
+  it('rejects reachable compiled Preview marker before archive identity', () => {
+    const sourcePath = join(repoRoot, 'app', 'page.js')
+    writeFileSync(sourcePath, 'export default function Page() { return null }\n')
+    let thrown: Error | undefined
+    try {
+      expectPreArchiveFailure(() => {
+        try {
+          prepareFixture(baseConfig(), {
+            buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
+              fixtureBuild(repositoryPath, options)
+              const appPathsManifestPath = join(repositoryPath, '.next', 'server', 'app-paths-manifest.json')
+              const compiledPath = join(repositoryPath, '.next', 'server', 'app', 'page.js')
+              mkdirSync(dirname(compiledPath), { recursive: true })
+              writeFileSync(appPathsManifestPath, JSON.stringify({ 'app/page.js': 'app/page.js' }))
+              writeFileSync(compiledPath, 'export default function Page() { return draftMode() }\n')
+            },
+          })
+        } catch (error) {
+          thrown = error as Error
+          throw error
+        }
+      })
+      expect(thrown?.message).toMatch(/Preview\/Draft Mode evidence/u)
+    } finally {
+      rmSync(sourcePath, { force: true })
+    }
+  })
+
   it('rejects an internal artifact symlink before archive creation', () => {
     let thrown: Error | undefined
     expectPreArchiveFailure(() => {

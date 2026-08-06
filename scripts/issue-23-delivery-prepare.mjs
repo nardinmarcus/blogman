@@ -854,7 +854,8 @@ function assertCompiledPathMap(repositoryPath, value, label, prefixes) {
       fail(`${label} contains a reachable Preview/Draft Mode route`)
     }
     assertNoReachablePreviewText(`${route}\n${compiledPath}`, label)
-    readTextEvidence(repositoryPath, `.next/server/${compiledPath}`, `${label} compiled entry ${compiledPath}`)
+    const compiledSource = readTextEvidence(repositoryPath, `.next/server/${compiledPath}`, `${label} compiled entry ${compiledPath}`)
+    assertNoReachablePreviewText(compiledSource, `${label} compiled entry ${compiledPath}`)
   }
 }
 
