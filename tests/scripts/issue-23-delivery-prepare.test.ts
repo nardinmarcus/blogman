@@ -455,6 +455,48 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(paths).toContain('.open-next/assets/index.html')
   })
 
+  it('excludes generated private files from archive membership', () => {
+    const result = prepareFixture(baseConfig(), {
+      buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
+        fixtureBuild(repositoryPath, options)
+        const privateDirectory = join(repositoryPath, '.open-next', 'private')
+        mkdirSync(privateDirectory, { recursive: true })
+        writeFileSync(join(privateDirectory, 'secret.txt'), 'private fixture\n')
+      },
+    })
+    const paths = result.value.artifact.file_tree.files.map((file) => file.path)
+    const archiveEntries = execFileSync(
+      'unzip',
+      ['-Z1', join(repoRoot, '.open-next/open-next-build.zip')],
+      { encoding: 'utf8' },
+    ).trim().split(/\r?\n/u).filter(Boolean)
+
+    expect(paths).not.toContain('.open-next/private/secret.txt')
+    expect(archiveEntries).not.toContain('private/secret.txt')
+    expect(archiveEntries).toContain('assets/index.html')
+  })
+
+  it('rejects an internal artifact symlink before archive creation', () => {
+    let thrown: Error | undefined
+    expectPreArchiveFailure(() => {
+      try {
+        prepareFixture(baseConfig(), {
+          buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
+            fixtureBuild(repositoryPath, options)
+            const privateDirectory = join(repositoryPath, '.open-next', 'private')
+            mkdirSync(privateDirectory, { recursive: true })
+            writeFileSync(join(privateDirectory, 'secret.txt'), 'private fixture\n')
+            symlinkSync('private/secret.txt', join(repositoryPath, '.open-next', 'public-link.js'))
+          },
+        })
+      } catch (error) {
+        thrown = error as Error
+        throw error
+      }
+    })
+    expect(thrown?.message).toMatch(/symbolic link/u)
+  })
+
   it('binds generated deployable bytes and final config bytes, not the committed source tree', () => {
     const result = prepareFixture(baseConfig())
     const archiveBytes = readFileSync(join(repoRoot, '.open-next/open-next-build.zip'))

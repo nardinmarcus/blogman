@@ -265,8 +265,10 @@ function enumerateBuildFiles(repositoryPath) {
       const absolute = join(directory, entry.name)
       if (entry.isDirectory()) {
         visit(absolute, path)
-      } else if (entry.isFile() || entry.isSymbolicLink()) {
+      } else if (entry.isFile()) {
         files.push(path)
+      } else if (entry.isSymbolicLink()) {
+        fail(`final OpenNext artifact contains symbolic link ${path}`)
       } else {
         fail(`final OpenNext artifact contains unsupported entry ${path}`)
       }
@@ -279,6 +281,16 @@ function enumerateBuildFiles(repositoryPath) {
   }
   visit(buildRoot, '')
   return files.sort()
+}
+
+function enumeratePublicBuildFiles(repositoryPath, archivePath) {
+  const archiveName = basename(resolve(repositoryPath, archivePath))
+  return enumerateBuildFiles(repositoryPath)
+    .filter((path) => path !== archiveName)
+    .filter((path) => {
+      const publicPath = `.open-next/${path}`
+      return ARTIFACT_PATH_PATTERN.test(publicPath) && !ARTIFACT_EXCLUDED_PATH_PATTERN.test(publicPath)
+    })
 }
 
 function assertZeroActionsBuild(repositoryPath) {
@@ -352,14 +364,12 @@ function assertZeroActionsBuild(repositoryPath) {
   }
 }
 
-function createBuildArchive(repositoryPath, archivePath) {
+function createBuildArchive(repositoryPath, archivePath, files) {
   const buildRoot = resolve(repositoryPath, '.open-next')
   const absoluteArchive = resolve(repositoryPath, archivePath)
   if (dirname(absoluteArchive) !== buildRoot) {
     fail('artifact archive must be created directly under .open-next')
   }
-  const archiveName = basename(absoluteArchive)
-  const files = enumerateBuildFiles(repositoryPath).filter((path) => path !== archiveName)
   if (files.length === 0) fail('final OpenNext artifact is empty')
   const fixedTime = new Date('1980-01-01T00:00:00.000Z')
   for (const path of files) {
@@ -367,14 +377,11 @@ function createBuildArchive(repositoryPath, archivePath) {
     utimesSync(join(buildRoot, path), fixedTime, fixedTime)
   }
   if (existsSync(absoluteArchive)) unlinkSync(absoluteArchive)
-  command(repositoryPath, 'zip', ['-X', '-q', archiveName, ...files], { cwd: buildRoot })
+  command(repositoryPath, 'zip', ['-X', '-q', basename(absoluteArchive), ...files], { cwd: buildRoot })
 }
 
-function enumerateArtifactPaths(repositoryPath, configuredFiles, archivePath) {
-  const archiveAbsolute = resolve(repositoryPath, archivePath)
-  const buildPaths = enumerateBuildFiles(repositoryPath)
-    .filter((path) => join(resolve(repositoryPath, '.open-next'), path) !== archiveAbsolute)
-    .map((path) => `.open-next/${path}`)
+function enumerateArtifactPaths(configuredFiles, buildFiles) {
+  const buildPaths = buildFiles.map((path) => `.open-next/${path}`)
   const paths = [...buildPaths, 'wrangler.toml']
     .filter((path) => ARTIFACT_PATH_PATTERN.test(path))
     .filter((path) => !ARTIFACT_EXCLUDED_PATH_PATTERN.test(path))
@@ -490,11 +497,11 @@ function resolveFacts(config, {
   })
   assertNoReachablePreviewBuildEvidence(repositoryPath)
   assertZeroActionsBuild(repositoryPath)
-  createBuildArchive(repositoryPath, config.artifact.archive.path)
+  const artifactBuildFiles = enumeratePublicBuildFiles(repositoryPath, config.artifact.archive.path)
+  createBuildArchive(repositoryPath, config.artifact.archive.path, artifactBuildFiles)
   const artifactPaths = enumerateArtifactPaths(
-    repositoryPath,
     config.artifact.file_tree.files,
-    config.artifact.archive.path,
+    artifactBuildFiles,
   )
   const artifact = {
     ...config.artifact,
