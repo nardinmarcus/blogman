@@ -61,7 +61,7 @@ const SAFE_ZERO_PREVIEW = Object.freeze({
   [BUILD_PREVIEW_MODE_SIGNING_KEY_ENV]: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
   [BUILD_PREVIEW_MODE_ENCRYPTION_KEY_ENV]: 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210',
 })
-const REACHABLE_PREVIEW_PATTERN = /\b(?:draftMode|previewData|setPreviewData|clearPreviewData|__next_preview_data|__prerender_bypass|previewMode(?:Id|SigningKey|EncryptionKey))\b|(?:preview|draft)[-_ ]?(?:cookie|data|mode)/iu
+const REACHABLE_PREVIEW_PATTERN = /\b(?:draftMode|previewData|setPreviewData|clearPreviewData|__next_preview_data|__prerender_bypass|previewMode(?:Id|SigningKey|EncryptionKey))\b|\b(?:preview|draft)[-_ ]?(?:cookie|data|mode)\b/iu
 const REACHABLE_PREVIEW_ROUTE_PATTERN = /(?:^|\/)(?:preview|draft(?:mode|data)?)(?:\/|$)/iu
 const SOURCE_EXTENSIONS = new Set(['.cjs', '.js', '.jsx', '.mjs', '.ts', '.tsx'])
 

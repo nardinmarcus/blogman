@@ -84,17 +84,17 @@ function baseConfig() {
         path: 'db/schema.sql',
         sha256: hash('f'),
       },
-      runner: { path: 'scripts/migrations.mjs', sha256: hash('e') },
+      runner: { path: 'scripts/migrations.mjs', sha256: '643594349a3f70d3bf9a7185c6449065cab497c07582cb92aacddb9dbf934c4d' },
       catalog: {
         path: 'db/ledger-migrations',
-        sha256: hash('a'),
+        sha256: '9421f735e2fa27b1051b884a16c6d2b0123791e05afc2bb6c02d2bcfac7e846c',
         migrations: [
-          { id: '001', path: 'db/ledger-migrations/001_initial_schema.sql', sha256: hash('b') },
-        { id: '002', path: 'db/ledger-migrations/002_add_ai_image_configuration.sql', sha256: hash('c') },
-          { id: '003', path: 'db/ledger-migrations/003_migrate_runtime_ai_configuration.sql', sha256: hash('d') },
-          { id: '004', path: 'db/ledger-migrations/004_complete_historical_text_ai_schema.sql', sha256: hash('e') },
-          { id: '005', path: 'db/ledger-migrations/005_fix_posts_fts_sync.sql', sha256: hash('f') },
-          { id: '006', path: 'db/ledger-migrations/006_add_rollout_safety_controls.sql', sha256: hash('a') },
+          { id: '001', path: 'db/ledger-migrations/001_initial_schema.sql', sha256: 'ce80438c559ff16bfc9909761837ea83b053d33c80616bd8477cee8841d7bfd1' },
+          { id: '002', path: 'db/ledger-migrations/002_add_ai_image_configuration.sql', sha256: '20abce1feba8dbf376448a359ba7e96dd11ac8458e097a8538cf67db632133af' },
+          { id: '003', path: 'db/ledger-migrations/003_migrate_runtime_ai_configuration.sql', sha256: 'f08a53117936495af5c85c61fbee678103bb1c8d335a18d62684834888ee864d' },
+          { id: '004', path: 'db/ledger-migrations/004_complete_historical_text_ai_schema.sql', sha256: '938e64fa93a4bbbabc8376ce2a02e90ca1d0d6896201f7350612bbd40da2b77a' },
+          { id: '005', path: 'db/ledger-migrations/005_fix_posts_fts_sync.sql', sha256: 'f6fde6db01e2fbaa967580ed707cded98f4eb7e36ab47707fc2ffc3d5e710441' },
+          { id: '006', path: 'db/ledger-migrations/006_add_rollout_safety_controls.sql', sha256: '8179bc9795619d44b7b01affeb0bb591b95af69c0b4a8399474a8ce4778ac551' },
         ],
       },
       historical_data_disposition: {
@@ -417,14 +417,20 @@ describe('Issue #23 Delivery Preparation', () => {
   it('binds the configured migration runner to catalog and rehearsal', () => {
     const runnerPath = 'tests/scripts/.issue-23-configured-runner.mjs'
     const catalog = {
-      source: 'configured-runner',
-      migrations: [1, 2, 3, 4, 5, 6].map((number) => ({ number })),
+      format: 'blogman-migration-catalog/v1',
+      migrations: baseConfig().migration.catalog.migrations.map((entry, index) => ({
+        number: index + 1,
+        name: entry.path.slice(entry.path.lastIndexOf('/') + 1).replace(/\.sql$/u, ''),
+        checksum: hash(String(index + 1)),
+      })),
     }
     writeFileSync(join(repoRoot, runnerPath), `process.stdout.write(${JSON.stringify(JSON.stringify(catalog))})\n`)
 
     try {
       const config = baseConfig()
       config.migration.runner.path = runnerPath
+      config.migration.runner.sha256 = sha256(readFileSync(join(repoRoot, runnerPath)))
+      config.migration.catalog.sha256 = sha256(Buffer.from(JSON.stringify(catalog)))
       let rehearsalRunnerPath = ''
       const result = prepareFixture(config, {
         rehearsalRunner: ({ migrationRunnerPath }: { migrationRunnerPath: string }) => {
@@ -510,7 +516,7 @@ describe('Issue #23 Delivery Preparation', () => {
       config.migration.catalog.sha256 = declaredCatalogSha256
       config.migration.catalog.migrations = configuredEntries
       mutateConfig(config)
-      return prepareFixture(config, {
+      return withTargetMacosRuntime(() => prepareFixture(config, {
         rehearsalRunner: ({
           repositoryPath,
           migrationRunnerPath,
@@ -525,7 +531,7 @@ describe('Issue #23 Delivery Preparation', () => {
           migrationCatalogPath: catalogPath,
           manifestDraftSha256,
         }),
-      })
+      }))
     }
 
     const scenarios: Array<{
@@ -636,6 +642,29 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(paths).not.toContain('.open-next/private/secret.txt')
     expect(archiveEntries).not.toContain('private/secret.txt')
     expect(archiveEntries).toContain('assets/index.html')
+  })
+
+  it('accepts generic Next DraftMode identifiers but rejects real Preview/Draft markers before archive', () => {
+    const runWithCompiledSource = (compiledSource: string) => prepareFixture(baseConfig(), {
+      buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
+        fixtureBuild(repositoryPath, options)
+        const appPathsManifestPath = join(repositoryPath, '.next', 'server', 'app-paths-manifest.json')
+        const compiledPath = join(repositoryPath, '.next', 'server', 'app', 'page.js')
+        mkdirSync(dirname(compiledPath), { recursive: true })
+        writeFileSync(appPathsManifestPath, JSON.stringify({ 'app/page.js': 'app/page.js' }))
+        writeFileSync(compiledPath, compiledSource)
+      },
+    })
+
+    expect(() => runWithCompiledSource([
+      'const multiZoneDraftMode = false',
+      'const isDraftMode = false',
+      'const previewProps = {}',
+    ].join('\n'))).not.toThrow()
+
+    expectPreArchiveFailure(() => runWithCompiledSource(
+      'export default function Page() { return [draftMode(), previewData] }\n',
+    ))
   })
 
   it('rejects reachable compiled Preview marker before archive identity', () => {
