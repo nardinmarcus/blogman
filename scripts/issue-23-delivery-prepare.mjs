@@ -250,6 +250,43 @@ function resolveFile(repositoryPath, path, label, includeBytes = false) {
   }
 }
 
+function resolveDeclaredFile(repositoryPath, declaration, label) {
+  const resolved = resolveFile(repositoryPath, declaration.path, label)
+  if (resolved.sha256 !== declaration.sha256) {
+    fail(`${label} declared sha256 does not match actual bytes`)
+  }
+  return resolved
+}
+
+function resolveMigrationCatalog(configuredMigrations, resolvedCatalog) {
+  if (!isRecord(resolvedCatalog)
+    || Object.keys(resolvedCatalog).sort().join(',') !== 'format,migrations'
+    || resolvedCatalog.format !== 'blogman-migration-catalog/v1'
+    || !Array.isArray(resolvedCatalog.migrations)
+    || resolvedCatalog.migrations.length !== configuredMigrations.length) {
+    fail('resolved migration catalog envelope is invalid')
+  }
+
+  return resolvedCatalog.migrations.map((entry, index) => {
+    const configured = configuredMigrations[index]
+    if (!isRecord(entry)
+      || Object.keys(entry).sort().join(',') !== 'checksum,name,number'
+      || !Number.isSafeInteger(entry.number)
+      || typeof entry.name !== 'string'
+      || !/^[a-f0-9]{64}$/u.test(entry.checksum)) {
+      fail(`resolved migration catalog entry ${index} is invalid`)
+    }
+    const resolvedId = String(entry.number).padStart(3, '0')
+    if (resolvedId !== configured.id) {
+      fail('resolved migration catalog does not match the configured migration set')
+    }
+    if (entry.name !== basename(configured.path, '.sql')) {
+      fail(`resolved migration catalog name does not match configured migration ${configured.id}`)
+    }
+    return resolvedId
+  })
+}
+
 function enumerateBuildFiles(repositoryPath) {
   const buildRoot = resolve(repositoryPath, '.open-next')
   const files = []
@@ -515,27 +552,28 @@ function resolveFacts(config, {
   const migration = {
     ...config.migration,
     reset_sql: resolveFile(repositoryPath, config.migration.reset_sql.path, 'reset SQL'),
-    runner: resolveFile(repositoryPath, config.migration.runner.path, 'migration runner'),
+    runner: resolveDeclaredFile(repositoryPath, config.migration.runner, 'migration runner'),
     catalog: {
       ...config.migration.catalog,
       migrations: config.migration.catalog.migrations.map((entry) => ({
         ...entry,
-        ...resolveFile(repositoryPath, entry.path, `migration ${entry.id}`),
+        ...resolveDeclaredFile(repositoryPath, entry, `migration ${entry.id}`),
       })),
     },
   }
   const catalogBytes = Buffer.from(command(repositoryPath, process.execPath, [
     resolve(repositoryPath, migration.runner.path), 'catalog',
+    '--migrations-dir', migration.catalog.path,
   ]))
-  const resolvedCatalog = JSON.parse(catalogBytes.toString('utf8'))
-  const configuredIds = config.migration.catalog.migrations.map((entry) => entry.id)
-  const resolvedIds = resolvedCatalog.migrations.map((entry) => String(entry.number).padStart(3, '0'))
-  if (JSON.stringify(configuredIds) !== JSON.stringify(resolvedIds)) {
-    fail('resolved migration catalog does not match the configured migration set')
+  const catalogSha256 = sha256(catalogBytes)
+  if (catalogSha256 !== config.migration.catalog.sha256) {
+    fail('migration catalog declared sha256 does not match actual bytes')
   }
+  const resolvedCatalog = JSON.parse(catalogBytes.toString('utf8'))
+  const resolvedIds = resolveMigrationCatalog(config.migration.catalog.migrations, resolvedCatalog)
   migration.catalog = {
     ...migration.catalog,
-    sha256: sha256(catalogBytes),
+    sha256: catalogSha256,
     migrations: migration.catalog.migrations.map((entry, index) => ({
       ...entry,
       id: resolvedIds[index],
@@ -558,6 +596,7 @@ function resolveFacts(config, {
     repositoryPath,
     manifestDraftSha256,
     migrationRunnerPath: migration.runner.path,
+    migrationCatalogPath: migration.catalog.path,
     productionWriteAdapter,
   })
   if (rehearsal.production_write_adapter_calls !== 0) {

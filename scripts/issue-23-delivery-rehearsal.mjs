@@ -150,6 +150,7 @@ export function runLocalRehearsal({
   repositoryPath = repoRoot,
   runnerPath,
   migrationRunnerPath,
+  migrationCatalogPath = 'db/ledger-migrations',
   manifestDraftSha256,
   productionWriteAdapter = { calls: 0 },
   childTimeoutMs = LOCAL_REHEARSAL_CHILD_TIMEOUT_MS,
@@ -159,6 +160,11 @@ export function runLocalRehearsal({
   const configuredRunnerPath = runnerPath ?? migrationRunnerPath
   if (typeof configuredRunnerPath !== 'string' || configuredRunnerPath.length === 0) {
     throw new Error('Issue #23 local rehearsal requires a configured migration runner')
+  }
+  if (typeof migrationCatalogPath !== 'string'
+    || migrationCatalogPath.length === 0
+    || /[\u0000\r\n]/u.test(migrationCatalogPath)) {
+    throw new Error('Issue #23 local rehearsal requires a configured migration catalog')
   }
   if (!Number.isSafeInteger(childTimeoutMs) || childTimeoutMs <= 0) {
     throw new Error('Issue #23 local rehearsal child timeout is invalid')
@@ -191,7 +197,11 @@ export function runLocalRehearsal({
       configPath: 'wrangler.toml',
       stateToken: stateDirectory,
       candidate: 'issue-23-local-rehearsal',
-    })
+    }).map((command) => ({
+      ...command,
+      args: [command.args[0], '--migrations-dir', migrationCatalogPath, ...command.args.slice(1)],
+      argv: [configuredRunnerPath, command.args[0], '--migrations-dir', migrationCatalogPath, ...command.args.slice(1)],
+    }))
     const run = ({ argv }) => {
       const supervisorArgs = [
         runnerAbsolutePath,

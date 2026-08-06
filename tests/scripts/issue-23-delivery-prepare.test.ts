@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -445,6 +445,168 @@ describe('Issue #23 Delivery Preparation', () => {
       rmSync(join(repoRoot, runnerPath), { force: true })
     }
   })
+
+  it('binds configured migration names checksums catalog and declared hashes', () => {
+    const runnerPath = 'tests/scripts/.issue-23-configured-runner-binding.mjs'
+    const catalogPath = 'tests/scripts/.issue-23-catalog-binding'
+    const catalogDirectory = join(repoRoot, catalogPath)
+    const canonicalCatalogDirectory = join(repoRoot, 'db/ledger-migrations')
+    const captureDirectory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-migration-binding-'))
+    const capturePath = join(captureDirectory, 'argv.jsonl')
+    const captureArguments = () => readFileSync(capturePath, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as string[])
+
+    rmSync(catalogDirectory, { recursive: true, force: true })
+    mkdirSync(catalogDirectory, { recursive: true })
+    for (const name of readdirSync(canonicalCatalogDirectory)) {
+      copyFileSync(join(canonicalCatalogDirectory, name), join(catalogDirectory, name))
+    }
+
+    const configuredEntries = baseConfig().migration.catalog.migrations.map((entry) => {
+      const name = entry.path.slice(entry.path.lastIndexOf('/') + 1)
+      const path = `${catalogPath}/${name}`
+      return {
+        ...entry,
+        path,
+        sha256: sha256(readFileSync(join(repoRoot, path))),
+      }
+    })
+    const goodCatalog = {
+      format: 'blogman-migration-catalog/v1',
+      migrations: configuredEntries.map((entry, index) => ({
+        number: index + 1,
+        name: entry.path.slice(entry.path.lastIndexOf('/') + 1).replace(/\.sql$/u, ''),
+        checksum: hash(String(index + 1)),
+      })),
+    }
+    const declaredCatalogSha256 = sha256(Buffer.from(JSON.stringify(goodCatalog)))
+
+    const writeRunner = (catalog: typeof goodCatalog) => {
+      writeFileSync(join(repoRoot, runnerPath), `
+        import { appendFileSync } from 'node:fs'
+        const args = process.argv.slice(2)
+        appendFileSync(${JSON.stringify(capturePath)}, JSON.stringify(args) + '\\n')
+        if (args[0] === 'catalog') {
+          process.stdout.write(${JSON.stringify(JSON.stringify(catalog))})
+        } else {
+          process.stdout.write(JSON.stringify({ state: 'current' }))
+        }
+      `)
+    }
+
+    const runPreparation = (
+      catalog: typeof goodCatalog,
+      mutateConfig: (config: ReturnType<typeof baseConfig>) => void = () => {},
+    ) => {
+      rmSync(capturePath, { force: true })
+      writeRunner(catalog)
+      const config = baseConfig()
+      config.migration.runner.path = runnerPath
+      config.migration.runner.sha256 = sha256(readFileSync(join(repoRoot, runnerPath)))
+      config.migration.catalog.path = catalogPath
+      config.migration.catalog.sha256 = declaredCatalogSha256
+      config.migration.catalog.migrations = configuredEntries
+      mutateConfig(config)
+      return prepareFixture(config, {
+        rehearsalRunner: ({
+          repositoryPath,
+          migrationRunnerPath,
+          manifestDraftSha256,
+        }: {
+          repositoryPath: string
+          migrationRunnerPath: string
+          manifestDraftSha256: string
+        }) => runLocalRehearsal({
+          repositoryPath,
+          migrationRunnerPath,
+          migrationCatalogPath: catalogPath,
+          manifestDraftSha256,
+        }),
+      })
+    }
+
+    const scenarios: Array<{
+      label: string
+      catalog: typeof goodCatalog
+      mutateConfig?: (config: ReturnType<typeof baseConfig>) => void
+    }> = [
+      {
+        label: 'missing name',
+        catalog: {
+          ...goodCatalog,
+          migrations: goodCatalog.migrations.map(({ number, checksum }) => ({ number, checksum })),
+        },
+      },
+      {
+        label: 'forged name',
+        catalog: {
+          ...goodCatalog,
+          migrations: goodCatalog.migrations.map((entry, index) => (
+            index === 0 ? { ...entry, name: '001_forged' } : entry
+          )),
+        },
+      },
+      {
+        label: 'missing checksum',
+        catalog: {
+          ...goodCatalog,
+          migrations: goodCatalog.migrations.map(({ number, name }, index) => (
+            index === 0 ? { number, name } : { number, name, checksum: hash(String(index + 1)) }
+          )),
+        },
+      },
+      {
+        label: 'forged checksum',
+        catalog: {
+          ...goodCatalog,
+          migrations: goodCatalog.migrations.map((entry, index) => (
+            index === 0 ? { ...entry, checksum: hash('f') } : entry
+          )),
+        },
+      },
+      {
+        label: 'declared runner hash',
+        catalog: goodCatalog,
+        mutateConfig: (config) => { config.migration.runner.sha256 = hash('0') },
+      },
+      {
+        label: 'declared catalog hash',
+        catalog: goodCatalog,
+        mutateConfig: (config) => { config.migration.catalog.sha256 = hash('0') },
+      },
+      {
+        label: 'declared migration hash',
+        catalog: goodCatalog,
+        mutateConfig: (config) => { config.migration.catalog.migrations[0].sha256 = hash('0') },
+      },
+    ]
+
+    try {
+      const result = runPreparation(goodCatalog)
+      expect(result.value.migration.catalog.sha256).toBe(declaredCatalogSha256)
+      const captured = captureArguments()
+      expect(captured).toHaveLength(4)
+      expect(captured.filter(([command]) => command === 'catalog')).toHaveLength(2)
+      expect(captured.filter(([command]) => command === 'apply' || command === 'verify')).toHaveLength(2)
+      for (const args of captured) {
+        const directoryIndex = args.indexOf('--migrations-dir')
+        expect(directoryIndex).toBeGreaterThan(-1)
+        expect(args[directoryIndex + 1]).toBe(catalogPath)
+      }
+
+      for (const scenario of scenarios) {
+        expect(() => runPreparation(scenario.catalog, scenario.mutateConfig), scenario.label)
+          .toThrow(/migration|catalog|sha256/u)
+      }
+    } finally {
+      rmSync(join(repoRoot, runnerPath), { force: true })
+      rmSync(catalogDirectory, { recursive: true, force: true })
+      rmSync(captureDirectory, { recursive: true, force: true })
+    }
+  }, 15_000)
 
   it('enumerates the complete public artifact tree independently of caller-listed files', () => {
     const result = prepareFixture(baseConfig())
