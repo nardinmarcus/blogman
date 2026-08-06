@@ -1,11 +1,61 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import {
   buildLocalEntryReceipt,
   buildLocalRehearsalCommands,
+  execute,
   parseLocalCommandResult,
 } from '../../scripts/issue-23-delivery-entry.mjs'
 
 const draft = 'a'.repeat(64)
+
+const TERMINAL_RESULT_FORMAT = 'blogman-issue-23-terminal-result/v1'
+const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
+
+function hash(bytes: Buffer) {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+function preparedManifest(marker: string) {
+  const value = {
+    format: 'blogman-issue-23-canonical-frozen-manifest/v1',
+    marker,
+  }
+  const bytes = Buffer.from(`{\n  "format": "${value.format}",\n  "marker": "${marker}"\n}\n`, 'utf8')
+  return { value, bytes, sha256: hash(bytes) }
+}
+
+function authorization(manifest: ReturnType<typeof preparedManifest>, authorizationId: string) {
+  return {
+    format: AUTHORIZATION_FORMAT,
+    authorization_id: authorizationId,
+    manifest_sha256: manifest.sha256,
+    decision: 'approve',
+  }
+}
+
+function authorizationHash(record: ReturnType<typeof authorization>) {
+  const bytes = Buffer.from(`${JSON.stringify({
+    format: record.format,
+    authorization_id: record.authorization_id,
+    manifest_sha256: record.manifest_sha256,
+    decision: record.decision,
+  }, null, 2)}\n`, 'utf8')
+  return hash(bytes)
+}
+
+const expectedStageCounts = {
+  authorization_accept: 1,
+  live_preconditions: 1,
+  d1_identity: 0,
+  clean_start_reset: 0,
+  empty_d1_proof: 0,
+  migrations_001_006: 0,
+  reconciliation: 0,
+  worker_deploy: 0,
+  version_traffic_verification: 0,
+  smoke_control_t0: 0,
+}
 
 function commands() {
   return buildLocalRehearsalCommands({
@@ -17,6 +67,64 @@ function commands() {
 }
 
 describe('Issue #23 pure local entry seam', () => {
+  it('executes the accepted public execute entry once and returns a secret-safe deferred Terminal Result', () => {
+    const manifest = preparedManifest('accepted-manifest')
+    const auth = authorization(manifest, 'authorization-accepted-once')
+
+    expect(execute).toHaveLength(2)
+    const result = execute(manifest, auth)
+
+    expect(Object.keys(result)).toEqual(['value', 'bytes', 'sha256'])
+    expect(result.value).toEqual({
+      format: TERMINAL_RESULT_FORMAT,
+      identities: {
+        manifest_sha256: manifest.sha256,
+        authorization_sha256: authorizationHash(auth),
+      },
+      attempt_id: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      authorization_consumed: true,
+      outcome: 'NON_PASS',
+      first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'slice_deferred' },
+      stage_counts: expectedStageCounts,
+      mutation_counts: { production_writes: 0 },
+      evidence: { source: 'synthetic', hashes: [] },
+      finalized: true,
+    })
+    expect(result.bytes).toEqual(Buffer.from(`${JSON.stringify(result.value, null, 2)}\n`, 'utf8'))
+    expect(result.sha256).toBe(hash(result.bytes))
+    expect(result.value).not.toHaveProperty('commands')
+    expect(result.value).not.toHaveProperty('target')
+    expect(result.value).not.toHaveProperty('adapters')
+    expect(result.value).not.toHaveProperty('production_evidence')
+  })
+
+  it('rejects manifest-mismatched Authorization before consumption', () => {
+    const manifest = preparedManifest('manifest-binding')
+    const otherManifest = preparedManifest('other-manifest')
+    const auth = authorization(manifest, 'authorization-before-mismatch')
+
+    expect(() => execute(otherManifest, auth)).toThrow(/manifest/u)
+    expect(execute(manifest, auth).value.authorization_consumed).toBe(true)
+  })
+
+  it('rejects Authorization plan fields and any third execute argument', () => {
+    const manifest = preparedManifest('argument-boundary')
+    const auth = authorization(manifest, 'authorization-argument-boundary')
+
+    expect(() => execute(manifest, { ...auth, plan: { stages: [] } })).toThrow(/authorization/u)
+    expect(() => execute(manifest, auth, { target: 'alternate-target' })).toThrow(/two arguments/u)
+    expect(execute(manifest, auth).value.authorization_consumed).toBe(true)
+  })
+
+  it('rejects replay of the same Authorization after the first terminal result', () => {
+    const manifest = preparedManifest('replay-boundary')
+    const auth = authorization(manifest, 'authorization-replay')
+
+    expect(execute(manifest, auth).value.finalized).toBe(true)
+    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+  })
+
   it('constructs fixed local commands and rejects command mutation', () => {
     const first = commands()
     const changed = buildLocalRehearsalCommands({

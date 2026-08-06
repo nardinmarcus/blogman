@@ -126,3 +126,150 @@ export function buildLocalEntryReceipt({
   const bytes = canonicalBytes(receipt)
   return { value: receipt, bytes, sha256: sha256(bytes) }
 }
+
+const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
+const TERMINAL_RESULT_FORMAT = 'blogman-issue-23-terminal-result/v1'
+const DELIVERY_STAGES = Object.freeze([
+  'authorization_accept',
+  'live_preconditions',
+  'd1_identity',
+  'clean_start_reset',
+  'empty_d1_proof',
+  'migrations_001_006',
+  'reconciliation',
+  'worker_deploy',
+  'version_traffic_verification',
+  'smoke_control_t0',
+])
+const consumedAuthorizationDigests = new Set()
+
+function isPlainRecord(value) {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype
+}
+
+function assertExactKeys(value, keys, label) {
+  const actual = Reflect.ownKeys(value)
+  if (actual.length !== keys.length || keys.some((key) => !actual.includes(key))) {
+    fail(`${label} contains unsupported fields`)
+  }
+}
+
+function canonicalJsonBytes(value) {
+  const json = JSON.stringify(value, null, 2)
+  if (typeof json !== 'string') fail('value is not canonical JSON')
+  return Buffer.from(`${json}\n`, 'utf8')
+}
+
+function isJsonValue(value) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (Array.isArray(value)) return value.every(isJsonValue)
+  if (isPlainRecord(value)) return Reflect.ownKeys(value).every((key) => (
+    typeof key === 'string' && isJsonValue(value[key])
+  ))
+  return false
+}
+
+function normalizedJsonValue(value) {
+  if (Array.isArray(value)) return value.map(normalizedJsonValue)
+  if (isPlainRecord(value)) {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, normalizedJsonValue(value[key])]))
+  }
+  return value
+}
+
+function sameJsonValue(left, right) {
+  return JSON.stringify(normalizedJsonValue(left)) === JSON.stringify(normalizedJsonValue(right))
+}
+
+function validatePreparedManifest(manifest) {
+  if (!isPlainRecord(manifest)) fail('manifest must be a plain record')
+  assertExactKeys(manifest, ['value', 'bytes', 'sha256'], 'manifest')
+  if (!isJsonValue(manifest.value) || !isPlainRecord(manifest.value)) {
+    fail('manifest value must be a JSON record')
+  }
+  if (!(manifest.bytes instanceof Uint8Array)) fail('manifest bytes must be bytes')
+  if (typeof manifest.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(manifest.sha256)) {
+    fail('manifest identity is invalid')
+  }
+
+  const bytes = Buffer.from(manifest.bytes)
+  const text = bytes.toString('utf8')
+  if (!text.endsWith('\n') || text.endsWith('\n\n') || text.includes('\r')) {
+    fail('manifest bytes must use canonical JSON with one LF')
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(text.slice(0, -1))
+  } catch {
+    fail('manifest bytes must contain JSON')
+  }
+  if (!isPlainRecord(parsed) || !bytes.equals(canonicalJsonBytes(parsed))) {
+    fail('manifest bytes are not canonical JSON')
+  }
+  if (!sameJsonValue(parsed, manifest.value)) fail('manifest value does not match bytes')
+  if (sha256(bytes) !== manifest.sha256) fail('manifest identity does not match bytes')
+  return bytes
+}
+
+function acceptAuthorization(manifestSha256, authorization) {
+  if (!isPlainRecord(authorization)) fail('authorization must be a plain record')
+  assertExactKeys(
+    authorization,
+    ['format', 'authorization_id', 'manifest_sha256', 'decision'],
+    'authorization',
+  )
+  if (authorization.format !== AUTHORIZATION_FORMAT) fail('authorization format is invalid')
+  assertSafeString(authorization.authorization_id, 'authorization_id')
+  if (authorization.manifest_sha256 !== manifestSha256) fail('authorization manifest does not match')
+  if (authorization.decision !== 'approve') fail('authorization decision must be approve')
+
+  const canonicalAuthorization = {
+    format: authorization.format,
+    authorization_id: authorization.authorization_id,
+    manifest_sha256: authorization.manifest_sha256,
+    decision: authorization.decision,
+  }
+  const authorizationDigest = sha256(canonicalJsonBytes(canonicalAuthorization))
+  if (consumedAuthorizationDigests.has(authorizationDigest)) {
+    fail('authorization has already been consumed')
+  }
+  consumedAuthorizationDigests.add(authorizationDigest)
+  return authorizationDigest
+}
+
+function stageCounts() {
+  return Object.fromEntries(DELIVERY_STAGES.map((stage, index) => [stage, index < 2 ? 1 : 0]))
+}
+
+export function execute(manifest, authorization) {
+  if (arguments.length !== 2) fail('execute accepts exactly two arguments')
+  const manifestBytes = validatePreparedManifest(manifest)
+  const authorizationDigest = acceptAuthorization(sha256(manifestBytes), authorization)
+  const identities = {
+    manifest_sha256: sha256(manifestBytes),
+    authorization_sha256: authorizationDigest,
+  }
+  const attemptId = sha256(canonicalJsonBytes({
+    format: 'blogman-issue-23-attempt/v1',
+    ...identities,
+  }))
+  const value = {
+    format: TERMINAL_RESULT_FORMAT,
+    identities,
+    attempt_id: attemptId,
+    authorization_consumed: true,
+    outcome: 'NON_PASS',
+    first_terminal_stage: 'live_preconditions',
+    failure: { classification: 'slice_deferred' },
+    stage_counts: stageCounts(),
+    mutation_counts: { production_writes: 0 },
+    evidence: { source: 'synthetic', hashes: [] },
+    finalized: true,
+  }
+  const bytes = canonicalJsonBytes(value)
+  return { value, bytes, sha256: sha256(bytes) }
+}
