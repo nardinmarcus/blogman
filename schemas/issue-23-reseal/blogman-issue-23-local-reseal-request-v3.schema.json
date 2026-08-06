@@ -338,16 +338,16 @@
           ],
           "properties": {
             "run_id": {
-              "const": 30431198339
+              "const": 31048131997
             },
             "job_id": {
-              "const": 90508593330
+              "const": 92448630134
             },
             "head_sha": {
-              "const": "91b223430ae92e3510d6767166c112aa94230282"
+              "const": "712f7d964ca3468727f018d2308f56cf311d9b8c"
             },
             "head_tree": {
-              "const": "ddbe51814fb037dce98d1aa73b8c1f5b008c8d43"
+              "const": "6db5e3fd5ef04d1b394177d7418840f4b6eb11b8"
             },
             "status": {
               "const": "completed"
@@ -368,7 +368,7 @@
               "const": 46
             },
             "raw_job_log_sha256": {
-              "const": "d43a3d6f616a3b2adb55a08b1bc6a17c1d64e737c2b8756b81c64969bc46bc48"
+              "const": "a0adee0ca544a33f3f5b8fb9ab16e1f52bfeecbd309da1ea6f15c801eb3f22b3"
             },
             "coverage": {
               "type": "object",
@@ -396,7 +396,7 @@
                   "const": "aecf5d95f3e96084e67aaf9018d35ce85b9000cc"
                 },
                 "package_lock_blob": {
-                  "const": "18c04f636fa0d4a0dd54eafbecfb083cad024428"
+                  "const": "b5801a611744ca475bead3638b5b6061ecb140fb"
                 },
                 "schema_blob": {
                   "const": "9585b5fdc67811d8f3b70b1fad3c0afbf42496f9"

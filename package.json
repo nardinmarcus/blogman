@@ -16,10 +16,12 @@
     "worktree:prune": "git worktree prune",
     "cf-typegen": "bash scripts/cf-typegen.sh",
     "cf:init": "bash scripts/cf-init.sh",
+    "issue-23:prepare": "node scripts/issue-23-delivery-prepare.mjs",
     "issue-23:reseal": "node scripts/issue-23-reseal.mjs",
     "rollout:safety": "node scripts/rollout-safety.mjs",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@opennextjs/cloudflare": "^1.19.1",
@@ -63,10 +65,15 @@
     "esbuild": "^0.28.0",
     "eslint": "^9",
     "eslint-config-next": "^16.2.6",
+    "patch-package": "8.0.1",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.5",
     "wrangler": "^4.84.1"
+  },
+  "optionalDependencies": {
+    "@img/sharp-darwin-arm64": "0.34.5",
+    "@img/sharp-libvips-darwin-arm64": "1.2.4"
   },
   "description": "Open-source Cloudflare blog starter with Next.js 16, D1, R2, built-in themes, and AI provider presets.",
   "license": "MIT",

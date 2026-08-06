@@ -1,0 +1,336 @@
+diff --git a/node_modules/next/dist/build/preview-key-utils.js b/node_modules/next/dist/build/preview-key-utils.js
+index 55d0a8c..b492857 100644
+--- a/node_modules/next/dist/build/preview-key-utils.js
++++ b/node_modules/next/dist/build/preview-key-utils.js
+@@ -24,6 +24,11 @@ const PREVIEW_ENCRYPTION_KEY = 'previewModeEncryptionKey';
+ const PREVIEW_EXPIRE_AT = 'expireAt';
+ const EXPIRATION = 1000 * 60 * 60 * 24 * 14 // 14 days
+ ;
++const BUILD_PREVIEW_MODE_ID_ENV = 'BLOGMAN_BUILD_PREVIEW_MODE_ID';
++const BUILD_PREVIEW_MODE_SIGNING_KEY_ENV = 'BLOGMAN_BUILD_PREVIEW_MODE_SIGNING_KEY';
++const BUILD_PREVIEW_MODE_ENCRYPTION_KEY_ENV = 'BLOGMAN_BUILD_PREVIEW_MODE_ENCRYPTION_KEY';
++const BUILD_PREVIEW_MODE_ID_PATTERN = /^[a-f0-9]{32}$/u;
++const BUILD_PREVIEW_MODE_KEY_PATTERN = /^[a-f0-9]{64}$/u;
+ async function writeCache(distDir, config) {
+     const cacheBaseDir = (0, _cachedir.getStorageDirectory)(distDir);
+     if (!cacheBaseDir) return;
+@@ -40,7 +45,31 @@ async function writeCache(distDir, config) {
+         [PREVIEW_EXPIRE_AT]: Date.now() + EXPIRATION
+     }));
+ }
++function readBuildPreviewConfig() {
++    const values = [
++        process.env[BUILD_PREVIEW_MODE_ID_ENV],
++        process.env[BUILD_PREVIEW_MODE_SIGNING_KEY_ENV],
++        process.env[BUILD_PREVIEW_MODE_ENCRYPTION_KEY_ENV],
++    ];
++    if (values.every((value)=>value === undefined)) return undefined;
++    if (values.some((value)=>value === undefined)) {
++        throw new Error('Blogman build preview configuration must provide all three values');
++    }
++    const [previewModeId, previewModeSigningKey, previewModeEncryptionKey] = values;
++    if (!BUILD_PREVIEW_MODE_ID_PATTERN.test(previewModeId)
++        || !BUILD_PREVIEW_MODE_KEY_PATTERN.test(previewModeSigningKey)
++        || !BUILD_PREVIEW_MODE_KEY_PATTERN.test(previewModeEncryptionKey)) {
++        throw new Error('Blogman build preview configuration is malformed');
++    }
++    return {
++        previewModeId,
++        previewModeSigningKey,
++        previewModeEncryptionKey,
++    };
++}
+ function generateConfig() {
++    const buildConfig = readBuildPreviewConfig();
++    if (buildConfig) return buildConfig;
+     return {
+         previewModeId: _crypto.default.randomBytes(16).toString('hex'),
+         previewModeSigningKey: _crypto.default.randomBytes(32).toString('hex'),
+diff --git a/node_modules/next/dist/build/webpack/plugins/next-font-manifest-plugin.js b/node_modules/next/dist/build/webpack/plugins/next-font-manifest-plugin.js
+index 1752d5b..e57f45f 100644
+--- a/node_modules/next/dist/build/webpack/plugins/next-font-manifest-plugin.js
++++ b/node_modules/next/dist/build/webpack/plugins/next-font-manifest-plugin.js
+@@ -62,12 +62,12 @@ class NextFontManifestPlugin {
+                             if (!((_mod_buildInfo = mod.buildInfo) == null ? void 0 : _mod_buildInfo.assets)) return;
+                             const chunkEntryName = (appDirBase + chunkGroup.name).replace(/[\\/]/g, _path.default.sep);
+                             const modAssets = Object.keys(mod.buildInfo.assets);
+-                            const fontFiles = modAssets.filter((file)=>/\.(woff|woff2|eot|ttf|otf)$/.test(file));
++                            const fontFiles = modAssets.filter((file)=>/\.(woff|woff2|eot|ttf|otf)$/.test(file)).sort();
+                             // Look if size-adjust fallback font is being used
+                             if (!nextFontManifest.appUsingSizeAdjust) {
+                                 nextFontManifest.appUsingSizeAdjust = getPageIsUsingSizeAdjust(fontFiles);
+                             }
+-                            const preloadedFontFiles = getPreloadedFontFiles(fontFiles);
++                            const preloadedFontFiles = getPreloadedFontFiles(fontFiles).sort();
+                             // Add an entry of the module's font files in the manifest.
+                             // We'll add an entry even if no files should preload.
+                             // When an entry is present but empty, instead of preloading the font files, a preconnect tag is added.
+@@ -93,12 +93,12 @@ class NextFontManifestPlugin {
+                     // Get font files from the chunks included in the entrypoint.
+                     const fontFiles = entrypoint.chunks.flatMap((chunk)=>[
+                             ...chunk.auxiliaryFiles
+-                        ]).filter((file)=>/\.(woff|woff2|eot|ttf|otf)$/.test(file));
++                    ]).filter((file)=>/\.(woff|woff2|eot|ttf|otf)$/.test(file)).sort();
+                     // Look if size-adjust fallback font is being used
+                     if (!nextFontManifest.pagesUsingSizeAdjust) {
+                         nextFontManifest.pagesUsingSizeAdjust = getPageIsUsingSizeAdjust(fontFiles);
+                     }
+-                    const preloadedFontFiles = getPreloadedFontFiles(fontFiles);
++                    const preloadedFontFiles = getPreloadedFontFiles(fontFiles).sort();
+                     // Add an entry of the route's font files in the manifest.
+                     // We'll add an entry even if no files should preload.
+                     // When an entry is present but empty, instead of preloading the font files, a preconnect tag is added.
+diff --git a/node_modules/next/dist/esm/build/preview-key-utils.js b/node_modules/next/dist/esm/build/preview-key-utils.js
+index 1980978..501347f 100644
+--- a/node_modules/next/dist/esm/build/preview-key-utils.js
++++ b/node_modules/next/dist/esm/build/preview-key-utils.js
+@@ -9,6 +9,11 @@ const PREVIEW_ENCRYPTION_KEY = 'previewModeEncryptionKey';
+ const PREVIEW_EXPIRE_AT = 'expireAt';
+ const EXPIRATION = 1000 * 60 * 60 * 24 * 14 // 14 days
+ ;
++const BUILD_PREVIEW_MODE_ID_ENV = 'BLOGMAN_BUILD_PREVIEW_MODE_ID';
++const BUILD_PREVIEW_MODE_SIGNING_KEY_ENV = 'BLOGMAN_BUILD_PREVIEW_MODE_SIGNING_KEY';
++const BUILD_PREVIEW_MODE_ENCRYPTION_KEY_ENV = 'BLOGMAN_BUILD_PREVIEW_MODE_ENCRYPTION_KEY';
++const BUILD_PREVIEW_MODE_ID_PATTERN = /^[a-f0-9]{32}$/u;
++const BUILD_PREVIEW_MODE_KEY_PATTERN = /^[a-f0-9]{64}$/u;
+ async function writeCache(distDir, config) {
+     const cacheBaseDir = getStorageDirectory(distDir);
+     if (!cacheBaseDir) return;
+@@ -25,7 +30,31 @@ async function writeCache(distDir, config) {
+         [PREVIEW_EXPIRE_AT]: Date.now() + EXPIRATION
+     }));
+ }
++function readBuildPreviewConfig() {
++    const values = [
++        process.env[BUILD_PREVIEW_MODE_ID_ENV],
++        process.env[BUILD_PREVIEW_MODE_SIGNING_KEY_ENV],
++        process.env[BUILD_PREVIEW_MODE_ENCRYPTION_KEY_ENV],
++    ];
++    if (values.every((value)=>value === undefined)) return undefined;
++    if (values.some((value)=>value === undefined)) {
++        throw new Error('Blogman build preview configuration must provide all three values');
++    }
++    const [previewModeId, previewModeSigningKey, previewModeEncryptionKey] = values;
++    if (!BUILD_PREVIEW_MODE_ID_PATTERN.test(previewModeId)
++        || !BUILD_PREVIEW_MODE_KEY_PATTERN.test(previewModeSigningKey)
++        || !BUILD_PREVIEW_MODE_KEY_PATTERN.test(previewModeEncryptionKey)) {
++        throw new Error('Blogman build preview configuration is malformed');
++    }
++    return {
++        previewModeId,
++        previewModeSigningKey,
++        previewModeEncryptionKey,
++    };
++}
+ function generateConfig() {
++    const buildConfig = readBuildPreviewConfig();
++    if (buildConfig) return buildConfig;
+     return {
+         previewModeId: crypto.randomBytes(16).toString('hex'),
+         previewModeSigningKey: crypto.randomBytes(32).toString('hex'),
+diff --git a/node_modules/next/dist/esm/build/webpack/plugins/next-font-manifest-plugin.js b/node_modules/next/dist/esm/build/webpack/plugins/next-font-manifest-plugin.js
+index 710d38a..3fb71b8 100644
+--- a/node_modules/next/dist/esm/build/webpack/plugins/next-font-manifest-plugin.js
++++ b/node_modules/next/dist/esm/build/webpack/plugins/next-font-manifest-plugin.js
+@@ -60,12 +60,12 @@ const PLUGIN_NAME = 'NextFontManifestPlugin';
+                             if (!((_mod_buildInfo = mod.buildInfo) == null ? void 0 : _mod_buildInfo.assets)) return;
+                             const chunkEntryName = (appDirBase + chunkGroup.name).replace(/[\\/]/g, path.sep);
+                             const modAssets = Object.keys(mod.buildInfo.assets);
+-                            const fontFiles = modAssets.filter((file)=>/\.(woff|woff2|eot|ttf|otf)$/.test(file));
++                            const fontFiles = modAssets.filter((file)=>/\.(woff|woff2|eot|ttf|otf)$/.test(file)).sort();
+                             // Look if size-adjust fallback font is being used
+                             if (!nextFontManifest.appUsingSizeAdjust) {
+                                 nextFontManifest.appUsingSizeAdjust = getPageIsUsingSizeAdjust(fontFiles);
+                             }
+-                            const preloadedFontFiles = getPreloadedFontFiles(fontFiles);
++                            const preloadedFontFiles = getPreloadedFontFiles(fontFiles).sort();
+                             // Add an entry of the module's font files in the manifest.
+                             // We'll add an entry even if no files should preload.
+                             // When an entry is present but empty, instead of preloading the font files, a preconnect tag is added.
+@@ -91,12 +91,12 @@ const PLUGIN_NAME = 'NextFontManifestPlugin';
+                     // Get font files from the chunks included in the entrypoint.
+                     const fontFiles = entrypoint.chunks.flatMap((chunk)=>[
+                             ...chunk.auxiliaryFiles
+-                        ]).filter((file)=>/\.(woff|woff2|eot|ttf|otf)$/.test(file));
++                    ]).filter((file)=>/\.(woff|woff2|eot|ttf|otf)$/.test(file)).sort();
+                     // Look if size-adjust fallback font is being used
+                     if (!nextFontManifest.pagesUsingSizeAdjust) {
+                         nextFontManifest.pagesUsingSizeAdjust = getPageIsUsingSizeAdjust(fontFiles);
+                     }
+-                    const preloadedFontFiles = getPreloadedFontFiles(fontFiles);
++                    const preloadedFontFiles = getPreloadedFontFiles(fontFiles).sort();
+                     // Add an entry of the route's font files in the manifest.
+                     // We'll add an entry even if no files should preload.
+                     // When an entry is present but empty, instead of preloading the font files, a preconnect tag is added.
+diff --git a/node_modules/next/dist/build/webpack/plugins/pages-manifest-plugin.js b/node_modules/next/dist/build/webpack/plugins/pages-manifest-plugin.js
+--- a/node_modules/next/dist/build/webpack/plugins/pages-manifest-plugin.js
++++ b/node_modules/next/dist/build/webpack/plugins/pages-manifest-plugin.js
+@@ -15,6 +15,15 @@
+         get: all[name]
+     });
+ }
++function sortManifestObjectKeys(value) {
++    if (Array.isArray(value)) return value.map(sortManifestObjectKeys);
++    if (value && typeof value === 'object') {
++        return Object.fromEntries(Object.entries(value)
++            .sort(([left], [right])=>left < right ? -1 : left > right ? 1 : 0)
++            .map(([key, child])=>[key, sortManifestObjectKeys(child)]));
++    }
++    return value;
++}
+ _export(exports, {
+     // This plugin creates a pages-manifest.json from page entrypoints.
+     // This is used for mapping paths like `/` to `.next/server/static/<buildid>/pages/index.js` when doing SSR
+@@ -100,10 +109,10 @@
+             await _promises.default.mkdir(_path.default.dirname(manifestPath), {
+                 recursive: true
+             });
+-            await _promises.default.writeFile(manifestPath, JSON.stringify({
++            await _promises.default.writeFile(manifestPath, JSON.stringify(sortManifestObjectKeys({
+                 ...await _promises.default.readFile(manifestPath, 'utf8').then((res)=>JSON.parse(res)).catch(()=>({})),
+                 ...entries
+-            }, null, 2));
++            }), null, 2));
+         };
+         if (this.distDir) {
+             const pagesManifestPath = _path.default.join(this.distDir, 'server', _constants.PAGES_MANIFEST);
+@@ -113,10 +122,10 @@
+             });
+         } else {
+             const pagesManifestPath = (!this.dev && !this.isEdgeRuntime ? '../' : '') + _constants.PAGES_MANIFEST;
+-            compilation.emitAsset(pagesManifestPath, new _webpack.sources.RawSource(JSON.stringify({
++            compilation.emitAsset(pagesManifestPath, new _webpack.sources.RawSource(JSON.stringify(sortManifestObjectKeys({
+                 ...edgeServerPages,
+                 ...nodeServerPages
+-            }, null, 2)));
++            }), null, 2)));
+         }
+         if (this.appDirEnabled) {
+             if (this.distDir) {
+@@ -126,10 +135,10 @@
+                     ...nodeServerAppPaths
+                 });
+             } else {
+-                compilation.emitAsset((!this.dev && !this.isEdgeRuntime ? '../' : '') + _constants.APP_PATHS_MANIFEST, new _webpack.sources.RawSource(JSON.stringify({
++                compilation.emitAsset((!this.dev && !this.isEdgeRuntime ? '../' : '') + _constants.APP_PATHS_MANIFEST, new _webpack.sources.RawSource(JSON.stringify(sortManifestObjectKeys({
+                     ...edgeServerAppPaths,
+                     ...nodeServerAppPaths
+-                }, null, 2)));
++                }), null, 2)));
+             }
+         }
+     }
+diff --git a/node_modules/next/dist/esm/build/webpack/plugins/pages-manifest-plugin.js b/node_modules/next/dist/esm/build/webpack/plugins/pages-manifest-plugin.js
+--- a/node_modules/next/dist/esm/build/webpack/plugins/pages-manifest-plugin.js
++++ b/node_modules/next/dist/esm/build/webpack/plugins/pages-manifest-plugin.js
+@@ -8,6 +8,15 @@
+ export let nodeServerPages = {};
+ export let edgeServerAppPaths = {};
+ export let nodeServerAppPaths = {};
++function sortManifestObjectKeys(value) {
++    if (Array.isArray(value)) return value.map(sortManifestObjectKeys);
++    if (value && typeof value === 'object') {
++        return Object.fromEntries(Object.entries(value)
++            .sort(([left], [right])=>left < right ? -1 : left > right ? 1 : 0)
++            .map(([key, child])=>[key, sortManifestObjectKeys(child)]));
++    }
++    return value;
++}
+ // This plugin creates a pages-manifest.json from page entrypoints.
+ // This is used for mapping paths like `/` to `.next/server/static/<buildid>/pages/index.js` when doing SSR
+ // It's also used by next export to provide defaultPathMap
+@@ -61,10 +70,10 @@
+             await fs.mkdir(path.dirname(manifestPath), {
+                 recursive: true
+             });
+-            await fs.writeFile(manifestPath, JSON.stringify({
++            await fs.writeFile(manifestPath, JSON.stringify(sortManifestObjectKeys({
+                 ...await fs.readFile(manifestPath, 'utf8').then((res)=>JSON.parse(res)).catch(()=>({})),
+                 ...entries
+-            }, null, 2));
++            }), null, 2));
+         };
+         if (this.distDir) {
+             const pagesManifestPath = path.join(this.distDir, 'server', PAGES_MANIFEST);
+@@ -74,10 +83,10 @@
+             });
+         } else {
+             const pagesManifestPath = (!this.dev && !this.isEdgeRuntime ? '../' : '') + PAGES_MANIFEST;
+-            compilation.emitAsset(pagesManifestPath, new sources.RawSource(JSON.stringify({
++            compilation.emitAsset(pagesManifestPath, new sources.RawSource(JSON.stringify(sortManifestObjectKeys({
+                 ...edgeServerPages,
+                 ...nodeServerPages
+-            }, null, 2)));
++            }), null, 2)));
+         }
+         if (this.appDirEnabled) {
+             if (this.distDir) {
+@@ -87,10 +96,10 @@
+                     ...nodeServerAppPaths
+                 });
+             } else {
+-                compilation.emitAsset((!this.dev && !this.isEdgeRuntime ? '../' : '') + APP_PATHS_MANIFEST, new sources.RawSource(JSON.stringify({
++                compilation.emitAsset((!this.dev && !this.isEdgeRuntime ? '../' : '') + APP_PATHS_MANIFEST, new sources.RawSource(JSON.stringify(sortManifestObjectKeys({
+                     ...edgeServerAppPaths,
+                     ...nodeServerAppPaths
+-                }, null, 2)));
++                }), null, 2)));
+             }
+         }
+     }
+diff --git a/node_modules/next/dist/build/webpack/plugins/flight-manifest-plugin.js b/node_modules/next/dist/build/webpack/plugins/flight-manifest-plugin.js
+--- a/node_modules/next/dist/build/webpack/plugins/flight-manifest-plugin.js
++++ b/node_modules/next/dist/build/webpack/plugins/flight-manifest-plugin.js
+@@ -22,6 +22,15 @@
+ const _deploymentid = require("../../../shared/lib/deployment-id");
+ const _utils = require("../utils");
+ const _encodeuripath = require("../../../shared/lib/encode-uri-path");
++function sortManifestObjectKeys(value) {
++    if (Array.isArray(value)) return value.map(sortManifestObjectKeys);
++    if (value && typeof value === 'object') {
++        return Object.fromEntries(Object.entries(value)
++            .sort(([left], [right])=>left < right ? -1 : left > right ? 1 : 0)
++            .map(([key, child])=>[key, sortManifestObjectKeys(child)]));
++    }
++    return value;
++}
+ function _getRequireWildcardCache(nodeInterop) {
+     if (typeof WeakMap !== "function") return null;
+     var cacheBabelInterop = new WeakMap();
+@@ -422,7 +431,7 @@
+                     group += (group ? '/' : '') + segment;
+                 }
+             }
+-            const json = JSON.stringify(mergedManifest);
++            const json = JSON.stringify(sortManifestObjectKeys(mergedManifest));
+             const pagePath = pageName.replace(/%5F/g, '_');
+             const pageBundlePath = (0, _normalizepagepath.normalizePagePath)(pagePath.slice('app'.length));
+             compilation.emitAsset('server/app' + pageBundlePath + '_' + _constants.CLIENT_REFERENCE_MANIFEST + '.js', new _webpack.sources.RawSource(`globalThis.__RSC_MANIFEST=(globalThis.__RSC_MANIFEST||{});globalThis.__RSC_MANIFEST[${JSON.stringify(pagePath.slice('app'.length))}]=${json};`));
+diff --git a/node_modules/next/dist/esm/build/webpack/plugins/flight-manifest-plugin.js b/node_modules/next/dist/esm/build/webpack/plugins/flight-manifest-plugin.js
+--- a/node_modules/next/dist/esm/build/webpack/plugins/flight-manifest-plugin.js
++++ b/node_modules/next/dist/esm/build/webpack/plugins/flight-manifest-plugin.js
+@@ -20,6 +20,15 @@
+     rscModules: {},
+     edgeRscModules: {}
+ });
++function sortManifestObjectKeys(value) {
++    if (Array.isArray(value)) return value.map(sortManifestObjectKeys);
++    if (value && typeof value === 'object') {
++        return Object.fromEntries(Object.entries(value)
++            .sort(([left], [right])=>left < right ? -1 : left > right ? 1 : 0)
++            .map(([key, child])=>[key, sortManifestObjectKeys(child)]));
++    }
++    return value;
++}
+ function getAppPathRequiredChunks(chunkGroup, excludedFiles) {
+     const assetTokenQuery = getAssetTokenQuery();
+     const chunks = [];
+@@ -373,7 +382,7 @@
+                     group += (group ? '/' : '') + segment;
+                 }
+             }
+-            const json = JSON.stringify(mergedManifest);
++            const json = JSON.stringify(sortManifestObjectKeys(mergedManifest));
+             const pagePath = pageName.replace(/%5F/g, '_');
+             const pageBundlePath = normalizePagePath(pagePath.slice('app'.length));
+             compilation.emitAsset('server/app' + pageBundlePath + '_' + CLIENT_REFERENCE_MANIFEST + '.js', new sources.RawSource(`globalThis.__RSC_MANIFEST=(globalThis.__RSC_MANIFEST||{});globalThis.__RSC_MANIFEST[${JSON.stringify(pagePath.slice('app'.length))}]=${json};`));
