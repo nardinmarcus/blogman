@@ -9,6 +9,8 @@ export function runSyntheticStage(stage) {
     case 'd1_identity':
       return { outcome: 'PASS', duration_ms: 0 }
     case 'clean_start_reset':
+      return { outcome: 'PASS', duration_ms: 0 }
+    case 'empty_d1_proof':
       return {
         outcome: 'NON_PASS',
         classification: 'synthetic_adapter_non_pass',
