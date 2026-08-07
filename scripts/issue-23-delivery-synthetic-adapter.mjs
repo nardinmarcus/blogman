@@ -7,6 +7,8 @@ export function runSyntheticStage(stage) {
     case 'live_preconditions':
       return { outcome: 'PASS', duration_ms: 0 }
     case 'd1_identity':
+      return { outcome: 'PASS', duration_ms: 0 }
+    case 'clean_start_reset':
       return {
         outcome: 'NON_PASS',
         classification: 'synthetic_adapter_non_pass',
