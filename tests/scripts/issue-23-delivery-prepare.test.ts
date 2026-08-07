@@ -1390,6 +1390,7 @@ describe('Issue #23 Delivery Preparation', () => {
         } catch {
           writeFileSync(process.env.BLOGMAN_ISSUE_88_PROBE_NETWORK, 'blocked')
         }
+        process.kill(process.ppid, 'SIGTERM')
         setTimeout(() => {}, 60_000)
       } else {
         process.stdout.write(JSON.stringify({ state: 'current' }))
