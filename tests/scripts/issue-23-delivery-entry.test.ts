@@ -53,7 +53,7 @@ const expectedStageCounts = {
   migrations_001_006: 1,
   reconciliation: 1,
   worker_deploy: 1,
-  version_traffic_verification: 0,
+  version_traffic_verification: 1,
   smoke_control_t0: 0,
 }
 
@@ -70,7 +70,7 @@ const expectedStageDurations = {
   smoke_control_t0: 0,
 }
 
-const EXPECTED_TRACE_SHA256 = '4378d40f3d6682bed7c599c1f5b8194a38e4bf252311b268db84a722b536ba6d'
+const EXPECTED_TRACE_SHA256 = '703686011f2910ab059a95778f03abca6d89ac5500a2e11b9505dbed0365693a'
 
 function commands() {
   return buildLocalRehearsalCommands({
@@ -99,7 +99,7 @@ describe('Issue #23 pure local entry seam', () => {
       attempt_id: expect.stringMatching(/^[a-f0-9]{64}$/u),
       authorization_consumed: true,
       outcome: 'NON_PASS',
-      first_terminal_stage: 'worker_deploy',
+      first_terminal_stage: 'version_traffic_verification',
       failure: { classification: 'synthetic_adapter_non_pass' },
       stage_counts: expectedStageCounts,
       stage_durations_ms: expectedStageDurations,

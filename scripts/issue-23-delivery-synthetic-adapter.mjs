@@ -17,6 +17,8 @@ export function runSyntheticStage(stage) {
     case 'reconciliation':
       return { outcome: 'PASS', duration_ms: 0 }
     case 'worker_deploy':
+      return { outcome: 'PASS', duration_ms: 0 }
+    case 'version_traffic_verification':
       return {
         outcome: 'NON_PASS',
         classification: 'synthetic_adapter_non_pass',
