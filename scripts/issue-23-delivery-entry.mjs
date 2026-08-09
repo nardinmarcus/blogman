@@ -177,7 +177,7 @@ function isJsonValue(value) {
 function normalizedJsonValue(value) {
   if (Array.isArray(value)) return value.map(normalizedJsonValue)
   if (isPlainRecord(value)) {
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, normalizedJsonValue(value[key])]))
+    return Object.fromEntries(Reflect.ownKeys(value).sort().map((key) => [key, normalizedJsonValue(value[key])]))
   }
   return value
 }
