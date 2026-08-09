@@ -17,11 +17,16 @@ function hash(bytes: Buffer) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
-function preparedManifest(marker: string, repositoryCommit = SYNTHETIC_LIVE_REPOSITORY_COMMIT) {
+function preparedManifest(
+  marker: string,
+  repositoryCommit = SYNTHETIC_LIVE_REPOSITORY_COMMIT,
+  d1DatabaseId?: string,
+) {
   const value = {
     format: 'blogman-issue-23-canonical-frozen-manifest/v1',
     marker,
     repository: { commit: repositoryCommit },
+    ...(d1DatabaseId ? { target: { d1_database_id: d1DatabaseId } } : {}),
   }
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
   return { value, bytes, sha256: hash(bytes) }
@@ -160,6 +165,56 @@ describe('Issue #23 pure local entry seam', () => {
     expect(result.value).toEqual(expected)
     expect(result.bytes).toEqual(Buffer.from(`${JSON.stringify(expected, null, 2)}\n`, 'utf8'))
     expect(result.sha256).toBe('d93cf8e0e28f1f3b54bb9c28fb845d72fad4fefbb2a2682dcb49ecfec43265a0')
+    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+    for (const excluded of ['commands', 'target', 'adapters', 'trace', 'raw_output', 'secrets', 'production_evidence']) {
+      expect(result.value).not.toHaveProperty(excluded)
+    }
+  })
+
+  it('returns a consumed terminal D1 NON_PASS result when public execute observes a different database identity', () => {
+    const manifest = preparedManifest(
+      'd1-identity-mismatch',
+      SYNTHETIC_LIVE_REPOSITORY_COMMIT,
+      'wrong-d1-public-id',
+    )
+    const auth = authorization(manifest, 'authorization-d1-identity-mismatch')
+    const expected = {
+      format: TERMINAL_RESULT_FORMAT,
+      identities: {
+        manifest_sha256: 'e8c2b0c79bfac6c7d28eccc27f9b34cb756253115ae78b05986f68f90cc4e952',
+        authorization_sha256: '0aec3a52909fe3f4c122598e1792982286119b9ff37960f5ed7a29d3f20a6d9a',
+      },
+      attempt_id: '4e8156b14f216e5448ddeb30190a740954cf574124f4d2e64867dfa4af2873fd',
+      authorization_consumed: true,
+      outcome: 'NON_PASS',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'synthetic_adapter_non_pass' },
+      stage_counts: {
+        authorization_accept: 1,
+        live_preconditions: 1,
+        d1_identity: 1,
+        clean_start_reset: 0,
+        empty_d1_proof: 0,
+        migrations_001_006: 0,
+        reconciliation: 0,
+        worker_deploy: 0,
+        version_traffic_verification: 0,
+        smoke_control_t0: 0,
+      },
+      stage_durations_ms: expectedStageDurations,
+      mutation_counts: { production_writes: 0 },
+      evidence: {
+        source: 'synthetic',
+        hashes: ['5254fe4ae57c5438e76d40aae510b80488cb71fbd74c53c476009474bb8cf889'],
+      },
+      finalized: true,
+    }
+
+    expect(manifest.sha256).toBe(expected.identities.manifest_sha256)
+    const result = execute(manifest, auth)
+    expect(result.value).toEqual(expected)
+    expect(result.bytes).toEqual(Buffer.from(`${JSON.stringify(expected, null, 2)}\n`, 'utf8'))
+    expect(result.sha256).toBe('746d40d1313599ed41e7cf8a1ff062ae28e54bea1842ce9a5381494a8733dd64')
     expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
     for (const excluded of ['commands', 'target', 'adapters', 'trace', 'raw_output', 'secrets', 'production_evidence']) {
       expect(result.value).not.toHaveProperty(excluded)
