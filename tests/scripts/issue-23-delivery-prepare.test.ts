@@ -301,6 +301,69 @@ function readPatchContract(relativePath: string) {
   return existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : ''
 }
 
+async function emitCjsFlightManifest(chunkSpecs: Array<{ id: string; files: string[] }>) {
+  const { ClientReferenceManifestPlugin } = await import(
+    'next/dist/build/webpack/plugins/flight-manifest-plugin.js'
+  )
+  const dependency = {}
+  const clientModule = { resource: join(repoRoot, 'app', 'client.tsx'), type: 'javascript/auto' }
+  const entryModule = {
+    layer: 'app-pages-browser',
+    request: 'next-flight-client-entry-loader.js?test',
+  }
+  const entrypoint = {
+    childrenIterable: [],
+    chunks: chunkSpecs.map(({ id, files }) => ({ id, files, name: `chunk-${id}` })),
+    getFiles: () => [],
+  }
+  let emitted = ''
+  const compilation = {
+    chunkGraph: {
+      getChunkEntryModulesIterable: () => [entryModule],
+      getModuleId: () => 'client-module',
+    },
+    emitAsset: (_path: string, source: { source: () => string | Uint8Array }) => {
+      emitted = source.source().toString()
+    },
+    entrypoints: new Map([['app/page', entrypoint]]),
+    getAsset: () => undefined,
+    hooks: {
+      processAssets: {
+        tap: (_options: unknown, callback: () => void) => callback(),
+      },
+    },
+    moduleGraph: {
+      getOutgoingConnectionsInOrder: () => [{ dependency, module: clientModule }],
+      getResolvedModule: () => clientModule,
+      isAsync: () => false,
+    },
+    outputOptions: { crossOriginLoading: false, publicPath: '' },
+  }
+  const compiler = {
+    context: repoRoot,
+    hooks: {
+      compilation: {
+        tap: (_name: string, callback: (value: typeof compilation) => void) => callback(compilation),
+      },
+    },
+  }
+
+  new ClientReferenceManifestPlugin({
+    appDir: join(repoRoot, 'app'),
+    dev: false,
+    experimentalInlineCss: false,
+  }).apply(compiler)
+  return emitted
+}
+
+function readFlightManifestChunkPairs(bytes: string) {
+  const manifest = JSON.parse(bytes.slice(bytes.indexOf(']=') + 2, -1))
+  const chunks = Object.values(manifest.clientModules)[0] as { chunks: string[] }
+  return Array.from({ length: chunks.chunks.length / 2 }, (_, index) =>
+    chunks.chunks.slice(index * 2, index * 2 + 2),
+  )
+}
+
 function buildFileMap(result: ReturnType<typeof prepareFixture>) {
   const artifactPaths = new Set(
     result.value.artifact.file_tree.files
@@ -366,6 +429,27 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(patch).toContain('a/node_modules/next/dist/esm/build/webpack/plugins/flight-manifest-plugin.js')
     expect(patch).toContain('sortManifestObjectKeys')
     expect(patch).toContain('Array.isArray')
+  })
+
+  it('manifest-order contract: emits identical flight manifests for equivalent chunk traversal order', async () => {
+    const first = await emitCjsFlightManifest([
+      { id: '2', files: ['static/chunks/a.js'] },
+      { id: '10', files: ['static/chunks/z.js', 'static/chunks/[slug].js'] },
+    ])
+    const second = await emitCjsFlightManifest([
+      { id: '10', files: ['static/chunks/[slug].js', 'static/chunks/z.js'] },
+      { id: '2', files: ['static/chunks/a.js'] },
+    ])
+    const expectedPairs = [
+      ['10', 'static/chunks/%5Bslug%5D.js'],
+      ['10', 'static/chunks/z.js'],
+      ['2', 'static/chunks/a.js'],
+    ]
+
+    expect(readFlightManifestChunkPairs(first).sort()).toEqual(expectedPairs)
+    expect(readFlightManifestChunkPairs(second).sort()).toEqual(expectedPairs)
+    expect(first).toBe(second)
+    expect(readFlightManifestChunkPairs(first)).toEqual(expectedPairs)
   })
 
   it('manifest-order contract: tie-breaks OpenNext manifest glob ordering lexically', () => {
