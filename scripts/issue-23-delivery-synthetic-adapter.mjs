@@ -11,6 +11,8 @@ export function runSyntheticStage(stage) {
     case 'clean_start_reset':
       return { outcome: 'PASS', duration_ms: 0 }
     case 'empty_d1_proof':
+      return { outcome: 'PASS', duration_ms: 0 }
+    case 'migrations_001_006':
       return {
         outcome: 'NON_PASS',
         classification: 'synthetic_adapter_non_pass',
