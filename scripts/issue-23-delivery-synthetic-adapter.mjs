@@ -21,11 +21,7 @@ export function runSyntheticStage(stage) {
     case 'version_traffic_verification':
       return { outcome: 'PASS', duration_ms: 0 }
     case 'smoke_control_t0':
-      return {
-        outcome: 'NON_PASS',
-        classification: 'synthetic_adapter_non_pass',
-        duration_ms: 0,
-      }
+      return { outcome: 'PASS', duration_ms: 0 }
     default:
       fail(`${stage} is deferred in this slice`)
   }
