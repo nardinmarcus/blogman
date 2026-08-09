@@ -1405,7 +1405,6 @@ describe('Issue #23 Delivery Preparation', () => {
         runnerPath,
         manifestDraftSha256: hash('a'),
         productionWriteAdapter: adapter,
-        childTimeoutMs: 100,
         environment: {
           BLOGMAN_ISSUE_88_PROBE_PID: `${probeBase}.pid`,
           BLOGMAN_ISSUE_88_PROBE_NETWORK: `${probeBase}.network`,
