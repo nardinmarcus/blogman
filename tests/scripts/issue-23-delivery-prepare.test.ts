@@ -301,7 +301,10 @@ function readPatchContract(relativePath: string) {
   return existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : ''
 }
 
-async function emitCjsFlightManifest(chunkSpecs: Array<{ id: string; files: string[] }>) {
+async function emitCjsFlightManifest(
+  chunkSpecs: Array<{ id: string; files: string[] }>,
+  cssFiles: string[] = [],
+) {
   const { ClientReferenceManifestPlugin } = await import(
     'next/dist/build/webpack/plugins/flight-manifest-plugin.js'
   )
@@ -314,7 +317,7 @@ async function emitCjsFlightManifest(chunkSpecs: Array<{ id: string; files: stri
   const entrypoint = {
     childrenIterable: [],
     chunks: chunkSpecs.map(({ id, files }) => ({ id, files, name: `chunk-${id}` })),
-    getFiles: () => [],
+    getFiles: () => cssFiles,
   }
   let emitted = ''
   const compilation = {
@@ -326,7 +329,7 @@ async function emitCjsFlightManifest(chunkSpecs: Array<{ id: string; files: stri
       emitted = source.source().toString()
     },
     entrypoints: new Map([['app/page', entrypoint]]),
-    getAsset: () => undefined,
+    getAsset: (file: string) => ({ source: { source: () => `/* ${file} */` } }),
     hooks: {
       processAssets: {
         tap: (_options: unknown, callback: () => void) => callback(),
@@ -362,6 +365,11 @@ function readFlightManifestChunkPairs(bytes: string) {
   return Array.from({ length: chunks.chunks.length / 2 }, (_, index) =>
     chunks.chunks.slice(index * 2, index * 2 + 2),
   )
+}
+
+function readFlightManifestEntryCssFiles(bytes: string) {
+  const manifest = JSON.parse(bytes.slice(bytes.indexOf(']=') + 2, -1))
+  return Object.values(manifest.entryCSSFiles)[0] as Array<{ inlined: boolean; path: string }>
 }
 
 function buildFileMap(result: ReturnType<typeof prepareFixture>) {
@@ -450,6 +458,19 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(readFlightManifestChunkPairs(second).sort()).toEqual(expectedPairs)
     expect(first).toBe(second)
     expect(readFlightManifestChunkPairs(first)).toEqual(expectedPairs)
+  })
+
+  it('manifest-order contract: emits identical flight manifests for equivalent CSS traversal order', async () => {
+    const chunkSpecs = [{ id: '2', files: ['static/chunks/a.js'] }]
+    const first = await emitCjsFlightManifest(chunkSpecs, ['static/css/z.css', 'static/css/a.css'])
+    const second = await emitCjsFlightManifest(chunkSpecs, ['static/css/a.css', 'static/css/z.css'])
+    const expectedCssFiles = [
+      { inlined: false, path: 'static/css/a.css' },
+      { inlined: false, path: 'static/css/z.css' },
+    ]
+
+    expect(first).toBe(second)
+    expect(readFlightManifestEntryCssFiles(first)).toEqual(expectedCssFiles)
   })
 
   it('manifest-order contract: tie-breaks OpenNext manifest glob ordering lexically', () => {
