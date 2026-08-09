@@ -3,6 +3,7 @@ function fail(message) {
 }
 
 const SYNTHETIC_LIVE_REPOSITORY_COMMIT = '1'.repeat(40)
+const SYNTHETIC_LIVE_D1_DATABASE_ID = 'd1-public-id'
 
 export function runSyntheticStage(stage, manifest) {
   switch (stage) {
@@ -16,6 +17,15 @@ export function runSyntheticStage(stage, manifest) {
       }
       return { outcome: 'PASS', duration_ms: 0 }
     case 'd1_identity':
+      if (manifest.target
+        && Object.hasOwn(manifest.target, 'd1_database_id')
+        && manifest.target.d1_database_id !== SYNTHETIC_LIVE_D1_DATABASE_ID) {
+        return {
+          outcome: 'NON_PASS',
+          classification: 'synthetic_adapter_non_pass',
+          duration_ms: 0,
+        }
+      }
       return { outcome: 'PASS', duration_ms: 0 }
     case 'clean_start_reset':
       return { outcome: 'PASS', duration_ms: 0 }
