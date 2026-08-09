@@ -2,9 +2,18 @@ function fail(message) {
   throw new Error(`Issue #23 synthetic adapter: ${message}`)
 }
 
-export function runSyntheticStage(stage) {
+const SYNTHETIC_LIVE_REPOSITORY_COMMIT = '1'.repeat(40)
+
+export function runSyntheticStage(stage, manifest) {
   switch (stage) {
     case 'live_preconditions':
+      if (manifest.repository.commit !== SYNTHETIC_LIVE_REPOSITORY_COMMIT) {
+        return {
+          outcome: 'NON_PASS',
+          classification: 'Manifest Drift',
+          duration_ms: 0,
+        }
+      }
       return { outcome: 'PASS', duration_ms: 0 }
     case 'd1_identity':
       return { outcome: 'PASS', duration_ms: 0 }

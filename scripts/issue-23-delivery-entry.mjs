@@ -269,7 +269,7 @@ export function execute(manifest, authorization) {
   }))
   const trace = []
   for (const stage of DELIVERY_STAGES.slice(1)) {
-    const result = runSyntheticStage(stage)
+    const result = runSyntheticStage(stage, manifest.value)
     const entry = {
       stage,
       outcome: result.outcome,
