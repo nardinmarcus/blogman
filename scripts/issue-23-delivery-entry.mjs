@@ -280,15 +280,17 @@ export function execute(manifest, authorization) {
     if (result.outcome !== 'PASS') break
   }
   const terminal = trace.at(-1)
-  if (!terminal || terminal.outcome !== 'NON_PASS') fail('synthetic prefix did not terminate')
+  if (!terminal) fail('synthetic state machine did not run')
   const value = {
     format: TERMINAL_RESULT_FORMAT,
     identities,
     attempt_id: attemptId,
     authorization_consumed: true,
-    outcome: 'NON_PASS',
+    outcome: terminal.outcome,
     first_terminal_stage: terminal.stage,
-    failure: { classification: terminal.classification },
+    failure: terminal.outcome === 'PASS'
+      ? null
+      : { classification: terminal.classification },
     stage_counts: stageCounts(trace),
     stage_durations_ms: stageDurations(trace),
     mutation_counts: { production_writes: 0 },

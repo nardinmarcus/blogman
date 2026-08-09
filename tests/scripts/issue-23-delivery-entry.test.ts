@@ -70,7 +70,7 @@ const expectedStageDurations = {
   smoke_control_t0: 0,
 }
 
-const EXPECTED_TRACE_SHA256 = 'a29ab75d435b8eb7d8b08b82fbc579845bd914c6c97f6cec7a5e7e41fe2763a3'
+const EXPECTED_TRACE_SHA256 = 'bd19b4591857ea9aab139ced2eb1afb5955050297ef2d4edb7c722f5b736e68c'
 
 function commands() {
   return buildLocalRehearsalCommands({
@@ -82,7 +82,7 @@ function commands() {
 }
 
 describe('Issue #23 pure local entry seam', () => {
-  it('executes the deterministic synthetic serial prefix and stops at the first adapter failure', () => {
+  it('executes the deterministic synthetic state machine to an all-success Terminal Result', () => {
     const manifest = preparedManifest('accepted-manifest')
     const auth = authorization(manifest, 'authorization-accepted-once')
 
@@ -98,9 +98,9 @@ describe('Issue #23 pure local entry seam', () => {
       },
       attempt_id: expect.stringMatching(/^[a-f0-9]{64}$/u),
       authorization_consumed: true,
-      outcome: 'NON_PASS',
+      outcome: 'PASS',
       first_terminal_stage: 'smoke_control_t0',
-      failure: { classification: 'synthetic_adapter_non_pass' },
+      failure: null,
       stage_counts: expectedStageCounts,
       stage_durations_ms: expectedStageDurations,
       mutation_counts: { production_writes: 0 },
