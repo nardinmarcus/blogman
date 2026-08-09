@@ -230,6 +230,23 @@ describe('Issue #23 pure local entry seam', () => {
     expect(execute(manifest, auth).value.authorization_consumed).toBe(true)
   })
 
+  it('rejects a prepared manifest value with an unencoded own property before Authorization consumption', () => {
+    const manifest = preparedManifest('unencoded-own-property')
+    const auth = authorization(manifest, 'authorization-unencoded-own-property')
+    Reflect.defineProperty(manifest.value, 'unencoded', { value: 'must-not-leak', enumerable: false, configurable: true })
+
+    expect(() => execute(manifest, auth)).toThrowError(new Error('Issue #23 local entry: manifest value does not match bytes'))
+    Reflect.deleteProperty(manifest.value, 'unencoded')
+    const result = execute(manifest, auth)
+    expect(result.value.identities.manifest_sha256).toBe('e4b41d575043bd366f7caa83e6196852c191fb864bbaec0197b640ab95f0d091')
+    expect(result.value.identities.authorization_sha256).toBe('5fda14a14654dbc885aa975baf4d41fc4cd16157752bb1d6247a2a93e58f9b2f')
+    expect(result.value.attempt_id).toBe('b43b820a89920488879c4a5c815f9907423ab75c6263026e25db3b9c73fcf589')
+    expect(result.value.evidence.hashes).toEqual(['bd19b4591857ea9aab139ced2eb1afb5955050297ef2d4edb7c722f5b736e68c'])
+    expect(result.value.authorization_consumed).toBe(true)
+    expect(result.sha256).toBe('0ef58a054a86d236766068c4147fa20572f29f752736197653abb486bd359c3a')
+    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+  })
+
   it('rejects Authorization plan fields and any third execute argument', () => {
     const manifest = preparedManifest('argument-boundary')
     const auth = authorization(manifest, 'authorization-argument-boundary')
