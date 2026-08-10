@@ -221,6 +221,56 @@ describe('Issue #23 pure local entry seam', () => {
     }
   })
 
+  it('returns a consumed terminal ERROR result when public execute encounters a malformed repository wrapper', () => {
+    const value = {
+      format: 'blogman-issue-23-canonical-frozen-manifest/v1',
+      marker: 'malformed-repository-wrapper',
+      repository: null,
+    }
+    const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
+    const manifest = { value, bytes, sha256: hash(bytes) }
+    const auth = {
+      format: AUTHORIZATION_FORMAT,
+      authorization_id: 'authorization-malformed-repository-wrapper',
+      manifest_sha256: manifest.sha256,
+      decision: 'approve',
+    }
+
+    expect(manifest.sha256).toBe('e2683c3dee1edb37f1826c662d8787710f647c817e4b38f673cdf8801355feb0')
+    const result = execute(manifest, auth)
+
+    expect(result.value).toMatchObject({
+      authorization_consumed: true,
+      outcome: 'ERROR',
+      first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'synthetic_adapter_error' },
+      finalized: true,
+    })
+    expect(result.value.identities).toEqual({
+      manifest_sha256: 'e2683c3dee1edb37f1826c662d8787710f647c817e4b38f673cdf8801355feb0',
+      authorization_sha256: 'db2a7a1db6e35d1f6dc3e164eca082fc125c6104d5ec54b42b8317991d1ab4c6',
+    })
+    expect(result.value.attempt_id).toBe('536ff231c110ff1769e1b961cd9274db85b1e5738e3b25c827365e51f1c5f86a')
+    expect(result.value.stage_counts).toEqual({
+      ...Object.fromEntries(Object.keys(expectedStageCounts).map((stage) => [stage, 0])),
+      authorization_accept: 1,
+      live_preconditions: 1,
+    })
+    expect(result.value.stage_durations_ms).toEqual(expectedStageDurations)
+    expect(result.value.mutation_counts).toEqual({ production_writes: 0 })
+    expect(result.value.evidence).toEqual({
+      source: 'synthetic',
+      hashes: ['e2eabe3dba794f26cca0b3c9911521e764bbd0e3f7a6344eb7fb89a7ad608c14'],
+    })
+    expect(result.bytes).toEqual(Buffer.from(`${JSON.stringify(result.value, null, 2)}\n`, 'utf8'))
+    expect(result.sha256).toBe('22396585fd95dbda128f23ec8e1a11090f6290ebea51813798673106ed0a453d')
+    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+    for (const excluded of ['commands', 'target', 'adapters', 'trace', 'raw_output', 'secrets', 'production_evidence', 'error', 'message', 'stack']) {
+      expect(result.value).not.toHaveProperty(excluded)
+    }
+    expect(JSON.stringify(result.value)).not.toMatch(/TypeError|Cannot read .*null|reading ['"]commit['"]/u)
+  })
+
   it('rejects manifest-mismatched Authorization before consumption', () => {
     const manifest = preparedManifest('manifest-binding')
     const otherManifest = preparedManifest('other-manifest')
