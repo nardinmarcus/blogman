@@ -130,17 +130,35 @@ export function buildLocalEntryReceipt({
 
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const TERMINAL_RESULT_FORMAT = 'blogman-issue-23-terminal-result/v1'
-const DELIVERY_STAGES = Object.freeze([
-  'authorization_accept',
-  'live_preconditions',
-  'd1_identity',
-  'clean_start_reset',
-  'empty_d1_proof',
-  'migrations_001_006',
-  'reconciliation',
-  'worker_deploy',
-  'version_traffic_verification',
-  'smoke_control_t0',
+const DELIVERY_STAGE_POLICY = Object.freeze([
+  Object.freeze({ name: 'authorization_accept', timeout_seconds: 30 }),
+  Object.freeze({ name: 'live_preconditions', timeout_seconds: 120 }),
+  Object.freeze({ name: 'd1_identity', timeout_seconds: 120 }),
+  Object.freeze({ name: 'clean_start_reset', timeout_seconds: 300 }),
+  Object.freeze({ name: 'empty_d1_proof', timeout_seconds: 300 }),
+  Object.freeze({ name: 'migrations_001_006', timeout_seconds: 2100 }),
+  Object.freeze({ name: 'reconciliation', timeout_seconds: 300 }),
+  Object.freeze({ name: 'worker_deploy', timeout_seconds: 600 }),
+  Object.freeze({ name: 'version_traffic_verification', timeout_seconds: 300 }),
+  Object.freeze({ name: 'smoke_control_t0', timeout_seconds: 300 }),
+])
+const DELIVERY_STAGES = Object.freeze(DELIVERY_STAGE_POLICY.map(({ name }) => name))
+const OVERALL_TIMEOUT_SECONDS = 5400
+const ADAPTER_OUTCOMES = Object.freeze(['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'])
+const DEFAULT_ADAPTER_CLASSIFICATIONS = Object.freeze({
+  NON_PASS: 'synthetic_adapter_non_pass',
+  ERROR: 'synthetic_adapter_error',
+  TIMEOUT: 'synthetic_adapter_timeout',
+  UNCERTAIN: 'uncertain_adapter_outcome',
+})
+const SAFE_ADAPTER_CLASSIFICATIONS = Object.freeze([
+  'Manifest Drift',
+  'synthetic_adapter_non_pass',
+  'synthetic_adapter_error',
+  'synthetic_adapter_timeout',
+  'stage_timeout',
+  'overall_timeout',
+  'uncertain_adapter_outcome',
 ])
 const consumedAuthorizationDigests = new Set()
 
@@ -184,6 +202,68 @@ function normalizedJsonValue(value) {
 
 function sameJsonValue(left, right) {
   return JSON.stringify(normalizedJsonValue(left)) === JSON.stringify(normalizedJsonValue(right))
+}
+
+function validateExecutionPolicy(policy) {
+  if (!isPlainRecord(policy) || !sameJsonValue(policy, {
+    stages: DELIVERY_STAGE_POLICY,
+    overall_timeout_seconds: OVERALL_TIMEOUT_SECONDS,
+  })) {
+    fail('manifest policy is not canonical')
+  }
+  return {
+    stageTimeouts: new Map(policy.stages.map(({ name, timeout_seconds }) => [
+      name,
+      timeout_seconds * 1000,
+    ])),
+    overallTimeoutMs: policy.overall_timeout_seconds * 1000,
+  }
+}
+
+function isSafeClassification(value) {
+  return typeof value === 'string' && SAFE_ADAPTER_CLASSIFICATIONS.includes(value)
+}
+
+function uncertainAdapterResult() {
+  return {
+    outcome: 'UNCERTAIN',
+    classification: DEFAULT_ADAPTER_CLASSIFICATIONS.UNCERTAIN,
+    duration_ms: 0,
+  }
+}
+
+function normalizeSyntheticResult(result) {
+  if (!isPlainRecord(result)) return uncertainAdapterResult()
+  const allowedKeys = ['outcome', 'classification', 'duration_ms', 'synthetic_elapsed_ms']
+  if (Reflect.ownKeys(result).some((key) => (
+    typeof key !== 'string' || !allowedKeys.includes(key)
+  ))) return uncertainAdapterResult()
+  const outcome = Object.hasOwn(result, 'outcome') ? result.outcome : undefined
+  const classification = Object.hasOwn(result, 'classification') ? result.classification : undefined
+  const durationMs = Object.hasOwn(result, 'duration_ms') ? result.duration_ms : undefined
+  const syntheticElapsedMs = Object.hasOwn(result, 'synthetic_elapsed_ms')
+    ? result.synthetic_elapsed_ms
+    : undefined
+  if (!ADAPTER_OUTCOMES.includes(outcome)
+    || !Number.isSafeInteger(durationMs)
+    || durationMs < 0
+    || (classification !== undefined && !isSafeClassification(classification))
+    || (syntheticElapsedMs !== undefined
+      && (!Number.isSafeInteger(syntheticElapsedMs) || syntheticElapsedMs < 0))) {
+    return uncertainAdapterResult()
+  }
+  const normalized = {
+    outcome,
+    duration_ms: durationMs,
+    ...(syntheticElapsedMs === undefined ? {} : { synthetic_elapsed_ms: syntheticElapsedMs }),
+  }
+  if (outcome === 'PASS') {
+    return normalized
+  }
+  return {
+    ...normalized,
+    classification: classification ?? DEFAULT_ADAPTER_CLASSIFICATIONS[outcome],
+  }
 }
 
 function validatePreparedManifest(manifest) {
@@ -258,6 +338,7 @@ function stageDurations(trace) {
 export function execute(manifest, authorization) {
   if (arguments.length !== 2) fail('execute accepts exactly two arguments')
   const manifestBytes = validatePreparedManifest(manifest)
+  const executionPolicy = validateExecutionPolicy(manifest.value.policy)
   const authorizationDigest = acceptAuthorization(sha256(manifestBytes), authorization)
   const identities = {
     manifest_sha256: sha256(manifestBytes),
@@ -268,21 +349,48 @@ export function execute(manifest, authorization) {
     ...identities,
   }))
   const trace = []
+  let elapsedMs = 0
   for (const stage of DELIVERY_STAGES.slice(1)) {
-    let result
+    let adapterResult
     try {
-      result = runSyntheticStage(stage, manifest.value)
+      adapterResult = runSyntheticStage(stage, manifest.value)
     } catch {
-      result = { outcome: 'ERROR', classification: 'synthetic_adapter_error', duration_ms: 0 }
+      adapterResult = { outcome: 'ERROR', classification: 'synthetic_adapter_error', duration_ms: 0 }
     }
+    const result = normalizeSyntheticResult(adapterResult)
+    const stageElapsedMs = elapsedMs + result.duration_ms
+    let nextElapsedMs = stageElapsedMs
+    let outcome = result.outcome
+    let classification = result.classification
+    const stageTimeoutMs = executionPolicy.stageTimeouts.get(stage)
+    if (stageTimeoutMs === undefined) fail(`stage ${stage} has no policy timeout`)
+    if (!Number.isSafeInteger(stageElapsedMs)) {
+      outcome = 'UNCERTAIN'
+      classification = 'uncertain_adapter_outcome'
+      nextElapsedMs = elapsedMs
+    } else if (result.synthetic_elapsed_ms !== undefined
+      && result.synthetic_elapsed_ms < stageElapsedMs) {
+      outcome = 'UNCERTAIN'
+      classification = 'uncertain_adapter_outcome'
+    } else if (result.synthetic_elapsed_ms !== undefined) {
+      nextElapsedMs = result.synthetic_elapsed_ms
+    }
+    if (outcome === 'PASS' && result.duration_ms > stageTimeoutMs) {
+      outcome = 'TIMEOUT'
+      classification = 'stage_timeout'
+    } else if (outcome === 'PASS' && nextElapsedMs > executionPolicy.overallTimeoutMs) {
+      outcome = 'TIMEOUT'
+      classification = 'overall_timeout'
+    }
+    elapsedMs = nextElapsedMs
     const entry = {
       stage,
-      outcome: result.outcome,
-      ...(result.classification ? { classification: result.classification } : {}),
+      outcome,
+      ...(classification ? { classification } : {}),
       duration_ms: result.duration_ms,
     }
     trace.push(entry)
-    if (result.outcome !== 'PASS') break
+    if (outcome !== 'PASS') break
   }
   const terminal = trace.at(-1)
   if (!terminal) fail('synthetic state machine did not run')
