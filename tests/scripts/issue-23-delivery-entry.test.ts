@@ -382,6 +382,29 @@ describe('Issue #23 pure local entry seam', () => {
     }
   })
 
+  it('continues after a Stage duration exactly at its deadline', () => {
+    const manifest = preparedManifest('synthetic-stage-timeout-equality')
+    const auth = authorization(manifest, 'authorization-synthetic-stage-timeout-equality')
+    const result = execute(manifest, auth)
+
+    expect(result.value).toMatchObject({
+      authorization_consumed: true,
+      outcome: 'PASS',
+      first_terminal_stage: 'smoke_control_t0',
+      failure: null,
+      mutation_counts: { production_writes: 0 },
+      evidence: { source: 'synthetic' },
+      finalized: true,
+    })
+    expect(result.value.stage_counts).toEqual(expectedStageCounts)
+    expect(result.value.stage_durations_ms).toEqual({
+      ...expectedStageDurations,
+      live_preconditions: 120000,
+    })
+    expect(result.value).not.toHaveProperty('synthetic_elapsed_ms')
+    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+  })
+
   it('terminalizes an uncertain synthetic adapter outcome with no suffix execution', () => {
     const manifest = preparedManifest('synthetic-uncertain-adapter')
     const auth = authorization(manifest, 'authorization-synthetic-uncertain-adapter')
@@ -434,6 +457,26 @@ describe('Issue #23 pure local entry seam', () => {
     expect(result.value.stage_durations_ms).toEqual({
       ...expectedStageDurations,
     })
+    expect(result.value).not.toHaveProperty('synthetic_elapsed_ms')
+    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+  })
+
+  it('continues after cumulative elapsed exactly at the overall deadline', () => {
+    const manifest = preparedManifest('synthetic-overall-timeout-equality')
+    const auth = authorization(manifest, 'authorization-synthetic-overall-timeout-equality')
+    const result = execute(manifest, auth)
+
+    expect(result.value).toMatchObject({
+      authorization_consumed: true,
+      outcome: 'PASS',
+      first_terminal_stage: 'smoke_control_t0',
+      failure: null,
+      mutation_counts: { production_writes: 0 },
+      evidence: { source: 'synthetic' },
+      finalized: true,
+    })
+    expect(result.value.stage_counts).toEqual(expectedStageCounts)
+    expect(result.value.stage_durations_ms).toEqual(expectedStageDurations)
     expect(result.value).not.toHaveProperty('synthetic_elapsed_ms')
     expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
   })

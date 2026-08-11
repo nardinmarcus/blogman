@@ -375,10 +375,10 @@ export function execute(manifest, authorization) {
     } else if (result.synthetic_elapsed_ms !== undefined) {
       nextElapsedMs = result.synthetic_elapsed_ms
     }
-    if (outcome === 'PASS' && result.duration_ms >= stageTimeoutMs) {
+    if (outcome === 'PASS' && result.duration_ms > stageTimeoutMs) {
       outcome = 'TIMEOUT'
       classification = 'stage_timeout'
-    } else if (outcome === 'PASS' && nextElapsedMs >= executionPolicy.overallTimeoutMs) {
+    } else if (outcome === 'PASS' && nextElapsedMs > executionPolicy.overallTimeoutMs) {
       outcome = 'TIMEOUT'
       classification = 'overall_timeout'
     }

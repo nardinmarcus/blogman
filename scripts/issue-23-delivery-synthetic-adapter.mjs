@@ -9,9 +9,17 @@ const SYNTHETIC_SCENARIOS = Object.freeze({
     stage: 'live_preconditions',
     result: Object.freeze({ outcome: 'PASS', duration_ms: 5401000 }),
   }),
+  'synthetic-stage-timeout-equality': Object.freeze({
+    stage: 'live_preconditions',
+    result: Object.freeze({ outcome: 'PASS', duration_ms: 120000 }),
+  }),
   'synthetic-overall-timeout': Object.freeze({
     stage: 'live_preconditions',
     result: Object.freeze({ outcome: 'PASS', duration_ms: 0, synthetic_elapsed_ms: 5401000 }),
+  }),
+  'synthetic-overall-timeout-equality': Object.freeze({
+    stage: 'live_preconditions',
+    result: Object.freeze({ outcome: 'PASS', duration_ms: 0, synthetic_elapsed_ms: 5400000 }),
   }),
   'synthetic-uncertain-adapter': Object.freeze({
     stage: 'd1_identity',
