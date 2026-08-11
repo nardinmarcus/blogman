@@ -12,6 +12,25 @@ const draft = 'a'.repeat(64)
 const TERMINAL_RESULT_FORMAT = 'blogman-issue-23-terminal-result/v1'
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const SYNTHETIC_LIVE_REPOSITORY_COMMIT = '1'.repeat(40)
+const FIXED_STAGE_POLICY = [
+  { name: 'authorization_accept', timeout_seconds: 30 },
+  { name: 'live_preconditions', timeout_seconds: 120 },
+  { name: 'd1_identity', timeout_seconds: 120 },
+  { name: 'clean_start_reset', timeout_seconds: 300 },
+  { name: 'empty_d1_proof', timeout_seconds: 300 },
+  { name: 'migrations_001_006', timeout_seconds: 2100 },
+  { name: 'reconciliation', timeout_seconds: 300 },
+  { name: 'worker_deploy', timeout_seconds: 600 },
+  { name: 'version_traffic_verification', timeout_seconds: 300 },
+  { name: 'smoke_control_t0', timeout_seconds: 300 },
+]
+
+function fixedPolicy() {
+  return {
+    stages: FIXED_STAGE_POLICY.map((stage) => ({ ...stage })),
+    overall_timeout_seconds: 5400,
+  }
+}
 
 function hash(bytes: Buffer) {
   return createHash('sha256').update(bytes).digest('hex')
@@ -26,10 +45,24 @@ function preparedManifest(
     format: 'blogman-issue-23-canonical-frozen-manifest/v1',
     marker,
     repository: { commit: repositoryCommit },
+    policy: fixedPolicy(),
     ...(d1DatabaseId ? { target: { d1_database_id: d1DatabaseId } } : {}),
   }
+  return encodedManifest(value)
+}
+
+function encodedManifest(value: Record<string, unknown>) {
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
   return { value, bytes, sha256: hash(bytes) }
+}
+
+function manifestWithPolicy(manifest: ReturnType<typeof preparedManifest>, policy: unknown) {
+  return encodedManifest({ ...manifest.value, policy })
+}
+
+function manifestWithoutPolicy(manifest: ReturnType<typeof preparedManifest>) {
+  const { policy: _policy, ...value } = manifest.value
+  return encodedManifest(value)
 }
 
 function authorization(manifest: ReturnType<typeof preparedManifest>, authorizationId: string) {
@@ -131,10 +164,10 @@ describe('Issue #23 pure local entry seam', () => {
     const expected = {
       format: TERMINAL_RESULT_FORMAT,
       identities: {
-        manifest_sha256: '4c35c731d28b29005eb431e9b8651ffe94ec18032cfe79c9a894a5feec9b6f3f',
-        authorization_sha256: '6106ab2a7d7942d0897942ca49d5f04e7e9a9e8d267428322849363ced5e1bf2',
+        manifest_sha256: '0d12bed02c7895f07dea4f1892b066c7dca9c5353c3a7dda974d2cefc052deaa',
+        authorization_sha256: '1d3a3216f8c136eed9f3afaac767946b449de379f14df1b90c0c751512806a19',
       },
-      attempt_id: 'f549c539c02d15ccd95e8c50fb1642897f2584ab1d6523879aad1766385a6367',
+      attempt_id: 'f4ff8820bf77c9371401c657a7472b1248efcdb485f07ff6124b4127b3f8696b',
       authorization_consumed: true,
       outcome: 'NON_PASS',
       first_terminal_stage: 'live_preconditions',
@@ -164,7 +197,7 @@ describe('Issue #23 pure local entry seam', () => {
     const result = execute(manifest, auth)
     expect(result.value).toEqual(expected)
     expect(result.bytes).toEqual(Buffer.from(`${JSON.stringify(expected, null, 2)}\n`, 'utf8'))
-    expect(result.sha256).toBe('d93cf8e0e28f1f3b54bb9c28fb845d72fad4fefbb2a2682dcb49ecfec43265a0')
+    expect(result.sha256).toBe('7f8f1b8b4d8a0b86719dd04334c42ea685b7bc9950e4f98a18ddd1ffa0c2152a')
     expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
     for (const excluded of ['commands', 'target', 'adapters', 'trace', 'raw_output', 'secrets', 'production_evidence']) {
       expect(result.value).not.toHaveProperty(excluded)
@@ -181,10 +214,10 @@ describe('Issue #23 pure local entry seam', () => {
     const expected = {
       format: TERMINAL_RESULT_FORMAT,
       identities: {
-        manifest_sha256: 'e8c2b0c79bfac6c7d28eccc27f9b34cb756253115ae78b05986f68f90cc4e952',
-        authorization_sha256: '0aec3a52909fe3f4c122598e1792982286119b9ff37960f5ed7a29d3f20a6d9a',
+        manifest_sha256: '7e8a5a24dea9a20bd98d104bc5717bbf37ac456c3c03f6aee78ef984dfde3ba7',
+        authorization_sha256: '57e0de9361e2b5f2715909217a7969f16db86aab358f33c0bb5db5fbff3331f9',
       },
-      attempt_id: '4e8156b14f216e5448ddeb30190a740954cf574124f4d2e64867dfa4af2873fd',
+      attempt_id: '07d331f8bb6004c0e8b665e688439c7b657c62eea367fe9f3e7ae4e741a32149',
       authorization_consumed: true,
       outcome: 'NON_PASS',
       first_terminal_stage: 'd1_identity',
@@ -214,7 +247,7 @@ describe('Issue #23 pure local entry seam', () => {
     const result = execute(manifest, auth)
     expect(result.value).toEqual(expected)
     expect(result.bytes).toEqual(Buffer.from(`${JSON.stringify(expected, null, 2)}\n`, 'utf8'))
-    expect(result.sha256).toBe('746d40d1313599ed41e7cf8a1ff062ae28e54bea1842ce9a5381494a8733dd64')
+    expect(result.sha256).toBe('de38378809ff53161538ad0f17fab817d05a03ff5e484706a43b42cbbaf82388')
     expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
     for (const excluded of ['commands', 'target', 'adapters', 'trace', 'raw_output', 'secrets', 'production_evidence']) {
       expect(result.value).not.toHaveProperty(excluded)
@@ -226,6 +259,7 @@ describe('Issue #23 pure local entry seam', () => {
       format: 'blogman-issue-23-canonical-frozen-manifest/v1',
       marker: 'malformed-repository-wrapper',
       repository: null,
+      policy: fixedPolicy(),
     }
     const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
     const manifest = { value, bytes, sha256: hash(bytes) }
@@ -236,7 +270,7 @@ describe('Issue #23 pure local entry seam', () => {
       decision: 'approve',
     }
 
-    expect(manifest.sha256).toBe('e2683c3dee1edb37f1826c662d8787710f647c817e4b38f673cdf8801355feb0')
+    expect(manifest.sha256).toBe('4e048f9f458dfef58fb2ea05ba70e8b278082e78284470524e15ec402a6df13c')
     const result = execute(manifest, auth)
 
     expect(result.value).toMatchObject({
@@ -247,10 +281,10 @@ describe('Issue #23 pure local entry seam', () => {
       finalized: true,
     })
     expect(result.value.identities).toEqual({
-      manifest_sha256: 'e2683c3dee1edb37f1826c662d8787710f647c817e4b38f673cdf8801355feb0',
-      authorization_sha256: 'db2a7a1db6e35d1f6dc3e164eca082fc125c6104d5ec54b42b8317991d1ab4c6',
+      manifest_sha256: '4e048f9f458dfef58fb2ea05ba70e8b278082e78284470524e15ec402a6df13c',
+      authorization_sha256: '2ea8626129f4e8fa70f1bcc87882a610a09e4b4aede042a461ee3fb88d379e4b',
     })
-    expect(result.value.attempt_id).toBe('536ff231c110ff1769e1b961cd9274db85b1e5738e3b25c827365e51f1c5f86a')
+    expect(result.value.attempt_id).toBe('6c8d3a98d5b73f6a52a192acc4428bc57dc2c66da723d2c67ef1edb6402b56cb')
     expect(result.value.stage_counts).toEqual({
       ...Object.fromEntries(Object.keys(expectedStageCounts).map((stage) => [stage, 0])),
       authorization_accept: 1,
@@ -263,12 +297,116 @@ describe('Issue #23 pure local entry seam', () => {
       hashes: ['e2eabe3dba794f26cca0b3c9911521e764bbd0e3f7a6344eb7fb89a7ad608c14'],
     })
     expect(result.bytes).toEqual(Buffer.from(`${JSON.stringify(result.value, null, 2)}\n`, 'utf8'))
-    expect(result.sha256).toBe('22396585fd95dbda128f23ec8e1a11090f6290ebea51813798673106ed0a453d')
+    expect(result.sha256).toBe('96c4a09e4adc5f7f5fef4d15cacf47f5c152281be98145a275372ec57ecc3218')
     expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
     for (const excluded of ['commands', 'target', 'adapters', 'trace', 'raw_output', 'secrets', 'production_evidence', 'error', 'message', 'stack']) {
       expect(result.value).not.toHaveProperty(excluded)
     }
     expect(JSON.stringify(result.value)).not.toMatch(/TypeError|Cannot read .*null|reading ['"]commit['"]/u)
+  })
+
+  it('rejects missing or drifted execution policy before Authorization consumption', () => {
+    const accepted = preparedManifest('policy-validation')
+    const drifted = manifestWithPolicy(accepted, {
+      ...accepted.value.policy,
+      stages: accepted.value.policy.stages.map((stage, index) => (
+        index === 0 ? { ...stage, timeout_seconds: 31 } : stage
+      )),
+    })
+    const driftedAuth = authorization(accepted, 'authorization-policy-drift')
+
+    expect(() => execute(drifted, driftedAuth)).toThrow(/policy/u)
+    expect(execute(accepted, driftedAuth).value.authorization_consumed).toBe(true)
+
+    const missing = manifestWithoutPolicy(accepted)
+    const missingAuth = authorization(accepted, 'authorization-policy-missing')
+    expect(() => execute(missing, missingAuth)).toThrow(/policy/u)
+    expect(execute(accepted, missingAuth).value.authorization_consumed).toBe(true)
+  })
+
+  it('terminalizes a synthetic stage timeout with no suffix execution', () => {
+    const manifest = preparedManifest('synthetic-stage-timeout')
+    const auth = authorization(manifest, 'authorization-synthetic-stage-timeout')
+    const result = execute(manifest, auth)
+
+    expect(result.value).toMatchObject({
+      authorization_consumed: true,
+      outcome: 'TIMEOUT',
+      first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'stage_timeout' },
+      mutation_counts: { production_writes: 0 },
+      evidence: { source: 'synthetic' },
+      finalized: true,
+    })
+    expect(result.value.stage_counts).toEqual({
+      ...Object.fromEntries(Object.keys(expectedStageCounts).map((stage) => [stage, 0])),
+      authorization_accept: 1,
+      live_preconditions: 1,
+    })
+    expect(result.value.stage_durations_ms).toEqual({
+      ...expectedStageDurations,
+      live_preconditions: 121000,
+    })
+    for (const excluded of ['commands', 'target', 'adapters', 'trace', 'raw_output', 'secrets', 'production_evidence']) {
+      expect(result.value).not.toHaveProperty(excluded)
+    }
+    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+  })
+
+  it('terminalizes an uncertain synthetic adapter outcome with no suffix execution', () => {
+    const manifest = preparedManifest('synthetic-uncertain-adapter')
+    const auth = authorization(manifest, 'authorization-synthetic-uncertain-adapter')
+    const result = execute(manifest, auth)
+
+    expect(result.value).toMatchObject({
+      authorization_consumed: true,
+      outcome: 'UNCERTAIN',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'uncertain_adapter_outcome' },
+      mutation_counts: { production_writes: 0 },
+      evidence: { source: 'synthetic' },
+      finalized: true,
+    })
+    expect(result.value.stage_counts).toEqual({
+      ...Object.fromEntries(Object.keys(expectedStageCounts).map((stage) => [stage, 0])),
+      authorization_accept: 1,
+      live_preconditions: 1,
+      d1_identity: 1,
+    })
+    expect(result.value.stage_durations_ms).toEqual({
+      ...expectedStageDurations,
+    })
+    for (const excluded of ['commands', 'target', 'adapters', 'trace', 'raw_output', 'secrets', 'production_evidence', 'error', 'message', 'stack']) {
+      expect(result.value).not.toHaveProperty(excluded)
+    }
+    expect(JSON.stringify(result.value)).not.toMatch(/synthetic-private-output/u)
+    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+  })
+
+  it('enforces cumulative overall duration at the public execute seam', () => {
+    const manifest = preparedManifest('synthetic-overall-timeout')
+    const auth = authorization(manifest, 'authorization-synthetic-overall-timeout')
+    const result = execute(manifest, auth)
+
+    expect(result.value).toMatchObject({
+      authorization_consumed: true,
+      outcome: 'TIMEOUT',
+      first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'overall_timeout' },
+      mutation_counts: { production_writes: 0 },
+      evidence: { source: 'synthetic' },
+      finalized: true,
+    })
+    expect(result.value.stage_counts).toEqual({
+      ...Object.fromEntries(Object.keys(expectedStageCounts).map((stage) => [stage, 0])),
+      authorization_accept: 1,
+      live_preconditions: 1,
+    })
+    expect(result.value.stage_durations_ms).toEqual({
+      ...expectedStageDurations,
+      live_preconditions: 5401000,
+    })
+    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
   })
 
   it('rejects manifest-mismatched Authorization before consumption', () => {
@@ -288,12 +426,12 @@ describe('Issue #23 pure local entry seam', () => {
     expect(() => execute(manifest, auth)).toThrowError(new Error('Issue #23 local entry: manifest value does not match bytes'))
     Reflect.deleteProperty(manifest.value, 'unencoded')
     const result = execute(manifest, auth)
-    expect(result.value.identities.manifest_sha256).toBe('e4b41d575043bd366f7caa83e6196852c191fb864bbaec0197b640ab95f0d091')
-    expect(result.value.identities.authorization_sha256).toBe('5fda14a14654dbc885aa975baf4d41fc4cd16157752bb1d6247a2a93e58f9b2f')
-    expect(result.value.attempt_id).toBe('b43b820a89920488879c4a5c815f9907423ab75c6263026e25db3b9c73fcf589')
+    expect(result.value.identities.manifest_sha256).toBe('c25189412aa7ea80bec6c78bd47380b6e477c696547e5e11b548ce848a4820a0')
+    expect(result.value.identities.authorization_sha256).toBe('3a018d41c529acdbe5dedf83cf99487115a313fa69a8fa2d21f5cfaa5824a5fa')
+    expect(result.value.attempt_id).toBe('3686549b77142bb240354b6535856072354b9a85bbd0b57afafa444e20e565aa')
     expect(result.value.evidence.hashes).toEqual(['bd19b4591857ea9aab139ced2eb1afb5955050297ef2d4edb7c722f5b736e68c'])
     expect(result.value.authorization_consumed).toBe(true)
-    expect(result.sha256).toBe('0ef58a054a86d236766068c4147fa20572f29f752736197653abb486bd359c3a')
+    expect(result.sha256).toBe('b7c73664d835980537ef791360d3e5f3b03307a14dd8da5f1c3f8bfccfa53995')
     expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
   })
 

@@ -4,8 +4,35 @@ function fail(message) {
 
 const SYNTHETIC_LIVE_REPOSITORY_COMMIT = '1'.repeat(40)
 const SYNTHETIC_LIVE_D1_DATABASE_ID = 'd1-public-id'
+const SYNTHETIC_SCENARIOS = Object.freeze({
+  'synthetic-stage-timeout': Object.freeze({
+    stage: 'live_preconditions',
+    result: Object.freeze({ outcome: 'PASS', duration_ms: 121000 }),
+  }),
+  'synthetic-overall-timeout': Object.freeze({
+    stage: 'live_preconditions',
+    result: Object.freeze({ outcome: 'PASS', duration_ms: 5401000 }),
+  }),
+  'synthetic-uncertain-adapter': Object.freeze({
+    stage: 'd1_identity',
+    result: Object.freeze({
+      outcome: 'MAYBE',
+      duration_ms: 0,
+      raw_output: 'synthetic-private-output',
+    }),
+  }),
+})
+
+function scenarioResult(stage, manifest) {
+  if (typeof manifest?.marker !== 'string') return null
+  const scenario = SYNTHETIC_SCENARIOS[manifest.marker]
+  if (!scenario || scenario.stage !== stage) return null
+  return { ...scenario.result }
+}
 
 export function runSyntheticStage(stage, manifest) {
+  const scenario = scenarioResult(stage, manifest)
+  if (scenario) return scenario
   switch (stage) {
     case 'live_preconditions':
       if (manifest.repository.commit !== SYNTHETIC_LIVE_REPOSITORY_COMMIT) {

@@ -130,18 +130,27 @@ export function buildLocalEntryReceipt({
 
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const TERMINAL_RESULT_FORMAT = 'blogman-issue-23-terminal-result/v1'
-const DELIVERY_STAGES = Object.freeze([
-  'authorization_accept',
-  'live_preconditions',
-  'd1_identity',
-  'clean_start_reset',
-  'empty_d1_proof',
-  'migrations_001_006',
-  'reconciliation',
-  'worker_deploy',
-  'version_traffic_verification',
-  'smoke_control_t0',
+const DELIVERY_STAGE_POLICY = Object.freeze([
+  Object.freeze({ name: 'authorization_accept', timeout_seconds: 30 }),
+  Object.freeze({ name: 'live_preconditions', timeout_seconds: 120 }),
+  Object.freeze({ name: 'd1_identity', timeout_seconds: 120 }),
+  Object.freeze({ name: 'clean_start_reset', timeout_seconds: 300 }),
+  Object.freeze({ name: 'empty_d1_proof', timeout_seconds: 300 }),
+  Object.freeze({ name: 'migrations_001_006', timeout_seconds: 2100 }),
+  Object.freeze({ name: 'reconciliation', timeout_seconds: 300 }),
+  Object.freeze({ name: 'worker_deploy', timeout_seconds: 600 }),
+  Object.freeze({ name: 'version_traffic_verification', timeout_seconds: 300 }),
+  Object.freeze({ name: 'smoke_control_t0', timeout_seconds: 300 }),
 ])
+const DELIVERY_STAGES = Object.freeze(DELIVERY_STAGE_POLICY.map(({ name }) => name))
+const OVERALL_TIMEOUT_SECONDS = 5400
+const ADAPTER_OUTCOMES = Object.freeze(['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'])
+const DEFAULT_ADAPTER_CLASSIFICATIONS = Object.freeze({
+  NON_PASS: 'synthetic_adapter_non_pass',
+  ERROR: 'synthetic_adapter_error',
+  TIMEOUT: 'synthetic_adapter_timeout',
+  UNCERTAIN: 'uncertain_adapter_outcome',
+})
 const consumedAuthorizationDigests = new Set()
 
 function isPlainRecord(value) {
@@ -184,6 +193,59 @@ function normalizedJsonValue(value) {
 
 function sameJsonValue(left, right) {
   return JSON.stringify(normalizedJsonValue(left)) === JSON.stringify(normalizedJsonValue(right))
+}
+
+function validateExecutionPolicy(policy) {
+  if (!isPlainRecord(policy) || !sameJsonValue(policy, {
+    stages: DELIVERY_STAGE_POLICY,
+    overall_timeout_seconds: OVERALL_TIMEOUT_SECONDS,
+  })) {
+    fail('manifest policy is not canonical')
+  }
+  return {
+    stageTimeouts: new Map(policy.stages.map(({ name, timeout_seconds }) => [
+      name,
+      timeout_seconds * 1000,
+    ])),
+    overallTimeoutMs: policy.overall_timeout_seconds * 1000,
+  }
+}
+
+function isBoundedClassification(value) {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 128
+    && !/[\u0000\r\n]/u.test(value)
+}
+
+function uncertainAdapterResult() {
+  return {
+    outcome: 'UNCERTAIN',
+    classification: DEFAULT_ADAPTER_CLASSIFICATIONS.UNCERTAIN,
+    duration_ms: 0,
+  }
+}
+
+function normalizeSyntheticResult(result) {
+  if (!isPlainRecord(result)) return uncertainAdapterResult()
+  const allowedKeys = ['outcome', 'classification', 'duration_ms']
+  if (Reflect.ownKeys(result).some((key) => (
+    typeof key !== 'string' || !allowedKeys.includes(key)
+  ))) return uncertainAdapterResult()
+  if (!ADAPTER_OUTCOMES.includes(result.outcome)
+    || !Number.isSafeInteger(result.duration_ms)
+    || result.duration_ms < 0
+    || (result.classification !== undefined && !isBoundedClassification(result.classification))) {
+    return uncertainAdapterResult()
+  }
+  if (result.outcome === 'PASS') {
+    return { outcome: 'PASS', duration_ms: result.duration_ms }
+  }
+  return {
+    outcome: result.outcome,
+    classification: result.classification ?? DEFAULT_ADAPTER_CLASSIFICATIONS[result.outcome],
+    duration_ms: result.duration_ms,
+  }
 }
 
 function validatePreparedManifest(manifest) {
@@ -258,6 +320,7 @@ function stageDurations(trace) {
 export function execute(manifest, authorization) {
   if (arguments.length !== 2) fail('execute accepts exactly two arguments')
   const manifestBytes = validatePreparedManifest(manifest)
+  const executionPolicy = validateExecutionPolicy(manifest.value.policy)
   const authorizationDigest = acceptAuthorization(sha256(manifestBytes), authorization)
   const identities = {
     manifest_sha256: sha256(manifestBytes),
@@ -268,21 +331,36 @@ export function execute(manifest, authorization) {
     ...identities,
   }))
   const trace = []
+  let elapsedMs = 0
   for (const stage of DELIVERY_STAGES.slice(1)) {
-    let result
+    let adapterResult
     try {
-      result = runSyntheticStage(stage, manifest.value)
+      adapterResult = runSyntheticStage(stage, manifest.value)
     } catch {
-      result = { outcome: 'ERROR', classification: 'synthetic_adapter_error', duration_ms: 0 }
+      adapterResult = { outcome: 'ERROR', classification: 'synthetic_adapter_error', duration_ms: 0 }
     }
+    const result = normalizeSyntheticResult(adapterResult)
+    const nextElapsedMs = elapsedMs + result.duration_ms
+    let outcome = result.outcome
+    let classification = result.classification
+    const stageTimeoutMs = executionPolicy.stageTimeouts.get(stage)
+    if (stageTimeoutMs === undefined) fail(`stage ${stage} has no policy timeout`)
+    if (outcome === 'PASS' && nextElapsedMs > executionPolicy.overallTimeoutMs) {
+      outcome = 'TIMEOUT'
+      classification = 'overall_timeout'
+    } else if (outcome === 'PASS' && result.duration_ms > stageTimeoutMs) {
+      outcome = 'TIMEOUT'
+      classification = 'stage_timeout'
+    }
+    elapsedMs = nextElapsedMs
     const entry = {
       stage,
-      outcome: result.outcome,
-      ...(result.classification ? { classification: result.classification } : {}),
+      outcome,
+      ...(classification ? { classification } : {}),
       duration_ms: result.duration_ms,
     }
     trace.push(entry)
-    if (result.outcome !== 'PASS') break
+    if (outcome !== 'PASS') break
   }
   const terminal = trace.at(-1)
   if (!terminal) fail('synthetic state machine did not run')
