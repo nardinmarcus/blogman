@@ -134,6 +134,18 @@ const EXPECTED_FIRST_ERROR_TRACE_HASHES = {
   smoke_control_t0: 'a29ab75d435b8eb7d8b08b82fbc579845bd914c6c97f6cec7a5e7e41fe2763a3',
 }
 
+const EXPECTED_MUTATION_ERROR_TRACE_HASHES = {
+  live_preconditions: 'e2eabe3dba794f26cca0b3c9911521e764bbd0e3f7a6344eb7fb89a7ad608c14',
+  d1_identity: '567b646af48a0fb9c72b11be6f45b6e80abd3699ae9c907e8e8079567df1be18',
+  clean_start_reset: '586cbf407a56ae65d642ba91725e58fe5ab0490b107bbfa3f14e11730a46bbbf',
+  empty_d1_proof: '669c16cbf25f91025ba8f6d15226293fc7892f2997af97e5be9da48d6db3d308',
+  migrations_001_006: '289a540dcf910394f38af598a3ca9777891d742f4efc938f76f44994ba6c40ba',
+  reconciliation: 'b1bf85fc877f6bc963fc917357994549c4250fe14501365b1eeee2406533ff27',
+  worker_deploy: '10ae2acdfbe80b9b7789c904ef8ebf9b186fee1444c204029481e3cea8e44306',
+  version_traffic_verification: '6c3ac6c7d4d3a878bb43cec22297192f81c78217343f6354d5ffdaa04ecdd3a6',
+  smoke_control_t0: 'b7d1f4feed4a7a6d087da358ee0a01d83a91161db3c849f2c7544733c9d4d6fa',
+}
+
 const EXPECTED_TRACE_SHA256 = 'bd19b4591857ea9aab139ced2eb1afb5955050297ef2d4edb7c722f5b736e68c'
 
 function commands() {
@@ -171,6 +183,37 @@ describe('Issue #23 pure local entry seam', () => {
         evidence: {
           source: 'synthetic',
           hashes: [EXPECTED_FIRST_ERROR_TRACE_HASHES[failedStage]],
+        },
+        finalized: true,
+      })
+    }
+  })
+
+  it('state-machine mutation error matrix', () => {
+    for (const [failedIndex, failedStage] of ADAPTER_FIRST_ERROR_STAGES.entries()) {
+      const marker = `synthetic-state-mutation-error-${failedStage}`
+      const manifest = preparedManifest(marker)
+      const auth = authorization(manifest, `authorization-${marker}`)
+      const expectedStageCountsForFailure = {
+        authorization_accept: 1,
+        ...Object.fromEntries(ADAPTER_FIRST_ERROR_STAGES.map((stage, index) => [
+          stage,
+          index <= failedIndex ? 1 : 0,
+        ])),
+      }
+      const result = execute(manifest, auth)
+
+      expect(result.value).toMatchObject({
+        authorization_consumed: true,
+        outcome: 'ERROR',
+        first_terminal_stage: failedStage,
+        failure: { classification: 'synthetic_adapter_error' },
+        stage_counts: expectedStageCountsForFailure,
+        stage_durations_ms: expectedStageDurations,
+        mutation_counts: { production_writes: 0 },
+        evidence: {
+          source: 'synthetic',
+          hashes: [EXPECTED_MUTATION_ERROR_TRACE_HASHES[failedStage]],
         },
         finalized: true,
       })
