@@ -151,6 +151,15 @@ const DEFAULT_ADAPTER_CLASSIFICATIONS = Object.freeze({
   TIMEOUT: 'synthetic_adapter_timeout',
   UNCERTAIN: 'uncertain_adapter_outcome',
 })
+const SAFE_ADAPTER_CLASSIFICATIONS = Object.freeze([
+  'Manifest Drift',
+  'synthetic_adapter_non_pass',
+  'synthetic_adapter_error',
+  'synthetic_adapter_timeout',
+  'stage_timeout',
+  'overall_timeout',
+  'uncertain_adapter_outcome',
+])
 const consumedAuthorizationDigests = new Set()
 
 function isPlainRecord(value) {
@@ -211,11 +220,8 @@ function validateExecutionPolicy(policy) {
   }
 }
 
-function isBoundedClassification(value) {
-  return typeof value === 'string'
-    && value.length > 0
-    && value.length <= 128
-    && !/[\u0000\r\n]/u.test(value)
+function isSafeClassification(value) {
+  return typeof value === 'string' && SAFE_ADAPTER_CLASSIFICATIONS.includes(value)
 }
 
 function uncertainAdapterResult() {
@@ -228,23 +234,35 @@ function uncertainAdapterResult() {
 
 function normalizeSyntheticResult(result) {
   if (!isPlainRecord(result)) return uncertainAdapterResult()
-  const allowedKeys = ['outcome', 'classification', 'duration_ms']
+  const allowedKeys = ['outcome', 'classification', 'duration_ms', 'synthetic_elapsed_ms']
   if (Reflect.ownKeys(result).some((key) => (
     typeof key !== 'string' || !allowedKeys.includes(key)
   ))) return uncertainAdapterResult()
-  if (!ADAPTER_OUTCOMES.includes(result.outcome)
-    || !Number.isSafeInteger(result.duration_ms)
-    || result.duration_ms < 0
-    || (result.classification !== undefined && !isBoundedClassification(result.classification))) {
+  const outcome = Object.hasOwn(result, 'outcome') ? result.outcome : undefined
+  const classification = Object.hasOwn(result, 'classification') ? result.classification : undefined
+  const durationMs = Object.hasOwn(result, 'duration_ms') ? result.duration_ms : undefined
+  const syntheticElapsedMs = Object.hasOwn(result, 'synthetic_elapsed_ms')
+    ? result.synthetic_elapsed_ms
+    : undefined
+  if (!ADAPTER_OUTCOMES.includes(outcome)
+    || !Number.isSafeInteger(durationMs)
+    || durationMs < 0
+    || (classification !== undefined && !isSafeClassification(classification))
+    || (syntheticElapsedMs !== undefined
+      && (!Number.isSafeInteger(syntheticElapsedMs) || syntheticElapsedMs < 0))) {
     return uncertainAdapterResult()
   }
-  if (result.outcome === 'PASS') {
-    return { outcome: 'PASS', duration_ms: result.duration_ms }
+  const normalized = {
+    outcome,
+    duration_ms: durationMs,
+    ...(syntheticElapsedMs === undefined ? {} : { synthetic_elapsed_ms: syntheticElapsedMs }),
+  }
+  if (outcome === 'PASS') {
+    return normalized
   }
   return {
-    outcome: result.outcome,
-    classification: result.classification ?? DEFAULT_ADAPTER_CLASSIFICATIONS[result.outcome],
-    duration_ms: result.duration_ms,
+    ...normalized,
+    classification: classification ?? DEFAULT_ADAPTER_CLASSIFICATIONS[outcome],
   }
 }
 
@@ -340,17 +358,29 @@ export function execute(manifest, authorization) {
       adapterResult = { outcome: 'ERROR', classification: 'synthetic_adapter_error', duration_ms: 0 }
     }
     const result = normalizeSyntheticResult(adapterResult)
-    const nextElapsedMs = elapsedMs + result.duration_ms
+    const stageElapsedMs = elapsedMs + result.duration_ms
+    let nextElapsedMs = stageElapsedMs
     let outcome = result.outcome
     let classification = result.classification
     const stageTimeoutMs = executionPolicy.stageTimeouts.get(stage)
     if (stageTimeoutMs === undefined) fail(`stage ${stage} has no policy timeout`)
-    if (outcome === 'PASS' && nextElapsedMs > executionPolicy.overallTimeoutMs) {
-      outcome = 'TIMEOUT'
-      classification = 'overall_timeout'
-    } else if (outcome === 'PASS' && result.duration_ms > stageTimeoutMs) {
+    if (!Number.isSafeInteger(stageElapsedMs)) {
+      outcome = 'UNCERTAIN'
+      classification = 'uncertain_adapter_outcome'
+      nextElapsedMs = elapsedMs
+    } else if (result.synthetic_elapsed_ms !== undefined
+      && result.synthetic_elapsed_ms < stageElapsedMs) {
+      outcome = 'UNCERTAIN'
+      classification = 'uncertain_adapter_outcome'
+    } else if (result.synthetic_elapsed_ms !== undefined) {
+      nextElapsedMs = result.synthetic_elapsed_ms
+    }
+    if (outcome === 'PASS' && result.duration_ms >= stageTimeoutMs) {
       outcome = 'TIMEOUT'
       classification = 'stage_timeout'
+    } else if (outcome === 'PASS' && nextElapsedMs >= executionPolicy.overallTimeoutMs) {
+      outcome = 'TIMEOUT'
+      classification = 'overall_timeout'
     }
     elapsedMs = nextElapsedMs
     const entry = {

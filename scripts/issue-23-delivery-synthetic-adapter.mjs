@@ -7,16 +7,17 @@ const SYNTHETIC_LIVE_D1_DATABASE_ID = 'd1-public-id'
 const SYNTHETIC_SCENARIOS = Object.freeze({
   'synthetic-stage-timeout': Object.freeze({
     stage: 'live_preconditions',
-    result: Object.freeze({ outcome: 'PASS', duration_ms: 121000 }),
+    result: Object.freeze({ outcome: 'PASS', duration_ms: 5401000 }),
   }),
   'synthetic-overall-timeout': Object.freeze({
     stage: 'live_preconditions',
-    result: Object.freeze({ outcome: 'PASS', duration_ms: 5401000 }),
+    result: Object.freeze({ outcome: 'PASS', duration_ms: 0, synthetic_elapsed_ms: 5401000 }),
   }),
   'synthetic-uncertain-adapter': Object.freeze({
     stage: 'd1_identity',
     result: Object.freeze({
       outcome: 'MAYBE',
+      classification: 'private-synthetic-classification',
       duration_ms: 0,
       raw_output: 'synthetic-private-output',
     }),
@@ -25,6 +26,7 @@ const SYNTHETIC_SCENARIOS = Object.freeze({
 
 function scenarioResult(stage, manifest) {
   if (typeof manifest?.marker !== 'string') return null
+  if (!Object.hasOwn(SYNTHETIC_SCENARIOS, manifest.marker)) return null
   const scenario = SYNTHETIC_SCENARIOS[manifest.marker]
   if (!scenario || scenario.stage !== stage) return null
   return { ...scenario.result }

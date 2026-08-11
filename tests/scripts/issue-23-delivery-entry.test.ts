@@ -61,7 +61,8 @@ function manifestWithPolicy(manifest: ReturnType<typeof preparedManifest>, polic
 }
 
 function manifestWithoutPolicy(manifest: ReturnType<typeof preparedManifest>) {
-  const { policy: _policy, ...value } = manifest.value
+  const value = { ...manifest.value }
+  Reflect.deleteProperty(value, 'policy')
   return encodedManifest(value)
 }
 
@@ -324,7 +325,7 @@ describe('Issue #23 pure local entry seam', () => {
     expect(execute(accepted, missingAuth).value.authorization_consumed).toBe(true)
   })
 
-  it('terminalizes a synthetic stage timeout with no suffix execution', () => {
+  it('terminalizes a stage timeout before an overall timeout and ignores inherited scenario keys', () => {
     const manifest = preparedManifest('synthetic-stage-timeout')
     const auth = authorization(manifest, 'authorization-synthetic-stage-timeout')
     const result = execute(manifest, auth)
@@ -345,12 +346,40 @@ describe('Issue #23 pure local entry seam', () => {
     })
     expect(result.value.stage_durations_ms).toEqual({
       ...expectedStageDurations,
-      live_preconditions: 121000,
+      live_preconditions: 5401000,
     })
     for (const excluded of ['commands', 'target', 'adapters', 'trace', 'raw_output', 'secrets', 'production_evidence']) {
       expect(result.value).not.toHaveProperty(excluded)
     }
     expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+
+    const inheritedStage = Object.getOwnPropertyDescriptor(Object.prototype, 'stage')
+    const inheritedResult = Object.getOwnPropertyDescriptor(Object.prototype, 'result')
+    Object.defineProperties(Object.prototype, {
+      stage: { configurable: true, value: 'live_preconditions' },
+      result: {
+        configurable: true,
+        value: {
+          outcome: 'NON_PASS',
+          classification: 'private-inherited-scenario',
+          duration_ms: 0,
+        },
+      },
+    })
+    try {
+      for (const marker of ['toString', 'constructor', '__proto__']) {
+        const ordinaryManifest = preparedManifest(marker)
+        const ordinaryAuth = authorization(ordinaryManifest, `authorization-inherited-${marker}`)
+        const ordinaryResult = execute(ordinaryManifest, ordinaryAuth)
+        expect(ordinaryResult.value.outcome).toBe('PASS')
+        expect(JSON.stringify(ordinaryResult.value)).not.toMatch(/private-inherited-scenario/u)
+      }
+    } finally {
+      if (inheritedStage) Object.defineProperty(Object.prototype, 'stage', inheritedStage)
+      else Reflect.deleteProperty(Object.prototype, 'stage')
+      if (inheritedResult) Object.defineProperty(Object.prototype, 'result', inheritedResult)
+      else Reflect.deleteProperty(Object.prototype, 'result')
+    }
   })
 
   it('terminalizes an uncertain synthetic adapter outcome with no suffix execution', () => {
@@ -383,7 +412,7 @@ describe('Issue #23 pure local entry seam', () => {
     expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
   })
 
-  it('enforces cumulative overall duration at the public execute seam', () => {
+  it('enforces cumulative overall duration from a private synthetic elapsed observation at the public execute seam', () => {
     const manifest = preparedManifest('synthetic-overall-timeout')
     const auth = authorization(manifest, 'authorization-synthetic-overall-timeout')
     const result = execute(manifest, auth)
@@ -404,8 +433,8 @@ describe('Issue #23 pure local entry seam', () => {
     })
     expect(result.value.stage_durations_ms).toEqual({
       ...expectedStageDurations,
-      live_preconditions: 5401000,
     })
+    expect(result.value).not.toHaveProperty('synthetic_elapsed_ms')
     expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
   })
 
