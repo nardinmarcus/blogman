@@ -4,6 +4,17 @@ function fail(message) {
 
 const SYNTHETIC_LIVE_REPOSITORY_COMMIT = '1'.repeat(40)
 const SYNTHETIC_LIVE_D1_DATABASE_ID = 'd1-public-id'
+const SYNTHETIC_FIRST_ERROR_STAGES = new Set([
+  'live_preconditions',
+  'd1_identity',
+  'clean_start_reset',
+  'empty_d1_proof',
+  'migrations_001_006',
+  'reconciliation',
+  'worker_deploy',
+  'version_traffic_verification',
+  'smoke_control_t0',
+])
 const SYNTHETIC_SCENARIOS = Object.freeze({
   'synthetic-stage-timeout': Object.freeze({
     stage: 'live_preconditions',
@@ -33,7 +44,15 @@ const SYNTHETIC_SCENARIOS = Object.freeze({
 })
 
 function scenarioResult(stage, manifest) {
-  if (typeof manifest?.marker !== 'string') return null
+  if (!Object.hasOwn(manifest ?? {}, 'marker') || typeof manifest.marker !== 'string') return null
+  if (SYNTHETIC_FIRST_ERROR_STAGES.has(stage)
+    && manifest.marker === `synthetic-first-error-${stage}`) {
+    return {
+      outcome: 'NON_PASS',
+      classification: 'synthetic_adapter_non_pass',
+      duration_ms: 0,
+    }
+  }
   if (!Object.hasOwn(SYNTHETIC_SCENARIOS, manifest.marker)) return null
   const scenario = SYNTHETIC_SCENARIOS[manifest.marker]
   if (!scenario || scenario.stage !== stage) return null

@@ -12,6 +12,17 @@ const draft = 'a'.repeat(64)
 const TERMINAL_RESULT_FORMAT = 'blogman-issue-23-terminal-result/v1'
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const SYNTHETIC_LIVE_REPOSITORY_COMMIT = '1'.repeat(40)
+const ADAPTER_FIRST_ERROR_STAGES = [
+  'live_preconditions',
+  'd1_identity',
+  'clean_start_reset',
+  'empty_d1_proof',
+  'migrations_001_006',
+  'reconciliation',
+  'worker_deploy',
+  'version_traffic_verification',
+  'smoke_control_t0',
+]
 const FIXED_STAGE_POLICY = [
   { name: 'authorization_accept', timeout_seconds: 30 },
   { name: 'live_preconditions', timeout_seconds: 120 },
@@ -111,6 +122,18 @@ const expectedStageDurations = {
   smoke_control_t0: 0,
 }
 
+const EXPECTED_FIRST_ERROR_TRACE_HASHES = {
+  live_preconditions: '07601158bcbad1336a0c10b3a5f10d4b4a99bfcfc74a7bbf4a86f82ad8c2329f',
+  d1_identity: '5254fe4ae57c5438e76d40aae510b80488cb71fbd74c53c476009474bb8cf889',
+  clean_start_reset: 'db7004f45f1cc8fdf0da722e5ab363d4164fa7b97c3d80f295da9f86517c2192',
+  empty_d1_proof: '0a5f5e43b4e13d5b0b290d903e0d51bc287f00600de5c48169a5b0c519402d7f',
+  migrations_001_006: '2a41c4098dce269b66904bf8f216bdfe3f4e789ac870a895c7b59a102184fb98',
+  reconciliation: '6cc5ee845d0add75b9057a5e6000aef343803b3b9a7d34f63668c4eb56b12f91',
+  worker_deploy: '4378d40f3d6682bed7c599c1f5b8194a38e4bf252311b268db84a722b536ba6d',
+  version_traffic_verification: '703686011f2910ab059a95778f03abca6d89ac5500a2e11b9505dbed0365693a',
+  smoke_control_t0: 'a29ab75d435b8eb7d8b08b82fbc579845bd914c6c97f6cec7a5e7e41fe2763a3',
+}
+
 const EXPECTED_TRACE_SHA256 = 'bd19b4591857ea9aab139ced2eb1afb5955050297ef2d4edb7c722f5b736e68c'
 
 function commands() {
@@ -123,6 +146,37 @@ function commands() {
 }
 
 describe('Issue #23 pure local entry seam', () => {
+  it('covers every adapter-backed Stage first-error matrix', () => {
+    for (const [failedIndex, failedStage] of ADAPTER_FIRST_ERROR_STAGES.entries()) {
+      const marker = `synthetic-first-error-${failedStage}`
+      const manifest = preparedManifest(marker)
+      const auth = authorization(manifest, `authorization-${marker}`)
+      const expectedStageCountsForFailure = {
+        authorization_accept: 1,
+        ...Object.fromEntries(ADAPTER_FIRST_ERROR_STAGES.map((stage, index) => [
+          stage,
+          index <= failedIndex ? 1 : 0,
+        ])),
+      }
+      const result = execute(manifest, auth)
+
+      expect(result.value).toMatchObject({
+        authorization_consumed: true,
+        outcome: 'NON_PASS',
+        first_terminal_stage: failedStage,
+        failure: { classification: 'synthetic_adapter_non_pass' },
+        stage_counts: expectedStageCountsForFailure,
+        stage_durations_ms: expectedStageDurations,
+        mutation_counts: { production_writes: 0 },
+        evidence: {
+          source: 'synthetic',
+          hashes: [EXPECTED_FIRST_ERROR_TRACE_HASHES[failedStage]],
+        },
+        finalized: true,
+      })
+    }
+  })
+
   it('executes the deterministic synthetic state machine to an all-success Terminal Result', () => {
     const manifest = preparedManifest('accepted-manifest')
     const auth = authorization(manifest, 'authorization-accepted-once')
