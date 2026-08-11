@@ -53,6 +53,14 @@ function scenarioResult(stage, manifest) {
       duration_ms: 0,
     }
   }
+  if (SYNTHETIC_FIRST_ERROR_STAGES.has(stage)
+    && manifest.marker === `synthetic-state-mutation-error-${stage}`) {
+    return {
+      outcome: 'ERROR',
+      classification: 'synthetic_adapter_error',
+      duration_ms: 0,
+    }
+  }
   if (!Object.hasOwn(SYNTHETIC_SCENARIOS, manifest.marker)) return null
   const scenario = SYNTHETIC_SCENARIOS[manifest.marker]
   if (!scenario || scenario.stage !== stage) return null
