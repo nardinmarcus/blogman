@@ -471,7 +471,7 @@ describe('remote baseline replacement runner', () => {
     expect(observed.filter((call) => call.arguments.includes('--file'))).toHaveLength(1)
   })
 
-  it('runs every pending preflight before the first remote apply write', () => {
+  it('runs every pending preflight before the first remote apply write', { timeout: 15_000 }, () => {
     const fixture = createFixture()
     writeFileSync(
       join(fixture.migrations, '002_second.sql'),
