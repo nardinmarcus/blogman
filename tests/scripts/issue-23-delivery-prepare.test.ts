@@ -404,6 +404,20 @@ function fileMapDiff(
   }
 }
 
+function firstChangedByteContext(before: Buffer | string, after: Buffer | string) {
+  const left = Buffer.from(before)
+  const right = Buffer.from(after)
+  let offset = 0
+  while (offset < left.length && offset < right.length && left[offset] === right[offset]) offset += 1
+  if (offset === left.length && offset === right.length) return null
+  const context = (bytes: Buffer) => {
+    const start = Math.max(0, offset - 8)
+    const end = Math.min(bytes.length, offset + 8)
+    return { start, end, hex: bytes.subarray(start, end).toString('hex') }
+  }
+  return { offset, before: context(left), after: context(right) }
+}
+
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 describe('Issue #23 Delivery Preparation', () => {
@@ -1334,6 +1348,11 @@ describe('Issue #23 Delivery Preparation', () => {
       rmSync(join(repoRoot, '.open-next'), { recursive: true, force: true })
       const result = prepareFixture(realConfig, { buildRunner: undefined })
       const fileMap = buildFileMap(result)
+      const jsBytes = Object.fromEntries(
+        fileMap
+          .filter(({ path }) => path.endsWith('.js') || path.endsWith('.mjs'))
+          .map(({ path }) => [path, readFileSync(join(repoRoot, path))]),
+      )
       const snapshot = {
         run,
         manifest: { bytes: result.bytes.byteLength, sha256: result.sha256 },
@@ -1343,12 +1362,21 @@ describe('Issue #23 Delivery Preparation', () => {
       }
       writeFileSync(join(snapshotRoot, `run${run}.json`), `${JSON.stringify(snapshot, null, 2)}\n`)
       writeFileSync(join(snapshotRoot, `run${run}-file-map.json`), `${JSON.stringify(fileMap, null, 2)}\n`)
-      return { result, fileMap, snapshot }
+      return { result, fileMap, snapshot, jsBytes }
     }
 
     const first = captureRun(1)
     const second = captureRun(2)
     const diff = fileMapDiff(first.fileMap, second.fileMap)
+    const firstChangedPath = diff.changed.find(({ path }) =>
+      path.endsWith('.js') || path.endsWith('.mjs'),
+    )?.path
+    const firstChangedByte = firstChangedPath
+      ? {
+          path: firstChangedPath,
+          detail: firstChangedByteContext(first.jsBytes[firstChangedPath], second.jsBytes[firstChangedPath]),
+        }
+      : null
     const report = {
       format: 'blogman-s3w23-f1/v1',
       snapshotRoot,
@@ -1359,11 +1387,26 @@ describe('Issue #23 Delivery Preparation', () => {
     writeFileSync(join(snapshotRoot, 'diff-manifest.json'), `${JSON.stringify(diff, null, 2)}\n`)
     writeFileSync(join(snapshotRoot, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
 
-    expect(diff).toEqual({ added: [], removed: [], changed: [] })
+    expect(diff, JSON.stringify({ diff, firstChangedByte })).toEqual({
+      added: [],
+      removed: [],
+      changed: [],
+    })
     expect(first.fileMap).toEqual(second.fileMap)
     expect(first.result.bytes).toEqual(second.result.bytes)
     expect(first.result.sha256).toBe(second.result.sha256)
     expect(first.snapshot.handlerFiles).toEqual(second.snapshot.handlerFiles)
+  })
+
+  it('F1 reports first changed byte context for bounded synthetic buffers', () => {
+    const before = Buffer.from('0123456789abcdefghij')
+    const after = Buffer.from('0123456789ABcdefghij')
+
+    expect(firstChangedByteContext(before, after)).toEqual({
+      offset: 10,
+      before: { start: 2, end: 18, hex: '32333435363738396162636465666768' },
+      after: { start: 2, end: 18, hex: '32333435363738394142636465666768' },
+    })
   })
 
   it('cleans temporary projections after a bounded child timeout', () => {
