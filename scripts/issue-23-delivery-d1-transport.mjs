@@ -325,12 +325,14 @@ function validateBoundArtifacts(config, expectedPersistIdentity = null) {
 }
 
 function validateRequest(request) {
-  assertExactKeys(request, ['elapsed_ms', 'operation', 'stage', 'timeout_ms'], 'request')
+  assertExactKeys(request, ['elapsed_ms', 'overall_elapsed_ms', 'operation', 'stage', 'timeout_ms'], 'request')
   if (!Object.hasOwn(OPERATION_STAGES, request.operation)) fail('request operation is invalid')
   if (OPERATION_STAGES[request.operation] !== request.stage) fail('request stage is invalid')
   if (request.timeout_ms !== D1_STAGE_TIMEOUT_MS[request.stage]) fail('request timeout is not frozen')
   if (!Number.isSafeInteger(request.elapsed_ms) || request.elapsed_ms < 0
-    || request.elapsed_ms >= request.timeout_ms) {
+    || request.elapsed_ms >= request.timeout_ms
+    || !Number.isSafeInteger(request.overall_elapsed_ms) || request.overall_elapsed_ms < 0
+    || request.overall_elapsed_ms >= 5_400_000) {
     fail('request elapsed time is invalid')
   }
   return Object.freeze({
@@ -338,11 +340,15 @@ function validateRequest(request) {
     stage: request.stage,
     timeout_ms: request.timeout_ms,
     elapsed_ms: request.elapsed_ms,
+    overall_elapsed_ms: request.overall_elapsed_ms,
   })
 }
 
-function remainingTimeout(request) {
-  const timeout = request.timeout_ms - request.elapsed_ms
+function remainingTimeout(request, spentMs = 0) {
+  const timeout = Math.min(
+    request.timeout_ms - request.elapsed_ms - spentMs,
+    5_400_000 - request.overall_elapsed_ms - spentMs,
+  )
   if (timeout <= 0) throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT)
   return timeout
 }
@@ -529,16 +535,12 @@ export function createD1Transport(config) {
       const infoCommand = runBounded(command.executable, command.args, timeoutMs)
       if (infoCommand.stderr !== '') return identityResponse(normalizedConfig, infoCommand)
       if (normalizedConfig.mode === 'local') return identityResponse(normalizedConfig, infoCommand)
-      const whoamiTimeout = timeoutMs - infoCommand.duration_ms
-      if (whoamiTimeout <= 0) {
-        throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT, infoCommand.duration_ms)
-      }
       let whoamiCommand
       try {
         whoamiCommand = runBounded(
           wranglerPath,
           buildRemoteWhoamiCommand(normalizedConfig),
-          whoamiTimeout,
+          remainingTimeout(normalizedRequest, infoCommand.duration_ms),
         )
       } catch (error) {
         if (error instanceof D1TransportError) {

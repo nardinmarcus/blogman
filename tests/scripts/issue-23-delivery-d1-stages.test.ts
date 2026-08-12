@@ -21,6 +21,7 @@ import {
 import {
   createD1Transport,
 } from '../../scripts/issue-23-delivery-d1-transport.mjs'
+import { runWorkerStages } from '../../scripts/issue-23-delivery-worker-stages.mjs'
 
 const MIGRATIONS = [
   { number: 1, name: '001_initial_schema', checksum: '8a71414814571d4fe65e03fc92b3f976074d025ddf03a4dd9f861698b2387d05' },
@@ -942,6 +943,47 @@ describe('Issue #23 D1 delivery stages', () => {
 
     expect(result.value.stage_durations_ms.migrations_001_006).toBe(expectedDuration)
     expect(result.value.stage_durations_ms.migrations_001_006).not.toBe(expectedDuration * 2)
+  })
+
+  it('shares one monotonic 5,400-second budget with preconditions and Worker stages, including equality', () => {
+    const livePreconditionsElapsedMs = 5_399_992
+    const d1Transport = createSuccessTransport()
+    const d1 = runD1Stages({
+      bindings: BINDINGS,
+      transport: d1Transport,
+      elapsed_ms: livePreconditionsElapsedMs,
+    })
+    const d1ElapsedMs = Object.values(d1.value.stage_durations_ms).reduce((sum, duration) => sum + duration, 0)
+    const workerCalls: unknown[] = []
+    const worker = runWorkerStages({
+      bindings: { smoke: { requests: [] } },
+      transport: { execute(request: unknown) { workerCalls.push(request); throw new Error('must not run') } },
+      elapsed_ms: livePreconditionsElapsedMs + d1ElapsedMs,
+    })
+
+    expect(d1.value.outcome).toBe('PASS')
+    expect(d1Transport.calls.map(({ request }) => request.overall_elapsed_ms)).toEqual([
+      5_399_992, 5_399_993, 5_399_994, 5_399_995,
+      5_399_996, 5_399_997, 5_399_998, 5_399_999,
+    ])
+    expect(livePreconditionsElapsedMs + d1ElapsedMs).toBe(5_400_000)
+    expect(worker.value).toMatchObject({
+      outcome: 'TIMEOUT',
+      first_terminal_stage: 'worker_deploy',
+      failure: { classification: 'overall_timeout' },
+    })
+    expect(workerCalls).toEqual([])
+
+    const exhausted = runD1Stages({
+      bindings: BINDINGS,
+      transport: createSuccessTransport(),
+      elapsed_ms: 5_400_000,
+    })
+    expect(exhausted.value).toMatchObject({
+      outcome: 'TIMEOUT',
+      first_terminal_stage: 'd1_identity',
+      stage_durations_ms: { d1_identity: 0 },
+    })
   })
 
   it('composes the real local transport with all five D1 stages', () => {

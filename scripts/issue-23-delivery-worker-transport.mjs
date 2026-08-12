@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, chmodSync, lstatSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { D1ChildError, runBoundedChild } from './issue-23-delivery-d1-child.mjs'
@@ -32,10 +32,54 @@ function assertPath(value, label) {
 }
 function assertHash(value, label) { if (!sha256(value)) fail(`${label} is invalid`) }
 function assertBoundFile(path, expectedHash) {
-  if (!existsSync(path) || hash(readFileSync(path)) !== expectedHash) {
+  try {
+    if (lstatSync(path).isSymbolicLink() || !statSync(path).isFile() || hash(readFileSync(path)) !== expectedHash) {
+      throw new Error('drift')
+    }
+  } catch {
     throw new WorkerTransportError('NON_PASS', 'Manifest Drift')
   }
   return path
+}
+function artifactFile(value) {
+  return exact(value, ['path', 'sha256', 'bytes'])
+    && typeof value.path === 'string' && /^(?:\.open-next\/)?[A-Za-z0-9._/-]+$/u.test(value.path)
+    && sha256(value.sha256) && Number.isSafeInteger(value.bytes) && value.bytes >= 0
+}
+function validateArtifactSource(bindings) {
+  if (!Array.isArray(bindings.artifact_file_tree_files)
+    || !bindings.artifact_file_tree_files.every(artifactFile)
+    || JSON.stringify(bindings.artifact_file_tree_files) !== JSON.stringify([...bindings.artifact_file_tree_files].sort((left, right) => left.path.localeCompare(right.path)))
+    || hash(Buffer.from(JSON.stringify(bindings.artifact_file_tree_files))) !== bindings.artifact_file_tree_sha256) {
+    throw new WorkerTransportError('NON_PASS', 'Manifest Drift')
+  }
+  const actual = []
+  const visit = (directory, prefix = '') => {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+      const path = join(directory, entry.name)
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name
+      if (entry.isSymbolicLink()) throw new Error('symlink')
+      if (entry.isDirectory()) visit(path, relative)
+      else if (entry.isFile()) actual.push({
+        path: `.open-next/${relative}`,
+        sha256: hash(readFileSync(path)),
+        bytes: statSync(path).size,
+      })
+      else throw new Error('unsupported')
+    }
+  }
+  try {
+    if (lstatSync(bindings.artifact_source_path).isSymbolicLink() || !statSync(bindings.artifact_source_path).isDirectory()) {
+      throw new Error('source')
+    }
+    visit(bindings.artifact_source_path)
+  } catch {
+    throw new WorkerTransportError('NON_PASS', 'Manifest Drift')
+  }
+  const sourceFiles = bindings.artifact_file_tree_files.filter((file) => file.path.startsWith('.open-next/'))
+  if (JSON.stringify(actual) !== JSON.stringify(sourceFiles)) {
+    throw new WorkerTransportError('NON_PASS', 'Manifest Drift')
+  }
 }
 function response(stdout, duration_ms) {
   return { status: 0, stdout: JSON.stringify(stdout), stderr: '', duration_ms }
@@ -94,16 +138,22 @@ export function createWorkerTransport(bindings) {
   if (!bindings || typeof bindings !== 'object') fail('bindings are required')
   for (const key of [
     'config_path', 'config_sha256', 'artifact_archive_path', 'artifact_archive_sha256',
-    'artifact_source_path', 'artifact_sha256', 'candidate_id', 'worker_name', 'd1_database_id',
-    'rollout_safety_path', 'rollout_safety_sha256', 'expected_reconciliation_path',
-    'wrangler_path', 'wrangler_sha256', 'database', 'origin', 'smoke', 'baseline',
+    'artifact_source_path', 'artifact_file_tree_sha256', 'artifact_file_tree_files', 'artifact_sha256',
+    'candidate_id', 'worker_name', 'd1_database_id', 'rollout_safety_path', 'rollout_safety_sha256',
+    'expected_reconciliation_path', 'expected_reconciliation_sha256', 'phase_b_sequence_path',
+    'phase_b_sequence_sha256', 'wrangler_path', 'wrangler_sha256', 'node_path', 'node_sha256',
+    'npm_path', 'npm_sha256', 'open_next_path', 'open_next_sha256', 'package_json_path',
+    'package_json_sha256', 'lockfile_path', 'lockfile_sha256', 'database', 'origin', 'smoke', 'baseline',
   ]) if (!Object.hasOwn(bindings, key)) fail(`${key} is required`)
   for (const key of [
     'config_path', 'artifact_archive_path', 'artifact_source_path', 'rollout_safety_path',
-    'expected_reconciliation_path', 'wrangler_path',
+    'expected_reconciliation_path', 'phase_b_sequence_path', 'wrangler_path', 'node_path', 'npm_path',
+    'open_next_path', 'package_json_path', 'lockfile_path',
   ]) assertPath(bindings[key], key)
   for (const key of [
-    'config_sha256', 'artifact_archive_sha256', 'artifact_sha256', 'rollout_safety_sha256', 'wrangler_sha256',
+    'config_sha256', 'artifact_archive_sha256', 'artifact_file_tree_sha256', 'artifact_sha256',
+    'rollout_safety_sha256', 'expected_reconciliation_sha256', 'phase_b_sequence_sha256', 'wrangler_sha256',
+    'node_sha256', 'npm_sha256', 'open_next_sha256', 'package_json_sha256', 'lockfile_sha256',
   ]) assertHash(bindings[key], key)
   if (!safeId(bindings.candidate_id) || !safeId(bindings.worker_name) || !safeId(bindings.d1_database_id)
     || !safeId(bindings.database) || typeof bindings.origin !== 'string' || !Array.isArray(bindings.smoke?.requests)
@@ -123,14 +173,20 @@ export function createWorkerTransport(bindings) {
   function validateLocalBindings() {
     assertBoundFile(bindings.config_path, bindings.config_sha256)
     assertBoundFile(bindings.artifact_archive_path, bindings.artifact_archive_sha256)
+    validateArtifactSource(bindings)
     assertBoundFile(bindings.rollout_safety_path, bindings.rollout_safety_sha256)
+    assertBoundFile(bindings.expected_reconciliation_path, bindings.expected_reconciliation_sha256)
+    assertBoundFile(bindings.phase_b_sequence_path, bindings.phase_b_sequence_sha256)
     assertBoundFile(bindings.wrangler_path, bindings.wrangler_sha256)
-    if (!existsSync(bindings.artifact_source_path) || !existsSync(bindings.expected_reconciliation_path)) {
-      throw new WorkerTransportError('NON_PASS', 'Manifest Drift')
-    }
+    assertBoundFile(bindings.node_path, bindings.node_sha256)
+    assertBoundFile(bindings.npm_path, bindings.npm_sha256)
+    assertBoundFile(bindings.open_next_path, bindings.open_next_sha256)
+    assertBoundFile(bindings.package_json_path, bindings.package_json_sha256)
+    assertBoundFile(bindings.lockfile_path, bindings.lockfile_sha256)
   }
 
   function invoke(executable, args, request, spent) {
+    validateLocalBindings()
     const remaining = Math.min(request.timeout_ms - spent, OVERALL_TIMEOUT_MS - request.elapsed_ms - spent)
     if (!Number.isSafeInteger(remaining) || remaining <= 0) {
       throw new WorkerTransportError('TIMEOUT', 'overall_timeout', 1)
@@ -165,8 +221,11 @@ export function createWorkerTransport(bindings) {
     return result.duration_ms
   }
 
-  function livePreconditions() {
-    const request = { timeout_ms: 120000, elapsed_ms: 0 }
+  function livePreconditions(elapsed_ms = 0) {
+    if (!Number.isSafeInteger(elapsed_ms) || elapsed_ms < 0 || elapsed_ms >= OVERALL_TIMEOUT_MS) {
+      return { outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: 1 }
+    }
+    const request = { timeout_ms: 120000, elapsed_ms }
     try {
       validateLocalBindings()
       const baseline = deploymentStatus(request, 0, bindings.baseline.version_id)
@@ -199,8 +258,8 @@ export function createWorkerTransport(bindings) {
         const proof = join(root, 'proof.json')
         const destination = join(root, 'source')
         for (const path of [output, before, after, proof]) writeFileSync(path, '', { mode: 0o600 })
-        const result = invoke(process.execPath, [
-          'scripts/phase-b-sequence.mjs', 'run-upload-source-lifecycle',
+        const result = invoke(bindings.node_path, [
+          bindings.phase_b_sequence_path, 'run-upload-source-lifecycle',
           '--config', bindings.config_path, '--source', bindings.artifact_source_path,
           '--destination', destination, '--operation-id', `issue-23-${bindings.candidate_id}-upload-1`,
           '--proof-before', before, '--proof-after', after, '--archive', bindings.artifact_archive_path,
@@ -247,13 +306,13 @@ export function createWorkerTransport(bindings) {
     spent += after.duration_ms
     if (after.value.deployment_id !== request.deployment_id) throw new WorkerTransportError('NON_PASS', 'version_traffic_mismatch', spent)
     spent += d1Identity(request, spent)
-    const controlsResult = invoke(process.execPath, [
+    const controlsResult = invoke(bindings.node_path, [
       bindings.rollout_safety_path, 'rollout', 'controls-status', '--database', bindings.database,
       '--remote', '--config', bindings.config_path,
     ], request, spent)
     spent += controlsResult.duration_ms
     const controls = parseControls(controlsResult.stdout, controlsResult.duration_ms)
-    const reconciliationResult = invoke(process.execPath, [
+    const reconciliationResult = invoke(bindings.node_path, [
       bindings.rollout_safety_path, 'reconcile', 'compare', '--expected', bindings.expected_reconciliation_path,
       '--database', bindings.database, '--remote', '--config', bindings.config_path,
     ], request, spent)

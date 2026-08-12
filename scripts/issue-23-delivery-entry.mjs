@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -605,6 +606,9 @@ function assertCanonicalManifestRelationships(manifest) {
     fail('manifest ci.tree must equal repository.tree')
   }
   if (manifest.ci.conclusion !== 'success') fail('manifest ci.conclusion must be success')
+  if (manifest.preparation.execute_entry.path !== 'scripts/phase-b-sequence.mjs') {
+    fail('manifest preparation.execute_entry must bind the canonical upload lifecycle')
+  }
 
   const publicPaths = [
     ['preparation.prepare_entry.path', manifest.preparation.prepare_entry.path],
@@ -1289,8 +1293,13 @@ function normalizeProductionD1Result(result) {
     || !isPlainRecord(value.stage_counts)
     || !isPlainRecord(value.stage_durations_ms)
     || !isPlainRecord(value.evidence)
+    || !exact(value.evidence, [
+      'source', 'production', 'promotable', ...D1_EVIDENCE_HASHES,
+      'account_id', 'd1_database_id', 'candidate_id',
+    ])
     || value.evidence.source !== 'production'
-    || value.evidence.production !== true) {
+    || value.evidence.production !== true
+    || D1_EVIDENCE_HASHES.some((name) => !/^[a-f0-9]{64}$/u.test(value.evidence[name]))) {
     return sanitizedD1Error('production_d1_result_malformed')
   }
   const countKeys = Reflect.ownKeys(value.stage_counts)
@@ -1320,6 +1329,7 @@ function normalizeProductionD1Result(result) {
       failure: null,
       stage_counts: { ...value.stage_counts },
       stage_durations_ms: { ...value.stage_durations_ms },
+      evidence_hashes: Object.fromEntries(D1_EVIDENCE_HASHES.map((name) => [name, value.evidence[name]])),
       sha256: result.sha256,
     }
   }
@@ -1338,13 +1348,31 @@ function normalizeProductionD1Result(result) {
     failure: { classification: value.failure.classification },
     stage_counts: { ...value.stage_counts },
     stage_durations_ms: { ...value.stage_durations_ms },
+    evidence_hashes: Object.fromEntries(D1_EVIDENCE_HASHES.map((name) => [name, value.evidence[name]])),
     sha256: result.sha256,
   }
 }
 
 const WORKER_RESULT_STAGES = Object.freeze(['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'])
+const D1_EVIDENCE_HASHES = Object.freeze([
+  'bindings_sha256',
+  'wrangler_sha256',
+  'config_sha256',
+  'reset_sql_sha256',
+  'migration_runner_sha256',
+  'migration_catalog_sha256',
+  'rollout_safety_sha256',
+  'expected_reconciliation_sha256',
+  'trace_sha256',
+])
 const WORKER_EVIDENCE_HASHES = Object.freeze([
   'upload_acceptance_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256',
+])
+const TERMINAL_EVIDENCE_HASHES = Object.freeze([
+  'd1_stage_receipt_sha256',
+  ...D1_EVIDENCE_HASHES.map((name) => `d1_${name}`),
+  'worker_stage_receipt_sha256',
+  ...WORKER_EVIDENCE_HASHES.map((name) => `worker_${name}`),
 ])
 
 function malformedWorkerResult() {
@@ -1360,7 +1388,7 @@ function malformedWorkerResult() {
   }
 }
 
-function normalizeWorkerResult(result) {
+export function normalizeWorkerResultForTestsOnly(result) {
   if (!isPlainRecord(result) || !isPlainRecord(result.value) || !(result.bytes instanceof Uint8Array)
     || !/^[a-f0-9]{64}$/u.test(result.sha256)) return malformedWorkerResult()
   const value = result.value
@@ -1421,29 +1449,50 @@ function normalizeWorkerResult(result) {
     stage_counts: value.stage_counts,
     stage_durations_ms: value.stage_durations_ms,
     mutation_counts: value.mutation_counts,
+    evidence_hashes: Object.fromEntries(WORKER_EVIDENCE_HASHES.map((name) => [name, value.evidence.hashes[name]])),
     sha256: result.sha256,
   }
 }
 
+function resolveNpmPath() {
+  const lookup = process.platform === 'win32' ? 'where.exe' : 'which'
+  const path = execFileSync(lookup, ['npm'], { encoding: 'utf8' }).split(/\r?\n/u)[0]?.trim()
+  if (!path) fail('npm executable could not be resolved')
+  return realpathSync(path)
+}
+
 function workerBindings(manifest, expectedReconciliationPath) {
+  const npmPath = resolveNpmPath()
   return {
     config_path: resolve(ENTRY_REPO_ROOT, manifest.d1.config_path), config_sha256: manifest.d1.config_sha256,
     artifact_archive_path: resolve(ENTRY_REPO_ROOT, manifest.artifact.archive.path), artifact_archive_sha256: manifest.artifact.archive.sha256,
-    artifact_source_path: resolve(ENTRY_REPO_ROOT, dirname(manifest.artifact.worker.path)), artifact_sha256: manifest.artifact.file_tree.sha256,
+    artifact_source_path: resolve(ENTRY_REPO_ROOT, dirname(manifest.artifact.worker.path)),
+    artifact_file_tree_sha256: manifest.artifact.file_tree.sha256,
+    artifact_file_tree_files: manifest.artifact.file_tree.files,
+    artifact_sha256: manifest.artifact.file_tree.sha256,
     candidate_id: manifest.repository.commit, worker_name: manifest.target.worker_name, d1_database_id: manifest.target.d1_database_id,
     rollout_safety_path: resolve(ENTRY_REPO_ROOT, manifest.d1.rollout_safety_path), rollout_safety_sha256: manifest.d1.rollout_safety_sha256,
     expected_reconciliation_path: expectedReconciliationPath,
-    wrangler_path: resolve(ENTRY_REPO_ROOT, 'node_modules/.bin/wrangler'), wrangler_sha256: manifest.d1.wrangler_sha256,
+    expected_reconciliation_sha256: manifest.d1.expected_reconciliation_sha256,
+    phase_b_sequence_path: resolve(ENTRY_REPO_ROOT, manifest.preparation.execute_entry.path),
+    phase_b_sequence_sha256: manifest.preparation.execute_entry.sha256,
+    wrangler_path: realpathSync(resolve(ENTRY_REPO_ROOT, 'node_modules/.bin/wrangler')), wrangler_sha256: manifest.d1.wrangler_sha256,
+    node_path: realpathSync(process.execPath), node_sha256: manifest.toolchain.node.identity_sha256,
+    npm_path: npmPath, npm_sha256: manifest.toolchain.npm.identity_sha256,
+    open_next_path: realpathSync(resolve(ENTRY_REPO_ROOT, 'node_modules/.bin/opennextjs-cloudflare')),
+    open_next_sha256: manifest.toolchain.opennextjs_cloudflare.identity_sha256,
+    package_json_path: resolve(ENTRY_REPO_ROOT, 'package.json'), package_json_sha256: manifest.toolchain.package_json_sha256,
+    lockfile_path: resolve(ENTRY_REPO_ROOT, 'package-lock.json'), lockfile_sha256: manifest.toolchain.lockfile_sha256,
     database: manifest.d1.database, origin: manifest.target.origin, smoke: manifest.target.smoke,
     baseline: manifest.target.baseline,
   }
 }
 
-function runLivePreconditions(manifest, d1) {
+function runLivePreconditions(manifest, d1, elapsed_ms = 0) {
   let materialized
   try {
     materialized = materializeExpectedReconciliation(d1)
-    const result = createWorkerTransport(workerBindings(manifest, materialized.path)).livePreconditions()
+    const result = createWorkerTransport(workerBindings(manifest, materialized.path)).livePreconditions(elapsed_ms)
     if (!isPlainRecord(result) || !['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(result.outcome)
       || !Number.isSafeInteger(result.duration_ms) || result.duration_ms <= 0
       || (result.outcome === 'PASS' ? Object.hasOwn(result, 'classification')
@@ -1457,6 +1506,21 @@ function runLivePreconditions(manifest, d1) {
     materialized ??= error?.materialized
     return { outcome: 'ERROR', classification: 'live_preconditions_error', duration_ms: 1 }
   } finally { disposeExpectedReconciliation(materialized) }
+}
+
+function productionEvidenceHashes(d1Result, workerResult) {
+  const d1Hashes = d1Result.evidence_hashes ?? {}
+  const workerHashes = workerResult?.evidence_hashes ?? {}
+  return Object.fromEntries([
+    ['d1_stage_receipt_sha256', d1Result.sha256],
+    ...D1_EVIDENCE_HASHES.map((name) => [`d1_${name}`, d1Hashes[name] ?? null]),
+    ['worker_stage_receipt_sha256', workerResult?.sha256 ?? null],
+    ...WORKER_EVIDENCE_HASHES.map((name) => [`worker_${name}`, workerHashes[name] ?? null]),
+  ])
+}
+
+export function productionEvidenceHashesForTestsOnly(d1Result, workerResult) {
+  return productionEvidenceHashes(d1Result, workerResult)
 }
 
 function productionTrace(liveResult, d1Result, workerResult = null) {
@@ -1516,7 +1580,11 @@ function executeProduction(manifest, authorization) {
       }
       if (!d1Result) {
         try {
-          d1Result = normalizeProductionD1Result(runD1Stages({ bindings, transport }))
+          d1Result = normalizeProductionD1Result(runD1Stages({
+            bindings,
+            transport,
+            elapsed_ms: liveResult.duration_ms,
+          }))
         } catch {
           d1Result = sanitizedD1Error('production_d1_adapter_error')
         }
@@ -1535,13 +1603,13 @@ function executeProduction(manifest, authorization) {
     try {
       workerExpected = materializeExpectedReconciliation(d1)
       const bindings = workerBindings(manifest.value, workerExpected.path)
-      workerResult = normalizeWorkerResult(runWorkerStages({
+      workerResult = normalizeWorkerResultForTestsOnly(runWorkerStages({
         bindings,
         transport: createWorkerTransport(bindings),
         elapsed_ms: liveResult.duration_ms
           + Object.values(d1Result.stage_durations_ms).reduce((sum, duration) => sum + duration, 0),
       }))
-    } catch { workerResult = normalizeWorkerResult(null) }
+    } catch { workerResult = normalizeWorkerResultForTestsOnly(null) }
     finally { disposeExpectedReconciliation(workerExpected) }
   }
   const trace = productionTrace(liveResult, d1Result, workerResult)
@@ -1572,7 +1640,7 @@ function executeProduction(manifest, authorization) {
       source: 'production',
       production: true,
       promotable: terminal.outcome === 'PASS',
-      hashes: [d1Result.sha256, ...(workerResult ? [workerResult.sha256] : [])],
+      hashes: productionEvidenceHashes(d1Result, workerResult),
       cleanup,
     },
     finalized: true,

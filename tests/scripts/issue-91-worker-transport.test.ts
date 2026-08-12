@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -31,11 +31,22 @@ function fixture() {
   const log = join(root, 'calls.log')
   const wrangler = join(root, 'wrangler')
   const rollout = join(root, 'rollout.mjs')
+  const phaseB = join(root, 'phase-b-sequence.mjs')
+  const npm = join(root, 'npm')
+  const openNext = join(root, 'opennextjs-cloudflare')
+  const packageJson = join(root, 'package.json')
+  const lockfile = join(root, 'package-lock.json')
   writeFileSync(config, 'name = "test"\n')
   writeFileSync(archive, 'fake archive\n')
   writeFileSync(expected, '{}\n')
   writeFileSync(log, '')
-  writeFileSync(source, '')
+  mkdirSync(source)
+  writeFileSync(join(source, 'worker.js'), 'fake worker\n')
+  writeFileSync(phaseB, 'process.stdout.write("{}")\n')
+  writeFileSync(npm, '#!/bin/sh\nexit 0\n')
+  writeFileSync(openNext, '#!/usr/bin/env node\n')
+  writeFileSync(packageJson, '{}\n')
+  writeFileSync(lockfile, '{}\n')
   writeFileSync(wrangler, `#!/usr/bin/env node
 const fs = require('node:fs')
 fs.appendFileSync(process.env.WORKER_FAKE_LOG, process.argv.slice(2).join(' ') + '\\n')
@@ -51,7 +62,12 @@ if (process.argv.includes('controls-status')) console.log(JSON.stringify({ state
 else console.log(JSON.stringify({ state: 'matched', checks: { schema: 'matched', migration_ledger: 'matched', post_count: 'matched', post_status: 'matched', post_content: 'matched' } }))
 `)
   chmodSync(wrangler, 0o755)
-  return { root, config, archive, source, expected, log, wrangler, rollout }
+  chmodSync(npm, 0o755)
+  chmodSync(openNext, 0o755)
+  return {
+    root, config, archive, source, expected, log, wrangler, rollout, phaseB, npm, openNext,
+    packageJson, lockfile,
+  }
 }
 
 async function localServer(root: string) {
@@ -73,14 +89,27 @@ server.listen(0, '127.0.0.1', () => fs.writeFileSync(process.argv[1], String(ser
 }
 
 function bindings(fixture: ReturnType<typeof fixture>, port: number) {
+  const artifactFileTree = [{
+    path: '.open-next/worker.js', sha256: hash(join(fixture.source, 'worker.js')),
+    bytes: readFileSync(join(fixture.source, 'worker.js')).byteLength,
+  }]
   return {
     config_path: fixture.config, config_sha256: hash(fixture.config),
     artifact_archive_path: fixture.archive, artifact_archive_sha256: hash(fixture.archive),
-    artifact_source_path: fixture.source, artifact_sha256: 'b'.repeat(64),
+    artifact_source_path: fixture.source,
+    artifact_file_tree_sha256: createHash('sha256').update(JSON.stringify(artifactFileTree)).digest('hex'),
+    artifact_file_tree_files: artifactFileTree,
+    artifact_sha256: 'b'.repeat(64),
     candidate_id: candidate, worker_name: 'worker-name', d1_database_id: 'd1-id', database: 'DB',
     rollout_safety_path: fixture.rollout, rollout_safety_sha256: hash(fixture.rollout),
-    expected_reconciliation_path: fixture.expected,
+    expected_reconciliation_path: fixture.expected, expected_reconciliation_sha256: hash(fixture.expected),
+    phase_b_sequence_path: fixture.phaseB, phase_b_sequence_sha256: hash(fixture.phaseB),
     wrangler_path: fixture.wrangler, wrangler_sha256: hash(fixture.wrangler),
+    node_path: process.execPath, node_sha256: hash(process.execPath),
+    npm_path: fixture.npm, npm_sha256: hash(fixture.npm),
+    open_next_path: fixture.openNext, open_next_sha256: hash(fixture.openNext),
+    package_json_path: fixture.packageJson, package_json_sha256: hash(fixture.packageJson),
+    lockfile_path: fixture.lockfile, lockfile_sha256: hash(fixture.lockfile),
     origin: `http://127.0.0.1:${port}`, smoke,
     baseline: { deployment_id: 'deployment-new', version_id: 'version-new', d1_database_id: 'd1-id', traffic: [{ version_id: 'version-new', percentage: 100 }] },
   }
@@ -113,7 +142,11 @@ describe('Issue #91 private smoke_control_t0 adapter', () => {
     }
   }, 30000)
 
-  it('returns live drift before any fake production command', async () => {
+  it.each([
+    ['config', (current: ReturnType<typeof fixture>) => writeFileSync(current.config, 'drift\n')],
+    ['complete artifact source', (current: ReturnType<typeof fixture>) => writeFileSync(join(current.source, 'worker.js'), 'drift\n')],
+    ['upload lifecycle script', (current: ReturnType<typeof fixture>) => writeFileSync(current.phaseB, 'drift\n')],
+  ])('returns manifest drift for %s before D1 selection or any fake production command', async (_name, drift) => {
     const current = fixture()
     const port = await localServer(current.root)
     const originalLog = process.env.WORKER_FAKE_LOG
@@ -121,7 +154,7 @@ describe('Issue #91 private smoke_control_t0 adapter', () => {
     try {
       const value = bindings(current, port)
       const transport = createWorkerTransport(value)
-      writeFileSync(current.config, 'drift\n')
+      drift(current)
       expect(transport.livePreconditions()).toMatchObject({ outcome: 'NON_PASS', classification: 'Manifest Drift' })
       expect(readFileSync(current.log, 'utf8')).toBe('')
     } finally {

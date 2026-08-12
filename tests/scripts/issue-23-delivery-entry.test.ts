@@ -5,8 +5,11 @@ import {
   buildLocalRehearsalCommands,
   execute,
   executeSyntheticForTest,
+  normalizeWorkerResultForTestsOnly,
   parseLocalCommandResult,
+  productionEvidenceHashesForTestsOnly,
 } from '../../scripts/issue-23-delivery-entry.mjs'
+import { runWorkerStages } from '../../scripts/issue-23-delivery-worker-stages.mjs'
 
 const draft = 'a'.repeat(64)
 
@@ -629,6 +632,75 @@ describe('Issue #23 pure local entry seam', () => {
 
     expect(executeSyntheticForTest(manifest, auth).value.finalized).toBe(true)
     expect(() => executeSyntheticForTest(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+  })
+
+  it('preserves exact named D1 and Worker evidence hashes in the public terminal evidence', () => {
+    const candidate = 'a'.repeat(40)
+    const worker = runWorkerStages({
+      bindings: {
+        candidate_id: candidate,
+        config_sha256: 'b'.repeat(64),
+        artifact_sha256: 'c'.repeat(64),
+        d1_database_id: 'd1',
+        smoke: { requests: [{ path: '/health', status: 200 }] },
+      },
+      transport: {
+        execute(request: { operation: string }) {
+          const duration_ms = 1
+          if (request.operation === 'worker_deploy') return {
+            status: 0, stderr: '', duration_ms, stdout: JSON.stringify({
+              format: 'blogman-upload-source-lifecycle-acceptance/v1', state: 'accepted',
+              upload_operation_id: `issue-23-${candidate}-upload-1`, version_id: 'version',
+              config_sha256: 'b'.repeat(64), snapshot_tree_sha256: 'c'.repeat(64),
+              snapshot_identity_sha256: 'd'.repeat(64), snapshot_proof_before_sha256: 'e'.repeat(64),
+              snapshot_proof_after_sha256: 'f'.repeat(64), build_directory_proof_sha256: '0'.repeat(64),
+              wrangler_output_sha256: '1'.repeat(64),
+            }),
+          }
+          if (request.operation === 'version_traffic_verification') return {
+            status: 0, stderr: '', duration_ms, stdout: JSON.stringify({
+              deployment_id: 'deployment', version_id: 'version', d1_database_id: 'd1',
+              traffic: [{ version_id: 'version', percentage: 100 }],
+            }),
+          }
+          return {
+            status: 0, stderr: '', duration_ms, stdout: JSON.stringify({
+              before: { deployment_id: 'deployment', version_id: 'version', d1_database_id: 'd1', traffic: [{ version_id: 'version', percentage: 100 }] },
+              after: { deployment_id: 'deployment', version_id: 'version', d1_database_id: 'd1', traffic: [{ version_id: 'version', percentage: 100 }] },
+              checks: { '/health': 200 }, controls: { producer: 'disabled', authority: 'disabled', executors: { scheduler: 'disabled' } },
+              reconciliation: { state: 'matched', checks: { schema: 'matched', migration_ledger: 'matched', post_count: 'matched', post_status: 'matched', post_content: 'matched' } },
+            }),
+          }
+        },
+      },
+    })
+    const normalizedWorker = normalizeWorkerResultForTestsOnly(worker)
+    const d1Hashes = Object.fromEntries([
+      'bindings_sha256', 'wrangler_sha256', 'config_sha256', 'reset_sql_sha256',
+      'migration_runner_sha256', 'migration_catalog_sha256', 'rollout_safety_sha256',
+      'expected_reconciliation_sha256', 'trace_sha256',
+    ].map((name, index) => [name, String(index).repeat(64)]))
+    const terminalHashes = productionEvidenceHashesForTestsOnly({
+      sha256: '2'.repeat(64), evidence_hashes: d1Hashes,
+    }, normalizedWorker)
+
+    expect(normalizedWorker.evidence_hashes).toEqual({
+      upload_acceptance_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      version_traffic_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      smoke_control_t0_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    })
+    expect(Object.keys(terminalHashes)).toEqual([
+      'd1_stage_receipt_sha256', 'd1_bindings_sha256', 'd1_wrangler_sha256',
+      'd1_config_sha256', 'd1_reset_sql_sha256', 'd1_migration_runner_sha256',
+      'd1_migration_catalog_sha256', 'd1_rollout_safety_sha256',
+      'd1_expected_reconciliation_sha256', 'd1_trace_sha256', 'worker_stage_receipt_sha256',
+      'worker_upload_acceptance_sha256', 'worker_version_traffic_sha256',
+      'worker_smoke_control_t0_sha256',
+    ])
+    expect(terminalHashes.d1_stage_receipt_sha256).toBe('2'.repeat(64))
+    expect(terminalHashes.worker_stage_receipt_sha256).toBe(worker.sha256)
+    expect(terminalHashes.worker_upload_acceptance_sha256).toBe(worker.value.evidence.hashes.upload_acceptance_sha256)
+    expect(JSON.stringify(terminalHashes)).not.toMatch(/raw|path|secret/u)
   })
 
   it('constructs fixed local commands and rejects command mutation', () => {

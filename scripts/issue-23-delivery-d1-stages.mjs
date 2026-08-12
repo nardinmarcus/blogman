@@ -230,12 +230,13 @@ function validateTransport(transport) {
   }
 }
 
-function requestFor(bindings, stage, operation, elapsedMs) {
+function requestFor(bindings, stage, operation, elapsedMs, overallElapsedMs) {
   return Object.freeze({
     operation,
     stage,
     timeout_ms: D1_STAGE_TIMEOUT_MS[stage],
     elapsed_ms: elapsedMs,
+    overall_elapsed_ms: overallElapsedMs,
   })
 }
 
@@ -289,9 +290,18 @@ function readTransportResponse(response, stage, elapsedMs) {
 function callOperation({ bindings, transport, stage, operation }, state) {
   const timeoutMs = D1_STAGE_TIMEOUT_MS[stage]
   if (state.durationMs >= timeoutMs) throw stageFailure('TIMEOUT', 'timeout', state.durationMs)
+  if (state.overallElapsedMs >= D1_OVERALL_TIMEOUT_MS) {
+    throw stageFailure('TIMEOUT', 'overall_timeout', state.durationMs)
+  }
   let response
   try {
-    response = transport.execute(requestFor(bindings, stage, operation, state.durationMs))
+    response = transport.execute(requestFor(
+      bindings,
+      stage,
+      operation,
+      state.durationMs,
+      state.overallElapsedMs,
+    ))
   } catch (error) {
     if (error instanceof StageFailure) throw error
     transportFailure(error, state.durationMs)
@@ -305,6 +315,10 @@ function callOperation({ bindings, transport, stage, operation }, state) {
     throw stageFailure('ERROR', 'malformed', state.durationMs)
   }
   state.durationMs += result.durationMs
+  state.overallElapsedMs += result.durationMs
+  if (state.overallElapsedMs > D1_OVERALL_TIMEOUT_MS) {
+    throw stageFailure('TIMEOUT', 'overall_timeout', state.durationMs)
+  }
   return result.stdout
 }
 
@@ -525,8 +539,8 @@ function parseReconciliation(stdout) {
   throw stageFailure('NON_PASS', 'reconciliation_drift')
 }
 
-function runD1Identity(bindings, transport) {
-  const state = { durationMs: 0 }
+function runD1Identity(bindings, transport, overallElapsedMs) {
+  const state = { durationMs: 0, overallElapsedMs }
   const stdout = callOperation({
     bindings,
     transport,
@@ -537,8 +551,8 @@ function runD1Identity(bindings, transport) {
   return state.durationMs
 }
 
-function runReset(bindings, transport) {
-  const state = { durationMs: 0 }
+function runReset(bindings, transport, overallElapsedMs) {
+  const state = { durationMs: 0, overallElapsedMs }
   const stdout = callOperation({
     bindings,
     transport,
@@ -549,8 +563,8 @@ function runReset(bindings, transport) {
   return state.durationMs
 }
 
-function runEmptyProof(bindings, transport) {
-  const state = { durationMs: 0 }
+function runEmptyProof(bindings, transport, overallElapsedMs) {
+  const state = { durationMs: 0, overallElapsedMs }
   const stdout = callOperation({
     bindings,
     transport,
@@ -561,8 +575,8 @@ function runEmptyProof(bindings, transport) {
   return state.durationMs
 }
 
-function runMigrations(bindings, transport) {
-  const state = { durationMs: 0 }
+function runMigrations(bindings, transport, overallElapsedMs) {
+  const state = { durationMs: 0, overallElapsedMs }
   const catalog = callOperation({
     bindings,
     transport,
@@ -604,8 +618,8 @@ function runMigrations(bindings, transport) {
   return state.durationMs
 }
 
-function runReconciliation(bindings, transport) {
-  const state = { durationMs: 0 }
+function runReconciliation(bindings, transport, overallElapsedMs) {
+  const state = { durationMs: 0, overallElapsedMs }
   const stdout = callOperation({
     bindings,
     transport,
@@ -624,7 +638,10 @@ const STAGE_RUNNERS = Object.freeze({
   reconciliation: runReconciliation,
 })
 
-export function runD1Stages({ bindings: rawBindings, transport }) {
+export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0 }) {
+  if (!Number.isSafeInteger(elapsed_ms) || elapsed_ms < 0 || elapsed_ms > D1_OVERALL_TIMEOUT_MS) {
+    fail('elapsed_ms is invalid')
+  }
   const bindings = normalizeBindings(rawBindings)
   validateTransport(transport)
   const provenance = getD1TransportProvenance(transport)
@@ -634,7 +651,7 @@ export function runD1Stages({ bindings: rawBindings, transport }) {
   const stageCounts = Object.fromEntries(D1_STAGE_ORDER.map((stage) => [stage, 0]))
   const stageDurations = Object.fromEntries(D1_STAGE_ORDER.map((stage) => [stage, 0]))
   const trace = []
-  let elapsedMs = 0
+  let elapsedMs = elapsed_ms
 
   for (const stage of D1_STAGE_ORDER) {
     stageCounts[stage] += 1
@@ -643,7 +660,10 @@ export function runD1Stages({ bindings: rawBindings, transport }) {
     let durationMs = 0
     try {
       if (bindingMismatch) throw stageFailure('ERROR', 'transport_binding_mismatch')
-      durationMs = STAGE_RUNNERS[stage](bindings, transport)
+      if (elapsedMs >= D1_OVERALL_TIMEOUT_MS) {
+        throw stageFailure('TIMEOUT', 'overall_timeout')
+      }
+      durationMs = STAGE_RUNNERS[stage](bindings, transport, elapsedMs)
       assertNonNegativeInteger(durationMs, `${stage} duration`)
       if (durationMs > D1_STAGE_TIMEOUT_MS[stage]) {
         throw stageFailure('TIMEOUT', 'timeout', durationMs)

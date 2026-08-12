@@ -912,6 +912,9 @@ function assertManifestRelationships(manifest) {
   if (manifest.ci.conclusion !== 'success') {
     fail('ci.conclusion must be success')
   }
+  if (manifest.preparation.execute_entry.path !== 'scripts/phase-b-sequence.mjs') {
+    fail('preparation.execute_entry must bind the canonical upload lifecycle')
+  }
 
   const publicPaths = [
     ['preparation.prepare_entry.path', manifest.preparation.prepare_entry.path],
