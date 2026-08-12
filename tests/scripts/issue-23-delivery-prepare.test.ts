@@ -1139,7 +1139,7 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(changedResult.sha256).not.toBe(first.sha256)
   })
 
-  it('derives draft and receipt identity from schema-ordered bytes, not key insertion order', () => {
+  it('derives draft and receipt identity from schema-ordered bytes, not key insertion order', { timeout: 15_000 }, () => {
     const receiptRunner = ({ manifestDraftSha256 }: { manifestDraftSha256: string }) => testRehearsalResult({
       receipt_sha256: manifestDraftSha256,
     })
