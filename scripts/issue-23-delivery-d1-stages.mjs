@@ -25,18 +25,9 @@ export const D1_STAGE_TIMEOUT_MS = Object.freeze({
 })
 
 const D1_OVERALL_TIMEOUT_MS = 5_400_000
-const MAX_TRANSPORT_OUTPUT_BYTES = 64 * 1024
+const MAX_STAGE_OUTPUT_BYTES = 64 * 1024
 const RESET_RESPONSE_PREFIX = '\u251c Checking if file needs uploading\n\u2502\n'
-const EMPTY_OBJECT_QUERY = `
-SELECT type, name, tbl_name, sql
-FROM sqlite_schema
-WHERE name NOT GLOB 'sqlite_*'
-  AND NOT (
-    type = 'table'
-    AND (name, tbl_name) IN (('_cf_KV', '_cf_KV'), ('_cf_METADATA', '_cf_METADATA'))
-  )
-ORDER BY type, name, tbl_name, sql
-`.trim()
+const RESET_LOCAL_STATEMENT_COUNT = 15
 const CANONICAL_MIGRATION_NAMES = Object.freeze([
   '001_initial_schema',
   '002_add_ai_image_configuration',
@@ -45,12 +36,39 @@ const CANONICAL_MIGRATION_NAMES = Object.freeze([
   '005_fix_posts_fts_sync',
   '006_add_rollout_safety_controls',
 ])
-const DEFAULT_BINDINGS = Object.freeze({
-  database: 'DB',
-  config_path: 'wrangler.toml',
-  reset_sql_path: 'db/issue-23-clean-start-reset.sql',
-  migration_runner_path: 'scripts/migrations.mjs',
-  migration_catalog_path: 'db/ledger-migrations',
+const BINDING_KEYS = Object.freeze([
+  'mode',
+  'database',
+  'config_path',
+  'config_sha256',
+  'wrangler_sha256',
+  'account_id',
+  'd1_database_id',
+  'reset_sql_path',
+  'reset_sql_sha256',
+  'migration_runner_path',
+  'migration_runner_sha256',
+  'migration_catalog_path',
+  'migration_catalog_sha256',
+  'rollout_safety_path',
+  'rollout_safety_sha256',
+  'expected_reconciliation_path',
+  'expected_reconciliation_sha256',
+  'candidate_id',
+  'evidence_class',
+  'migrations',
+])
+const EVIDENCE_CLASSES = Object.freeze([
+  'production',
+  'local-non-production',
+  'test-non-production',
+  'synthetic-non-production',
+])
+const TRANSPORT_FAILURE_OUTCOMES = Object.freeze({
+  timeout: ['TIMEOUT', 'timeout'],
+  nonzero: ['ERROR', 'nonzero'],
+  malformed: ['ERROR', 'malformed'],
+  uncertain: ['UNCERTAIN', 'uncertain'],
 })
 
 function fail(message) {
@@ -75,15 +93,17 @@ function assertSafeString(value, label) {
   }
 }
 
-function assertHash(value, label) {
-  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/u.test(value)) {
-    fail(`${label} must be a SHA-256 identity`)
+function assertSafePath(value, label) {
+  assertSafeString(value, label)
+  if (!value.startsWith('/') || value !== value.replace(/\/+/gu, '/')
+    || /(^|\/)\.\.?($|\/)/u.test(value)) {
+    fail(`${label} must be an absolute normalized path`)
   }
 }
 
-function assertCanonicalPath(value, suffix, label) {
-  if (value !== suffix && !value.endsWith(`/${suffix}`)) {
-    fail(`${label} must identify the canonical ${suffix}`)
+function assertHash(value, label) {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/u.test(value)) {
+    fail(`${label} must be a SHA-256 identity`)
   }
 }
 
@@ -222,7 +242,7 @@ function assertUniqueJsonObjectKeys(json) {
   if (index !== json.length) throw new SyntaxError()
 }
 
-function parseJson(stdout, classification = 'malformed_response') {
+function parseJson(stdout, classification = 'malformed') {
   try {
     assertUniqueJsonObjectKeys(stdout)
     return JSON.parse(stdout)
@@ -233,41 +253,30 @@ function parseJson(stdout, classification = 'malformed_response') {
 
 function normalizeMigration(entry, index, label) {
   if (!isRecord(entry)) fail(`${label}[${index}] must be an object`)
-  const number = Object.hasOwn(entry, 'number')
-    ? entry.number
-    : Object.hasOwn(entry, 'id') && /^\d{3}$/u.test(String(entry.id))
-      ? Number(entry.id)
-      : undefined
-  const name = Object.hasOwn(entry, 'name')
-    ? entry.name
-    : Object.hasOwn(entry, 'path') && typeof entry.path === 'string'
-      ? entry.path.split('/').at(-1)?.replace(/\.sql$/u, '')
-      : undefined
-  const checksum = Object.hasOwn(entry, 'checksum') ? entry.checksum : entry.sha256
-  if (!Number.isSafeInteger(number) || number !== index + 1) fail(`${label}[${index}] number is invalid`)
-  if (name !== CANONICAL_MIGRATION_NAMES[index]) fail(`${label}[${index}] name is invalid`)
-  assertHash(checksum, `${label}[${index}].checksum`)
-  return { number, name, checksum }
+  assertExactKeys(entry, ['checksum', 'name', 'number'], `${label}[${index}]`)
+  if (!Number.isSafeInteger(entry.number) || entry.number !== index + 1) {
+    fail(`${label}[${index}] number is invalid`)
+  }
+  if (entry.name !== CANONICAL_MIGRATION_NAMES[index]) {
+    fail(`${label}[${index}] name is invalid`)
+  }
+  assertHash(entry.checksum, `${label}[${index}].checksum`)
+  return { number: entry.number, name: entry.name, checksum: entry.checksum }
 }
 
 function normalizeBindings(value) {
   if (!isRecord(value)) fail('bindings must be an object')
-  const allowedKeys = new Set([
-    ...Object.keys(DEFAULT_BINDINGS),
-    'account_id',
-    'config_sha256',
-    'd1_database_id',
-    'reset_sql_sha256',
-    'candidate_id',
-    'migrations',
-  ])
-  if (Reflect.ownKeys(value).some((key) => typeof key !== 'string' || !allowedKeys.has(key))) {
+  const actual = Reflect.ownKeys(value)
+  const expectedKeys = value.mode === 'local'
+    ? [...BINDING_KEYS, 'persist_path']
+    : BINDING_KEYS
+  if (actual.length !== expectedKeys.length
+    || expectedKeys.some((key) => !actual.includes(key))) {
     fail('bindings contains unsupported fields')
   }
-  const bindings = {
-    ...DEFAULT_BINDINGS,
-    ...value,
-  }
+  if (value.mode !== 'local' && value.mode !== 'remote') fail('bindings.mode is invalid')
+  if (value.mode === 'local') assertSafePath(value.persist_path, 'bindings.persist_path')
+  else if (value.persist_path !== undefined) fail('remote bindings cannot include persist_path')
   for (const field of [
     'database',
     'config_path',
@@ -276,20 +285,47 @@ function normalizeBindings(value) {
     'reset_sql_path',
     'migration_runner_path',
     'migration_catalog_path',
+    'rollout_safety_path',
+    'expected_reconciliation_path',
     'candidate_id',
-  ]) assertSafeString(bindings[field], `bindings.${field}`)
-  assertHash(bindings.config_sha256, 'bindings.config_sha256')
-  assertHash(bindings.reset_sql_sha256, 'bindings.reset_sql_sha256')
-  assertCanonicalPath(bindings.reset_sql_path, 'db/issue-23-clean-start-reset.sql', 'bindings.reset_sql_path')
-  assertCanonicalPath(bindings.migration_runner_path, 'scripts/migrations.mjs', 'bindings.migration_runner_path')
-  assertCanonicalPath(bindings.migration_catalog_path, 'db/ledger-migrations', 'bindings.migration_catalog_path')
-  if (!Array.isArray(bindings.migrations) || bindings.migrations.length !== 6) {
+  ]) assertSafeString(value[field], `bindings.${field}`)
+  for (const field of [
+    'config_sha256',
+    'wrangler_sha256',
+    'reset_sql_sha256',
+    'migration_runner_sha256',
+    'migration_catalog_sha256',
+    'rollout_safety_sha256',
+    'expected_reconciliation_sha256',
+  ]) assertHash(value[field], `bindings.${field}`)
+  if (!/^[a-f0-9]{40}$/u.test(value.candidate_id)) {
+    fail('bindings.candidate_id is invalid')
+  }
+  for (const [field, suffix] of [
+    ['reset_sql_path', 'db/issue-23-clean-start-reset.sql'],
+    ['migration_runner_path', 'scripts/migrations.mjs'],
+    ['migration_catalog_path', 'db/ledger-migrations'],
+    ['rollout_safety_path', 'scripts/rollout-safety.mjs'],
+  ]) {
+    if (!value[field].endsWith(`/${suffix}`) && value[field] !== suffix) {
+      fail(`bindings.${field} must identify the canonical ${suffix}`)
+    }
+  }
+  if (!EVIDENCE_CLASSES.includes(value.evidence_class)) fail('bindings.evidence_class is invalid')
+  if ((value.mode === 'remote' && value.evidence_class !== 'production')
+    || (value.mode === 'local' && value.evidence_class === 'production')) {
+    fail('bindings mode and evidence class are inconsistent')
+  }
+  if (!Array.isArray(value.migrations) || value.migrations.length !== 6) {
     fail('bindings.migrations must contain exactly six entries')
   }
-  const migrations = bindings.migrations.map((entry, index) => (
+  const migrations = value.migrations.map((entry, index) => (
     normalizeMigration(entry, index, 'bindings.migrations')
   ))
-  return Object.freeze({ ...bindings, migrations: Object.freeze(migrations) })
+  return Object.freeze({
+    ...value,
+    migrations: Object.freeze(migrations),
+  })
 }
 
 function validateTransport(transport) {
@@ -298,71 +334,82 @@ function validateTransport(transport) {
   }
 }
 
-function requestFor(bindings, stage, operation, extra = {}) {
+function requestFor(bindings, stage, operation, elapsedMs) {
   return Object.freeze({
     operation,
     stage,
     timeout_ms: D1_STAGE_TIMEOUT_MS[stage],
-    database: bindings.database,
-    config_path: bindings.config_path,
-    config_sha256: bindings.config_sha256,
-    account_id: bindings.account_id,
-    d1_database_id: bindings.d1_database_id,
-    ...extra,
+    elapsed_ms: elapsedMs,
   })
 }
 
-function readTransportResponse(response, stage) {
-  if (!isRecord(response)) throw stageFailure('ERROR', 'invalid_transport_response')
+function transportFailure(error, durationMs) {
+  const classification = error?.name === 'D1TransportError'
+    ? error.classification
+    : undefined
+  const mapped = TRANSPORT_FAILURE_OUTCOMES[classification] ?? ['ERROR', 'transport_error']
+  const measured = Number.isSafeInteger(error?.durationMs) && error.durationMs >= 0
+    ? durationMs + error.durationMs
+    : durationMs
+  throw stageFailure(mapped[0], mapped[1], measured)
+}
+
+function readTransportResponse(response, stage, elapsedMs) {
+  if (!isRecord(response)) throw stageFailure('ERROR', 'malformed', elapsedMs)
   const allowedKeys = ['duration_ms', 'signal', 'status', 'stderr', 'stdout', 'timed_out']
   if (Reflect.ownKeys(response).some((key) => (
     typeof key !== 'string' || !allowedKeys.includes(key)
-  ))) throw stageFailure('ERROR', 'invalid_transport_response')
-
-  const durationMs = response.duration_ms ?? 0
-  assertNonNegativeInteger(durationMs, 'transport duration')
-  const timeoutMs = D1_STAGE_TIMEOUT_MS[stage]
-  if (durationMs > timeoutMs) throw stageFailure('TIMEOUT', 'stage_timeout', durationMs)
-  if (response.timed_out === true) throw stageFailure('TIMEOUT', 'stage_timeout', durationMs)
+  ))) throw stageFailure('ERROR', 'malformed', elapsedMs)
+  if (!Object.hasOwn(response, 'duration_ms')
+    || !Number.isSafeInteger(response.duration_ms)
+    || response.duration_ms <= 0) {
+    throw stageFailure('ERROR', 'malformed', elapsedMs)
+  }
+  const durationMs = response.duration_ms
+  if (response.timed_out === true) throw stageFailure('TIMEOUT', 'timeout', durationMs)
   if (response.signal !== undefined && response.signal !== null) {
-    throw stageFailure('ERROR', 'transport_failure', durationMs)
+    throw stageFailure('UNCERTAIN', 'uncertain', durationMs)
   }
-  if (response.status !== 0) throw stageFailure('ERROR', 'transport_failure', durationMs)
-  const stdout = response.stdout ?? ''
-  const stderr = response.stderr ?? ''
-  if (typeof stdout !== 'string' || typeof stderr !== 'string') {
-    throw stageFailure('ERROR', 'invalid_transport_response', durationMs)
+  if (!Number.isSafeInteger(response.status)) {
+    throw stageFailure('ERROR', 'malformed', durationMs)
   }
-  if (Buffer.byteLength(stdout, 'utf8') > MAX_TRANSPORT_OUTPUT_BYTES
-    || Buffer.byteLength(stderr, 'utf8') > MAX_TRANSPORT_OUTPUT_BYTES) {
-    throw stageFailure('ERROR', 'output_overflow', durationMs)
+  if (response.status !== 0) throw stageFailure('ERROR', 'nonzero', durationMs)
+  if (typeof response.stdout !== 'string' || typeof response.stderr !== 'string') {
+    throw stageFailure('ERROR', 'malformed', durationMs)
   }
-  if (stderr !== '') throw stageFailure('ERROR', 'transport_failure', durationMs)
-  return { stdout, durationMs }
+  if (Buffer.byteLength(response.stdout, 'utf8') > MAX_STAGE_OUTPUT_BYTES
+    || Buffer.byteLength(response.stderr, 'utf8') > MAX_STAGE_OUTPUT_BYTES) {
+    throw stageFailure('UNCERTAIN', 'uncertain', durationMs)
+  }
+  if (response.stderr !== '') throw stageFailure('UNCERTAIN', 'uncertain', durationMs)
+  if (elapsedMs + durationMs > D1_STAGE_TIMEOUT_MS[stage]) {
+    throw stageFailure('TIMEOUT', 'timeout', elapsedMs + durationMs)
+  }
+  return { stdout: response.stdout, durationMs }
 }
 
-function callOperation({ bindings, transport, stage, operation, extra }, state) {
+function callOperation({ bindings, transport, stage, operation }, state) {
+  const timeoutMs = D1_STAGE_TIMEOUT_MS[stage]
+  if (state.durationMs >= timeoutMs) throw stageFailure('TIMEOUT', 'timeout', state.durationMs)
   let response
   try {
-    response = transport.execute(requestFor(bindings, stage, operation, extra))
-  } catch {
-    throw stageFailure('ERROR', 'transport_error', state.durationMs)
+    response = transport.execute(requestFor(bindings, stage, operation, state.durationMs))
+  } catch (error) {
+    if (error instanceof StageFailure) throw error
+    transportFailure(error, state.durationMs)
   }
 
   let result
   try {
-    result = readTransportResponse(response, stage)
+    result = readTransportResponse(response, stage, state.durationMs)
   } catch (error) {
     if (error instanceof StageFailure) {
       error.durationMs += state.durationMs
       throw error
     }
-    throw stageFailure('ERROR', 'invalid_transport_response', state.durationMs)
+    throw stageFailure('ERROR', 'malformed', state.durationMs)
   }
   state.durationMs += result.durationMs
-  if (state.durationMs > D1_STAGE_TIMEOUT_MS[stage]) {
-    throw stageFailure('TIMEOUT', 'stage_timeout', state.durationMs)
-  }
   return result.stdout
 }
 
@@ -379,27 +426,34 @@ function parseOperationOutput(stdout, state, parser, classification) {
 }
 
 function parseIdentity(stdout, bindings) {
-  const value = parseJson(stdout)
+  const value = parseJson(stdout, 'd1_identity_response_invalid')
   assertExactKeys(value, ['account_id', 'config_sha256', 'd1_database_id'], 'D1 identity response')
   assertSafeString(value.account_id, 'D1 account identity')
   assertHash(value.config_sha256, 'D1 config identity')
   assertSafeString(value.d1_database_id, 'D1 database identity')
-  const mismatches = []
-  if (value.account_id !== bindings.account_id) mismatches.push('account')
-  if (value.config_sha256 !== bindings.config_sha256) mismatches.push('config')
-  if (value.d1_database_id !== bindings.d1_database_id) mismatches.push('d1')
-  if (mismatches.length > 0) throw stageFailure('NON_PASS', 'Manifest Drift')
+  if (value.account_id !== bindings.account_id
+    || value.config_sha256 !== bindings.config_sha256
+    || value.d1_database_id !== bindings.d1_database_id) {
+    throw stageFailure('NON_PASS', 'Manifest Drift')
+  }
 }
 
-function parseResetResponse(stdout) {
-  const json = stdout.startsWith(RESET_RESPONSE_PREFIX)
-    ? stdout.slice(RESET_RESPONSE_PREFIX.length)
-    : stdout
-  const value = parseJson(json, 'reset_response_invalid')
+function parseQueryEnvelope(stdout, label) {
+  const value = parseJson(stdout)
   if (!Array.isArray(value) || value.length !== 1) {
-    throw stageFailure('ERROR', 'reset_response_invalid')
+    throw stageFailure('ERROR', 'malformed')
   }
   const envelope = value[0]
+  assertExactKeys(envelope, ['meta', 'results', 'success'], `${label} response`)
+  if (envelope.success !== true || !Array.isArray(envelope.results)) {
+    throw stageFailure('ERROR', 'malformed')
+  }
+  assertExactKeys(envelope.meta, ['duration'], `${label} metadata`)
+  assertNonNegativeInteger(envelope.meta.duration, `${label} duration`)
+  return envelope.results
+}
+
+function parseResetEnvelope(envelope) {
   assertExactKeys(envelope, ['finalBookmark', 'meta', 'results', 'success'], 'reset response')
   if (envelope.success !== true || typeof envelope.finalBookmark !== 'string'
     || envelope.finalBookmark.length === 0 || envelope.finalBookmark.trim() !== envelope.finalBookmark) {
@@ -431,17 +485,24 @@ function parseResetResponse(stdout) {
   }
 }
 
-function parseQueryEnvelope(stdout, label) {
-  const value = parseJson(stdout)
-  if (!Array.isArray(value) || value.length !== 1) {
-    throw stageFailure('ERROR', 'malformed_response')
+function parseResetResponse(stdout, mode) {
+  const json = stdout.startsWith(RESET_RESPONSE_PREFIX)
+    ? stdout.slice(RESET_RESPONSE_PREFIX.length)
+    : stdout
+  const value = parseJson(json, 'reset_response_invalid')
+  if (!Array.isArray(value)) throw stageFailure('ERROR', 'reset_response_invalid')
+  if (mode === 'remote') {
+    if (value.length !== 1) throw stageFailure('ERROR', 'reset_response_invalid')
+    parseResetEnvelope(value[0])
+    return
   }
-  const envelope = value[0]
-  assertExactKeys(envelope, ['results', 'success'], `${label} response`)
-  if (envelope.success !== true || !Array.isArray(envelope.results)) {
-    throw stageFailure('ERROR', 'malformed_response')
+  if (value.length !== RESET_LOCAL_STATEMENT_COUNT) {
+    throw stageFailure('ERROR', 'reset_response_invalid')
   }
-  return envelope.results
+  for (const envelope of value) {
+    const results = parseQueryEnvelope(JSON.stringify([envelope]), 'local reset')
+    if (results.length !== 0) throw stageFailure('ERROR', 'reset_response_invalid')
+  }
 }
 
 function parseEmptyObjects(stdout) {
@@ -489,7 +550,11 @@ function parsePlan(stdout, bindings) {
   for (const [index, migration] of value.pending.entries()) {
     assertExactKeys(migration, ['action', 'checksum', 'name', 'number'], 'migration plan entry')
     if (migration.action !== 'apply') throw stageFailure('NON_PASS', 'empty_only_plan_invalid')
-    const normalized = normalizeMigration(migration, index, 'migration plan')
+    const normalized = normalizeMigration({
+      checksum: migration.checksum,
+      name: migration.name,
+      number: migration.number,
+    }, index, 'migration plan')
     if (normalized.number !== bindings.migrations[index].number
       || normalized.name !== bindings.migrations[index].name
       || normalized.checksum !== bindings.migrations[index].checksum) {
@@ -500,7 +565,11 @@ function parsePlan(stdout, bindings) {
 
 function parseAppliedEntry(entry, expected, candidate, label) {
   assertExactKeys(entry, ['applied_at', 'candidate_id', 'checksum', 'name', 'number'], `${label} entry`)
-  const normalized = normalizeMigration(entry, expected.number - 1, label)
+  const normalized = normalizeMigration({
+    checksum: entry.checksum,
+    name: entry.name,
+    number: entry.number,
+  }, expected.number - 1, label)
   if (normalized.number !== expected.number
     || normalized.name !== expected.name
     || normalized.checksum !== expected.checksum
@@ -524,19 +593,15 @@ function parseMigrationState(stdout, bindings, expectedState, label) {
 }
 
 function parseReconciliation(stdout) {
-  const value = parseJson(stdout)
+  const value = parseJson(stdout, 'reconciliation_response_invalid')
   if (!isRecord(value)) throw stageFailure('ERROR', 'reconciliation_response_invalid')
   const keys = Reflect.ownKeys(value)
-  if (keys.some((key) => typeof key !== 'string' || !['checks', 'drift_dimensions', 'state'].includes(key))) {
+  if (keys.some((key) => typeof key !== 'string'
+    || !['checks', 'drift_dimensions', 'state'].includes(key))) {
     throw stageFailure('ERROR', 'reconciliation_response_invalid')
   }
   if (!Object.hasOwn(value, 'state') || !Object.hasOwn(value, 'checks')
     || !isRecord(value.checks)) {
-    throw stageFailure('ERROR', 'reconciliation_response_invalid')
-  }
-  if (Object.hasOwn(value, 'drift_dimensions')
-    && (!Array.isArray(value.drift_dimensions)
-      || value.drift_dimensions.some((dimension) => typeof dimension !== 'string'))) {
     throw stageFailure('ERROR', 'reconciliation_response_invalid')
   }
   const actualDimensions = Reflect.ownKeys(value.checks)
@@ -544,10 +609,25 @@ function parseReconciliation(stdout) {
     || D1_RECONCILIATION_DIMENSIONS.some((dimension) => !actualDimensions.includes(dimension))) {
     throw stageFailure('NON_PASS', 'reconciliation_contract_invalid')
   }
-  const drift = D1_RECONCILIATION_DIMENSIONS.filter((dimension) => value.checks[dimension] !== 'matched')
-  if (value.state !== 'matched' || drift.length > 0) {
+  const driftDimensions = D1_RECONCILIATION_DIMENSIONS.filter((dimension) => (
+    value.checks[dimension] !== 'matched'
+  ))
+  if (driftDimensions.some((dimension) => value.checks[dimension] !== 'drift')) {
+    throw stageFailure('ERROR', 'reconciliation_response_invalid')
+  }
+  if (Object.hasOwn(value, 'drift_dimensions')) {
+    if (!Array.isArray(value.drift_dimensions)
+      || JSON.stringify(value.drift_dimensions) !== JSON.stringify(driftDimensions)) {
+      throw stageFailure('ERROR', 'reconciliation_response_invalid')
+    }
+  } else if (driftDimensions.length > 0) {
+    throw stageFailure('ERROR', 'reconciliation_response_invalid')
+  }
+  if (value.state === 'matched' && driftDimensions.length === 0) return
+  if (value.state !== 'drift' || driftDimensions.length === 0) {
     throw stageFailure('NON_PASS', 'reconciliation_drift')
   }
+  throw stageFailure('NON_PASS', 'reconciliation_drift')
 }
 
 function runD1Identity(bindings, transport) {
@@ -557,10 +637,6 @@ function runD1Identity(bindings, transport) {
     transport,
     stage: 'd1_identity',
     operation: 'd1_identity',
-    extra: {
-      expected_account_id: bindings.account_id,
-      expected_config_sha256: bindings.config_sha256,
-    },
   }, state)
   parseOperationOutput(stdout, state, (value) => parseIdentity(value, bindings), 'd1_identity_response_invalid')
   return state.durationMs
@@ -573,40 +649,30 @@ function runReset(bindings, transport) {
     transport,
     stage: 'clean_start_reset',
     operation: 'clean_start_reset',
-    extra: {
-      reset_sql_path: bindings.reset_sql_path,
-      reset_sql_sha256: bindings.reset_sql_sha256,
-    },
   }, state)
-  parseOperationOutput(stdout, state, parseResetResponse, 'reset_response_invalid')
+  parseOperationOutput(stdout, state, (value) => parseResetResponse(value, bindings.mode), 'reset_response_invalid')
   return state.durationMs
 }
 
 function runEmptyProof(bindings, transport) {
   const state = { durationMs: 0 }
-  const emptyObjects = callOperation({
+  const stdout = callOperation({
     bindings,
     transport,
     stage: 'empty_d1_proof',
-    operation: 'empty_d1_objects',
-    extra: { query: EMPTY_OBJECT_QUERY },
+    operation: 'empty_d1_proof',
   }, state)
-  parseOperationOutput(emptyObjects, state, parseEmptyObjects, 'empty_d1_proof_invalid')
+  parseOperationOutput(stdout, state, parseEmptyObjects, 'empty_d1_proof_invalid')
   return state.durationMs
 }
 
 function runMigrations(bindings, transport) {
   const state = { durationMs: 0 }
-  const common = {
-    migration_runner_path: bindings.migration_runner_path,
-    migration_catalog_path: bindings.migration_catalog_path,
-  }
   const catalog = callOperation({
     bindings,
     transport,
     stage: 'migrations_001_006',
     operation: 'migration_catalog',
-    extra: common,
   }, state)
   parseOperationOutput(catalog, state, (value) => parseCatalog(value, bindings), 'migration_contract_invalid')
   const plan = callOperation({
@@ -614,7 +680,6 @@ function runMigrations(bindings, transport) {
     transport,
     stage: 'migrations_001_006',
     operation: 'migration_plan',
-    extra: common,
   }, state)
   parseOperationOutput(plan, state, (value) => parsePlan(value, bindings), 'empty_only_plan_invalid')
   const applied = callOperation({
@@ -622,7 +687,6 @@ function runMigrations(bindings, transport) {
     transport,
     stage: 'migrations_001_006',
     operation: 'migration_apply',
-    extra: { ...common, candidate_id: bindings.candidate_id },
   }, state)
   parseOperationOutput(
     applied,
@@ -635,7 +699,6 @@ function runMigrations(bindings, transport) {
     transport,
     stage: 'migrations_001_006',
     operation: 'migration_verify',
-    extra: { ...common, candidate_id: bindings.candidate_id },
   }, state)
   parseOperationOutput(
     verified,
@@ -653,7 +716,6 @@ function runReconciliation(bindings, transport) {
     transport,
     stage: 'reconciliation',
     operation: 'reconciliation',
-    extra: { dimensions: D1_RECONCILIATION_DIMENSIONS },
   }, state)
   parseOperationOutput(stdout, state, parseReconciliation, 'reconciliation_response_invalid')
   return state.durationMs
@@ -681,10 +743,10 @@ export function runD1Stages({ bindings: rawBindings, transport }) {
     let classification
     let durationMs = 0
     try {
-      durationMs = STAGE_RUNNERS[stage](bindings, transport, trace)
+      durationMs = STAGE_RUNNERS[stage](bindings, transport)
       assertNonNegativeInteger(durationMs, `${stage} duration`)
       if (durationMs > D1_STAGE_TIMEOUT_MS[stage]) {
-        throw stageFailure('TIMEOUT', 'stage_timeout', durationMs)
+        throw stageFailure('TIMEOUT', 'timeout', durationMs)
       }
       elapsedMs += durationMs
       if (elapsedMs > D1_OVERALL_TIMEOUT_MS) {
@@ -713,6 +775,8 @@ export function runD1Stages({ bindings: rawBindings, transport }) {
 
   const terminal = trace.at(-1)
   if (!terminal) fail('D1 stage contract did not execute')
+  const production = bindings.evidence_class === 'production'
+  const traceSha256 = sha256(canonicalBytes(trace))
   const value = {
     format: 'blogman-issue-23-d1-stages/v1',
     outcome: terminal.outcome,
@@ -721,8 +785,19 @@ export function runD1Stages({ bindings: rawBindings, transport }) {
     stage_counts: stageCounts,
     stage_durations_ms: stageDurations,
     evidence: {
-      source: 'internal-transport',
-      trace_sha256: sha256(canonicalBytes(trace)),
+      source: bindings.evidence_class,
+      production,
+      promotable: production,
+      account_id: bindings.account_id,
+      d1_database_id: bindings.d1_database_id,
+      config_sha256: bindings.config_sha256,
+      candidate_id: bindings.candidate_id,
+      reset_sql_sha256: bindings.reset_sql_sha256,
+      migration_runner_sha256: bindings.migration_runner_sha256,
+      migration_catalog_sha256: bindings.migration_catalog_sha256,
+      rollout_safety_sha256: bindings.rollout_safety_sha256,
+      expected_reconciliation_sha256: bindings.expected_reconciliation_sha256,
+      trace_sha256: traceSha256,
     },
     finalized: true,
   }

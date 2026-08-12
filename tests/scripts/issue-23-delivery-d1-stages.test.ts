@@ -1,10 +1,26 @@
-import { describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
   D1_RECONCILIATION_DIMENSIONS,
   D1_STAGE_ORDER,
   D1_STAGE_TIMEOUT_MS,
   runD1Stages,
 } from '../../scripts/issue-23-delivery-d1-stages.mjs'
+import {
+  createD1Transport,
+} from '../../scripts/issue-23-delivery-d1-transport.mjs'
 
 const MIGRATIONS = [
   { number: 1, name: '001_initial_schema', checksum: '8a71414814571d4fe65e03fc92b3f976074d025ddf03a4dd9f861698b2387d05' },
@@ -23,22 +39,131 @@ const RECONCILIATION_DIMENSIONS = [
   'post_content',
 ]
 
+const repoRoot = process.cwd()
+
 const BINDINGS = {
+  mode: 'local',
+  persist_path: realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-90-stage-fake-'))),
   database: 'DB',
-  config_path: '/repo/wrangler.toml',
-  config_sha256: 'a'.repeat(64),
+  config_path: join(repoRoot, 'wrangler.toml'),
+  config_sha256: sha256File(join(repoRoot, 'wrangler.toml')),
+  wrangler_sha256: sha256File(realpathSync(join(repoRoot, 'node_modules', '.bin', 'wrangler'))),
   account_id: 'account-public-id',
   d1_database_id: 'd1-public-id',
-  reset_sql_path: '/repo/db/issue-23-clean-start-reset.sql',
-  reset_sql_sha256: 'b'.repeat(64),
-  migration_runner_path: '/repo/scripts/migrations.mjs',
-  migration_catalog_path: '/repo/db/ledger-migrations',
-  candidate_id: 'candidate-001',
+  reset_sql_path: join(repoRoot, 'db', 'issue-23-clean-start-reset.sql'),
+  reset_sql_sha256: sha256File(join(repoRoot, 'db', 'issue-23-clean-start-reset.sql')),
+  migration_runner_path: join(repoRoot, 'scripts', 'migrations.mjs'),
+  migration_runner_sha256: sha256File(join(repoRoot, 'scripts', 'migrations.mjs')),
+  migration_catalog_path: join(repoRoot, 'db', 'ledger-migrations'),
+  migration_catalog_sha256: hashDirectory(join(repoRoot, 'db', 'ledger-migrations')),
+  rollout_safety_path: join(repoRoot, 'scripts', 'rollout-safety.mjs'),
+  rollout_safety_sha256: sha256File(join(repoRoot, 'scripts', 'rollout-safety.mjs')),
+  expected_reconciliation_path: join(repoRoot, 'package.json'),
+  expected_reconciliation_sha256: sha256File(join(repoRoot, 'package.json')),
+  candidate_id: 'c'.repeat(40),
+  evidence_class: 'test-non-production',
   migrations: MIGRATIONS,
 }
 
+const temporaryDirectories: string[] = [BINDINGS.persist_path]
+
+function sha256File(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex')
+}
+
+function hashDirectory(path: string): string {
+  const hash = createHash('sha256')
+  const visit = (directory: string, prefix: string) => {
+    for (const name of readdirSync(directory).sort()) {
+      const child = join(directory, name)
+      const relativePath = prefix ? `${prefix}/${name}` : name
+      const metadata = statSync(child)
+      if (metadata.isDirectory()) visit(child, relativePath)
+      else hash.update(`${relativePath}\0${metadata.size}\0`).update(readFileSync(child)).update('\0')
+    }
+  }
+  visit(path, '')
+  return hash.digest('hex')
+}
+
+function createLocalIntegrationBindings(
+  statePath: string,
+  expectedPath: string,
+) {
+  const configPath = join(repoRoot, 'wrangler.toml')
+  const resetSqlPath = join(repoRoot, 'db', 'issue-23-clean-start-reset.sql')
+  const runnerPath = join(repoRoot, 'scripts', 'migrations.mjs')
+  const catalogPath = join(repoRoot, 'db', 'ledger-migrations')
+  const rolloutSafetyPath = join(repoRoot, 'scripts', 'rollout-safety.mjs')
+  return {
+    mode: 'local' as const,
+    persist_path: statePath,
+    database: 'DB',
+    config_path: configPath,
+    config_sha256: sha256File(configPath),
+    wrangler_sha256: sha256File(realpathSync(join(repoRoot, 'node_modules', '.bin', 'wrangler'))),
+    account_id: 'local-account-not-production',
+    d1_database_id: 'local-d1-not-production',
+    reset_sql_path: resetSqlPath,
+    reset_sql_sha256: sha256File(resetSqlPath),
+    migration_runner_path: runnerPath,
+    migration_runner_sha256: sha256File(runnerPath),
+    migration_catalog_path: catalogPath,
+    migration_catalog_sha256: hashDirectory(catalogPath),
+    rollout_safety_path: rolloutSafetyPath,
+    rollout_safety_sha256: sha256File(rolloutSafetyPath),
+    expected_reconciliation_path: expectedPath,
+    expected_reconciliation_sha256: sha256File(expectedPath),
+    candidate_id: 'c'.repeat(40),
+    evidence_class: 'local-non-production',
+    migrations: MIGRATIONS,
+  }
+}
+
+function createExpectedReconciliation(statePath: string): string {
+  const expectedDirectory = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-90-expected-')))
+  temporaryDirectories.push(expectedDirectory)
+  const runner = join(repoRoot, 'scripts', 'migrations.mjs')
+  const config = join(repoRoot, 'wrangler.toml')
+  const apply = spawnSync(process.execPath, [
+    runner,
+    'apply',
+    '--database', 'DB',
+    '--local',
+    '--persist-to', expectedDirectory,
+    '--config', config,
+    '--candidate', 'c'.repeat(40),
+  ], { cwd: repoRoot, encoding: 'utf8' })
+  expect(apply.status, apply.stderr).toBe(0)
+  const capture = spawnSync(process.execPath, [
+    join(repoRoot, 'scripts', 'rollout-safety.mjs'),
+    'reconcile',
+    'capture',
+    '--database', 'DB',
+    '--local',
+    '--persist-to', expectedDirectory,
+    '--config', config,
+  ], { cwd: repoRoot, encoding: 'utf8' })
+  expect(capture.status, capture.stderr).toBe(0)
+  const expectedPath = join(statePath, 'expected-reconciliation.json')
+  writeFileSync(expectedPath, capture.stdout, { mode: 0o600 })
+  return expectedPath
+}
+
+afterEach(() => {
+  for (const path of temporaryDirectories.splice(0)) rmSync(path, { recursive: true, force: true })
+})
+
 function jsonResponse(value: unknown) {
-  return { status: 0, stdout: JSON.stringify(value), stderr: '' }
+  return { status: 0, stdout: JSON.stringify(value), stderr: '', duration_ms: 1 }
+}
+
+function stageJsonResponse(value: unknown) {
+  return jsonResponse(value)
+}
+
+function queryResponse(results: unknown[]) {
+  return jsonResponse([{ results, success: true, meta: { duration: 0 } }])
 }
 
 function resetResponse() {
@@ -53,6 +178,14 @@ function resetResponse() {
       'Database size (MB)': '0.00',
     }],
   }])
+}
+
+function localResetResponse() {
+  return jsonResponse(Array.from({ length: 15 }, () => ({
+    success: true,
+    results: [],
+    meta: { duration: 1 },
+  })))
 }
 
 function migrationState(state: 'current' | 'verified') {
@@ -75,32 +208,32 @@ function createSuccessTransport() {
       calls.push({ operation: String(request.operation), request })
       switch (request.operation) {
         case 'd1_identity':
-          return jsonResponse({
+          return stageJsonResponse({
             account_id: BINDINGS.account_id,
             config_sha256: BINDINGS.config_sha256,
             d1_database_id: BINDINGS.d1_database_id,
           })
         case 'clean_start_reset':
-          return resetResponse()
-        case 'empty_d1_objects':
-          return jsonResponse([{ success: true, results: [] }])
+          return BINDINGS.mode === 'local' ? localResetResponse() : resetResponse()
+        case 'empty_d1_proof':
+          return queryResponse([])
         case 'migration_catalog':
-          return jsonResponse({
+          return stageJsonResponse({
             format: 'blogman-migration-catalog/v1',
             migrations: MIGRATIONS,
           })
         case 'migration_plan':
-          return jsonResponse({
+          return stageJsonResponse({
             state: 'pending',
             applied: [],
             pending: MIGRATIONS.map((migration) => ({ ...migration, action: 'apply' })),
           })
         case 'migration_apply':
-          return jsonResponse(migrationState('current'))
+          return stageJsonResponse(migrationState('current'))
         case 'migration_verify':
-          return jsonResponse(migrationState('verified'))
+          return stageJsonResponse(migrationState('verified'))
         case 'reconciliation':
-          return jsonResponse({
+          return stageJsonResponse({
             state: 'matched',
             checks: Object.fromEntries(RECONCILIATION_DIMENSIONS.map((dimension) => [dimension, 'matched'])),
           })
@@ -136,7 +269,7 @@ describe('Issue #23 D1 delivery stages', () => {
     expect(transport.calls.map(({ operation }) => operation)).toEqual([
       'd1_identity',
       'clean_start_reset',
-      'empty_d1_objects',
+      'empty_d1_proof',
       'migration_catalog',
       'migration_plan',
       'migration_apply',
@@ -154,16 +287,17 @@ describe('Issue #23 D1 delivery stages', () => {
       D1_STAGE_TIMEOUT_MS.reconciliation,
     ])
     expect(transport.calls[0].request).toMatchObject({
-      expected_account_id: BINDINGS.account_id,
-      expected_config_sha256: BINDINGS.config_sha256,
-      d1_database_id: BINDINGS.d1_database_id,
+      operation: 'd1_identity',
+      stage: 'd1_identity',
+      elapsed_ms: 0,
     })
     expect(transport.calls[1].request).toMatchObject({
-      reset_sql_path: BINDINGS.reset_sql_path,
-      reset_sql_sha256: BINDINGS.reset_sql_sha256,
-      config_path: BINDINGS.config_path,
-      d1_database_id: BINDINGS.d1_database_id,
+      operation: 'clean_start_reset',
+      stage: 'clean_start_reset',
+      elapsed_ms: 0,
     })
+    expect(transport.calls[1].request).not.toHaveProperty('reset_sql_path')
+    expect(transport.calls[1].request).not.toHaveProperty('sql')
     expect(D1_STAGE_ORDER).toEqual([
       'd1_identity',
       'clean_start_reset',
@@ -271,19 +405,14 @@ describe('Issue #23 D1 delivery stages', () => {
 
   it('uses an exact internal-object allowlist and rejects _cf_unknown', () => {
     const transport = overrideTransport({
-      empty_d1_objects: (request) => {
-        const query = String(request.query)
-        expect(query).toContain("(name, tbl_name) IN (('_cf_KV', '_cf_KV'), ('_cf_METADATA', '_cf_METADATA'))")
-        expect(query).not.toContain("name LIKE '_cf_%'")
-        if (query.includes("name NOT GLOB '_cf_*'")) return jsonResponse([{ success: true, results: [] }])
-        return jsonResponse([{
-          success: true,
-          results: [{
-            type: 'table',
-            name: '_cf_unknown',
-            tbl_name: '_cf_unknown',
-            sql: 'CREATE TABLE _cf_unknown(private_body TEXT)',
-          }],
+      empty_d1_proof: (request) => {
+        expect(request).not.toHaveProperty('query')
+        expect(request).not.toHaveProperty('sql')
+        return queryResponse([{
+          type: 'table',
+          name: '_cf_unknown',
+          tbl_name: '_cf_unknown',
+          sql: 'CREATE TABLE _cf_unknown(private_body TEXT)',
         }])
       },
     })
@@ -305,7 +434,7 @@ describe('Issue #23 D1 delivery stages', () => {
     expect(transport.calls.map(({ operation }) => operation)).toEqual([
       'd1_identity',
       'clean_start_reset',
-      'empty_d1_objects',
+      'empty_d1_proof',
     ])
     expect(JSON.stringify(result.value)).not.toContain('_cf_unknown')
     expect(JSON.stringify(result.value)).not.toContain('private_body')
@@ -340,7 +469,7 @@ describe('Issue #23 D1 delivery stages', () => {
     expect(transport.calls.map(({ operation }) => operation)).toEqual([
       'd1_identity',
       'clean_start_reset',
-      'empty_d1_objects',
+      'empty_d1_proof',
       'migration_catalog',
       'migration_plan',
     ])
@@ -372,7 +501,7 @@ describe('Issue #23 D1 delivery stages', () => {
     expect(transport.calls.map(({ operation }) => operation)).toEqual([
       'd1_identity',
       'clean_start_reset',
-      'empty_d1_objects',
+      'empty_d1_proof',
       'migration_catalog',
     ])
   })
@@ -385,14 +514,15 @@ describe('Issue #23 D1 delivery stages', () => {
 
     expect(result.value.outcome).toBe('PASS')
     expect(apply?.request).toMatchObject({
-      candidate_id: BINDINGS.candidate_id,
-      migration_runner_path: BINDINGS.migration_runner_path,
-      migration_catalog_path: BINDINGS.migration_catalog_path,
+      operation: 'migration_apply',
+      stage: 'migrations_001_006',
     })
     expect(verify?.request).toMatchObject({
-      migration_runner_path: BINDINGS.migration_runner_path,
-      migration_catalog_path: BINDINGS.migration_catalog_path,
+      operation: 'migration_verify',
+      stage: 'migrations_001_006',
     })
+    expect(apply?.request).not.toHaveProperty('candidate_id')
+    expect(apply?.request).not.toHaveProperty('migration_runner_path')
   })
 
   it('stops after an apply ledger candidate mismatch and never verifies it', () => {
@@ -419,7 +549,7 @@ describe('Issue #23 D1 delivery stages', () => {
     expect(transport.calls.map(({ operation }) => operation)).toEqual([
       'd1_identity',
       'clean_start_reset',
-      'empty_d1_objects',
+      'empty_d1_proof',
       'migration_catalog',
       'migration_plan',
       'migration_apply',
@@ -453,6 +583,7 @@ describe('Issue #23 D1 delivery stages', () => {
           current,
           current === dimension ? 'drift' : 'matched',
         ])),
+        drift_dimensions: [dimension],
       }),
     })
 
@@ -526,24 +657,25 @@ describe('Issue #23 D1 delivery stages', () => {
 
   it('bounds transport output and terminalizes without parsing or retrying it', () => {
     const transport = overrideTransport({
-      empty_d1_objects: () => ({
+      empty_d1_proof: () => ({
         status: 0,
         stdout: 'x'.repeat(64 * 1024 + 1),
         stderr: '',
+        duration_ms: 1,
       }),
     })
 
     const result = runD1Stages({ bindings: BINDINGS, transport })
 
     expect(result.value).toMatchObject({
-      outcome: 'ERROR',
+      outcome: 'UNCERTAIN',
       first_terminal_stage: 'empty_d1_proof',
-      failure: { classification: 'output_overflow' },
+      failure: { classification: 'uncertain' },
     })
     expect(transport.calls.map(({ operation }) => operation)).toEqual([
       'd1_identity',
       'clean_start_reset',
-      'empty_d1_objects',
+      'empty_d1_proof',
     ])
     expect(JSON.stringify(result.value)).not.toContain('x'.repeat(100))
   })
@@ -563,7 +695,28 @@ describe('Issue #23 D1 delivery stages', () => {
     expect(result.value).toMatchObject({
       outcome: 'TIMEOUT',
       first_terminal_stage: 'clean_start_reset',
-      failure: { classification: 'stage_timeout' },
+      failure: { classification: 'timeout' },
+    })
+    expect(transport.calls.map(({ operation }) => operation)).toEqual([
+      'd1_identity',
+      'clean_start_reset',
+    ])
+  })
+
+  it.each([
+    ['timed out', { status: 0, stdout: '', stderr: '', duration_ms: 3, timed_out: true }, 'TIMEOUT', 'timeout'],
+    ['nonzero', { status: 7, stdout: '', stderr: '', duration_ms: 3 }, 'ERROR', 'nonzero'],
+    ['uncertain signal', { status: 0, signal: 'SIGKILL', stdout: '', stderr: '', duration_ms: 3 }, 'UNCERTAIN', 'uncertain'],
+    ['malformed transport response', { status: 0, stdout: '', stderr: '' }, 'ERROR', 'malformed'],
+  ] as const)('preserves the transport %s classification at the terminal boundary', (_name, response, outcome, classification) => {
+    const transport = overrideTransport({ clean_start_reset: () => response })
+
+    const result = runD1Stages({ bindings: BINDINGS, transport })
+
+    expect(result.value).toMatchObject({
+      outcome,
+      first_terminal_stage: 'clean_start_reset',
+      failure: { classification },
     })
     expect(transport.calls.map(({ operation }) => operation)).toEqual([
       'd1_identity',
@@ -579,9 +732,9 @@ describe('Issue #23 D1 delivery stages', () => {
     const result = runD1Stages({ bindings: BINDINGS, transport })
 
     expect(result.value).toMatchObject({
-      outcome: 'ERROR',
+      outcome: 'UNCERTAIN',
       first_terminal_stage: 'clean_start_reset',
-      failure: { classification: 'transport_failure' },
+      failure: { classification: 'uncertain' },
     })
     expect(JSON.stringify(result.value)).not.toContain('private stderr body')
   })
@@ -592,6 +745,7 @@ describe('Issue #23 D1 delivery stages', () => {
         status: 0,
         stderr: '',
         stdout: '[{"success":false,"finalBookmark":"bookmark","meta":{"rows_read":0,"rows_written":1,"size_after":1},"results":[{"Total queries executed":1,"Rows read":0,"Rows written":1,"Database size (MB)":"0.00"}],"success":true}]',
+        duration_ms: 1,
       }),
     })
 
@@ -603,4 +757,33 @@ describe('Issue #23 D1 delivery stages', () => {
       failure: { classification: 'reset_response_invalid' },
     })
   })
+
+  it('composes the real local transport with all five D1 stages', () => {
+    const statePath = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-90-stage-integration-')))
+    temporaryDirectories.push(statePath)
+    const expectedPath = createExpectedReconciliation(statePath)
+    const bindings = createLocalIntegrationBindings(statePath, expectedPath)
+    const transport = createD1Transport(bindings)
+
+    const result = runD1Stages({ bindings, transport })
+
+    expect(result.value).toMatchObject({
+      outcome: 'PASS',
+      first_terminal_stage: null,
+      stage_counts: {
+        d1_identity: 1,
+        clean_start_reset: 1,
+        empty_d1_proof: 1,
+        migrations_001_006: 1,
+        reconciliation: 1,
+      },
+      evidence: {
+        source: 'local-non-production',
+        production: false,
+        promotable: false,
+        d1_database_id: 'local-d1-not-production',
+        expected_reconciliation_sha256: sha256File(expectedPath),
+      },
+    })
+  }, 180_000)
 })
