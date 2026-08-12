@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -20,8 +20,8 @@ const SHA40 = 'a'.repeat(40)
 const SHA40_B = 'b'.repeat(40)
 const ZERO_ACTIONS_TEST_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
 const SERVER_REFERENCE_TEST_PLACEHOLDER = 'process.env.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY'
-const FORMAL_CLI_CHILD_TIMEOUT_MS = 240_000
-const FORMAL_CLI_TEST_TIMEOUT_MS = FORMAL_CLI_CHILD_TIMEOUT_MS + 60_000
+const FORMAL_CLI_CHILD_TIMEOUT_MS = 180_000
+const FORMAL_CLI_TEST_TIMEOUT_MS = FORMAL_CLI_CHILD_TIMEOUT_MS
 
 function hash(character: string) {
   return character.repeat(64)
@@ -1400,7 +1400,35 @@ describe('Issue #23 Delivery Preparation', () => {
       ]
       for (const path of copiedPaths) copyFileSync(join(repoRoot, path), join(fixtureRepo, path))
       writeFileSync(join(fixtureRepo, 'fixture-marker.txt'), 'Issue #23 prepare fixture\n')
-      symlinkSync(join(repoRoot, 'node_modules'), join(fixtureRepo, 'node_modules'))
+      const fixtureBin = join(fixtureRepo, 'node_modules', '.bin')
+      const fixtureOpenNext = join(fixtureBin, 'opennextjs-cloudflare')
+      const fixtureWrangler = join(fixtureBin, 'wrangler')
+      mkdirSync(fixtureBin, { recursive: true })
+      writeFileSync(fixtureOpenNext, `const { mkdirSync, writeFileSync } = require('node:fs')
+mkdirSync('.open-next/assets', { recursive: true })
+mkdirSync('.next/server', { recursive: true })
+writeFileSync('.open-next/assets/index.html', 'fixture artifact: .open-next/assets/index.html\\n')
+writeFileSync('.open-next/worker.js', 'fixture worker: .open-next/worker.js\\n')
+writeFileSync('.open-next/runtime.js', 'fixture runtime\\n')
+writeFileSync('.next/server/app-paths-manifest.json', '{}\\n')
+writeFileSync('.next/server/pages-manifest.json', '{}\\n')
+writeFileSync('.next/server/middleware-manifest.json', '{"version":3,"middleware":{},"functions":{},"sortedMiddleware":[]}\\n')
+writeFileSync('.next/routes-manifest.json', '{"staticRoutes":[],"dynamicRoutes":[],"rewrites":{"beforeFiles":[],"afterFiles":[],"fallback":[]}}\\n')
+writeFileSync('.next/server/server-reference-manifest.json', '{"node":{},"edge":{},"encryptionKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}\\n')
+const serverReference = JSON.stringify({ node: {}, edge: {}, encryptionKey: 'process.env.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY' })
+writeFileSync('.next/server/server-reference-manifest.js', 'self.__RSC_SERVER_MANIFEST=' + JSON.stringify(serverReference) + '\\n')
+`)
+      writeFileSync(fixtureWrangler, `#!/bin/sh
+if [ "$1" = '--version' ]; then
+  printf '%s\\n' 'wrangler 4.84.1'
+  exit 0
+fi
+exec wrangler "$@"
+`)
+      chmodSync(fixtureOpenNext, 0o755)
+      chmodSync(fixtureWrangler, 0o755)
+      expect(lstatSync(fixtureOpenNext).isSymbolicLink()).toBe(false)
+      expect(lstatSync(fixtureWrangler).isSymbolicLink()).toBe(false)
       execFileSync('git', ['add', 'fixture-marker.txt', ...copiedPaths], { cwd: fixtureRepo })
       execFileSync('git', ['commit', '-m', 'test fixture'], { cwd: fixtureRepo, env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' } })
       const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: fixtureRepo, encoding: 'utf8' }).trim()
@@ -1415,27 +1443,12 @@ describe('Issue #23 Delivery Preparation', () => {
       const fakeBin = join(directory, 'bin')
       mkdirSync(fakeBin)
       const fakeGh = join(fakeBin, 'gh')
-      const fakeNpx = join(fakeBin, 'npx')
       const runtimeShim = join(directory, 'formal-cli-macos.cjs')
       if (process.platform !== 'darwin') {
         writeFileSync(runtimeShim, "if (process.argv[1]?.endsWith('issue-23-delivery-prepare.mjs')) Object.defineProperty(process, 'platform', { value: 'darwin' })\n")
       }
       writeFileSync(fakeGh, '#!/bin/sh\nprintf \'[{"databaseId":1,"headSha":"%s","status":"completed","conclusion":"success","event":"pull_request","attempt":1}]\n\' "$BLOGMAN_TEST_HEAD"\n')
       chmodSync(fakeGh, 0o755)
-      writeFileSync(fakeNpx, `#!/bin/sh
-mkdir -p .open-next/assets .next/server
-printf '%s\\n' 'fixture artifact: .open-next/assets/index.html' > .open-next/assets/index.html
-printf '%s\\n' 'fixture worker: .open-next/worker.js' > .open-next/worker.js
-printf '%s\\n' 'fixture runtime' > .open-next/runtime.js
-printf '%s\\n' '{}' > .next/server/app-paths-manifest.json
-printf '%s\\n' '{}' > .next/server/pages-manifest.json
-printf '%s\\n' '{"version":3,"middleware":{},"functions":{},"sortedMiddleware":[]}' > .next/server/middleware-manifest.json
-printf '%s\\n' '{"staticRoutes":[],"dynamicRoutes":[],"rewrites":{"beforeFiles":[],"afterFiles":[],"fallback":[]}}' > .next/routes-manifest.json
-printf '%s\\n' '{"node":{},"edge":{},"encryptionKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}' > .next/server/server-reference-manifest.json
-printf '%s\\n' 'self.__RSC_SERVER_MANIFEST="{\\"node\\":{},\\"edge\\":{},\\"encryptionKey\\":\\"process.env.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY\\"}"' > .next/server/server-reference-manifest.js
-`)
-      chmodSync(fakeNpx, 0o755)
-
       const childEnv = {
         ...process.env,
         PATH: `${fakeBin}:${process.env.PATH}`,
@@ -1465,6 +1478,16 @@ printf '%s\\n' 'self.__RSC_SERVER_MANIFEST="{\\"node\\":{},\\"edge\\":{},\\"encr
       })
       expect(parsed.d1.mode).toBe('remote')
       expect(parsed.d1.evidence_class).toBe('production')
+      const nodeExecutable = process.execPath
+      const npmCliPath = join(dirname(dirname(nodeExecutable)), 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')
+      expect(parsed.toolchain.npm).toEqual({
+        version: execFileSync(nodeExecutable, [npmCliPath, '--version'], { encoding: 'utf8' }).trim().replace(/^v/u, ''),
+        identity_sha256: sha256(readFileSync(npmCliPath)),
+      })
+      expect(parsed.toolchain.curl).toEqual({
+        version: execFileSync('/usr/bin/curl', ['--version'], { encoding: 'utf8' }).match(/^curl ([0-9]+(?:\.[0-9]+){1,2})\b/u)?.[1],
+        identity_sha256: sha256(readFileSync('/usr/bin/curl')),
+      })
     })
   ))
 

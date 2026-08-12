@@ -71,12 +71,13 @@ function hashDirectory(path: string): string {
   return hash.digest('hex')
 }
 
-function request(operation: string, stage = operation, elapsedMs = 0) {
+function request(operation: string, stage = operation, elapsedMs = 0, overallElapsedMs = 0) {
   return {
     operation,
     stage,
     timeout_ms: D1_STAGE_TIMEOUT_MS[stage as keyof typeof D1_STAGE_TIMEOUT_MS],
     elapsed_ms: elapsedMs,
+    overall_elapsed_ms: overallElapsedMs,
   }
 }
 
@@ -178,6 +179,21 @@ describe('Issue #90 D1 transport', () => {
     expect(transportModule).not.toHaveProperty('registerD1TransportCapability')
     expect(Object.keys(transport)).toEqual(['execute'])
     expect(transport.execute(request('empty_d1_proof')).status).toBe(0)
+  })
+
+  it('keeps the request contract to five keys and rejects extras', () => {
+    const { config } = createConfig()
+    const transport = createD1Transport(config)
+
+    expect(Object.keys(request('empty_d1_proof'))).toEqual([
+      'operation',
+      'stage',
+      'timeout_ms',
+      'elapsed_ms',
+      'overall_elapsed_ms',
+    ])
+    expect(() => transport.execute({ ...request('empty_d1_proof'), extra: true }))
+      .toThrow(/unsupported fields/u)
   })
 
   it('dispatches migration operations through the canonical runner instead of accepting SQL or file overrides', () => {
