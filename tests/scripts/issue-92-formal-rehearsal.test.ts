@@ -9,6 +9,7 @@ import { runFormalRehearsal } from '../../scripts/issue-23-delivery-formal-rehea
 
 const REPOSITORY_ROOT = process.cwd()
 const IS_MACOS = platform() === 'darwin'
+const IS_MACOS_CI_GATE = IS_MACOS && process.env.GITHUB_ACTIONS === 'true'
 const SHA256 = /^[a-f0-9]{64}$/u
 const ALL_STAGES = [
   'authorization_accept',
@@ -61,12 +62,7 @@ function formalConfig() {
     ci: {
       provider: 'github-actions',
       workflow: '.github/workflows/verify.yml',
-      run_id: 1,
-      attempt: 1,
-      event: 'pull_request',
-      head_sha: commit,
-      tree,
-      conclusion: 'success',
+      expected_head_sha: commit,
     },
     toolchain: {
       node: { version: process.versions.node, identity_sha256: '0'.repeat(64) },
@@ -165,7 +161,7 @@ describe('Issue #92 formal rehearsal public path', () => {
     expect(() => runFormalRehearsal({} as never, {} as never)).toThrow(/exactly one config/u)
   })
 
-  it.skipIf(!IS_MACOS)('runs public prepare(config) then public execute(manifest, authorization) through the exact no-network formal gate', { timeout: 120_000 }, () => {
+  it.skipIf(!IS_MACOS_CI_GATE)('runs public prepare(config) then public execute(manifest, authorization) through the exact no-network formal gate', { timeout: 120_000 }, () => {
     const result = runFormalRehearsal(formalConfig())
 
     expect(result.manifest.bytes).toEqual(expect.any(Uint8Array))
@@ -201,7 +197,35 @@ describe('Issue #92 formal rehearsal public path', () => {
     expect(() => deliveryEntry.validateProductionTerminalEvidence(result.terminal)).toThrow(/production terminal evidence/u)
   })
 
+  it.skipIf(!IS_MACOS_CI_GATE)('covers a module-owned fail-closed live-precondition fault through the same public call graph', async () => {
+    const { runFormalFaultHarnessForTestsOnly } = await import('../../scripts/issue-23-delivery-formal-fault-harness.mjs')
+    const result = runFormalFaultHarnessForTestsOnly('live_preconditions', () => runFormalRehearsal(formalConfig()))
+
+    expect(result.terminal.value).toMatchObject({
+      outcome: 'NON_PASS',
+      first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'formal_rehearsal_forced_live_precondition_failure' },
+      mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
+    })
+    expect(result.terminal.value.stage_counts).toEqual({
+      authorization_accept: 1,
+      live_preconditions: 1,
+      d1_identity: 0,
+      clean_start_reset: 0,
+      empty_d1_proof: 0,
+      migrations_001_006: 0,
+      reconciliation: 0,
+      worker_deploy: 0,
+      version_traffic_verification: 0,
+      smoke_control_t0: 0,
+    })
+    expect(result.operations).toEqual([
+      expect.objectContaining({ adapter: 'worker', operation: 'live_preconditions.deployment_status' }),
+    ])
+  })
+
   it.skipIf(IS_MACOS)('does not substitute Linux ordinary verification for the macOS exact gate', () => {
     expect(() => runFormalRehearsal(formalConfig())).toThrow(/macOS/u)
   })
+
 })

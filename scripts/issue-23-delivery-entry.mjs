@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { prepare } from './issue-23-delivery-prepare.mjs'
 import { runSyntheticStage } from './issue-23-delivery-synthetic-adapter.mjs'
+import { currentFormalFaultStageForTestsOnly } from './issue-23-delivery-formal-fault-harness.mjs'
 import {
   createD1Transport,
   createRehearsalD1Transport,
@@ -1603,7 +1604,7 @@ function formalAdapterFactories(context) {
       return createRehearsalD1Transport(bindings, context.sink)
     },
     createWorkerTransport(bindings) {
-      return createRehearsalWorkerTransport(bindings, context.sink)
+      return createRehearsalWorkerTransport(bindings, context.sink, currentFormalFaultStageForTestsOnly())
     },
     normalizeD1Result: normalizeFormalRehearsalD1Result,
     normalizeWorkerResult: normalizeFormalRehearsalWorkerResult,
@@ -1814,25 +1815,81 @@ function executeProduction(manifest, authorization) {
 }
 
 /**
- * Production Evidence validator. Formal/test Terminal Results must fail this check.
+ * Production Evidence validator. It treats canonical bytes as the sole authority;
+ * `value` is only required to be an exact decoded copy of those bytes.
  */
 export function validateProductionTerminalEvidence(result) {
   if (!isPlainRecord(result) || !isPlainRecord(result.value) || !(result.bytes instanceof Uint8Array)
-    || typeof result.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(result.sha256)
-    || sha256(Buffer.from(result.bytes)) !== result.sha256) {
+    || typeof result.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(result.sha256)) {
     fail('production terminal evidence is malformed')
   }
-  const value = result.value
-  if (value.format !== TERMINAL_RESULT_FORMAT
-    || value.finalized !== true
-    || value.authorization_consumed !== true
-    || !isPlainRecord(value.evidence)
-    || value.evidence.source !== 'production'
-    || value.evidence.production !== true
+  const bytes = Buffer.from(result.bytes)
+  if (sha256(bytes) !== result.sha256) fail('production terminal evidence is malformed')
+  const text = bytes.toString('utf8')
+  if (!text.endsWith('\n') || text.endsWith('\n\n') || text.includes('\r')) {
+    fail('production terminal evidence is malformed')
+  }
+  let value
+  try {
+    value = JSON.parse(text.slice(0, -1))
+  } catch {
+    fail('production terminal evidence is malformed')
+  }
+  if (!isPlainRecord(value) || !bytes.equals(canonicalJsonBytes(value)) || !sameJsonValue(value, result.value)) {
+    fail('production terminal evidence is malformed')
+  }
+  if (!exact(value, [
+    'format', 'identities', 'attempt_id', 'authorization_consumed', 'outcome',
+    'first_terminal_stage', 'failure', 'stage_counts', 'stage_durations_ms',
+    'mutation_counts', 'evidence', 'finalized',
+  ]) || value.format !== TERMINAL_RESULT_FORMAT
+    || value.finalized !== true || value.authorization_consumed !== true
+    || !isPlainRecord(value.identities)
+    || !exact(value.identities, ['manifest_sha256', 'authorization_sha256'])
+    || !Object.values(value.identities).every((identity) => typeof identity === 'string' && /^[a-f0-9]{64}$/u.test(identity))
+    || typeof value.attempt_id !== 'string' || !/^[a-f0-9]{64}$/u.test(value.attempt_id)
+    || !['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(value.outcome)
+    || !isPlainRecord(value.stage_counts) || !exact(value.stage_counts, DELIVERY_STAGES)
+    || !isPlainRecord(value.stage_durations_ms) || !exact(value.stage_durations_ms, DELIVERY_STAGES)
+    || !isPlainRecord(value.mutation_counts) || !exact(value.mutation_counts, ['production_writes', 'attempted', 'confirmed'])
+    || !isPlainRecord(value.evidence) || !exact(value.evidence, ['source', 'production', 'promotable', 'hashes', 'cleanup'])
+    || value.evidence.source !== 'production' || value.evidence.production !== true
     || value.evidence.promotable !== (value.outcome === 'PASS')
-    || !isPlainRecord(value.mutation_counts)
-    || !Number.isSafeInteger(value.mutation_counts.production_writes)
-    || value.mutation_counts.production_writes < 0) {
+    || !isPlainRecord(value.evidence.hashes) || !exact(value.evidence.hashes, TERMINAL_EVIDENCE_HASHES)
+    || !isPlainRecord(value.evidence.cleanup) || !exact(value.evidence.cleanup, ['created', 'cleaned', 'observed_absent'])) {
+    fail('production terminal evidence is invalid')
+  }
+  const expectedAttemptId = sha256(canonicalJsonBytes({
+    format: 'blogman-issue-23-attempt/v1',
+    ...value.identities,
+  }))
+  const terminalIndex = DELIVERY_STAGES.indexOf(value.first_terminal_stage)
+  if (value.attempt_id !== expectedAttemptId
+    || terminalIndex < 1
+    || DELIVERY_STAGES.some((stage, index) => (
+      !Number.isSafeInteger(value.stage_counts[stage]) || ![0, 1].includes(value.stage_counts[stage])
+      || !Number.isSafeInteger(value.stage_durations_ms[stage]) || value.stage_durations_ms[stage] < 0
+      || value.stage_counts[stage] !== (index <= terminalIndex ? 1 : 0)
+      || (value.stage_counts[stage] === 0 && value.stage_durations_ms[stage] !== 0)
+    ))
+    || Object.values(value.mutation_counts).some((count) => !Number.isSafeInteger(count) || count < 0)
+    || value.mutation_counts.production_writes !== value.mutation_counts.confirmed
+    || value.mutation_counts.confirmed > value.mutation_counts.attempted
+    || value.mutation_counts.attempted > 4
+    || !/^[a-f0-9]{64}$/u.test(value.evidence.hashes.d1_stage_receipt_sha256)
+    || (value.stage_counts.worker_deploy === 0
+      ? value.evidence.hashes.worker_stage_receipt_sha256 !== null
+      : !/^[a-f0-9]{64}$/u.test(value.evidence.hashes.worker_stage_receipt_sha256))
+    || Object.values(value.evidence.hashes).some((hash) => hash !== null && (typeof hash !== 'string' || !/^[a-f0-9]{64}$/u.test(hash)))
+    || !Object.values(value.evidence.cleanup).every((flag) => typeof flag === 'boolean')) {
+    fail('production terminal evidence is invalid')
+  }
+  if (value.outcome === 'PASS') {
+    if (value.first_terminal_stage !== 'smoke_control_t0' || value.failure !== null) {
+      fail('production terminal evidence is invalid')
+    }
+  } else if (!isPlainRecord(value.failure) || !exact(value.failure, ['classification'])
+    || typeof value.failure.classification !== 'string' || value.failure.classification.length === 0) {
     fail('production terminal evidence is invalid')
   }
   return true
@@ -1845,13 +1902,13 @@ export function validateProductionTerminalEvidence(result) {
 export function runFormalRehearsal(config) {
   if (arguments.length !== 1) fail('runFormalRehearsal accepts exactly one config argument')
   if (platform() !== 'darwin') fail('runFormalRehearsal requires target macOS')
-  const manifest = prepare(config)
   const sink = []
   const context = Object.freeze({ sink })
   return formalRehearsalContext.run(context, () => {
+    const manifest = prepare(config)
     const authorization = Object.freeze({
       format: AUTHORIZATION_FORMAT,
-      authorization_id: `formal-rehearsal-${manifest.sha256.slice(0, 16)}`,
+      authorization_id: `formal-rehearsal-${currentFormalFaultStageForTestsOnly() ?? 'pass'}-${manifest.sha256.slice(0, 16)}`,
       manifest_sha256: manifest.sha256,
       decision: 'approve',
     })

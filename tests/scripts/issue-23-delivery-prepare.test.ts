@@ -96,12 +96,7 @@ function baseConfig() {
     ci: {
       provider: 'github-actions',
       workflow: '.github/workflows/verify.yml',
-      run_id: 30914559221,
-      attempt: 1,
-      event: 'push',
-      head_sha: SHA40,
-      tree: SHA40_B,
-      conclusion: 'success',
+      expected_head_sha: SHA40,
     },
     toolchain: {
       node: { version: '22.14.0', identity_sha256: hash('f') },
@@ -316,15 +311,15 @@ function prepareFixture(config: ReturnType<typeof baseConfig>, options: Record<s
   const fixture = structuredClone(config)
   fixture.repository.commit = commit
   fixture.repository.tree = tree
-  fixture.ci.head_sha = commit
-  fixture.ci.tree = tree
+  fixture.ci.expected_head_sha = commit
   const fixtureOptions = { ...options }
   if (!Object.hasOwn(fixtureOptions, 'buildRunner')) fixtureOptions.buildRunner = fixtureBuild
   return prepareForTestsOnly(fixture, {
     repositoryPath: repoRoot,
     repositoryResolver: () => ({ commit, tree, clean: true }),
     ciResolver: (_path, source, repository) => ({
-      ...source.ci,
+      provider: source.ci.provider,
+      workflow: source.ci.workflow,
       run_id: 1,
       attempt: 1,
       event: 'pull_request',
@@ -1310,6 +1305,21 @@ describe('Issue #23 Delivery Preparation', () => {
     })).toThrow(/identity does not match its bytes/u)
   })
 
+  it('rejects caller-supplied CI run outcome facts before any resolver can treat them as evidence', () => {
+    const config = baseConfig() as ReturnType<typeof baseConfig> & { ci: Record<string, unknown> }
+    config.ci.run_id = 1
+    config.ci.conclusion = 'success'
+    let resolverCalled = false
+
+    expect(() => prepareForTestsOnly(config, {
+      ciResolver: () => {
+        resolverCalled = true
+        throw new Error('CI resolver must not run for caller facts')
+      },
+    })).toThrow(/run_id.*not allowed|conclusion.*not allowed/u)
+    expect(resolverCalled).toBe(false)
+  })
+
   it('rejects caller adapter injection at the public prepare boundary', () => {
     let invoked = false
     expect(() => prepare(baseConfig(), {
@@ -1349,7 +1359,7 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(() => prepareForTestsOnly(forged, {
       repositoryPath: repoRoot,
       repositoryResolver: () => ({ commit, tree, clean: true }),
-      ciResolver: (_path, source, repository) => ({ ...source.ci, run_id: 1, attempt: 1, event: 'pull_request', head_sha: repository.commit, tree: repository.tree, conclusion: 'success' }),
+      ciResolver: (_path, source, repository) => ({ provider: source.ci.provider, workflow: source.ci.workflow, run_id: 1, attempt: 1, event: 'pull_request', head_sha: repository.commit, tree: repository.tree, conclusion: 'success' }),
       buildRunner: fixtureBuild,
       rehearsalRunner: () => testRehearsalResult(),
     })).toThrow(
@@ -1382,13 +1392,12 @@ describe('Issue #23 Delivery Preparation', () => {
     const dirty = baseConfig()
     dirty.repository.commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim()
     dirty.repository.tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoRoot, encoding: 'utf8' }).trim()
-    dirty.ci.head_sha = dirty.repository.commit
-    dirty.ci.tree = dirty.repository.tree
+    dirty.ci.expected_head_sha = dirty.repository.commit
 
     expect(() => prepareForTestsOnly(dirty, {
       repositoryPath: repoRoot,
       repositoryResolver: () => ({ commit: dirty.repository.commit, tree: dirty.repository.tree, clean: false }),
-      ciResolver: (_path, source, repository) => ({ ...source.ci, run_id: 1, attempt: 1, event: 'pull_request', head_sha: repository.commit, tree: repository.tree, conclusion: 'success' }),
+      ciResolver: (_path, source, repository) => ({ provider: source.ci.provider, workflow: source.ci.workflow, run_id: 1, attempt: 1, event: 'pull_request', head_sha: repository.commit, tree: repository.tree, conclusion: 'success' }),
       rehearsalRunner: () => testRehearsalResult(),
     })).toThrow(/valid Git commit\/tree/u)
   })
@@ -1431,6 +1440,7 @@ describe('Issue #23 Delivery Preparation', () => {
       const copiedPaths = [
         'scripts/issue-23-delivery-prepare.mjs',
         'scripts/issue-23-delivery-entry.mjs',
+        'scripts/issue-23-delivery-formal-fault-harness.mjs',
         'scripts/issue-23-delivery-rehearsal.mjs',
         'scripts/issue-23-delivery-d1-child.mjs',
         'scripts/issue-23-delivery-d1-contracts.mjs',
@@ -1446,12 +1456,15 @@ describe('Issue #23 Delivery Preparation', () => {
       const fixtureOpenNext = join(fixtureBin, 'opennextjs-cloudflare')
       const fixtureWrangler = join(fixtureBin, 'wrangler')
       mkdirSync(fixtureBin, { recursive: true })
-      writeFileSync(fixtureOpenNext, `const { mkdirSync, writeFileSync } = require('node:fs')
+      writeFileSync(fixtureOpenNext, `const { mkdirSync, symlinkSync, writeFileSync } = require('node:fs')
 mkdirSync('.open-next/assets', { recursive: true })
 mkdirSync('.next/server', { recursive: true })
 writeFileSync('.open-next/assets/index.html', 'fixture artifact: .open-next/assets/index.html\\n')
 writeFileSync('.open-next/worker.js', 'fixture worker: .open-next/worker.js\\n')
 writeFileSync('.open-next/runtime.js', 'fixture runtime\\n')
+mkdirSync('.open-next/server-functions/default', { recursive: true })
+for (const file of ['handler.mjs', 'open-next.config.mjs', 'package.json']) writeFileSync('.open-next/server-functions/default/' + file, file + '\\n')
+symlinkSync('../../../node_modules', '.open-next/server-functions/default/node_modules')
 writeFileSync('.next/server/app-paths-manifest.json', '{}\\n')
 writeFileSync('.next/server/pages-manifest.json', '{}\\n')
 writeFileSync('.next/server/middleware-manifest.json', '{"version":3,"middleware":{},"functions":{},"sortedMiddleware":[]}\\n')
@@ -1478,8 +1491,7 @@ exec wrangler "$@"
       const expectedConfig = baseConfig()
       expectedConfig.repository.commit = commit
       expectedConfig.repository.tree = tree
-      expectedConfig.ci.head_sha = commit
-      expectedConfig.ci.tree = tree
+      expectedConfig.ci.expected_head_sha = commit
       const config = expectedConfig
       writeFileSync(configPath, JSON.stringify(config, null, 2))
       const fakeBin = join(directory, 'bin')
@@ -1489,12 +1501,13 @@ exec wrangler "$@"
       if (process.platform !== 'darwin') {
         writeFileSync(runtimeShim, "if (process.argv[1]?.endsWith('issue-23-delivery-prepare.mjs')) Object.defineProperty(process, 'platform', { value: 'darwin' })\n")
       }
-      writeFileSync(fakeGh, '#!/bin/sh\nprintf \'[{"databaseId":1,"headSha":"%s","status":"completed","conclusion":"success","event":"pull_request","attempt":1}]\n\' "$BLOGMAN_TEST_HEAD"\n')
+      writeFileSync(fakeGh, '#!/bin/sh\nif [ "$1" = "api" ]; then\n  printf \'{"tree":{"sha":"%s"}}\n\' "$BLOGMAN_TEST_TREE"\nelse\n  printf \'[{"databaseId":1,"headSha":"%s","status":"completed","conclusion":"success","event":"pull_request","attempt":1}]\n\' "$BLOGMAN_TEST_HEAD"\nfi\n')
       chmodSync(fakeGh, 0o755)
       const childEnv = {
         ...process.env,
         PATH: `${fakeBin}:${process.env.PATH}`,
         BLOGMAN_TEST_HEAD: commit,
+        BLOGMAN_TEST_TREE: tree,
       }
       if (process.platform === 'darwin') {
         delete childEnv.NODE_OPTIONS

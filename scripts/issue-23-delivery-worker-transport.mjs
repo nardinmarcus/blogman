@@ -377,8 +377,11 @@ function rehearsalDeployment(bindings, versionId = bindings.baseline.version_id)
  * records that argv and returns a bounded recorded response; it never invokes
  * a command and rejects anything outside the fixed formal command plan.
  */
-export function createRehearsalWorkerTransport(bindings, sink) {
+export function createRehearsalWorkerTransport(bindings, sink, failureStage = null) {
   if (!bindings || typeof bindings !== 'object') fail('bindings are required')
+  if (failureStage !== null && failureStage !== 'live_preconditions') {
+    fail('formal rehearsal failure stage is invalid')
+  }
   const origin = new URL(bindings.origin)
   if (!['http:', 'https:'].includes(origin.protocol)) fail('origin is invalid')
   const record = (operation, command, stdout) => {
@@ -402,6 +405,9 @@ export function createRehearsalWorkerTransport(bindings, sink) {
     }
     const request = { timeout_ms: 120000, elapsed_ms }
     const baseline = record('live_preconditions.deployment_status', deploymentStatusCommand(bindings), deploymentRaw(bindings.baseline.version_id))
+    if (failureStage === 'live_preconditions') {
+      return { outcome: 'NON_PASS', classification: 'formal_rehearsal_forced_live_precondition_failure', duration_ms: baseline.duration_ms }
+    }
     const deployment = parseDeployment(baseline.stdout, bindings.baseline.version_id, bindings.d1_database_id, baseline.duration_ms)
     if (deployment.deployment_id !== bindings.baseline.deployment_id) return { outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }
     const identity = record('live_preconditions.d1_identity', d1IdentityCommand(bindings), d1Raw)

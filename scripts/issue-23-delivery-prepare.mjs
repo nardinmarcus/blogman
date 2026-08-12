@@ -88,6 +88,16 @@ const CONFIG_REHEARSAL_SCHEMA = Object.freeze({
   ...MANIFEST_SCHEMA.properties.rehearsal,
   required: ['runtime', 'network', 'status', 'receipt_sha256', 'production_write_adapter_calls'],
 })
+const CONFIG_CI_SCHEMA = Object.freeze({
+  type: 'object',
+  additionalProperties: false,
+  required: ['provider', 'workflow', 'expected_head_sha'],
+  properties: {
+    provider: { const: 'github-actions' },
+    workflow: MANIFEST_SCHEMA.properties.ci.properties.workflow,
+    expected_head_sha: MANIFEST_SCHEMA.properties.ci.properties.head_sha,
+  },
+})
 const FIXED_SMOKE_CONTRACT = Object.freeze({
   requests: Object.freeze([
     Object.freeze({ path: '/api/search', status: 200 }),
@@ -107,6 +117,7 @@ const CONFIG_SCHEMA = Object.freeze({
       Object.entries(MANIFEST_SCHEMA.properties)
         .filter(([key]) => key !== 'format' && key !== 'd1' && key !== 'rehearsal'),
     ),
+    ci: CONFIG_CI_SCHEMA,
     target: {
       ...MANIFEST_SCHEMA.properties.target,
       required: MANIFEST_SCHEMA.properties.target.required.filter((key) => key !== 'smoke'),
@@ -674,19 +685,54 @@ function resolveRepositoryFacts(repositoryPath) {
   return { commit, tree, clean: true }
 }
 
-function resolveCiFacts(_repositoryPath, config, repository) {
-  // Preparation is intentionally network-free. CI identity is a frozen input
-  // checked against the locally resolved candidate, not fetched during a formal
-  // rehearsal (which would make the target gate depend on production network).
-  const ci = config.ci
-  if (!Number.isSafeInteger(ci.run_id) || ci.run_id < 1 || ci.attempt !== 1
-    || !['push', 'pull_request'].includes(ci.event)
-    || ci.conclusion !== 'success'
-    || ci.head_sha !== repository.commit
-    || ci.tree !== repository.tree) {
-    fail('configured CI identity is not a successful exact-head record')
+function resolveCiFacts(repositoryPath, config, repository) {
+  const expected = config.ci
+  if (expected.expected_head_sha !== repository.commit) {
+    fail('configured CI expected head does not match the resolved candidate')
   }
-  return { ...ci }
+  const parse = (output, label) => {
+    try {
+      return JSON.parse(output)
+    } catch {
+      fail(`${label} did not return JSON`)
+    }
+  }
+  const validateRun = (run) => {
+    if (!isRecord(run)
+      || !Number.isSafeInteger(run.databaseId) || run.databaseId < 1
+      || run.headSha !== repository.commit
+      || run.status !== 'completed'
+      || run.attempt !== 1
+      || !['push', 'pull_request'].includes(run.event)
+      || run.conclusion !== 'success') {
+      fail('GitHub Actions did not provide a completed successful exact-head candidate run')
+    }
+    return run
+  }
+  const runs = parse(command(repositoryPath, 'gh', [
+    'run', 'list', '--repo', 'nardinmarcus/blogman', '--workflow', expected.workflow,
+    '--commit', repository.commit, '--status', 'completed', '--json',
+    'databaseId,headSha,status,conclusion,event,attempt', '--limit', '20',
+  ]), 'GitHub Actions run list')
+  if (!Array.isArray(runs)) fail('GitHub Actions run list is invalid')
+  const run = runs.map(validateRun).find((candidate) => candidate.conclusion === 'success')
+  if (!run) fail('GitHub Actions has no completed successful exact-head candidate run')
+  const commit = parse(command(repositoryPath, 'gh', [
+    'api', `repos/nardinmarcus/blogman/git/commits/${repository.commit}`,
+  ]), 'GitHub commit identity')
+  if (!isRecord(commit) || !isRecord(commit.tree) || commit.tree.sha !== repository.tree) {
+    fail('GitHub Actions candidate tree does not match the resolved candidate tree')
+  }
+  return {
+    provider: 'github-actions',
+    workflow: expected.workflow,
+    run_id: run.databaseId,
+    attempt: run.attempt,
+    event: run.event,
+    head_sha: run.headSha,
+    tree: commit.tree.sha,
+    conclusion: 'success',
+  }
 }
 
 function resolveTargetFacts(target) {

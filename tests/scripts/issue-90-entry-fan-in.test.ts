@@ -53,6 +53,7 @@ import {
   canonicalBytes,
   prepareForTestsOnly,
 } from '../../scripts/issue-23-delivery-prepare.mjs'
+import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-formal-runtime.mjs'
 
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const MANIFEST_FORMAT = 'blogman-issue-23-canonical-frozen-manifest/v1'
@@ -76,6 +77,7 @@ const D1_OPERATIONS = [
   'reconciliation',
 ]
 const REPOSITORY_ROOT = process.cwd()
+const RUNTIME_RECEIPT = buildFormalRuntimeReceipt().value
 
 function hash(bytes: Buffer) {
   return createHash('sha256').update(bytes).digest('hex')
@@ -152,7 +154,7 @@ function d1Binding(overrides: Record<string, unknown> = {}) {
     database: 'DB',
     config_path: 'wrangler.toml',
     config_sha256: HASH,
-    wrangler_sha256: HASH,
+    wrangler_sha256: RUNTIME_RECEIPT.wrangler.identity_sha256,
     account_id: 'account-id',
     d1_database_id: 'd1-id',
     reset_sql_path: 'db/issue-23-clean-start-reset.sql',
@@ -216,11 +218,11 @@ function manifest(overrides: Record<string, unknown> = {}) {
       conclusion: 'success',
     },
     toolchain: {
-      node: { version: '22.14.0', identity_sha256: HASH },
-      npm: { version: '10.9.2', identity_sha256: HASH },
-      curl: { version: '8.0.0', identity_sha256: HASH },
-      wrangler: { version: '4.86.0', identity_sha256: HASH },
-      opennextjs_cloudflare: { version: '1.19.10', identity_sha256: HASH },
+      node: RUNTIME_RECEIPT.node,
+      npm: RUNTIME_RECEIPT.npm,
+      curl: RUNTIME_RECEIPT.curl,
+      wrangler: RUNTIME_RECEIPT.wrangler,
+      opennextjs_cloudflare: RUNTIME_RECEIPT.opennextjs_cloudflare,
       package_json_sha256: HASH,
       lockfile_sha256: HASH,
     },
@@ -285,7 +287,8 @@ function manifest(overrides: Record<string, unknown> = {}) {
     },
     policy: policy(),
     rehearsal: {
-      runtime: { os: 'macos', architecture: 'arm64', node_version: '22.14.0' },
+      runtime: { os: RUNTIME_RECEIPT.os, architecture: RUNTIME_RECEIPT.arch, node_version: RUNTIME_RECEIPT.node.version },
+      runtime_receipt: RUNTIME_RECEIPT,
       network: 'disabled',
       status: 'PASS',
       receipt_sha256: HASH,
@@ -350,12 +353,7 @@ function actualPreparedManifest() {
     ci: {
       provider: 'github-actions',
       workflow: '.github/workflows/verify.yml',
-      run_id: 1,
-      attempt: 1,
-      event: 'pull_request',
-      head_sha: commit,
-      tree,
-      conclusion: 'success',
+      expected_head_sha: commit,
     },
     toolchain: {
       node: { version: '22.14.0', identity_sha256: HASH },
@@ -448,7 +446,11 @@ function actualPreparedManifest() {
       repositoryPath: REPOSITORY_ROOT,
       repositoryResolver: () => ({ commit, tree, clean: true }),
       ciResolver: (_path: string, source: typeof config, repository: { commit: string; tree: string }) => ({
-        ...source.ci,
+        provider: source.ci.provider,
+        workflow: source.ci.workflow,
+        run_id: 1,
+        attempt: 1,
+        event: 'pull_request',
         head_sha: repository.commit,
         tree: repository.tree,
         conclusion: 'success',
@@ -472,6 +474,7 @@ function actualPreparedManifest() {
     const result = { value, bytes, sha256: hash(bytes) }
     expect(Object.keys(result.value.rehearsal)).toEqual([
       'runtime',
+      'runtime_receipt',
       'network',
       'status',
       'receipt_sha256',

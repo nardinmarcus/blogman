@@ -5,6 +5,7 @@ import {
   buildLocalRehearsalCommands,
   execute,
   executeSyntheticForTest,
+  validateProductionTerminalEvidence,
   normalizeWorkerResultForTestsOnly,
   parseLocalCommandResult,
   productionEvidenceHashesForTestsOnly,
@@ -632,6 +633,55 @@ describe('Issue #23 pure local entry seam', () => {
 
     expect(executeSyntheticForTest(manifest, auth).value.finalized).toBe(true)
     expect(() => executeSyntheticForTest(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+  })
+
+  it('rejects a forged production terminal value even when arbitrary canonical bytes have a valid hash', () => {
+    const identities = {
+      manifest_sha256: 'a'.repeat(64),
+      authorization_sha256: 'b'.repeat(64),
+    }
+    const value = {
+      format: TERMINAL_RESULT_FORMAT,
+      identities,
+      attempt_id: hash(Buffer.from(`${JSON.stringify({ format: 'blogman-issue-23-attempt/v1', ...identities }, null, 2)}\n`, 'utf8')),
+      authorization_consumed: true,
+      outcome: 'NON_PASS',
+      first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'Manifest Drift' },
+      stage_counts: {
+        authorization_accept: 1, live_preconditions: 1, d1_identity: 0, clean_start_reset: 0,
+        empty_d1_proof: 0, migrations_001_006: 0, reconciliation: 0, worker_deploy: 0,
+        version_traffic_verification: 0, smoke_control_t0: 0,
+      },
+      stage_durations_ms: {
+        authorization_accept: 0, live_preconditions: 1, d1_identity: 0, clean_start_reset: 0,
+        empty_d1_proof: 0, migrations_001_006: 0, reconciliation: 0, worker_deploy: 0,
+        version_traffic_verification: 0, smoke_control_t0: 0,
+      },
+      mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
+      evidence: {
+        source: 'production', production: true, promotable: false,
+        hashes: {
+          d1_stage_receipt_sha256: 'c'.repeat(64), d1_bindings_sha256: null,
+          d1_wrangler_sha256: null, d1_config_sha256: null, d1_reset_sql_sha256: null,
+          d1_migration_runner_sha256: null, d1_migration_catalog_sha256: null,
+          d1_rollout_safety_sha256: null, d1_expected_reconciliation_sha256: null,
+          d1_trace_sha256: null, worker_stage_receipt_sha256: null,
+          worker_upload_acceptance_sha256: null, worker_version_traffic_sha256: null,
+          worker_smoke_control_t0_sha256: null,
+        },
+        cleanup: { created: false, cleaned: true, observed_absent: true },
+      },
+      finalized: true,
+    }
+    const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
+    const result = { value, bytes, sha256: hash(bytes) }
+
+    expect(validateProductionTerminalEvidence(result)).toBe(true)
+    const forgedValue = { ...value, evidence: { ...value.evidence, production: false } }
+    expect(() => validateProductionTerminalEvidence({ ...result, value: forgedValue })).toThrow(/malformed/u)
+    const forgedBytes = Buffer.from(`${JSON.stringify({ ...value, finalized: false }, null, 2)}\n`, 'utf8')
+    expect(() => validateProductionTerminalEvidence({ ...result, bytes: forgedBytes, sha256: hash(forgedBytes) })).toThrow(/malformed/u)
   })
 
   it('preserves exact named D1 and Worker evidence hashes in the public terminal evidence', () => {
