@@ -508,8 +508,8 @@ function d1Result(failedStage: string | null = null) {
 }
 
 function configureWorker() {
-  createWorkerTransportMock.mockReturnValue({ execute() {} })
-  const value = { format: 'blogman-issue-23-worker-stages/v1', outcome: 'ERROR', first_terminal_stage: 'worker_deploy', failure: { classification: 'worker_adapter_error' }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, mutation_counts: { attempted: 1, confirmed: 0 }, evidence: {}, finalized: true }
+  createWorkerTransportMock.mockReturnValue({ livePreconditions: () => ({ outcome: 'PASS', duration_ms: 1 }), execute() {} })
+  const value = { format: 'blogman-issue-23-worker-stages/v1', outcome: 'ERROR', first_terminal_stage: 'worker_deploy', failure: { classification: 'worker_adapter_error' }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, mutation_counts: { attempted: 1, confirmed: 0 }, evidence: { source: 'production', production: true, promotable: false, hashes: { upload_acceptance_sha256: null, version_traffic_sha256: null, smoke_control_t0_sha256: null } }, finalized: true }
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
   runWorkerStagesMock.mockReturnValue({ value, bytes, sha256: hash(bytes) })
 }
@@ -574,6 +574,7 @@ describe('Issue #90 formal entry fan-in', () => {
     createD1TransportMock.mockImplementation(() => {
       events.push('adapter-selected')
       return {
+        livePreconditions() { return { outcome: 'PASS', duration_ms: 1 } },
         execute(request: { operation: string }) {
           events.push(`transport:${request.operation}`)
           return { status: 0, stdout: '{}', stderr: '', duration_ms: 1 }
@@ -682,6 +683,40 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(result.value.failure.classification).toBe('worker_adapter_error')
   })
 
+  it('terminalizes a malformed worker receipt as ERROR and preserves its possible upload attempt', () => {
+    configureD1()
+    const prepared = manifest()
+    const malformed = { format: 'blogman-issue-23-worker-stages/v1', outcome: 'PASS' }
+    const bytes = Buffer.from(`${JSON.stringify(malformed, null, 2)}\n`, 'utf8')
+    runWorkerStagesMock.mockReturnValue({ value: malformed, bytes, sha256: hash(bytes) })
+
+    const result = execute(prepared, authorizationFor(prepared, 'fan-in-malformed-worker-receipt'))
+
+    expect(result.value).toMatchObject({
+      outcome: 'ERROR', first_terminal_stage: 'worker_deploy',
+      failure: { classification: 'worker_result_malformed' },
+      mutation_counts: { attempted: 3, confirmed: 2 },
+    })
+    expect(result.value.evidence.promotable).toBe(false)
+  })
+
+  it('stops at live_preconditions on drift without selecting a D1 adapter', () => {
+    configureD1()
+    createWorkerTransportMock.mockReturnValue({
+      livePreconditions: () => ({ outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }),
+      execute() {},
+    })
+    const prepared = manifest()
+
+    const result = execute(prepared, authorizationFor(prepared, 'fan-in-live-preconditions-drift'))
+
+    expect(result.value).toMatchObject({
+      outcome: 'NON_PASS', first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'Manifest Drift' }, mutation_counts: { attempted: 0, confirmed: 0 },
+    })
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+  })
+
   it('rejects rehearsal schema drift and an unbound expected reconciliation hash before selecting a production adapter', () => {
     configureD1()
     const missingCleanup = manifest()
@@ -702,7 +737,7 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(createD1TransportMock).not.toHaveBeenCalled()
   })
 
-  it('returns a sanitized terminal D1 error and cleanup proof when expected snapshot materialization fails after authorization', () => {
+  it('returns a sanitized live-preconditions error before selecting D1 when expected snapshot materialization fails', () => {
     configureD1()
     const originalRealpathSync = fsActual.realpathSync!
     let materializedDirectory = ''
@@ -719,11 +754,11 @@ describe('Issue #90 formal entry fan-in', () => {
 
     expect(result.value).toMatchObject({
       outcome: 'ERROR',
-      first_terminal_stage: 'd1_identity',
-      failure: { classification: 'production_d1_setup_error' },
+      first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'live_preconditions_error' },
       authorization_consumed: true,
       evidence: {
-        cleanup: { created: true, cleaned: true, observed_absent: true },
+        cleanup: { created: false, cleaned: true, observed_absent: true },
       },
     })
     expect(JSON.stringify(result.value)).not.toMatch(/materialization failed/u)

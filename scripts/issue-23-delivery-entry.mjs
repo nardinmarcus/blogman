@@ -208,6 +208,11 @@ function assertExactKeys(value, keys, label) {
   }
 }
 
+function exact(value, keys) {
+  return isPlainRecord(value) && Reflect.ownKeys(value).length === keys.length
+    && keys.every((key) => Object.hasOwn(value, key))
+}
+
 function canonicalJsonBytes(value) {
   const json = JSON.stringify(value, null, 2)
   if (typeof json !== 'string') fail('value is not canonical JSON')
@@ -1337,31 +1342,130 @@ function normalizeProductionD1Result(result) {
   }
 }
 
-function normalizeWorkerResult(result) {
-  if (!isPlainRecord(result) || !isPlainRecord(result.value) || !(result.bytes instanceof Uint8Array)
-    || !/^[a-f0-9]{64}$/u.test(result.sha256)) {
-    return { outcome: 'UNCERTAIN', first_terminal_stage: 'worker_deploy', failure: { classification: 'worker_result_malformed' }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, stage_durations_ms: { worker_deploy: 0, version_traffic_verification: 0, smoke_control_t0: 0 }, mutation_counts: { attempted: 0, confirmed: 0 }, sha256: sha256(canonicalJsonBytes({ malformed: 'worker' })) }
+const WORKER_RESULT_STAGES = Object.freeze(['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'])
+const WORKER_EVIDENCE_HASHES = Object.freeze([
+  'upload_acceptance_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256',
+])
+
+function malformedWorkerResult() {
+  return {
+    outcome: 'ERROR',
+    first_terminal_stage: 'worker_deploy',
+    failure: { classification: 'worker_result_malformed' },
+    stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 },
+    stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 },
+    // A malformed receipt may have followed a spawned upload; do not erase that attempt.
+    mutation_counts: { attempted: 1, confirmed: 0 },
+    sha256: sha256(canonicalJsonBytes({ malformed: 'worker' })),
   }
-  const value = result.value
-  if (!['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(value.outcome)
-    || !isPlainRecord(value.stage_counts) || !isPlainRecord(value.stage_durations_ms) || !isPlainRecord(value.mutation_counts)
-    || !['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'].every((stage) => [0, 1].includes(value.stage_counts[stage]) && Number.isSafeInteger(value.stage_durations_ms[stage]) && value.stage_durations_ms[stage] >= 0)
-    || !Number.isSafeInteger(value.mutation_counts.attempted) || !Number.isSafeInteger(value.mutation_counts.confirmed)) return normalizeWorkerResult(null)
-  return { outcome: value.outcome, first_terminal_stage: value.first_terminal_stage, failure: value.failure, stage_counts: value.stage_counts, stage_durations_ms: value.stage_durations_ms, mutation_counts: value.mutation_counts, sha256: result.sha256 }
 }
 
-function workerBindings(manifest) {
+function normalizeWorkerResult(result) {
+  if (!isPlainRecord(result) || !isPlainRecord(result.value) || !(result.bytes instanceof Uint8Array)
+    || !/^[a-f0-9]{64}$/u.test(result.sha256)) return malformedWorkerResult()
+  const value = result.value
+  const bytes = Buffer.from(result.bytes)
+  if (sha256(bytes) !== result.sha256 || !bytes.equals(canonicalJsonBytes(value))
+    || !exact(value, [
+      'format', 'outcome', 'first_terminal_stage', 'failure', 'stage_counts',
+      'stage_durations_ms', 'mutation_counts', 'evidence', 'finalized',
+    ]) || value.format !== 'blogman-issue-23-worker-stages/v1' || value.finalized !== true
+    || !['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(value.outcome)
+    || !isPlainRecord(value.stage_counts) || !isPlainRecord(value.stage_durations_ms)
+    || !isPlainRecord(value.mutation_counts) || !isPlainRecord(value.evidence)
+    || !exact(value.stage_counts, WORKER_RESULT_STAGES)
+    || !exact(value.stage_durations_ms, WORKER_RESULT_STAGES)
+    || !exact(value.mutation_counts, ['attempted', 'confirmed'])
+    || !exact(value.evidence, ['source', 'production', 'promotable', 'hashes'])
+    || value.evidence.source !== 'production' || value.evidence.production !== true
+    || !isPlainRecord(value.evidence.hashes) || !exact(value.evidence.hashes, WORKER_EVIDENCE_HASHES)) {
+    return malformedWorkerResult()
+  }
+  for (const stage of WORKER_RESULT_STAGES) {
+    if (!Number.isSafeInteger(value.stage_counts[stage]) || ![0, 1].includes(value.stage_counts[stage])
+      || !Number.isSafeInteger(value.stage_durations_ms[stage]) || value.stage_durations_ms[stage] < 0
+      || (value.stage_counts[stage] === 1 && value.stage_durations_ms[stage] <= 0)
+      || (value.stage_counts[stage] === 0 && value.stage_durations_ms[stage] !== 0)) {
+      return malformedWorkerResult()
+    }
+  }
+  if (!Number.isSafeInteger(value.mutation_counts.attempted) || !Number.isSafeInteger(value.mutation_counts.confirmed)
+    || value.mutation_counts.attempted < 1 || value.mutation_counts.attempted > 2
+    || value.mutation_counts.confirmed < 0 || value.mutation_counts.confirmed > value.mutation_counts.attempted) {
+    return malformedWorkerResult()
+  }
+  const terminalIndex = value.outcome === 'PASS' ? WORKER_RESULT_STAGES.length - 1
+    : WORKER_RESULT_STAGES.indexOf(value.first_terminal_stage)
+  if (terminalIndex < 0
+    || WORKER_RESULT_STAGES.some((stage, index) => value.stage_counts[stage] !== (index <= terminalIndex ? 1 : 0))
+    || WORKER_EVIDENCE_HASHES.some((name, index) => (
+      index < terminalIndex ? !/^[a-f0-9]{64}$/u.test(value.evidence.hashes[name])
+        : index === terminalIndex && value.outcome === 'PASS' ? !/^[a-f0-9]{64}$/u.test(value.evidence.hashes[name])
+          : value.evidence.hashes[name] !== null
+    ))) return malformedWorkerResult()
+  if (value.outcome === 'PASS') {
+    if (value.first_terminal_stage !== null || value.failure !== null || value.evidence.promotable !== true
+      || value.mutation_counts.attempted !== 2 || value.mutation_counts.confirmed !== 2) {
+      return malformedWorkerResult()
+    }
+  } else if (!exact(value.failure, ['classification']) || typeof value.failure.classification !== 'string'
+    || value.evidence.promotable !== false
+    || value.mutation_counts.attempted !== (terminalIndex >= 1 ? 2 : 1)
+    || value.mutation_counts.confirmed !== (terminalIndex >= 1 ? 1 : 0)) {
+    return malformedWorkerResult()
+  }
+  return {
+    outcome: value.outcome,
+    first_terminal_stage: value.first_terminal_stage,
+    failure: value.failure,
+    stage_counts: value.stage_counts,
+    stage_durations_ms: value.stage_durations_ms,
+    mutation_counts: value.mutation_counts,
+    sha256: result.sha256,
+  }
+}
+
+function workerBindings(manifest, expectedReconciliationPath) {
   return {
     config_path: resolve(ENTRY_REPO_ROOT, manifest.d1.config_path), config_sha256: manifest.d1.config_sha256,
     artifact_archive_path: resolve(ENTRY_REPO_ROOT, manifest.artifact.archive.path), artifact_archive_sha256: manifest.artifact.archive.sha256,
     artifact_source_path: resolve(ENTRY_REPO_ROOT, dirname(manifest.artifact.worker.path)), artifact_sha256: manifest.artifact.file_tree.sha256,
     candidate_id: manifest.repository.commit, worker_name: manifest.target.worker_name, d1_database_id: manifest.target.d1_database_id,
-    rollout_safety_path: resolve(ENTRY_REPO_ROOT, manifest.d1.rollout_safety_path), smoke: manifest.target.smoke,
+    rollout_safety_path: resolve(ENTRY_REPO_ROOT, manifest.d1.rollout_safety_path), rollout_safety_sha256: manifest.d1.rollout_safety_sha256,
+    expected_reconciliation_path: expectedReconciliationPath,
+    wrangler_path: resolve(ENTRY_REPO_ROOT, 'node_modules/.bin/wrangler'), wrangler_sha256: manifest.d1.wrangler_sha256,
+    database: manifest.d1.database, origin: manifest.target.origin, smoke: manifest.target.smoke,
+    baseline: manifest.target.baseline,
   }
 }
 
-function productionTrace(d1Result, workerResult = null) {
-  const trace = [{ stage: 'live_preconditions', outcome: 'PASS', duration_ms: 0 }]
+function runLivePreconditions(manifest, d1) {
+  let materialized
+  try {
+    materialized = materializeExpectedReconciliation(d1)
+    const result = createWorkerTransport(workerBindings(manifest, materialized.path)).livePreconditions()
+    if (!isPlainRecord(result) || !['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(result.outcome)
+      || !Number.isSafeInteger(result.duration_ms) || result.duration_ms <= 0
+      || (result.outcome === 'PASS' ? Object.hasOwn(result, 'classification')
+        : typeof result.classification !== 'string')) {
+      return { outcome: 'ERROR', classification: 'live_preconditions_malformed', duration_ms: 1 }
+    }
+    return result.outcome === 'PASS'
+      ? { outcome: 'PASS', duration_ms: result.duration_ms }
+      : { outcome: result.outcome, classification: result.classification, duration_ms: result.duration_ms }
+  } catch (error) {
+    materialized ??= error?.materialized
+    return { outcome: 'ERROR', classification: 'live_preconditions_error', duration_ms: 1 }
+  } finally { disposeExpectedReconciliation(materialized) }
+}
+
+function productionTrace(liveResult, d1Result, workerResult = null) {
+  const trace = [{
+    stage: 'live_preconditions', outcome: liveResult.outcome,
+    ...(liveResult.outcome === 'PASS' ? {} : { classification: liveResult.classification }),
+    duration_ms: liveResult.duration_ms,
+  }]
+  if (liveResult.outcome !== 'PASS') return trace
   for (const stage of PRODUCTION_D1_STAGES) {
     if (d1Result.stage_counts[stage] === 0) break
     const terminal = d1Result.outcome !== 'PASS' && stage === d1Result.first_terminal_stage
@@ -1396,40 +1500,51 @@ function executeProduction(manifest, authorization) {
     format: 'blogman-issue-23-attempt/v1',
     ...identities,
   }))
+  const liveResult = runLivePreconditions(manifest.value, d1)
   let materialized
   let d1Result
   let cleanup = { created: false, cleaned: true, observed_absent: true }
-  try {
-    materialized = materializeExpectedReconciliation(d1)
-    const bindings = deriveProductionD1Bindings(d1, materialized.path)
-    let transport
+  if (liveResult.outcome === 'PASS') {
     try {
-      transport = createD1Transport(bindings)
-    } catch {
-      d1Result = sanitizedD1Error('production_d1_setup_error')
-    }
-    if (!d1Result) {
+      materialized = materializeExpectedReconciliation(d1)
+      const bindings = deriveProductionD1Bindings(d1, materialized.path)
+      let transport
       try {
-        d1Result = normalizeProductionD1Result(runD1Stages({ bindings, transport }))
+        transport = createD1Transport(bindings)
       } catch {
-        d1Result = sanitizedD1Error('production_d1_adapter_error')
+        d1Result = sanitizedD1Error('production_d1_setup_error')
       }
+      if (!d1Result) {
+        try {
+          d1Result = normalizeProductionD1Result(runD1Stages({ bindings, transport }))
+        } catch {
+          d1Result = sanitizedD1Error('production_d1_adapter_error')
+        }
+      }
+    } catch (error) {
+      materialized ??= error?.materialized
+      d1Result = sanitizedD1Error('production_d1_setup_error')
+    } finally {
+      cleanup = disposeExpectedReconciliation(materialized)
     }
-  } catch (error) {
-    materialized ??= error?.materialized
-    d1Result = sanitizedD1Error('production_d1_setup_error')
-  } finally {
-    cleanup = disposeExpectedReconciliation(materialized)
   }
   if (!d1Result) d1Result = sanitizedD1Error('production_d1_adapter_error')
   let workerResult
   if (d1Result.outcome === 'PASS') {
+    let workerExpected
     try {
-      const bindings = workerBindings(manifest.value)
-      workerResult = normalizeWorkerResult(runWorkerStages({ bindings, transport: createWorkerTransport(bindings), elapsed_ms: Object.values(d1Result.stage_durations_ms).reduce((sum, duration) => sum + duration, 0) }))
+      workerExpected = materializeExpectedReconciliation(d1)
+      const bindings = workerBindings(manifest.value, workerExpected.path)
+      workerResult = normalizeWorkerResult(runWorkerStages({
+        bindings,
+        transport: createWorkerTransport(bindings),
+        elapsed_ms: liveResult.duration_ms
+          + Object.values(d1Result.stage_durations_ms).reduce((sum, duration) => sum + duration, 0),
+      }))
     } catch { workerResult = normalizeWorkerResult(null) }
+    finally { disposeExpectedReconciliation(workerExpected) }
   }
-  const trace = productionTrace(d1Result, workerResult)
+  const trace = productionTrace(liveResult, d1Result, workerResult)
   const d1MutationAttempted = (d1Result.stage_counts.clean_start_reset ?? 0) + (d1Result.stage_counts.migrations_001_006 ?? 0)
   const d1TerminalIndex = PRODUCTION_D1_STAGES.indexOf(d1Result.first_terminal_stage)
   const d1MutationConfirmed = d1Result.outcome === 'PASS'
