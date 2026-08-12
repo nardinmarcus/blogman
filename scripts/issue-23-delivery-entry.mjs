@@ -1,10 +1,13 @@
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { platform, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parseCanonicalManifest, prepare } from './issue-23-delivery-prepare.mjs'
-import { FORMAL_TEST_MANIFEST_FORMAT } from './issue-23-delivery-formal-manifest.mjs'
+import {
+  CANONICAL_MANIFEST_FORMAT,
+  parseCanonicalManifest,
+  prepare,
+} from './issue-23-delivery-prepare.mjs'
 import { currentFormalRehearsalContext, runInFormalRehearsalContext } from './issue-23-delivery-formal-context.mjs'
 import { runSyntheticStage } from './issue-23-delivery-synthetic-adapter.mjs'
 import { currentFormalFaultStageForTestsOnly } from './issue-23-delivery-formal-fault-harness.mjs'
@@ -253,7 +256,6 @@ function sameJsonValue(left, right) {
   return JSON.stringify(normalizedJsonValue(left)) === JSON.stringify(normalizedJsonValue(right))
 }
 
-const CANONICAL_MANIFEST_FORMAT = 'blogman-issue-23-canonical-frozen-manifest/v1'
 const CANONICAL_MANIFEST_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._/-]+$/u
 const CANONICAL_MANIFEST_SHA256_PATTERN = /^[a-f0-9]{64}$/u
 const CANONICAL_MANIFEST_SHA40_PATTERN = /^[a-f0-9]{40}$/u
@@ -277,14 +279,14 @@ const CANONICAL_MANIFEST_ROOT_KEYS = [
   'rehearsal',
 ]
 const PRODUCTION_MANIFEST_POLICY = Object.freeze({
-  format: CANONICAL_MANIFEST_FORMAT,
   conclusion: 'success',
-  testOnly: false,
+  ciEvidenceClass: 'production-ci-evidence',
+  d1EvidenceClass: 'production',
 })
-const FORMAL_TEST_MANIFEST_POLICY = Object.freeze({
-  format: FORMAL_TEST_MANIFEST_FORMAT,
+const FORMAL_REHEARSAL_MANIFEST_POLICY = Object.freeze({
   conclusion: 'in_progress-test-evidence',
-  testOnly: true,
+  ciEvidenceClass: FORMAL_REHEARSAL_EVIDENCE_SOURCE,
+  d1EvidenceClass: FORMAL_REHEARSAL_EVIDENCE_SOURCE,
 })
 const CANONICAL_MANIFEST_FROZEN_PRECONDITIONS = Object.freeze([
   'repository.commit',
@@ -368,11 +370,8 @@ function validateToolchainEntry(value, label) {
 }
 
 function validateCanonicalManifestSchema(value, policy = PRODUCTION_MANIFEST_POLICY) {
-  schemaRecord(value, policy.testOnly
-    ? [...CANONICAL_MANIFEST_ROOT_KEYS, 'test_only']
-    : CANONICAL_MANIFEST_ROOT_KEYS, policy.testOnly ? 'formal test manifest' : 'canonical manifest')
-  if (value.format !== policy.format) fail('manifest format is invalid')
-  if (policy.testOnly && value.test_only !== true) fail('formal test manifest classification is invalid')
+  schemaRecord(value, CANONICAL_MANIFEST_ROOT_KEYS, 'canonical manifest')
+  if (value.format !== CANONICAL_MANIFEST_FORMAT) fail('manifest format is invalid')
 
   schemaRecord(value.preparation, ['prepare_entry', 'execute_entry', 'manifest_schema'], 'manifest preparation')
   validateManifestReference(value.preparation.prepare_entry, 'manifest preparation.prepare_entry')
@@ -392,7 +391,7 @@ function validateCanonicalManifestSchema(value, policy = PRODUCTION_MANIFEST_POL
 
   schemaRecord(
     value.ci,
-    ['provider', 'workflow', 'run_id', 'attempt', 'event', 'head_sha', 'tree', 'conclusion'],
+    ['provider', 'workflow', 'run_id', 'attempt', 'event', 'head_sha', 'tree', 'conclusion', 'evidence_class'],
     'manifest ci',
   )
   if (value.ci.provider !== 'github-actions') fail('manifest ci.provider is invalid')
@@ -402,7 +401,10 @@ function validateCanonicalManifestSchema(value, policy = PRODUCTION_MANIFEST_POL
   if (!['push', 'pull_request'].includes(value.ci.event)) fail('manifest ci.event is invalid')
   schemaString(value.ci.head_sha, 'manifest ci.head_sha', CANONICAL_MANIFEST_SHA40_PATTERN)
   schemaString(value.ci.tree, 'manifest ci.tree', CANONICAL_MANIFEST_SHA40_PATTERN)
-  if (value.ci.conclusion !== policy.conclusion) fail('manifest ci.conclusion is invalid')
+  if (value.ci.conclusion !== policy.conclusion
+    || value.ci.evidence_class !== policy.ciEvidenceClass) {
+    fail('manifest ci evidence classification is invalid')
+  }
 
   schemaRecord(
     value.toolchain,
@@ -659,7 +661,10 @@ function assertCanonicalManifestRelationships(manifest, policy = PRODUCTION_MANI
   if (manifest.ci.tree !== manifest.repository.tree) {
     fail('manifest ci.tree must equal repository.tree')
   }
-  if (manifest.ci.conclusion !== policy.conclusion) fail('manifest ci.conclusion is invalid')
+  if (manifest.ci.conclusion !== policy.conclusion
+    || manifest.ci.evidence_class !== policy.ciEvidenceClass) {
+    fail('manifest ci evidence classification is invalid')
+  }
   if (manifest.preparation.execute_entry.path !== 'scripts/phase-b-sequence.mjs') {
     fail('manifest preparation.execute_entry must bind the canonical upload lifecycle')
   }
@@ -702,8 +707,8 @@ function assertCanonicalManifestRelationships(manifest, policy = PRODUCTION_MANI
     fail('manifest migration.catalog.migrations must contain 001 through 006 in order')
   }
 
-  if (manifest.d1.mode !== 'remote' || manifest.d1.evidence_class !== 'production') {
-    fail('manifest d1 must be the canonical remote production binding')
+  if (manifest.d1.mode !== 'remote' || manifest.d1.evidence_class !== policy.d1EvidenceClass) {
+    fail('manifest d1 evidence classification is invalid')
   }
   if (manifest.d1.database !== 'DB'
     || manifest.d1.config_path !== PRODUCTION_D1_CANONICAL_PATHS.config_path
@@ -781,6 +786,7 @@ const CANONICAL_MANIFEST_ORDER = {
     head_sha: null,
     tree: null,
     conclusion: null,
+    evidence_class: null,
   },
   toolchain: {
     node: { version: null, identity_sha256: null },
@@ -912,24 +918,18 @@ function orderCanonicalManifestValue(value, order) {
   ]))
 }
 
-const FORMAL_TEST_MANIFEST_ORDER = Object.freeze({
-  ...CANONICAL_MANIFEST_ORDER,
-  test_only: null,
-})
-
-function manifestBytesForPolicy(value, policy) {
-  const order = policy.testOnly ? FORMAL_TEST_MANIFEST_ORDER : CANONICAL_MANIFEST_ORDER
-  return canonicalJsonBytes(orderCanonicalManifestValue(value, order))
+function manifestBytesForPolicy(value) {
+  return canonicalJsonBytes(orderCanonicalManifestValue(value, CANONICAL_MANIFEST_ORDER))
 }
 
 function validateManifestStructure(value, manifestBytes, policy) {
   validateCanonicalManifestSchema(value, policy)
-  const d1 = validateProductionD1(value)
+  const d1 = validateD1(value, policy)
   schemaString(d1.account_id, 'manifest d1.account_id', CANONICAL_MANIFEST_ID_PATTERN)
   schemaString(d1.d1_database_id, 'manifest d1.d1_database_id', CANONICAL_MANIFEST_ID_PATTERN)
   schemaString(d1.candidate_id, 'manifest d1.candidate_id', CANONICAL_MANIFEST_SHA40_PATTERN)
   assertCanonicalManifestRelationships(value, policy)
-  if (!Buffer.from(manifestBytes).equals(manifestBytesForPolicy(value, policy))) {
+  if (!Buffer.from(manifestBytes).equals(manifestBytesForPolicy(value))) {
     fail('manifest bytes are not schema-canonical JSON')
   }
   return d1
@@ -939,8 +939,8 @@ function validateCanonicalManifest(value, manifestBytes) {
   return validateManifestStructure(value, manifestBytes, PRODUCTION_MANIFEST_POLICY)
 }
 
-function validateFormalTestManifest(value, manifestBytes) {
-  return validateManifestStructure(value, manifestBytes, FORMAL_TEST_MANIFEST_POLICY)
+function validateFormalRehearsalManifest(value, manifestBytes) {
+  return validateManifestStructure(value, manifestBytes, FORMAL_REHEARSAL_MANIFEST_POLICY)
 }
 
 function validateExecutionPolicy(policy) {
@@ -1003,6 +1003,63 @@ function normalizeSyntheticResult(result) {
     ...normalized,
     classification: classification ?? DEFAULT_ADAPTER_CLASSIFICATIONS[outcome],
   }
+}
+
+function deepFreeze(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value
+  Object.freeze(value)
+  for (const child of Object.values(value)) deepFreeze(child)
+  return value
+}
+
+function canonicalSidecarRecord(record) {
+  if (!isPlainRecord(record) || !isPlainRecord(record.value)
+    || !(record.bytes instanceof Uint8Array)
+    || typeof record.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(record.sha256)) {
+    return null
+  }
+  const bytes = Buffer.from(record.bytes)
+  if (sha256(bytes) !== record.sha256) return null
+  let value
+  try {
+    value = JSON.parse(bytes.toString('utf8'))
+  } catch {
+    return null
+  }
+  if (!isPlainRecord(value) || !bytes.equals(canonicalJsonBytes(value)) || !sameJsonValue(value, record.value)) {
+    return null
+  }
+  return Object.freeze({
+    value: deepFreeze(value),
+    get bytes() { return Buffer.from(bytes) },
+    sha256: record.sha256,
+  })
+}
+
+function terminalResult(value, records) {
+  const bytes = canonicalJsonBytes(value)
+  const result = { value, bytes, sha256: sha256(bytes) }
+  const receipts = Object.freeze({
+    manifest: canonicalSidecarRecord(records.manifest),
+    d1: canonicalSidecarRecord(records.d1),
+    worker: canonicalSidecarRecord(records.worker),
+  })
+  Object.defineProperty(result, 'receipts', {
+    value: receipts,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  })
+  return Object.freeze(result)
+}
+
+function readTerminalReceipts(result) {
+  const descriptor = Object.getOwnPropertyDescriptor(result, 'receipts')
+  if (!descriptor || descriptor.enumerable || descriptor.writable || descriptor.configurable
+    || !exact(descriptor.value, ['manifest', 'd1', 'worker'])) {
+    fail('production terminal evidence is malformed')
+  }
+  return descriptor.value
 }
 
 function validatePreparedManifest(manifest) {
@@ -1200,7 +1257,7 @@ function canonicalD1ExpectedReconciliationBytes(value) {
   return canonicalJsonBytes(canonicalD1ExpectedReconciliation(value))
 }
 
-function validateProductionD1(manifestValue) {
+function validateD1(manifestValue, policy = PRODUCTION_MANIFEST_POLICY) {
   if (!isPlainRecord(manifestValue) || !isPlainRecord(manifestValue.d1)) {
     fail('production manifest requires a derived d1 block')
   }
@@ -1228,8 +1285,8 @@ function validateProductionD1(manifestValue) {
     'evidence_class',
     'migrations',
   ], 'd1')
-  if (d1.mode !== 'remote' || d1.evidence_class !== 'production') {
-    fail('production execute requires remote production d1 facts')
+  if (d1.mode !== 'remote' || d1.evidence_class !== policy.d1EvidenceClass) {
+    fail('manifest d1 evidence classification is invalid')
   }
   if (d1.database !== 'DB') fail('production d1 database is not canonical')
   for (const [field, expected] of Object.entries(PRODUCTION_D1_CANONICAL_PATHS)) {
@@ -1741,7 +1798,7 @@ function executeProduction(manifest, authorization) {
   const formal = currentFormalContext()
   const manifestBytes = validatePreparedManifest(manifest)
   const d1 = formal
-    ? validateFormalTestManifest(manifest.value, manifestBytes)
+    ? validateFormalRehearsalManifest(manifest.value, manifestBytes)
     : validateCanonicalManifest(manifest.value, manifestBytes)
   const authorizationDigest = acceptAuthorization(sha256(manifestBytes), authorization)
   const identities = {
@@ -1755,6 +1812,7 @@ function executeProduction(manifest, authorization) {
   const liveResult = runLivePreconditions(manifest.value, d1)
   let materialized
   let d1Result
+  let d1Receipt
   let cleanup = { created: false, cleaned: true, observed_absent: true }
   if (liveResult.outcome === 'PASS') {
     try {
@@ -1768,11 +1826,12 @@ function executeProduction(manifest, authorization) {
       }
       if (!d1Result) {
         try {
-          d1Result = adapters.normalizeD1Result(runD1Stages({
+          d1Receipt = runD1Stages({
             bindings,
             transport,
             elapsed_ms: liveResult.duration_ms,
-          }))
+          })
+          d1Result = adapters.normalizeD1Result(d1Receipt)
         } catch {
           d1Result = adapters.d1Error(formal ? 'formal_rehearsal_d1_adapter_error' : 'production_d1_adapter_error')
         }
@@ -1786,17 +1845,19 @@ function executeProduction(manifest, authorization) {
   }
   if (!d1Result) d1Result = adapters.d1Error(formal ? 'formal_rehearsal_d1_adapter_error' : 'production_d1_adapter_error')
   let workerResult
+  let workerReceipt
   if (d1Result.outcome === 'PASS') {
     let workerExpected
     try {
       workerExpected = materializeExpectedReconciliation(d1)
       const bindings = workerBindings(manifest.value, workerExpected.path)
-      workerResult = adapters.normalizeWorkerResult(runWorkerStages({
+      workerReceipt = runWorkerStages({
         bindings,
         transport: adapters.createWorkerTransport(bindings),
         elapsed_ms: liveResult.duration_ms
           + Object.values(d1Result.stage_durations_ms).reduce((sum, duration) => sum + duration, 0),
-      }))
+      })
+      workerResult = adapters.normalizeWorkerResult(workerReceipt)
     } catch { workerResult = adapters.normalizeWorkerResult(null) }
     finally { disposeExpectedReconciliation(workerExpected) }
   }
@@ -1839,20 +1900,24 @@ function executeProduction(manifest, authorization) {
     },
     finalized: true,
   }
-  const bytes = canonicalJsonBytes(value)
-  return { value, bytes, sha256: sha256(bytes) }
+  return terminalResult(value, {
+    manifest,
+    d1: d1Receipt,
+    worker: workerReceipt,
+  })
 }
 
 /**
  * Production Evidence validator. It treats canonical bytes as the sole authority;
  * `value` is only required to be an exact decoded copy of those bytes.
  */
-export function validateProductionTerminalEvidence(result, inputs) {
-  if (!isPlainRecord(result) || !isPlainRecord(result.value) || !(result.bytes instanceof Uint8Array)
-    || typeof result.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(result.sha256)
-    || !isPlainRecord(inputs) || !exact(inputs, ['manifest', 'd1Receipt', 'workerReceipt'])) {
+export function validateProductionTerminalEvidence(result) {
+  if (arguments.length !== 1 || !isPlainRecord(result) || !isPlainRecord(result.value)
+    || !(result.bytes instanceof Uint8Array)
+    || typeof result.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(result.sha256)) {
     fail('production terminal evidence is malformed')
   }
+  const receipts = readTerminalReceipts(result)
   const bytes = Buffer.from(result.bytes)
   if (sha256(bytes) !== result.sha256) fail('production terminal evidence is malformed')
   const text = bytes.toString('utf8')
@@ -1922,19 +1987,24 @@ export function validateProductionTerminalEvidence(result, inputs) {
     || typeof value.failure.classification !== 'string' || value.failure.classification.length === 0) {
     fail('production terminal evidence is invalid')
   }
-  const manifest = inputs.manifest
+  const manifest = receipts.manifest
   if (!isPlainRecord(manifest) || !(manifest.bytes instanceof Uint8Array)
     || typeof manifest.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(manifest.sha256)) {
     fail('production terminal evidence is invalid')
   }
-  const parsedManifest = parseCanonicalManifest(manifest.bytes, manifest.sha256)
+  let parsedManifest
+  try {
+    parsedManifest = parseCanonicalManifest(manifest.bytes, manifest.sha256)
+  } catch {
+    fail('production terminal evidence is invalid')
+  }
   if (value.identities.manifest_sha256 !== manifest.sha256
     || parsedManifest.repository.commit !== parsedManifest.ci.head_sha
     || parsedManifest.repository.tree !== parsedManifest.ci.tree) {
     fail('production terminal evidence is invalid')
   }
 
-  const d1Receipt = inputs.d1Receipt
+  const d1Receipt = receipts.d1
   const normalizedD1 = normalizeProductionD1Result(d1Receipt)
   if (!isPlainRecord(d1Receipt?.value)
     || !Buffer.from(d1Receipt.bytes ?? []).equals(canonicalJsonBytes(d1Receipt.value))
@@ -1955,9 +2025,9 @@ export function validateProductionTerminalEvidence(result, inputs) {
 
   const workerHash = value.evidence.hashes.worker_stage_receipt_sha256
   if (workerHash === null) {
-    if (inputs.workerReceipt !== null) fail('production terminal evidence is invalid')
+    if (receipts.worker !== null) fail('production terminal evidence is invalid')
   } else {
-    const workerReceipt = inputs.workerReceipt
+    const workerReceipt = receipts.worker
     const normalizedWorker = normalizeWorkerResultForTestsOnly(workerReceipt)
     if (!isPlainRecord(workerReceipt?.value)
       || !Buffer.from(workerReceipt.bytes ?? []).equals(canonicalJsonBytes(workerReceipt.value))
@@ -1995,11 +2065,7 @@ export function runFormalRehearsal(config) {
       fail('formal rehearsal must not emit production evidence')
     }
     try {
-      validateProductionTerminalEvidence(terminal, {
-        manifest,
-        d1Receipt: null,
-        workerReceipt: null,
-      })
+      validateProductionTerminalEvidence(terminal)
       fail('formal rehearsal terminal result must not pass production evidence validation')
     } catch (error) {
       if (!/production terminal evidence/u.test(error.message)) throw error

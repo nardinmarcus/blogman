@@ -108,7 +108,8 @@
         "event",
         "head_sha",
         "tree",
-        "conclusion"
+        "conclusion",
+        "evidence_class"
       ],
       "properties": {
         "provider": {
@@ -137,7 +138,10 @@
           "pattern": "^[a-f0-9]{40}$"
         },
         "conclusion": {
-          "const": "success"
+          "enum": ["success", "in_progress-test-evidence"]
+        },
+        "evidence_class": {
+          "enum": ["production-ci-evidence", "formal-rehearsal-test-evidence"]
         }
       }
     },
@@ -577,7 +581,7 @@
           "pattern": "^[a-f0-9]{40}$"
         },
         "evidence_class": {
-          "enum": ["production", "local-non-production", "test-non-production", "synthetic-non-production"]
+          "enum": ["production", "local-non-production", "test-non-production", "synthetic-non-production", "formal-rehearsal-test-evidence"]
         },
         "migrations": {
           "type": "array",

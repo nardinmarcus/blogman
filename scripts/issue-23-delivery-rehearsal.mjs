@@ -691,10 +691,7 @@ export function runLocalRehearsal(options = {}) {
 }
 
 export function runLocalRehearsalForTestsOnly(options = {}) {
-  return {
-    ...runLegacyLocalRehearsal(options),
-    test_only: true,
-  }
+  return runLegacyLocalRehearsal(options)
 }
 
 function repositoryPathOrDefault(path) {

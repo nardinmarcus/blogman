@@ -216,6 +216,7 @@ function manifest(overrides: Record<string, unknown> = {}) {
       head_sha: CANDIDATE,
       tree: 'd'.repeat(40),
       conclusion: 'success',
+      evidence_class: 'production-ci-evidence',
     },
     toolchain: {
       node: RUNTIME_RECEIPT.node,
@@ -838,7 +839,7 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(JSON.stringify(result.value)).not.toMatch(/transport setup failed/u)
   })
 
-  it('binds terminal production evidence to its canonical manifest and raw stage receipts', () => {
+  it('binds terminal production evidence to execute-returned canonical receipt sidecars', () => {
     const prepared = actualPreparedManifest()
     const d1Receipt = d1Result()
     d1Receipt.value.evidence.account_id = prepared.value.target.account_id
@@ -854,11 +855,14 @@ describe('Issue #90 formal entry fan-in', () => {
     const terminal = execute(prepared, authorizationFor(prepared, 'fan-in-terminal-evidence'))
     const workerReceipt = workerResult()
 
-    expect(validateProductionTerminalEvidence(terminal, {
-      manifest: prepared,
-      d1Receipt,
-      workerReceipt,
-    })).toBe(true)
+    expect(Object.keys(terminal)).toEqual(['value', 'bytes', 'sha256'])
+    expect(terminal.receipts).toEqual(expect.objectContaining({
+      manifest: expect.objectContaining({ sha256: prepared.sha256 }),
+      d1: expect.objectContaining({ sha256: d1Receipt.sha256 }),
+      worker: expect.objectContaining({ sha256: workerReceipt.sha256 }),
+    }))
+    expect(Object.isFrozen(terminal.receipts)).toBe(true)
+    expect(validateProductionTerminalEvidence(terminal)).toBe(true)
 
     const forgedValue = structuredClone(terminal.value)
     forgedValue.identities.manifest_sha256 = 'f'.repeat(64)
@@ -868,11 +872,8 @@ describe('Issue #90 formal entry fan-in', () => {
     }, null, 2)}\n`, 'utf8'))
     const forgedBytes = Buffer.from(`${JSON.stringify(forgedValue, null, 2)}\n`, 'utf8')
     const forgedTerminal = { value: forgedValue, bytes: forgedBytes, sha256: hash(forgedBytes) }
-    expect(() => validateProductionTerminalEvidence(forgedTerminal, {
-      manifest: prepared,
-      d1Receipt,
-      workerReceipt,
-    })).toThrow(/production terminal evidence/u)
+    expect(() => validateProductionTerminalEvidence(forgedTerminal))
+      .toThrow(/production terminal evidence/u)
   })
 
   it('accepts the canonical output produced by prepare at the execute seam', () => {
@@ -896,7 +897,7 @@ describe('Issue #90 formal entry fan-in', () => {
     const prepared = manifest({ d1: d1Binding({ mode: 'local', evidence_class: 'local-non-production' }) })
 
     expect(() => execute(prepared, authorizationFor(prepared, 'fan-in-local-lane')))
-      .toThrow(/remote production/u)
+      .toThrow(/remote production|d1 evidence/u)
     expect(createD1TransportMock).not.toHaveBeenCalled()
   })
 

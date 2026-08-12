@@ -208,7 +208,7 @@ function normalizeBindings(value) {
       fail(`bindings.${field} must identify the canonical ${suffix}`)
     }
   }
-  if (!['production', 'local-non-production', 'test-non-production', 'synthetic-non-production']
+  if (!['production', 'local-non-production', 'test-non-production', 'synthetic-non-production', 'formal-rehearsal-test-evidence']
     .includes(value.evidence_class)) {
     fail('bindings.evidence_class is invalid')
   }

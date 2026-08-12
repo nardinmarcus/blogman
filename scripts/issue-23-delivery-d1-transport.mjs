@@ -224,10 +224,17 @@ function validateConfig(config) {
     'rollout_safety_sha256',
     'expected_reconciliation_sha256',
   ]) assertHash(config[field], field)
-  if (!['production', 'local-non-production', 'test-non-production', 'synthetic-non-production'].includes(config.evidence_class)) {
+  if (![
+    'production',
+    'local-non-production',
+    'test-non-production',
+    'synthetic-non-production',
+    'formal-rehearsal-test-evidence',
+  ].includes(config.evidence_class)) {
     fail('evidence_class is invalid')
   }
-  if (config.mode === 'remote' && config.evidence_class !== 'production') {
+  if (config.mode === 'remote'
+    && !['production', 'formal-rehearsal-test-evidence'].includes(config.evidence_class)) {
     fail('remote transport requires production evidence')
   }
   if (!Array.isArray(config.migrations) || config.migrations.length !== 6) {

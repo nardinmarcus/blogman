@@ -7,9 +7,6 @@ import { runLocalRehearsal } from './issue-23-delivery-rehearsal.mjs'
 import { hashD1ArtifactDirectory } from './issue-23-delivery-d1-contracts.mjs'
 import { buildFormalRuntimeReceipt } from './issue-23-delivery-formal-runtime.mjs'
 import { currentFormalRehearsalContext } from './issue-23-delivery-formal-context.mjs'
-import { FORMAL_TEST_MANIFEST_FORMAT } from './issue-23-delivery-formal-manifest.mjs'
-
-export { FORMAL_TEST_MANIFEST_FORMAT } from './issue-23-delivery-formal-manifest.mjs'
 
 const MANIFEST_SCHEMA_URL = new URL(
   '../schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
@@ -130,30 +127,14 @@ const CONFIG_SCHEMA = Object.freeze({
   },
 })
 const PRODUCTION_MANIFEST_POLICY = Object.freeze({
-  format: CANONICAL_MANIFEST_FORMAT,
   conclusion: 'success',
-  testOnly: false,
+  ciEvidenceClass: 'production-ci-evidence',
+  d1EvidenceClass: 'production',
 })
-const FORMAL_TEST_MANIFEST_POLICY = Object.freeze({
-  format: FORMAL_TEST_MANIFEST_FORMAT,
+const FORMAL_REHEARSAL_MANIFEST_POLICY = Object.freeze({
   conclusion: 'in_progress-test-evidence',
-  testOnly: true,
-})
-const FORMAL_TEST_MANIFEST_SCHEMA = Object.freeze({
-  ...MANIFEST_SCHEMA,
-  required: [...MANIFEST_SCHEMA.required, 'test_only'],
-  properties: {
-    ...MANIFEST_SCHEMA.properties,
-    format: { const: FORMAL_TEST_MANIFEST_FORMAT },
-    ci: {
-      ...MANIFEST_SCHEMA.properties.ci,
-      properties: {
-        ...MANIFEST_SCHEMA.properties.ci.properties,
-        conclusion: { const: 'in_progress-test-evidence' },
-      },
-    },
-    test_only: { const: true },
-  },
+  ciEvidenceClass: 'formal-rehearsal-test-evidence',
+  d1EvidenceClass: 'formal-rehearsal-test-evidence',
 })
 
 function fail(message) {
@@ -905,6 +886,7 @@ function resolveRehearsalEvidence(rehearsalResult) {
 function resolveFacts(config, {
   repositoryPath = REPO_ROOT,
   ciResolver = resolveCiFacts,
+  manifestPolicy = PRODUCTION_MANIFEST_POLICY,
   rehearsalRunner = runLocalRehearsal,
   buildRunner = runOpenNextBuild,
   targetResolver = resolveTargetFacts,
@@ -925,7 +907,10 @@ function resolveFacts(config, {
     execute_entry: resolveFile(repositoryPath, config.preparation.execute_entry.path, 'execute entry'),
     manifest_schema: resolveFile(repositoryPath, config.preparation.manifest_schema.path, 'manifest schema'),
   }
-  const ci = ciResolver(repositoryPath, config, repository)
+  const ci = {
+    ...ciResolver(repositoryPath, config, repository),
+    evidence_class: manifestPolicy.ciEvidenceClass,
+  }
   const nodeExecutable = realpathSync(process.execPath)
   const npmExecutableBytes = resolveExecutableBytes(npmCliPath(nodeExecutable), 'npm')
   const wranglerExecutable = resolve(repositoryPath, 'node_modules', '.bin', 'wrangler')
@@ -1035,6 +1020,7 @@ function resolveFacts(config, {
   const rehearsalEvidence = resolveRehearsalEvidence(rehearsalResult)
   const d1 = {
     ...d1Base,
+    evidence_class: manifestPolicy.d1EvidenceClass,
     expected_reconciliation_sha256: rehearsalEvidence.expectedReconciliationSha256,
     expected_reconciliation: rehearsalEvidence.expectedReconciliation,
   }
@@ -1085,8 +1071,9 @@ function assertManifestRelationships(manifest, policy = PRODUCTION_MANIFEST_POLI
   if (manifest.ci.tree !== manifest.repository.tree) {
     fail('ci.tree must equal repository.tree')
   }
-  if (manifest.ci.conclusion !== policy.conclusion) {
-    fail('ci.conclusion is invalid')
+  if (manifest.ci.conclusion !== policy.conclusion
+    || manifest.ci.evidence_class !== policy.ciEvidenceClass) {
+    fail('ci evidence classification is invalid')
   }
   if (manifest.preparation.execute_entry.path !== 'scripts/phase-b-sequence.mjs') {
     fail('preparation.execute_entry must bind the canonical upload lifecycle')
@@ -1126,8 +1113,10 @@ function assertManifestRelationships(manifest, policy = PRODUCTION_MANIFEST_POLI
     fail('migration.catalog.migrations must contain 001 through 006 in order')
   }
 
-  if (manifest.d1.mode !== 'remote' || manifest.d1.evidence_class !== 'production') {
-    fail('d1 must be the canonical remote production binding')
+  if (manifest.d1.mode !== 'remote' || manifest.d1.evidence_class !== policy.d1EvidenceClass) {
+    fail(policy === PRODUCTION_MANIFEST_POLICY
+      ? 'd1 must be the canonical remote production binding'
+      : 'd1 evidence classification is invalid for formal rehearsal')
   }
   if (manifest.d1.database !== 'DB'
     || manifest.d1.config_path !== CANONICAL_D1_PATHS.config
@@ -1212,10 +1201,9 @@ function assertManifestRelationships(manifest, policy = PRODUCTION_MANIFEST_POLI
 }
 
 function validateConfigStructure(value, policy = PRODUCTION_MANIFEST_POLICY) {
-  const schema = policy.testOnly ? FORMAL_TEST_MANIFEST_SCHEMA : MANIFEST_SCHEMA
-  validateSchemaValue(value, schema)
+  validateSchemaValue(value, MANIFEST_SCHEMA)
   assertManifestRelationships(value, policy)
-  return orderBySchema(value, schema)
+  return orderBySchema(value, MANIFEST_SCHEMA)
 }
 
 function validateManifestValue(value) {
@@ -1489,12 +1477,11 @@ function validateConfig(config) {
   return validateConfigStructure({ format: CANONICAL_MANIFEST_FORMAT, ...config })
 }
 
-function preparedResult(value, testOnly = false, schema = MANIFEST_SCHEMA) {
-  const ordered = orderBySchema(value, schema)
+function preparedResult(value) {
+  const ordered = orderBySchema(value, MANIFEST_SCHEMA)
   const canonical = Buffer.from(`${JSON.stringify(ordered, null, 2)}\n`, 'utf8')
   const identity = sha256(canonical)
   return Object.freeze({
-    ...(testOnly ? { test_only: true } : {}),
     value: deepFreeze(JSON.parse(canonical.toString('utf8'))),
     get bytes() {
       return Buffer.from(canonical)
@@ -1503,13 +1490,12 @@ function preparedResult(value, testOnly = false, schema = MANIFEST_SCHEMA) {
   })
 }
 
-function formalTestPreparedResult(resolvedConfig) {
+function formalRehearsalPreparedResult(resolvedConfig) {
   const value = validateConfigStructure({
-    format: FORMAL_TEST_MANIFEST_FORMAT,
+    format: CANONICAL_MANIFEST_FORMAT,
     ...resolvedConfig,
-    test_only: true,
-  }, FORMAL_TEST_MANIFEST_POLICY)
-  return preparedResult(value, true, FORMAL_TEST_MANIFEST_SCHEMA)
+  }, FORMAL_REHEARSAL_MANIFEST_POLICY)
+  return preparedResult(value)
 }
 
 function assertReadOnlyPreparation(productionWriteAdapter, callsBefore) {
@@ -1542,9 +1528,12 @@ export function prepare(config, options) {
   const formal = currentFormalRehearsalContext()
   const resolvedConfig = resolveFacts(config, {
     verifyGeneratedResolverLinks: true,
-    ...(formal ? { ciResolver: resolveFormalCiFacts } : {}),
+    ...(formal ? {
+      ciResolver: resolveFormalCiFacts,
+      manifestPolicy: FORMAL_REHEARSAL_MANIFEST_POLICY,
+    } : {}),
   })
-  if (formal) return formalTestPreparedResult(resolvedConfig)
+  if (formal) return formalRehearsalPreparedResult(resolvedConfig)
   const value = validateConfig(resolvedConfig)
   return preparedResult(value)
 }

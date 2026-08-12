@@ -168,11 +168,14 @@ describe('Issue #92 formal rehearsal public path', () => {
     expect(result.manifest.bytes).toEqual(expect.any(Uint8Array))
     expect(result.manifest.sha256).toMatch(SHA256)
     expect(result.manifest.value).toMatchObject({
-      format: 'blogman-issue-23-formal-test-manifest/v1',
-      test_only: true,
-      ci: { conclusion: 'in_progress-test-evidence' },
-      d1: { mode: 'remote', evidence_class: 'production' },
+      format: 'blogman-issue-23-canonical-frozen-manifest/v1',
+      ci: {
+        conclusion: 'in_progress-test-evidence',
+        evidence_class: 'formal-rehearsal-test-evidence',
+      },
+      d1: { mode: 'remote', evidence_class: 'formal-rehearsal-test-evidence' },
     })
+    expect(Object.keys(result.manifest.value)).not.toContain('test_only')
     expect(result.manifest.value.rehearsal.runtime_receipt).toMatchObject({
       format: 'blogman-issue-23-formal-rehearsal-runtime-receipt/v1',
       os: 'macos',
@@ -200,16 +203,22 @@ describe('Issue #92 formal rehearsal public path', () => {
     expect(result.operations).toContainEqual(expect.objectContaining({
       adapter: 'worker', operation: 'smoke_control_t0.smoke', argv: expect.arrayContaining(['--request', 'GET']),
     }))
-    expect(() => deliveryEntry.validateProductionTerminalEvidence(result.terminal, {
-      manifest: result.manifest,
-      d1Receipt: null,
-      workerReceipt: null,
-    })).toThrow(/production terminal evidence/u)
+    expect(() => deliveryEntry.validateProductionTerminalEvidence(result.terminal))
+      .toThrow(/production terminal evidence/u)
+
+    const productionAuthorization = {
+      format: 'blogman-issue-23-authorization/v1',
+      authorization_id: `formal-manifest-production-policy-${result.manifest.sha256.slice(0, 12)}`,
+      manifest_sha256: result.manifest.sha256,
+      decision: 'approve',
+    }
+    expect(() => deliveryEntry.execute(result.manifest, productionAuthorization))
+      .toThrow(/ci evidence|d1 evidence|production/u)
 
     for (const mutate of [
-      (value: Record<string, unknown>) => { value.format = 'blogman-issue-23-canonical-frozen-manifest/v1' },
+      (value: Record<string, unknown>) => { value.format = 'invalid-manifest-format' },
       (value: Record<string, unknown>) => { (value.ci as Record<string, unknown>).conclusion = 'success' },
-      (value: Record<string, unknown>) => { value.test_only = false },
+      (value: Record<string, unknown>) => { (value.d1 as Record<string, unknown>).evidence_class = 'production' },
     ]) {
       const value = structuredClone(result.manifest.value) as Record<string, unknown>
       mutate(value)

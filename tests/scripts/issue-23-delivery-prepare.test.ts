@@ -1345,7 +1345,7 @@ describe('Issue #23 Delivery Preparation', () => {
   it('marks test-only prepared output as non-production and rejects it at the canonical manifest seam', () => {
     const result = prepareFixture(baseConfig())
 
-    expect(result.test_only).toBe(true)
+    expect(Object.keys(result)).not.toContain('test_only')
     expect(result.value.d1.mode).toBe('local')
     expect(result.value.d1.evidence_class).toBe('test-non-production')
     expect(() => parseCanonicalManifest(result.bytes, result.sha256)).toThrow(/canonical remote production/u)
@@ -1442,7 +1442,6 @@ describe('Issue #23 Delivery Preparation', () => {
         'scripts/issue-23-delivery-entry.mjs',
         'scripts/issue-23-delivery-formal-fault-harness.mjs',
         'scripts/issue-23-delivery-formal-context.mjs',
-        'scripts/issue-23-delivery-formal-manifest.mjs',
         'scripts/issue-23-delivery-rehearsal.mjs',
         'scripts/issue-23-delivery-d1-child.mjs',
         'scripts/issue-23-delivery-d1-contracts.mjs',
