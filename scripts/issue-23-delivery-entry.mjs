@@ -235,6 +235,583 @@ function sameJsonValue(left, right) {
   return JSON.stringify(normalizedJsonValue(left)) === JSON.stringify(normalizedJsonValue(right))
 }
 
+const CANONICAL_MANIFEST_FORMAT = 'blogman-issue-23-canonical-frozen-manifest/v1'
+const CANONICAL_MANIFEST_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._/-]+$/u
+const CANONICAL_MANIFEST_SHA256_PATTERN = /^[a-f0-9]{64}$/u
+const CANONICAL_MANIFEST_SHA40_PATTERN = /^[a-f0-9]{40}$/u
+const CANONICAL_MANIFEST_VERSION_PATTERN = /^[0-9]+(?:\.[0-9]+){1,2}(?:[-+][A-Za-z0-9._-]+)?$/u
+const CANONICAL_MANIFEST_NAME_PATTERN = /^[a-z][a-z0-9_:-]*$/u
+const CANONICAL_MANIFEST_ID_PATTERN = /^[A-Za-z0-9_-]+$/u
+const CANONICAL_MANIFEST_WORKER_PATTERN = /^[A-Za-z0-9._-]+$/u
+const CANONICAL_MANIFEST_ORIGIN_PATTERN = /^https:\/\/[A-Za-z0-9._/-]+$/u
+const CANONICAL_MANIFEST_ROOT_KEYS = [
+  'format',
+  'preparation',
+  'repository',
+  'ci',
+  'toolchain',
+  'artifact',
+  'migration',
+  'd1',
+  'target',
+  'policy',
+  'rehearsal',
+]
+const CANONICAL_MANIFEST_FROZEN_PRECONDITIONS = Object.freeze([
+  'repository.commit',
+  'repository.tree',
+  'ci.head_sha',
+  'ci.tree',
+  'artifact.file_tree.sha256',
+  'migration.catalog.sha256',
+  'target.baseline',
+])
+const CANONICAL_MANIFEST_OBSERVATIONS = Object.freeze([
+  'target.deployment_id',
+  'target.version_id',
+  'target.traffic',
+  'rehearsal.receipt_sha256',
+])
+const CANONICAL_MANIFEST_EVIDENCE_EXCLUSIONS = Object.freeze([
+  'secret_values',
+  'raw_private_adapter_output',
+  'sql_bodies',
+  'private_operator_paths',
+])
+
+function assertSchemaKeys(value, keys, label) {
+  if (!isPlainRecord(value)) fail(`${label} must be an object`)
+  const actual = Reflect.ownKeys(value)
+  const missing = keys.filter((key) => !actual.includes(key))
+  if (missing.length > 0) fail(`${label} is missing required field ${missing[0]}`)
+  if (actual.length !== keys.length || actual.some((key) => !keys.includes(key))) {
+    fail(`${label} contains unsupported fields`)
+  }
+}
+
+function schemaRecord(value, keys, label) {
+  if (keys) assertSchemaKeys(value, keys, label)
+  else if (!isPlainRecord(value)) fail(`${label} must be an object`)
+  return value
+}
+
+function schemaString(value, label, pattern = null) {
+  if (typeof value !== 'string' || (pattern && !pattern.test(value))) {
+    fail(`${label} is invalid`)
+  }
+  return value
+}
+
+function schemaSha256(value, label) {
+  return schemaString(value, label, CANONICAL_MANIFEST_SHA256_PATTERN)
+}
+
+function schemaPath(value, label) {
+  return schemaString(value, label, CANONICAL_MANIFEST_PATH_PATTERN)
+}
+
+function schemaVersion(value, label) {
+  return schemaString(value, label, CANONICAL_MANIFEST_VERSION_PATTERN)
+}
+
+function schemaNonNegativeInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value < 0) fail(`${label} is invalid`)
+  return value
+}
+
+function schemaPositiveInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value < 1) fail(`${label} is invalid`)
+  return value
+}
+
+function validateManifestReference(value, label, includeBytes = false) {
+  const keys = includeBytes ? ['path', 'sha256', 'bytes'] : ['path', 'sha256']
+  schemaRecord(value, keys, label)
+  schemaPath(value.path, `${label}.path`)
+  schemaSha256(value.sha256, `${label}.sha256`)
+  if (includeBytes) schemaNonNegativeInteger(value.bytes, `${label}.bytes`)
+}
+
+function validateToolchainEntry(value, label) {
+  schemaRecord(value, ['version', 'identity_sha256'], label)
+  schemaVersion(value.version, `${label}.version`)
+  schemaSha256(value.identity_sha256, `${label}.identity_sha256`)
+}
+
+function validateCanonicalManifestSchema(value) {
+  schemaRecord(value, CANONICAL_MANIFEST_ROOT_KEYS, 'canonical manifest')
+  if (value.format !== CANONICAL_MANIFEST_FORMAT) fail('canonical manifest format is invalid')
+
+  schemaRecord(value.preparation, ['prepare_entry', 'execute_entry', 'manifest_schema'], 'manifest preparation')
+  validateManifestReference(value.preparation.prepare_entry, 'manifest preparation.prepare_entry')
+  validateManifestReference(value.preparation.execute_entry, 'manifest preparation.execute_entry')
+  validateManifestReference(value.preparation.manifest_schema, 'manifest preparation.manifest_schema')
+
+  schemaRecord(value.repository, ['canonical', 'remote', 'commit', 'tree', 'clean'], 'manifest repository')
+  if (value.repository.canonical !== 'nardinmarcus/blogman') {
+    fail('manifest repository.canonical is invalid')
+  }
+  if (value.repository.remote !== 'https://github.com/nardinmarcus/blogman.git') {
+    fail('manifest repository.remote is invalid')
+  }
+  schemaString(value.repository.commit, 'manifest repository.commit', CANONICAL_MANIFEST_SHA40_PATTERN)
+  schemaString(value.repository.tree, 'manifest repository.tree', CANONICAL_MANIFEST_SHA40_PATTERN)
+  if (value.repository.clean !== true) fail('manifest repository.clean is invalid')
+
+  schemaRecord(
+    value.ci,
+    ['provider', 'workflow', 'run_id', 'attempt', 'event', 'head_sha', 'tree', 'conclusion'],
+    'manifest ci',
+  )
+  if (value.ci.provider !== 'github-actions') fail('manifest ci.provider is invalid')
+  schemaPath(value.ci.workflow, 'manifest ci.workflow')
+  schemaPositiveInteger(value.ci.run_id, 'manifest ci.run_id')
+  if (value.ci.attempt !== 1) fail('manifest ci.attempt is invalid')
+  if (!['push', 'pull_request'].includes(value.ci.event)) fail('manifest ci.event is invalid')
+  schemaString(value.ci.head_sha, 'manifest ci.head_sha', CANONICAL_MANIFEST_SHA40_PATTERN)
+  schemaString(value.ci.tree, 'manifest ci.tree', CANONICAL_MANIFEST_SHA40_PATTERN)
+  if (value.ci.conclusion !== 'success') fail('manifest ci.conclusion is invalid')
+
+  schemaRecord(
+    value.toolchain,
+    ['node', 'npm', 'wrangler', 'opennextjs_cloudflare', 'package_json_sha256', 'lockfile_sha256'],
+    'manifest toolchain',
+  )
+  validateToolchainEntry(value.toolchain.node, 'manifest toolchain.node')
+  validateToolchainEntry(value.toolchain.npm, 'manifest toolchain.npm')
+  validateToolchainEntry(value.toolchain.wrangler, 'manifest toolchain.wrangler')
+  validateToolchainEntry(value.toolchain.opennextjs_cloudflare, 'manifest toolchain.opennextjs_cloudflare')
+  schemaSha256(value.toolchain.package_json_sha256, 'manifest toolchain.package_json_sha256')
+  schemaSha256(value.toolchain.lockfile_sha256, 'manifest toolchain.lockfile_sha256')
+
+  schemaRecord(value.artifact, ['archive', 'worker', 'file_tree'], 'manifest artifact')
+  validateManifestReference(value.artifact.archive, 'manifest artifact.archive', true)
+  validateManifestReference(value.artifact.worker, 'manifest artifact.worker', true)
+  schemaRecord(value.artifact.file_tree, ['sha256', 'complete', 'files'], 'manifest artifact.file_tree')
+  schemaSha256(value.artifact.file_tree.sha256, 'manifest artifact.file_tree.sha256')
+  if (value.artifact.file_tree.complete !== true) fail('manifest artifact.file_tree.complete is invalid')
+  if (!Array.isArray(value.artifact.file_tree.files) || value.artifact.file_tree.files.length < 1) {
+    fail('manifest artifact.file_tree.files is invalid')
+  }
+  value.artifact.file_tree.files.forEach((file, index) => {
+    validateManifestReference(file, `manifest artifact.file_tree.files[${index}]`, true)
+  })
+
+  schemaRecord(
+    value.migration,
+    ['delivery_mode', 'reset_sql', 'runner', 'catalog', 'historical_data_disposition'],
+    'manifest migration',
+  )
+  if (value.migration.delivery_mode !== 'clean-start') fail('manifest migration.delivery_mode is invalid')
+  validateManifestReference(value.migration.reset_sql, 'manifest migration.reset_sql')
+  validateManifestReference(value.migration.runner, 'manifest migration.runner')
+  schemaRecord(value.migration.catalog, ['path', 'sha256', 'migrations'], 'manifest migration.catalog')
+  schemaPath(value.migration.catalog.path, 'manifest migration.catalog.path')
+  schemaSha256(value.migration.catalog.sha256, 'manifest migration.catalog.sha256')
+  if (!Array.isArray(value.migration.catalog.migrations)
+    || value.migration.catalog.migrations.length < 6
+    || value.migration.catalog.migrations.length > 6) {
+    fail('manifest migration.catalog.migrations is invalid')
+  }
+  value.migration.catalog.migrations.forEach((migration, index) => {
+    schemaRecord(migration, ['id', 'path', 'sha256'], `manifest migration.catalog.migrations[${index}]`)
+    schemaString(migration.id, `manifest migration.catalog.migrations[${index}].id`, /^00[1-6]$/u)
+    schemaPath(migration.path, `manifest migration.catalog.migrations[${index}].path`)
+    schemaSha256(migration.sha256, `manifest migration.catalog.migrations[${index}].sha256`)
+  })
+  schemaRecord(
+    value.migration.historical_data_disposition,
+    ['production_export', 'double_restore', 'historical_baseline_queries'],
+    'manifest migration.historical_data_disposition',
+  )
+  for (const field of ['production_export', 'double_restore', 'historical_baseline_queries']) {
+    if (value.migration.historical_data_disposition[field] !== 'NOT_APPLICABLE') {
+      fail(`manifest migration.historical_data_disposition.${field} is invalid`)
+    }
+  }
+
+  schemaRecord(
+    value.target,
+    ['account_id', 'd1_database_id', 'worker_name', 'origin', 'baseline'],
+    'manifest target',
+  )
+  schemaString(value.target.account_id, 'manifest target.account_id', CANONICAL_MANIFEST_ID_PATTERN)
+  schemaString(value.target.d1_database_id, 'manifest target.d1_database_id', CANONICAL_MANIFEST_ID_PATTERN)
+  schemaString(value.target.worker_name, 'manifest target.worker_name', CANONICAL_MANIFEST_WORKER_PATTERN)
+  schemaString(value.target.origin, 'manifest target.origin', CANONICAL_MANIFEST_ORIGIN_PATTERN)
+  schemaRecord(
+    value.target.baseline,
+    ['deployment_id', 'version_id', 'd1_database_id', 'traffic'],
+    'manifest target.baseline',
+  )
+  schemaString(value.target.baseline.deployment_id, 'manifest target.baseline.deployment_id', CANONICAL_MANIFEST_WORKER_PATTERN)
+  schemaString(value.target.baseline.version_id, 'manifest target.baseline.version_id', CANONICAL_MANIFEST_WORKER_PATTERN)
+  schemaString(value.target.baseline.d1_database_id, 'manifest target.baseline.d1_database_id', CANONICAL_MANIFEST_ID_PATTERN)
+  if (!Array.isArray(value.target.baseline.traffic) || value.target.baseline.traffic.length < 1) {
+    fail('manifest target.baseline.traffic is invalid')
+  }
+  value.target.baseline.traffic.forEach((traffic, index) => {
+    schemaRecord(traffic, ['version_id', 'percentage'], `manifest target.baseline.traffic[${index}]`)
+    schemaString(traffic.version_id, `manifest target.baseline.traffic[${index}].version_id`, CANONICAL_MANIFEST_WORKER_PATTERN)
+    schemaNonNegativeInteger(traffic.percentage, `manifest target.baseline.traffic[${index}].percentage`)
+  })
+
+  schemaRecord(
+    value.policy,
+    ['authorization', 'stages', 'overall_timeout_seconds', 'drift', 'evidence'],
+    'manifest policy',
+  )
+  schemaRecord(
+    value.policy.authorization,
+    ['manifest_binding', 'one_shot', 'credential_slots'],
+    'manifest policy.authorization',
+  )
+  if (value.policy.authorization.manifest_binding !== 'manifest_sha256'
+    || value.policy.authorization.one_shot !== true) {
+    fail('manifest policy.authorization is invalid')
+  }
+  if (!Array.isArray(value.policy.authorization.credential_slots)
+    || value.policy.authorization.credential_slots.length < 1) {
+    fail('manifest policy.authorization.credential_slots is invalid')
+  }
+  value.policy.authorization.credential_slots.forEach((slot, index) => {
+    schemaRecord(slot, ['name', 'scopes'], `manifest policy.authorization.credential_slots[${index}]`)
+    schemaString(slot.name, `manifest policy.authorization.credential_slots[${index}].name`, CANONICAL_MANIFEST_NAME_PATTERN)
+    if (!Array.isArray(slot.scopes) || slot.scopes.length < 1) {
+      fail(`manifest policy.authorization.credential_slots[${index}].scopes is invalid`)
+    }
+    slot.scopes.forEach((scope, scopeIndex) => {
+      schemaString(
+        scope,
+        `manifest policy.authorization.credential_slots[${index}].scopes[${scopeIndex}]`,
+        CANONICAL_MANIFEST_NAME_PATTERN,
+      )
+    })
+  })
+  if (!Array.isArray(value.policy.stages) || value.policy.stages.length !== DELIVERY_STAGE_POLICY.length) {
+    fail('manifest policy.stages is invalid')
+  }
+  value.policy.stages.forEach((stage, index) => {
+    schemaRecord(stage, ['name', 'timeout_seconds'], `manifest policy.stages[${index}]`)
+    schemaString(stage.name, `manifest policy.stages[${index}].name`, CANONICAL_MANIFEST_NAME_PATTERN)
+    schemaPositiveInteger(stage.timeout_seconds, `manifest policy.stages[${index}].timeout_seconds`)
+  })
+  if (value.policy.overall_timeout_seconds !== OVERALL_TIMEOUT_SECONDS) {
+    fail('manifest policy.overall_timeout_seconds is invalid')
+  }
+  schemaRecord(
+    value.policy.drift,
+    ['frozen_preconditions', 'observations', 'mismatch_classification'],
+    'manifest policy.drift',
+  )
+  if (!Array.isArray(value.policy.drift.frozen_preconditions)
+    || value.policy.drift.frozen_preconditions.length < 1
+    || value.policy.drift.frozen_preconditions.some((item) => typeof item !== 'string')) {
+    fail('manifest policy.drift.frozen_preconditions is invalid')
+  }
+  if (!Array.isArray(value.policy.drift.observations)
+    || value.policy.drift.observations.length < 1
+    || value.policy.drift.observations.some((item) => typeof item !== 'string')) {
+    fail('manifest policy.drift.observations is invalid')
+  }
+  if (value.policy.drift.mismatch_classification !== 'Manifest Drift') {
+    fail('manifest policy.drift.mismatch_classification is invalid')
+  }
+  schemaRecord(
+    value.policy.evidence,
+    ['allowed_hash_algorithm', 'excluded', 'production_evidence', 'local_rehearsal_evidence'],
+    'manifest policy.evidence',
+  )
+  if (value.policy.evidence.allowed_hash_algorithm !== 'sha256'
+    || value.policy.evidence.production_evidence !== 'real_adapters_only'
+    || value.policy.evidence.local_rehearsal_evidence !== 'test_only') {
+    fail('manifest policy.evidence is invalid')
+  }
+  if (!Array.isArray(value.policy.evidence.excluded)
+    || value.policy.evidence.excluded.length !== CANONICAL_MANIFEST_EVIDENCE_EXCLUSIONS.length
+    || value.policy.evidence.excluded.some((item) => !CANONICAL_MANIFEST_EVIDENCE_EXCLUSIONS.includes(item))) {
+    fail('manifest policy.evidence.excluded is invalid')
+  }
+
+  schemaRecord(
+    value.rehearsal,
+    ['runtime', 'network', 'status', 'receipt_sha256', 'production_write_adapter_calls'],
+    'manifest rehearsal',
+  )
+  schemaRecord(value.rehearsal.runtime, ['os', 'architecture', 'node_version'], 'manifest rehearsal.runtime')
+  if (value.rehearsal.runtime.os !== 'macos') fail('manifest rehearsal.runtime.os is invalid')
+  schemaString(value.rehearsal.runtime.architecture, 'manifest rehearsal.runtime.architecture', CANONICAL_MANIFEST_WORKER_PATTERN)
+  schemaVersion(value.rehearsal.runtime.node_version, 'manifest rehearsal.runtime.node_version')
+  if (value.rehearsal.network !== 'disabled' || value.rehearsal.status !== 'PASS') {
+    fail('manifest rehearsal state is invalid')
+  }
+  schemaSha256(value.rehearsal.receipt_sha256, 'manifest rehearsal.receipt_sha256')
+  if (value.rehearsal.production_write_adapter_calls !== 0) {
+    fail('manifest rehearsal.production_write_adapter_calls is invalid')
+  }
+
+  return value
+}
+
+function assertCanonicalManifestRelationships(manifest) {
+  if (manifest.repository.canonical !== 'nardinmarcus/blogman'
+    || manifest.repository.remote !== 'https://github.com/nardinmarcus/blogman.git') {
+    fail('manifest repository identity is not canonical')
+  }
+  if (manifest.ci.head_sha !== manifest.repository.commit) {
+    fail('manifest ci.head_sha must equal repository.commit')
+  }
+  if (manifest.ci.tree !== manifest.repository.tree) {
+    fail('manifest ci.tree must equal repository.tree')
+  }
+  if (manifest.ci.conclusion !== 'success') fail('manifest ci.conclusion must be success')
+
+  const publicPaths = [
+    ['preparation.prepare_entry.path', manifest.preparation.prepare_entry.path],
+    ['preparation.execute_entry.path', manifest.preparation.execute_entry.path],
+    ['preparation.manifest_schema.path', manifest.preparation.manifest_schema.path],
+    ['ci.workflow', manifest.ci.workflow],
+    ['artifact.archive.path', manifest.artifact.archive.path],
+    ['artifact.worker.path', manifest.artifact.worker.path],
+    ['migration.reset_sql.path', manifest.migration.reset_sql.path],
+    ['migration.runner.path', manifest.migration.runner.path],
+    ['migration.catalog.path', manifest.migration.catalog.path],
+    ...manifest.artifact.file_tree.files.map((file, index) => [
+      `artifact.file_tree.files[${index}].path`,
+      file.path,
+    ]),
+    ...manifest.migration.catalog.migrations.map((migration, index) => [
+      `migration.catalog.migrations[${index}].path`,
+      migration.path,
+    ]),
+  ]
+  for (const [label, path] of publicPaths) {
+    if (/(^|\/)(?:private|operator|secret|credential|tmp)(?:\/|$)/iu.test(path)) {
+      fail(`${label} contains a private operator path`)
+    }
+  }
+
+  const filePaths = manifest.artifact.file_tree.files.map((file) => file.path)
+  if (new Set(filePaths).size !== filePaths.length) {
+    fail('artifact.file_tree.files must not contain duplicate paths')
+  }
+  if (!sameJsonValue(filePaths, [...filePaths].sort())) {
+    fail('artifact.file_tree.files must be ordered by public path')
+  }
+
+  const migrationIds = manifest.migration.catalog.migrations.map((migration) => migration.id)
+  if (!sameJsonValue(migrationIds, ['001', '002', '003', '004', '005', '006'])) {
+    fail('manifest migration.catalog.migrations must contain 001 through 006 in order')
+  }
+
+  if (manifest.d1.mode !== 'remote' || manifest.d1.evidence_class !== 'production') {
+    fail('manifest d1 must be the canonical remote production binding')
+  }
+  if (manifest.d1.database !== 'DB'
+    || manifest.d1.config_path !== PRODUCTION_D1_CANONICAL_PATHS.config_path
+    || manifest.d1.reset_sql_path !== PRODUCTION_D1_CANONICAL_PATHS.reset_sql_path
+    || manifest.d1.migration_runner_path !== PRODUCTION_D1_CANONICAL_PATHS.migration_runner_path
+    || manifest.d1.migration_catalog_path !== PRODUCTION_D1_CANONICAL_PATHS.migration_catalog_path
+    || manifest.d1.rollout_safety_path !== PRODUCTION_D1_CANONICAL_PATHS.rollout_safety_path) {
+    fail('manifest d1 paths must identify the canonical production artifacts')
+  }
+  if (manifest.d1.account_id !== manifest.target.account_id
+    || manifest.d1.d1_database_id !== manifest.target.d1_database_id
+    || manifest.d1.candidate_id !== manifest.repository.commit
+    || manifest.d1.wrangler_sha256 !== manifest.toolchain.wrangler.identity_sha256) {
+    fail('manifest d1 identities do not match the frozen production facts')
+  }
+  if (manifest.d1.expected_reconciliation_format !== EXPECTED_RECONCILIATION_FORMAT) {
+    fail('manifest d1 expected reconciliation format is not canonical')
+  }
+  if (sha256(canonicalD1ExpectedReconciliationBytes(manifest.d1.expected_reconciliation))
+    !== manifest.d1.expected_reconciliation_sha256) {
+    fail('manifest d1 expected reconciliation hash does not match its frozen bytes')
+  }
+  if (!manifest.d1.migrations.every((migration, index) => (
+    migration.number === index + 1
+      && migration.name === PRODUCTION_D1_MIGRATION_NAMES[index]
+  ))) {
+    fail('manifest d1 migrations must be the canonical checksum set')
+  }
+
+  if (manifest.target.baseline.d1_database_id !== manifest.target.d1_database_id) {
+    fail('manifest target.baseline.d1_database_id must equal target.d1_database_id')
+  }
+  if (manifest.target.baseline.traffic.length !== 1
+    || manifest.target.baseline.traffic[0].version_id !== manifest.target.baseline.version_id
+    || manifest.target.baseline.traffic[0].percentage !== 100) {
+    fail('manifest target.baseline.traffic must bind one 100% baseline version')
+  }
+
+  if (!sameJsonValue(manifest.policy.stages, DELIVERY_STAGE_POLICY)) {
+    fail('manifest policy.stages must use the fixed Issue #23 order and timeouts')
+  }
+  if (!sameJsonValue(manifest.policy.drift.frozen_preconditions, CANONICAL_MANIFEST_FROZEN_PRECONDITIONS)) {
+    fail('manifest policy.drift.frozen_preconditions are not canonical')
+  }
+  if (!sameJsonValue(manifest.policy.drift.observations, CANONICAL_MANIFEST_OBSERVATIONS)) {
+    fail('manifest policy.drift.observations are not canonical')
+  }
+  if (!sameJsonValue(manifest.policy.evidence.excluded, CANONICAL_MANIFEST_EVIDENCE_EXCLUSIONS)) {
+    fail('manifest policy.evidence.excluded is not canonical')
+  }
+  if (manifest.rehearsal.runtime.node_version !== manifest.toolchain.node.version) {
+    fail('manifest rehearsal.runtime.node_version must equal toolchain.node.version')
+  }
+
+  return manifest
+}
+
+const CANONICAL_MANIFEST_ORDER = {
+  format: null,
+  preparation: {
+    prepare_entry: { path: null, sha256: null },
+    execute_entry: { path: null, sha256: null },
+    manifest_schema: { path: null, sha256: null },
+  },
+  repository: { canonical: null, remote: null, commit: null, tree: null, clean: null },
+  ci: {
+    provider: null,
+    workflow: null,
+    run_id: null,
+    attempt: null,
+    event: null,
+    head_sha: null,
+    tree: null,
+    conclusion: null,
+  },
+  toolchain: {
+    node: { version: null, identity_sha256: null },
+    npm: { version: null, identity_sha256: null },
+    wrangler: { version: null, identity_sha256: null },
+    opennextjs_cloudflare: { version: null, identity_sha256: null },
+    package_json_sha256: null,
+    lockfile_sha256: null,
+  },
+  artifact: {
+    archive: { path: null, sha256: null, bytes: null },
+    worker: { path: null, sha256: null, bytes: null },
+    file_tree: {
+      sha256: null,
+      complete: null,
+      files: { path: null, sha256: null, bytes: null },
+    },
+  },
+  migration: {
+    delivery_mode: null,
+    reset_sql: { path: null, sha256: null },
+    runner: { path: null, sha256: null },
+    catalog: {
+      path: null,
+      sha256: null,
+      migrations: { id: null, path: null, sha256: null },
+    },
+    historical_data_disposition: {
+      production_export: null,
+      double_restore: null,
+      historical_baseline_queries: null,
+    },
+  },
+  d1: {
+    mode: null,
+    database: null,
+    config_path: null,
+    config_sha256: null,
+    wrangler_sha256: null,
+    account_id: null,
+    d1_database_id: null,
+    reset_sql_path: null,
+    reset_sql_sha256: null,
+    migration_runner_path: null,
+    migration_runner_sha256: null,
+    migration_catalog_path: null,
+    migration_catalog_sha256: null,
+    rollout_safety_path: null,
+    rollout_safety_sha256: null,
+    expected_reconciliation_format: null,
+    expected_reconciliation_sha256: null,
+    expected_reconciliation: {
+      format: null,
+      schema: { sha256: null },
+      migration_ledger: { state: null, row_count: null, sha256: null },
+      posts: { count: null, status: 'sorted', content_sha256: null },
+    },
+    candidate_id: null,
+    evidence_class: null,
+    migrations: { number: null, name: null, checksum: null },
+  },
+  target: {
+    account_id: null,
+    d1_database_id: null,
+    worker_name: null,
+    origin: null,
+    baseline: {
+      deployment_id: null,
+      version_id: null,
+      d1_database_id: null,
+      traffic: { version_id: null, percentage: null },
+    },
+  },
+  policy: {
+    authorization: {
+      manifest_binding: null,
+      one_shot: null,
+      credential_slots: { name: null, scopes: 'sorted' },
+    },
+    stages: { name: null, timeout_seconds: null },
+    overall_timeout_seconds: null,
+    drift: {
+      frozen_preconditions: 'sorted',
+      observations: 'sorted',
+      mismatch_classification: null,
+    },
+    evidence: {
+      allowed_hash_algorithm: null,
+      excluded: 'sorted',
+      production_evidence: null,
+      local_rehearsal_evidence: null,
+    },
+  },
+  rehearsal: {
+    runtime: { os: null, architecture: null, node_version: null },
+    network: null,
+    status: null,
+    receipt_sha256: null,
+    production_write_adapter_calls: null,
+  },
+}
+
+function orderCanonicalManifestValue(value, order) {
+  if (Array.isArray(value)) return value.map((item) => orderCanonicalManifestValue(item, order))
+  if (!isPlainRecord(value)) return value
+  if (order === 'sorted') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]]))
+  }
+  const keys = isPlainRecord(order) ? Object.keys(order) : Object.keys(value)
+  return Object.fromEntries(keys.map((key) => [
+    key,
+    orderCanonicalManifestValue(value[key], isPlainRecord(order) ? order[key] : undefined),
+  ]))
+}
+
+function canonicalManifestBytes(value) {
+  return canonicalJsonBytes(orderCanonicalManifestValue(value, CANONICAL_MANIFEST_ORDER))
+}
+
+function validateCanonicalManifest(value, manifestBytes) {
+  validateCanonicalManifestSchema(value)
+  const d1 = validateProductionD1(value)
+  schemaString(d1.account_id, 'manifest d1.account_id', CANONICAL_MANIFEST_ID_PATTERN)
+  schemaString(d1.d1_database_id, 'manifest d1.d1_database_id', CANONICAL_MANIFEST_ID_PATTERN)
+  schemaString(d1.candidate_id, 'manifest d1.candidate_id', CANONICAL_MANIFEST_SHA40_PATTERN)
+  assertCanonicalManifestRelationships(value)
+  if (!Buffer.from(manifestBytes).equals(canonicalManifestBytes(value))) {
+    fail('manifest bytes are not schema-canonical JSON')
+  }
+  return d1
+}
+
 function validateExecutionPolicy(policy) {
   if (!isPlainRecord(policy) || !sameJsonValue(policy, {
     stages: DELIVERY_STAGE_POLICY,
@@ -732,8 +1309,7 @@ function productionTrace(d1Result) {
 
 function executeProduction(manifest, authorization) {
   const manifestBytes = validatePreparedManifest(manifest)
-  validateExecutionPolicy(manifest.value.policy)
-  const d1 = validateProductionD1(manifest.value)
+  const d1 = validateCanonicalManifest(manifest.value, manifestBytes)
   const authorizationDigest = acceptAuthorization(sha256(manifestBytes), authorization)
   const identities = {
     manifest_sha256: sha256(manifestBytes),
@@ -788,8 +1364,10 @@ function executeProduction(manifest, authorization) {
 
 export function execute(manifest, authorization) {
   if (arguments.length !== 2) fail('execute accepts exactly two arguments')
-  if (isPlainRecord(manifest?.value) && Object.hasOwn(manifest.value, 'd1')) {
-    return executeProduction(manifest, authorization)
-  }
+  return executeProduction(manifest, authorization)
+}
+
+export function executeSyntheticForTest(manifest, authorization) {
+  if (arguments.length !== 2) fail('executeSyntheticForTest accepts exactly two arguments')
   return executeLegacy(manifest, authorization)
 }

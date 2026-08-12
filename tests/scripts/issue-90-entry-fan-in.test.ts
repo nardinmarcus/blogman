@@ -46,6 +46,13 @@ function hash(bytes: Buffer) {
 
 function policy() {
   return {
+    authorization: {
+      manifest_binding: 'manifest_sha256',
+      one_shot: true,
+      credential_slots: [
+        { name: 'cloudflare_delivery', scopes: ['account:read', 'workers:write', 'd1:write'] },
+      ],
+    },
     stages: [
       { name: 'authorization_accept', timeout_seconds: 30 },
       { name: 'live_preconditions', timeout_seconds: 120 },
@@ -59,6 +66,35 @@ function policy() {
       { name: 'smoke_control_t0', timeout_seconds: 300 },
     ],
     overall_timeout_seconds: 5400,
+    drift: {
+      frozen_preconditions: [
+        'repository.commit',
+        'repository.tree',
+        'ci.head_sha',
+        'ci.tree',
+        'artifact.file_tree.sha256',
+        'migration.catalog.sha256',
+        'target.baseline',
+      ],
+      observations: [
+        'target.deployment_id',
+        'target.version_id',
+        'target.traffic',
+        'rehearsal.receipt_sha256',
+      ],
+      mismatch_classification: 'Manifest Drift',
+    },
+    evidence: {
+      allowed_hash_algorithm: 'sha256',
+      excluded: [
+        'secret_values',
+        'raw_private_adapter_output',
+        'sql_bodies',
+        'private_operator_paths',
+      ],
+      production_evidence: 'real_adapters_only',
+      local_rehearsal_evidence: 'test_only',
+    },
   }
 }
 
@@ -108,18 +144,107 @@ function d1Binding(overrides: Record<string, unknown> = {}) {
   return binding
 }
 
+function preparedFromValue(value: Record<string, unknown>) {
+  const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  return { value, bytes, sha256: hash(bytes) }
+}
+
 function manifest(overrides: Record<string, unknown> = {}) {
   const d1 = d1Binding()
   const value = {
     format: MANIFEST_FORMAT,
-    repository: { commit: CANDIDATE, tree: 'd'.repeat(40) },
-    target: { account_id: 'account-id', d1_database_id: 'd1-id' },
-    policy: policy(),
+    preparation: {
+      prepare_entry: { path: 'scripts/issue-23-delivery-prepare.mjs', sha256: HASH },
+      execute_entry: { path: 'scripts/issue-23-delivery-entry.mjs', sha256: HASH },
+      manifest_schema: {
+        path: 'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
+        sha256: HASH,
+      },
+    },
+    repository: {
+      canonical: 'nardinmarcus/blogman',
+      remote: 'https://github.com/nardinmarcus/blogman.git',
+      commit: CANDIDATE,
+      tree: 'd'.repeat(40),
+      clean: true,
+    },
+    ci: {
+      provider: 'github-actions',
+      workflow: '.github/workflows/verify.yml',
+      run_id: 1,
+      attempt: 1,
+      event: 'push',
+      head_sha: CANDIDATE,
+      tree: 'd'.repeat(40),
+      conclusion: 'success',
+    },
+    toolchain: {
+      node: { version: '22.14.0', identity_sha256: HASH },
+      npm: { version: '10.9.2', identity_sha256: HASH },
+      wrangler: { version: '4.86.0', identity_sha256: HASH },
+      opennextjs_cloudflare: { version: '1.19.10', identity_sha256: HASH },
+      package_json_sha256: HASH,
+      lockfile_sha256: HASH,
+    },
+    artifact: {
+      archive: { path: '.open-next/open-next-build.zip', sha256: HASH, bytes: 1 },
+      worker: { path: '.open-next/worker.js', sha256: HASH, bytes: 1 },
+      file_tree: {
+        sha256: HASH,
+        complete: true,
+        files: [
+          { path: '.open-next/assets/index.html', sha256: HASH, bytes: 1 },
+          { path: '.open-next/worker.js', sha256: HASH, bytes: 1 },
+          { path: 'wrangler.toml', sha256: HASH, bytes: 1 },
+        ],
+      },
+    },
+    migration: {
+      delivery_mode: 'clean-start',
+      reset_sql: { path: 'db/issue-23-clean-start-reset.sql', sha256: HASH },
+      runner: { path: 'scripts/migrations.mjs', sha256: HASH },
+      catalog: {
+        path: 'db/ledger-migrations',
+        sha256: HASH,
+        migrations: [
+          { id: '001', path: 'db/ledger-migrations/001_initial_schema.sql', sha256: HASH },
+          { id: '002', path: 'db/ledger-migrations/002_add_ai_image_configuration.sql', sha256: HASH },
+          { id: '003', path: 'db/ledger-migrations/003_migrate_runtime_ai_configuration.sql', sha256: HASH },
+          { id: '004', path: 'db/ledger-migrations/004_complete_historical_text_ai_schema.sql', sha256: HASH },
+          { id: '005', path: 'db/ledger-migrations/005_fix_posts_fts_sync.sql', sha256: HASH },
+          { id: '006', path: 'db/ledger-migrations/006_add_rollout_safety_controls.sql', sha256: HASH },
+        ],
+      },
+      historical_data_disposition: {
+        production_export: 'NOT_APPLICABLE',
+        double_restore: 'NOT_APPLICABLE',
+        historical_baseline_queries: 'NOT_APPLICABLE',
+      },
+    },
     d1,
+    target: {
+      account_id: 'account-id',
+      d1_database_id: 'd1-id',
+      worker_name: 'blogman',
+      origin: 'https://blog.example.com',
+      baseline: {
+        deployment_id: 'deployment-before',
+        version_id: 'version-before',
+        d1_database_id: 'd1-id',
+        traffic: [{ version_id: 'version-before', percentage: 100 }],
+      },
+    },
+    policy: policy(),
+    rehearsal: {
+      runtime: { os: 'macos', architecture: 'arm64', node_version: '22.14.0' },
+      network: 'disabled',
+      status: 'PASS',
+      receipt_sha256: HASH,
+      production_write_adapter_calls: 0,
+    },
     ...overrides,
   }
-  const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
-  return { value, bytes, sha256: hash(bytes) }
+  return preparedFromValue(value)
 }
 
 function authorizationFor(prepared: ReturnType<typeof manifest>, id: string) {
@@ -182,6 +307,78 @@ function configureD1(failedStage: string | null = null) {
 }
 
 describe('Issue #90 formal entry fan-in', () => {
+  it('rejects missing-d1 and d1-only wrappers before Authorization or adapter selection', () => {
+    configureD1()
+    const complete = manifest()
+    const missingD1Value = structuredClone(complete.value) as Record<string, unknown>
+    Reflect.deleteProperty(missingD1Value, 'd1')
+    const missingD1 = preparedFromValue(missingD1Value)
+    const d1Only = preparedFromValue({
+      format: MANIFEST_FORMAT,
+      repository: { commit: CANDIDATE, tree: 'd'.repeat(40) },
+      target: { account_id: 'account-id', d1_database_id: 'd1-id' },
+      policy: {
+        stages: policy().stages,
+        overall_timeout_seconds: 5400,
+      },
+      d1: complete.value.d1,
+    })
+
+    for (const [prepared, id] of [[missingD1, 'fan-in-missing-d1'], [d1Only, 'fan-in-d1-only']]) {
+      let authorizationRead = false
+      const authorization = new Proxy(authorizationFor(prepared, id), {
+        get() {
+          authorizationRead = true
+          throw new Error('Authorization must not be read for an invalid manifest')
+        },
+      })
+      expect(() => execute(prepared, authorization)).toThrow(/manifest|required|canonical/u)
+      expect(authorizationRead).toBe(false)
+    }
+
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+    expect(runD1StagesMock).not.toHaveBeenCalled()
+  })
+
+  it('does not select an adapter until Authorization has been consumed', () => {
+    configureD1()
+    const events: string[] = []
+    createD1TransportMock.mockImplementation(() => {
+      events.push('adapter-selected')
+      return {
+        execute(request: { operation: string }) {
+          events.push(`transport:${request.operation}`)
+          return { status: 0, stdout: '{}', stderr: '', duration_ms: 1 }
+        },
+      }
+    })
+    const prepared = manifest()
+    const baseAuthorization = authorizationFor(prepared, 'fan-in-adversarial-order')
+    const authorization = {
+      get format() {
+        events.push('authorization:format')
+        return baseAuthorization.format
+      },
+      get authorization_id() {
+        events.push('authorization:authorization_id')
+        return baseAuthorization.authorization_id
+      },
+      get manifest_sha256() {
+        events.push('authorization:manifest_sha256')
+        return baseAuthorization.manifest_sha256
+      },
+      get decision() {
+        events.push('authorization:decision')
+        return baseAuthorization.decision
+      },
+    }
+
+    execute(prepared, authorization)
+
+    expect(events.indexOf('adapter-selected')).toBeGreaterThan(events.lastIndexOf('authorization:decision'))
+    expect(events.indexOf('transport:d1_identity')).toBeGreaterThan(events.indexOf('adapter-selected'))
+  })
+
   it('consumes authorization before reads, preserves D1 operation order, and cleans materialized expected state', () => {
     const calls = configureD1()
     let authorizationRead = false

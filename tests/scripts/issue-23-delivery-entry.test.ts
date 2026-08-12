@@ -4,6 +4,7 @@ import {
   buildLocalEntryReceipt,
   buildLocalRehearsalCommands,
   execute,
+  executeSyntheticForTest,
   parseLocalCommandResult,
 } from '../../scripts/issue-23-delivery-entry.mjs'
 
@@ -158,6 +159,14 @@ function commands() {
 }
 
 describe('Issue #23 pure local entry seam', () => {
+  it('keeps synthetic behavior outside the public production execute boundary', () => {
+    const manifest = preparedManifest('synthetic-is-test-only')
+    const auth = authorization(manifest, 'authorization-synthetic-is-test-only')
+
+    expect(() => execute(manifest, auth)).toThrow(/canonical|manifest|required|d1/u)
+    expect(executeSyntheticForTest(manifest, auth).value.evidence.source).toBe('synthetic')
+  })
+
   it('covers every adapter-backed Stage first-error matrix', () => {
     for (const [failedIndex, failedStage] of ADAPTER_FIRST_ERROR_STAGES.entries()) {
       const marker = `synthetic-first-error-${failedStage}`
@@ -170,7 +179,7 @@ describe('Issue #23 pure local entry seam', () => {
           index <= failedIndex ? 1 : 0,
         ])),
       }
-      const result = execute(manifest, auth)
+      const result = executeSyntheticForTest(manifest, auth)
 
       expect(result.value).toMatchObject({
         authorization_consumed: true,
@@ -201,7 +210,7 @@ describe('Issue #23 pure local entry seam', () => {
           index <= failedIndex ? 1 : 0,
         ])),
       }
-      const result = execute(manifest, auth)
+      const result = executeSyntheticForTest(manifest, auth)
 
       expect(result.value).toMatchObject({
         authorization_consumed: true,
@@ -225,7 +234,8 @@ describe('Issue #23 pure local entry seam', () => {
     const auth = authorization(manifest, 'authorization-accepted-once')
 
     expect(execute).toHaveLength(2)
-    const result = execute(manifest, auth)
+    expect(executeSyntheticForTest).toHaveLength(2)
+    const result = executeSyntheticForTest(manifest, auth)
 
     expect(Object.keys(result)).toEqual(['value', 'bytes', 'sha256'])
     expect(result.value).toEqual({
@@ -292,11 +302,11 @@ describe('Issue #23 pure local entry seam', () => {
     }
 
     expect(manifest.sha256).toBe(expected.identities.manifest_sha256)
-    const result = execute(manifest, auth)
+    const result = executeSyntheticForTest(manifest, auth)
     expect(result.value).toEqual(expected)
     expect(result.bytes).toEqual(Buffer.from(`${JSON.stringify(expected, null, 2)}\n`, 'utf8'))
     expect(result.sha256).toBe('7f8f1b8b4d8a0b86719dd04334c42ea685b7bc9950e4f98a18ddd1ffa0c2152a')
-    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+    expect(() => executeSyntheticForTest(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
     for (const excluded of ['commands', 'target', 'adapters', 'trace', 'raw_output', 'secrets', 'production_evidence']) {
       expect(result.value).not.toHaveProperty(excluded)
     }
@@ -342,11 +352,11 @@ describe('Issue #23 pure local entry seam', () => {
     }
 
     expect(manifest.sha256).toBe(expected.identities.manifest_sha256)
-    const result = execute(manifest, auth)
+    const result = executeSyntheticForTest(manifest, auth)
     expect(result.value).toEqual(expected)
     expect(result.bytes).toEqual(Buffer.from(`${JSON.stringify(expected, null, 2)}\n`, 'utf8'))
     expect(result.sha256).toBe('de38378809ff53161538ad0f17fab817d05a03ff5e484706a43b42cbbaf82388')
-    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+    expect(() => executeSyntheticForTest(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
     for (const excluded of ['commands', 'target', 'adapters', 'trace', 'raw_output', 'secrets', 'production_evidence']) {
       expect(result.value).not.toHaveProperty(excluded)
     }
@@ -369,7 +379,7 @@ describe('Issue #23 pure local entry seam', () => {
     }
 
     expect(manifest.sha256).toBe('4e048f9f458dfef58fb2ea05ba70e8b278082e78284470524e15ec402a6df13c')
-    const result = execute(manifest, auth)
+    const result = executeSyntheticForTest(manifest, auth)
 
     expect(result.value).toMatchObject({
       authorization_consumed: true,
@@ -396,7 +406,7 @@ describe('Issue #23 pure local entry seam', () => {
     })
     expect(result.bytes).toEqual(Buffer.from(`${JSON.stringify(result.value, null, 2)}\n`, 'utf8'))
     expect(result.sha256).toBe('96c4a09e4adc5f7f5fef4d15cacf47f5c152281be98145a275372ec57ecc3218')
-    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+    expect(() => executeSyntheticForTest(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
     for (const excluded of ['commands', 'target', 'adapters', 'trace', 'raw_output', 'secrets', 'production_evidence', 'error', 'message', 'stack']) {
       expect(result.value).not.toHaveProperty(excluded)
     }
@@ -413,19 +423,19 @@ describe('Issue #23 pure local entry seam', () => {
     })
     const driftedAuth = authorization(accepted, 'authorization-policy-drift')
 
-    expect(() => execute(drifted, driftedAuth)).toThrow(/policy/u)
-    expect(execute(accepted, driftedAuth).value.authorization_consumed).toBe(true)
+    expect(() => executeSyntheticForTest(drifted, driftedAuth)).toThrow(/policy/u)
+    expect(executeSyntheticForTest(accepted, driftedAuth).value.authorization_consumed).toBe(true)
 
     const missing = manifestWithoutPolicy(accepted)
     const missingAuth = authorization(accepted, 'authorization-policy-missing')
-    expect(() => execute(missing, missingAuth)).toThrow(/policy/u)
-    expect(execute(accepted, missingAuth).value.authorization_consumed).toBe(true)
+    expect(() => executeSyntheticForTest(missing, missingAuth)).toThrow(/policy/u)
+    expect(executeSyntheticForTest(accepted, missingAuth).value.authorization_consumed).toBe(true)
   })
 
   it('terminalizes a stage timeout before an overall timeout and ignores inherited scenario keys', () => {
     const manifest = preparedManifest('synthetic-stage-timeout')
     const auth = authorization(manifest, 'authorization-synthetic-stage-timeout')
-    const result = execute(manifest, auth)
+    const result = executeSyntheticForTest(manifest, auth)
 
     expect(result.value).toMatchObject({
       authorization_consumed: true,
@@ -448,7 +458,7 @@ describe('Issue #23 pure local entry seam', () => {
     for (const excluded of ['commands', 'target', 'adapters', 'trace', 'raw_output', 'secrets', 'production_evidence']) {
       expect(result.value).not.toHaveProperty(excluded)
     }
-    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+    expect(() => executeSyntheticForTest(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
 
     const inheritedStage = Object.getOwnPropertyDescriptor(Object.prototype, 'stage')
     const inheritedResult = Object.getOwnPropertyDescriptor(Object.prototype, 'result')
@@ -467,7 +477,7 @@ describe('Issue #23 pure local entry seam', () => {
       for (const marker of ['toString', 'constructor', '__proto__']) {
         const ordinaryManifest = preparedManifest(marker)
         const ordinaryAuth = authorization(ordinaryManifest, `authorization-inherited-${marker}`)
-        const ordinaryResult = execute(ordinaryManifest, ordinaryAuth)
+        const ordinaryResult = executeSyntheticForTest(ordinaryManifest, ordinaryAuth)
         expect(ordinaryResult.value.outcome).toBe('PASS')
         expect(JSON.stringify(ordinaryResult.value)).not.toMatch(/private-inherited-scenario/u)
       }
@@ -482,7 +492,7 @@ describe('Issue #23 pure local entry seam', () => {
   it('continues after a Stage duration exactly at its deadline', () => {
     const manifest = preparedManifest('synthetic-stage-timeout-equality')
     const auth = authorization(manifest, 'authorization-synthetic-stage-timeout-equality')
-    const result = execute(manifest, auth)
+    const result = executeSyntheticForTest(manifest, auth)
 
     expect(result.value).toMatchObject({
       authorization_consumed: true,
@@ -499,13 +509,13 @@ describe('Issue #23 pure local entry seam', () => {
       live_preconditions: 120000,
     })
     expect(result.value).not.toHaveProperty('synthetic_elapsed_ms')
-    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+    expect(() => executeSyntheticForTest(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
   })
 
   it('terminalizes an uncertain synthetic adapter outcome with no suffix execution', () => {
     const manifest = preparedManifest('synthetic-uncertain-adapter')
     const auth = authorization(manifest, 'authorization-synthetic-uncertain-adapter')
-    const result = execute(manifest, auth)
+    const result = executeSyntheticForTest(manifest, auth)
 
     expect(result.value).toMatchObject({
       authorization_consumed: true,
@@ -529,13 +539,13 @@ describe('Issue #23 pure local entry seam', () => {
       expect(result.value).not.toHaveProperty(excluded)
     }
     expect(JSON.stringify(result.value)).not.toMatch(/synthetic-private-output/u)
-    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+    expect(() => executeSyntheticForTest(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
   })
 
   it('enforces cumulative overall duration from a private synthetic elapsed observation at the public execute seam', () => {
     const manifest = preparedManifest('synthetic-overall-timeout')
     const auth = authorization(manifest, 'authorization-synthetic-overall-timeout')
-    const result = execute(manifest, auth)
+    const result = executeSyntheticForTest(manifest, auth)
 
     expect(result.value).toMatchObject({
       authorization_consumed: true,
@@ -555,13 +565,13 @@ describe('Issue #23 pure local entry seam', () => {
       ...expectedStageDurations,
     })
     expect(result.value).not.toHaveProperty('synthetic_elapsed_ms')
-    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+    expect(() => executeSyntheticForTest(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
   })
 
   it('continues after cumulative elapsed exactly at the overall deadline', () => {
     const manifest = preparedManifest('synthetic-overall-timeout-equality')
     const auth = authorization(manifest, 'authorization-synthetic-overall-timeout-equality')
-    const result = execute(manifest, auth)
+    const result = executeSyntheticForTest(manifest, auth)
 
     expect(result.value).toMatchObject({
       authorization_consumed: true,
@@ -575,7 +585,7 @@ describe('Issue #23 pure local entry seam', () => {
     expect(result.value.stage_counts).toEqual(expectedStageCounts)
     expect(result.value.stage_durations_ms).toEqual(expectedStageDurations)
     expect(result.value).not.toHaveProperty('synthetic_elapsed_ms')
-    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+    expect(() => executeSyntheticForTest(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
   })
 
   it('rejects manifest-mismatched Authorization before consumption', () => {
@@ -583,8 +593,8 @@ describe('Issue #23 pure local entry seam', () => {
     const otherManifest = preparedManifest('other-manifest')
     const auth = authorization(manifest, 'authorization-before-mismatch')
 
-    expect(() => execute(otherManifest, auth)).toThrow(/manifest/u)
-    expect(execute(manifest, auth).value.authorization_consumed).toBe(true)
+    expect(() => executeSyntheticForTest(otherManifest, auth)).toThrow(/manifest/u)
+    expect(executeSyntheticForTest(manifest, auth).value.authorization_consumed).toBe(true)
   })
 
   it('rejects a prepared manifest value with an unencoded own property before Authorization consumption', () => {
@@ -592,33 +602,33 @@ describe('Issue #23 pure local entry seam', () => {
     const auth = authorization(manifest, 'authorization-unencoded-own-property')
     Reflect.defineProperty(manifest.value, 'unencoded', { value: 'must-not-leak', enumerable: false, configurable: true })
 
-    expect(() => execute(manifest, auth)).toThrowError(new Error('Issue #23 local entry: manifest value does not match bytes'))
+    expect(() => executeSyntheticForTest(manifest, auth)).toThrowError(new Error('Issue #23 local entry: manifest value does not match bytes'))
     Reflect.deleteProperty(manifest.value, 'unencoded')
-    const result = execute(manifest, auth)
+    const result = executeSyntheticForTest(manifest, auth)
     expect(result.value.identities.manifest_sha256).toBe('c25189412aa7ea80bec6c78bd47380b6e477c696547e5e11b548ce848a4820a0')
     expect(result.value.identities.authorization_sha256).toBe('3a018d41c529acdbe5dedf83cf99487115a313fa69a8fa2d21f5cfaa5824a5fa')
     expect(result.value.attempt_id).toBe('3686549b77142bb240354b6535856072354b9a85bbd0b57afafa444e20e565aa')
     expect(result.value.evidence.hashes).toEqual(['bd19b4591857ea9aab139ced2eb1afb5955050297ef2d4edb7c722f5b736e68c'])
     expect(result.value.authorization_consumed).toBe(true)
     expect(result.sha256).toBe('b7c73664d835980537ef791360d3e5f3b03307a14dd8da5f1c3f8bfccfa53995')
-    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+    expect(() => executeSyntheticForTest(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
   })
 
   it('rejects Authorization plan fields and any third execute argument', () => {
     const manifest = preparedManifest('argument-boundary')
     const auth = authorization(manifest, 'authorization-argument-boundary')
 
-    expect(() => execute(manifest, { ...auth, plan: { stages: [] } })).toThrow(/authorization/u)
+    expect(() => executeSyntheticForTest(manifest, { ...auth, plan: { stages: [] } })).toThrow(/authorization/u)
     expect(() => execute(manifest, auth, { target: 'alternate-target' })).toThrow(/two arguments/u)
-    expect(execute(manifest, auth).value.authorization_consumed).toBe(true)
+    expect(executeSyntheticForTest(manifest, auth).value.authorization_consumed).toBe(true)
   })
 
   it('rejects replay of the same Authorization after the first terminal result', () => {
     const manifest = preparedManifest('replay-boundary')
     const auth = authorization(manifest, 'authorization-replay')
 
-    expect(execute(manifest, auth).value.finalized).toBe(true)
-    expect(() => execute(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
+    expect(executeSyntheticForTest(manifest, auth).value.finalized).toBe(true)
+    expect(() => executeSyntheticForTest(manifest, auth)).toThrow(/consumed|replay|one-shot/u)
   })
 
   it('constructs fixed local commands and rejects command mutation', () => {
