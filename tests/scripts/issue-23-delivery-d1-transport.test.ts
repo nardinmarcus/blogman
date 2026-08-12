@@ -397,11 +397,11 @@ describe('Issue #90 D1 transport', () => {
   })
 
   it.each([
-    ['timeout', 'setInterval(() => {}, 1000)', 'timeout'],
-    ['nonzero', 'process.stderr.write("private child secret"); process.exit(7)', 'nonzero'],
-  ] as const)('classifies a real child %s once without exposing raw output', (_name, source, classification) => {
+    ['timeout', 'setInterval(() => {}, 1000)', 'timeout', 40],
+    ['nonzero', 'process.stderr.write("private child secret"); process.exit(7)', 'nonzero', 500],
+  ] as const)('classifies a real child %s once without exposing raw output', (_name, source, classification, timeoutMs) => {
     try {
-      runBoundedChild(process.execPath, ['-e', source], 40, 1024)
+      runBoundedChild(process.execPath, ['-e', source], timeoutMs, 1024)
       throw new Error('expected child failure')
     } catch (error) {
       expect(error).toBeInstanceOf(D1ChildError)
