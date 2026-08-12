@@ -1441,6 +1441,8 @@ describe('Issue #23 Delivery Preparation', () => {
         'scripts/issue-23-delivery-prepare.mjs',
         'scripts/issue-23-delivery-entry.mjs',
         'scripts/issue-23-delivery-formal-fault-harness.mjs',
+        'scripts/issue-23-delivery-formal-context.mjs',
+        'scripts/issue-23-delivery-formal-manifest.mjs',
         'scripts/issue-23-delivery-rehearsal.mjs',
         'scripts/issue-23-delivery-d1-child.mjs',
         'scripts/issue-23-delivery-d1-contracts.mjs',

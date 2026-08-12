@@ -13,6 +13,10 @@ concurrency:
   group: verify-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -38,6 +42,42 @@ jobs:
           CI: true
           NEXT_TELEMETRY_DISABLED: '1'
         run: npm run verify:quick
+
+  verify-target-macos:
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Assert target runtime
+        run: test "$(node -p 'process.platform')" = "darwin"
+
+      - name: Run formal prepare, real OpenNext artifact, and no-network rehearsal
+        env:
+          CI: true
+          NEXT_TELEMETRY_DISABLED: '1'
+          GH_TOKEN: ${{ github.token }}
+        run: npm run test:run -- tests/scripts/issue-23-delivery-prepare.test.ts --reporter=verbose
+
+      - name: Run Issue #92 formal rehearsal macOS exact gate
+        env:
+          CI: true
+          NEXT_TELEMETRY_DISABLED: '1'
+          GH_TOKEN: ${{ github.token }}
+        run: npm run test:run -- tests/scripts/issue-92-formal-rehearsal.test.ts --reporter=verbose
 
   verify-migrations:
     runs-on: ubuntu-latest

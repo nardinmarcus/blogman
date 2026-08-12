@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
@@ -54,6 +54,19 @@ describe('Verify workflow test partition', () => {
       expect(job).not.toContain('continue-on-error')
       expect(job).not.toContain('|| true')
     }
+  })
+
+  it('keeps the exact macOS formal gate in the candidate Verify workflow with read-only GitHub access', () => {
+    const workflow = readFileSync(join(repoRoot, '.github', 'workflows', 'verify.yml'), 'utf8')
+    const macosJob = workflowJob(workflow, 'verify-target-macos')
+
+    expect(workflow).toContain('permissions:\n  contents: read\n  actions: read')
+    expect(existsSync(join(repoRoot, '.github', 'workflows', 'formal-rehearsal-macos.yml'))).toBe(false)
+    expect(macosJob).toContain('runs-on: macos-latest')
+    expect(macosJob).toContain("ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}")
+    expect(macosJob).toContain('GH_TOKEN: ${{ github.token }}')
+    expect(macosJob).not.toContain('workflow_run')
+    expect(macosJob).not.toMatch(/secrets\.|contents: write|actions: write/u)
   })
 
   it('fails closed while skipping the long suite for proven-unrelated changes', () => {

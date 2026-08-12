@@ -677,7 +677,7 @@ describe('Issue #23 pure local entry seam', () => {
     const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
     const result = { value, bytes, sha256: hash(bytes) }
 
-    expect(validateProductionTerminalEvidence(result)).toBe(true)
+    expect(() => validateProductionTerminalEvidence(result)).toThrow(/malformed/u)
     const forgedValue = { ...value, evidence: { ...value.evidence, production: false } }
     expect(() => validateProductionTerminalEvidence({ ...result, value: forgedValue })).toThrow(/malformed/u)
     const forgedBytes = Buffer.from(`${JSON.stringify({ ...value, finalized: false }, null, 2)}\n`, 'utf8')

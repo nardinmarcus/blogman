@@ -6,6 +6,10 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { runLocalRehearsal } from './issue-23-delivery-rehearsal.mjs'
 import { hashD1ArtifactDirectory } from './issue-23-delivery-d1-contracts.mjs'
 import { buildFormalRuntimeReceipt } from './issue-23-delivery-formal-runtime.mjs'
+import { currentFormalRehearsalContext } from './issue-23-delivery-formal-context.mjs'
+import { FORMAL_TEST_MANIFEST_FORMAT } from './issue-23-delivery-formal-manifest.mjs'
+
+export { FORMAL_TEST_MANIFEST_FORMAT } from './issue-23-delivery-formal-manifest.mjs'
 
 const MANIFEST_SCHEMA_URL = new URL(
   '../schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
@@ -123,6 +127,32 @@ const CONFIG_SCHEMA = Object.freeze({
       required: MANIFEST_SCHEMA.properties.target.required.filter((key) => key !== 'smoke'),
     },
     rehearsal: CONFIG_REHEARSAL_SCHEMA,
+  },
+})
+const PRODUCTION_MANIFEST_POLICY = Object.freeze({
+  format: CANONICAL_MANIFEST_FORMAT,
+  conclusion: 'success',
+  testOnly: false,
+})
+const FORMAL_TEST_MANIFEST_POLICY = Object.freeze({
+  format: FORMAL_TEST_MANIFEST_FORMAT,
+  conclusion: 'in_progress-test-evidence',
+  testOnly: true,
+})
+const FORMAL_TEST_MANIFEST_SCHEMA = Object.freeze({
+  ...MANIFEST_SCHEMA,
+  required: [...MANIFEST_SCHEMA.required, 'test_only'],
+  properties: {
+    ...MANIFEST_SCHEMA.properties,
+    format: { const: FORMAL_TEST_MANIFEST_FORMAT },
+    ci: {
+      ...MANIFEST_SCHEMA.properties.ci,
+      properties: {
+        ...MANIFEST_SCHEMA.properties.ci.properties,
+        conclusion: { const: 'in_progress-test-evidence' },
+      },
+    },
+    test_only: { const: true },
   },
 })
 
@@ -735,6 +765,66 @@ function resolveCiFacts(repositoryPath, config, repository) {
   }
 }
 
+function resolveFormalCiFacts(repositoryPath, config, repository) {
+  const runId = process.env.GITHUB_RUN_ID
+  const attempt = process.env.GITHUB_RUN_ATTEMPT
+  const event = process.env.GITHUB_EVENT_NAME
+  const eventPath = process.env.GITHUB_EVENT_PATH
+  if (process.env.GITHUB_ACTIONS !== 'true'
+    || !/^[1-9][0-9]*$/u.test(runId ?? '')
+    || attempt !== '1'
+    || !['push', 'pull_request'].includes(event)
+    || typeof eventPath !== 'string') {
+    fail('formal rehearsal requires the current GitHub Actions run identity')
+  }
+  let eventPayload
+  try {
+    eventPayload = JSON.parse(readFileSync(eventPath, 'utf8'))
+  } catch {
+    fail('formal rehearsal GitHub event payload is unreadable')
+  }
+  const eventHeadSha = event === 'pull_request'
+    ? eventPayload?.pull_request?.head?.sha
+    : eventPayload?.after
+  if (config.ci.expected_head_sha !== repository.commit
+    || eventHeadSha !== repository.commit) {
+    fail('formal rehearsal event candidate does not match the checked-out candidate')
+  }
+  const parse = (output, label) => {
+    try { return JSON.parse(output) } catch { fail(`${label} is invalid`) }
+  }
+  const run = parse(command(repositoryPath, 'gh', [
+    'api', `repos/nardinmarcus/blogman/actions/runs/${runId}`,
+  ]), 'formal rehearsal GitHub Actions run')
+  if (!isRecord(run)
+    || run.id !== Number(runId)
+    || run.run_attempt !== Number(attempt)
+    || run.event !== event
+    || run.head_sha !== repository.commit
+    || run.status !== 'in_progress'
+    || run.conclusion !== null
+    || typeof run.path !== 'string'
+    || !run.path.includes(`/${config.ci.workflow}@`)) {
+    fail('formal rehearsal current run receipt is not an in-progress exact candidate run')
+  }
+  const commit = parse(command(repositoryPath, 'gh', [
+    'api', `repos/nardinmarcus/blogman/git/commits/${repository.commit}`,
+  ]), 'formal rehearsal GitHub commit identity')
+  if (!isRecord(commit) || !isRecord(commit.tree) || commit.tree.sha !== repository.tree) {
+    fail('formal rehearsal candidate tree does not match the checked-out candidate tree')
+  }
+  return {
+    provider: 'github-actions',
+    workflow: config.ci.workflow,
+    run_id: run.id,
+    attempt: run.run_attempt,
+    event: run.event,
+    head_sha: run.head_sha,
+    tree: commit.tree.sha,
+    conclusion: 'in_progress-test-evidence',
+  }
+}
+
 function resolveTargetFacts(target) {
   if (!isRecord(target) || !isRecord(target.baseline)
     || target.baseline.d1_database_id !== target.d1_database_id
@@ -982,7 +1072,7 @@ function assertPublicPath(path, label) {
   }
 }
 
-function assertManifestRelationships(manifest) {
+function assertManifestRelationships(manifest, policy = PRODUCTION_MANIFEST_POLICY) {
   if (manifest.repository.canonical !== 'nardinmarcus/blogman') {
     fail('repository.canonical must identify the canonical repository')
   }
@@ -995,8 +1085,8 @@ function assertManifestRelationships(manifest) {
   if (manifest.ci.tree !== manifest.repository.tree) {
     fail('ci.tree must equal repository.tree')
   }
-  if (manifest.ci.conclusion !== 'success') {
-    fail('ci.conclusion must be success')
+  if (manifest.ci.conclusion !== policy.conclusion) {
+    fail('ci.conclusion is invalid')
   }
   if (manifest.preparation.execute_entry.path !== 'scripts/phase-b-sequence.mjs') {
     fail('preparation.execute_entry must bind the canonical upload lifecycle')
@@ -1121,10 +1211,15 @@ function assertManifestRelationships(manifest) {
   }
 }
 
+function validateConfigStructure(value, policy = PRODUCTION_MANIFEST_POLICY) {
+  const schema = policy.testOnly ? FORMAL_TEST_MANIFEST_SCHEMA : MANIFEST_SCHEMA
+  validateSchemaValue(value, schema)
+  assertManifestRelationships(value, policy)
+  return orderBySchema(value, schema)
+}
+
 function validateManifestValue(value) {
-  validateSchemaValue(value, MANIFEST_SCHEMA)
-  assertManifestRelationships(value)
-  return value
+  return validateConfigStructure(value)
 }
 
 export function canonicalBytes(value) {
@@ -1391,13 +1486,11 @@ function readProductionWriteCallCount(adapter) {
 }
 
 function validateConfig(config) {
-  const manifest = { format: CANONICAL_MANIFEST_FORMAT, ...config }
-  validateManifestValue(manifest)
-  return orderBySchema(manifest, MANIFEST_SCHEMA)
+  return validateConfigStructure({ format: CANONICAL_MANIFEST_FORMAT, ...config })
 }
 
-function preparedResult(value, testOnly = false) {
-  const ordered = orderBySchema(value, MANIFEST_SCHEMA)
+function preparedResult(value, testOnly = false, schema = MANIFEST_SCHEMA) {
+  const ordered = orderBySchema(value, schema)
   const canonical = Buffer.from(`${JSON.stringify(ordered, null, 2)}\n`, 'utf8')
   const identity = sha256(canonical)
   return Object.freeze({
@@ -1408,6 +1501,15 @@ function preparedResult(value, testOnly = false) {
     },
     sha256: identity,
   })
+}
+
+function formalTestPreparedResult(resolvedConfig) {
+  const value = validateConfigStructure({
+    format: FORMAL_TEST_MANIFEST_FORMAT,
+    ...resolvedConfig,
+    test_only: true,
+  }, FORMAL_TEST_MANIFEST_POLICY)
+  return preparedResult(value, true, FORMAL_TEST_MANIFEST_SCHEMA)
 }
 
 function assertReadOnlyPreparation(productionWriteAdapter, callsBefore) {
@@ -1437,7 +1539,12 @@ export function prepare(config, options) {
   }
   validateSchemaValue(config, CONFIG_SCHEMA, '$.config')
   assertCanonicalProductionPaths(config)
-  const resolvedConfig = resolveFacts(config, { verifyGeneratedResolverLinks: true })
+  const formal = currentFormalRehearsalContext()
+  const resolvedConfig = resolveFacts(config, {
+    verifyGeneratedResolverLinks: true,
+    ...(formal ? { ciResolver: resolveFormalCiFacts } : {}),
+  })
+  if (formal) return formalTestPreparedResult(resolvedConfig)
   const value = validateConfig(resolvedConfig)
   return preparedResult(value)
 }

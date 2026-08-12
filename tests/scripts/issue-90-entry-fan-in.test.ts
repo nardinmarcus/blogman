@@ -48,7 +48,7 @@ afterEach(() => {
   vi.mocked(realpathSync).mockImplementation(fsActual.realpathSync!)
 })
 
-import { execute } from '../../scripts/issue-23-delivery-entry.mjs'
+import { execute, validateProductionTerminalEvidence } from '../../scripts/issue-23-delivery-entry.mjs'
 import {
   canonicalBytes,
   prepareForTestsOnly,
@@ -524,14 +524,18 @@ function d1Result(failedStage: string | null = null) {
   return { value, bytes, sha256: hash(bytes) }
 }
 
-function configureWorker() {
-  createWorkerTransportMock.mockReturnValue({ livePreconditions: () => ({ outcome: 'PASS', duration_ms: 1 }), execute() {} })
+function workerResult() {
   const value = { format: 'blogman-issue-23-worker-stages/v1', outcome: 'ERROR', first_terminal_stage: 'worker_deploy', failure: { classification: 'worker_adapter_error' }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, mutation_counts: { attempted: 1, confirmed: 0 }, evidence: { source: 'production', production: true, promotable: false, hashes: { upload_acceptance_sha256: null, version_traffic_sha256: null, smoke_control_t0_sha256: null } }, finalized: true }
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
-  runWorkerStagesMock.mockReturnValue({ value, bytes, sha256: hash(bytes) })
+  return { value, bytes, sha256: hash(bytes) }
 }
 
-function configureD1(failedStage: string | null = null) {
+function configureWorker() {
+  createWorkerTransportMock.mockReturnValue({ livePreconditions: () => ({ outcome: 'PASS', duration_ms: 1 }), execute() {} })
+  runWorkerStagesMock.mockReturnValue(workerResult())
+}
+
+function configureD1(failedStage: string | null = null, receipt = d1Result(failedStage)) {
   const calls: string[] = []
   const transport = {
     execute(request: { operation: string }) {
@@ -545,7 +549,7 @@ function configureD1(failedStage: string | null = null) {
       ? D1_OPERATIONS
       : D1_OPERATIONS.slice(0, D1_OPERATIONS.indexOf(failedStage) + 1)
     for (const operation of operations) activeTransport.execute({ operation })
-    return d1Result(failedStage)
+    return receipt
   })
   return calls
 }
@@ -832,6 +836,43 @@ describe('Issue #90 formal entry fan-in', () => {
       },
     })
     expect(JSON.stringify(result.value)).not.toMatch(/transport setup failed/u)
+  })
+
+  it('binds terminal production evidence to its canonical manifest and raw stage receipts', () => {
+    const prepared = actualPreparedManifest()
+    const d1Receipt = d1Result()
+    d1Receipt.value.evidence.account_id = prepared.value.target.account_id
+    d1Receipt.value.evidence.d1_database_id = prepared.value.target.d1_database_id
+    d1Receipt.value.evidence.candidate_id = prepared.value.repository.commit
+    d1Receipt.value.evidence.config_sha256 = prepared.value.d1.config_sha256
+    d1Receipt.value.evidence.wrangler_sha256 = prepared.value.d1.wrangler_sha256
+    d1Receipt.value.evidence.expected_reconciliation_sha256 = prepared.value.d1.expected_reconciliation_sha256
+    d1Receipt.bytes = Buffer.from(`${JSON.stringify(d1Receipt.value, null, 2)}\n`, 'utf8')
+    d1Receipt.sha256 = hash(d1Receipt.bytes)
+    configureD1(null, d1Receipt)
+    configureWorker()
+    const terminal = execute(prepared, authorizationFor(prepared, 'fan-in-terminal-evidence'))
+    const workerReceipt = workerResult()
+
+    expect(validateProductionTerminalEvidence(terminal, {
+      manifest: prepared,
+      d1Receipt,
+      workerReceipt,
+    })).toBe(true)
+
+    const forgedValue = structuredClone(terminal.value)
+    forgedValue.identities.manifest_sha256 = 'f'.repeat(64)
+    forgedValue.attempt_id = hash(Buffer.from(`${JSON.stringify({
+      format: 'blogman-issue-23-attempt/v1',
+      ...forgedValue.identities,
+    }, null, 2)}\n`, 'utf8'))
+    const forgedBytes = Buffer.from(`${JSON.stringify(forgedValue, null, 2)}\n`, 'utf8')
+    const forgedTerminal = { value: forgedValue, bytes: forgedBytes, sha256: hash(forgedBytes) }
+    expect(() => validateProductionTerminalEvidence(forgedTerminal, {
+      manifest: prepared,
+      d1Receipt,
+      workerReceipt,
+    })).toThrow(/production terminal evidence/u)
   })
 
   it('accepts the canonical output produced by prepare at the execute seam', () => {
