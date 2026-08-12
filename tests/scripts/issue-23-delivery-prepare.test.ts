@@ -18,6 +18,7 @@ import {
 import { runLocalRehearsal, runLocalRehearsalForTestsOnly } from '../../scripts/issue-23-delivery-rehearsal.mjs'
 import { hashD1ArtifactDirectory as contractHashD1ArtifactDirectory } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
 import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-formal-runtime.mjs'
+import nextConfig from '../../next.config'
 
 const SHA40 = 'a'.repeat(40)
 const SHA40_B = 'b'.repeat(40)
@@ -1039,6 +1040,17 @@ describe('Issue #23 Delivery Preparation', () => {
       if (previousNodeEnv === undefined) delete process.env.NODE_ENV
       else process.env.NODE_ENV = previousNodeEnv
     }
+  })
+
+  it('pins stable named Webpack module IDs for the real OpenNext build command', () => {
+    const webpack = nextConfig.webpack
+    expect(webpack).toBeTypeOf('function')
+
+    const configuration = { optimization: {} }
+    const configured = webpack?.(configuration as never, {} as never)
+
+    expect(configured).toBe(configuration)
+    expect(configured?.optimization?.moduleIds).toBe('named')
   })
 
   it('rejects a node action before archive identity', () => {

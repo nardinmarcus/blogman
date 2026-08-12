@@ -25,6 +25,12 @@ const nextConfig: NextConfig = {
     root: resolve(process.cwd()),
   },
 
+  webpack: (config) => {
+    config.optimization ??= {};
+    config.optimization.moduleIds = "named";
+    return config;
+  },
+
   // 移除客户端环境变量暴露（安全风险）
   // 敏感信息应该只在服务端使用
 
