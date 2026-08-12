@@ -209,6 +209,10 @@ const SAFE_ADAPTER_CLASSIFICATIONS = Object.freeze([
 ])
 const consumedAuthorizationDigests = new Set()
 
+// This is an in-process, pre-persistence provenance gate. WeakMap identity cannot
+// survive serialization; offline evidence verification needs a signed receipt sink.
+const productionTerminalSidecars = new WeakMap()
+
 function isPlainRecord(value) {
   return value !== null
     && typeof value === 'object'
@@ -1750,10 +1754,10 @@ function runLivePreconditions(manifest, d1, elapsed_ms = 0) {
 }
 
 function productionEvidenceHashes(d1Result, workerResult) {
-  const d1Hashes = d1Result.evidence_hashes ?? {}
+  const d1Hashes = d1Result?.evidence_hashes ?? {}
   const workerHashes = workerResult?.evidence_hashes ?? {}
   return Object.fromEntries([
-    ['d1_stage_receipt_sha256', d1Result.sha256],
+    ['d1_stage_receipt_sha256', d1Result?.sha256 ?? null],
     ...D1_EVIDENCE_HASHES.map((name) => [`d1_${name}`, d1Hashes[name] ?? null]),
     ['worker_stage_receipt_sha256', workerResult?.sha256 ?? null],
     ...WORKER_EVIDENCE_HASHES.map((name) => [`worker_${name}`, workerHashes[name] ?? null]),
@@ -1895,29 +1899,38 @@ function executeProduction(manifest, authorization) {
       source: evidenceSource,
       production: evidenceProduction,
       promotable: evidencePromotable,
-      hashes: productionEvidenceHashes(d1Result, workerResult),
+      hashes: productionEvidenceHashes(
+        d1Receipt === undefined ? null : d1Result,
+        workerReceipt === undefined ? null : workerResult,
+      ),
       cleanup,
     },
     finalized: true,
   }
-  return terminalResult(value, {
+  const result = terminalResult(value, {
     manifest,
     d1: d1Receipt,
     worker: workerReceipt,
   })
+  productionTerminalSidecars.set(result, result.receipts)
+  return result
 }
 
 /**
- * Production Evidence validator. It treats canonical bytes as the sole authority;
- * `value` is only required to be an exact decoded copy of those bytes.
+ * Same-process, pre-persistence Production Evidence validator. It requires the
+ * terminal object and exact frozen sidecar registered by executeProduction;
+ * canonical bytes remain the authority for its public value.
  */
 export function validateProductionTerminalEvidence(result) {
+  const registeredReceipts = isPlainRecord(result) ? productionTerminalSidecars.get(result) : undefined
   if (arguments.length !== 1 || !isPlainRecord(result) || !isPlainRecord(result.value)
     || !(result.bytes instanceof Uint8Array)
-    || typeof result.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(result.sha256)) {
+    || typeof result.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(result.sha256)
+    || !registeredReceipts || !Object.isFrozen(registeredReceipts)) {
     fail('production terminal evidence is malformed')
   }
   const receipts = readTerminalReceipts(result)
+  if (receipts !== registeredReceipts) fail('production terminal evidence is malformed')
   const bytes = Buffer.from(result.bytes)
   if (sha256(bytes) !== result.sha256) fail('production terminal evidence is malformed')
   const text = bytes.toString('utf8')
@@ -1971,7 +1984,9 @@ export function validateProductionTerminalEvidence(result) {
     || value.mutation_counts.production_writes !== value.mutation_counts.confirmed
     || value.mutation_counts.confirmed > value.mutation_counts.attempted
     || value.mutation_counts.attempted > 4
-    || !/^[a-f0-9]{64}$/u.test(value.evidence.hashes.d1_stage_receipt_sha256)
+    || (value.stage_counts.d1_identity === 0
+      ? value.evidence.hashes.d1_stage_receipt_sha256 !== null
+      : !/^[a-f0-9]{64}$/u.test(value.evidence.hashes.d1_stage_receipt_sha256))
     || (value.stage_counts.worker_deploy === 0
       ? value.evidence.hashes.worker_stage_receipt_sha256 !== null
       : !/^[a-f0-9]{64}$/u.test(value.evidence.hashes.worker_stage_receipt_sha256))
@@ -2005,22 +2020,28 @@ export function validateProductionTerminalEvidence(result) {
   }
 
   const d1Receipt = receipts.d1
-  const normalizedD1 = normalizeProductionD1Result(d1Receipt)
-  if (!isPlainRecord(d1Receipt?.value)
-    || !Buffer.from(d1Receipt.bytes ?? []).equals(canonicalJsonBytes(d1Receipt.value))
-    || normalizedD1.sha256 !== value.evidence.hashes.d1_stage_receipt_sha256
-    || d1Receipt.value.evidence.source !== 'production'
-    || d1Receipt.value.evidence.production !== true
-    || d1Receipt.value.evidence.promotable !== (d1Receipt.value.outcome === 'PASS')
-    || d1Receipt.value.evidence.candidate_id !== parsedManifest.repository.commit
-    || d1Receipt.value.evidence.account_id !== parsedManifest.target.account_id
-    || d1Receipt.value.evidence.d1_database_id !== parsedManifest.target.d1_database_id
-    || d1Receipt.value.evidence.config_sha256 !== parsedManifest.d1.config_sha256
-    || d1Receipt.value.evidence.wrangler_sha256 !== parsedManifest.d1.wrangler_sha256
-    || d1Receipt.value.evidence.expected_reconciliation_sha256 !== parsedManifest.d1.expected_reconciliation_sha256
-    || PRODUCTION_D1_STAGES.some((stage) => value.stage_counts[stage] !== d1Receipt.value.stage_counts[stage])
-    || D1_EVIDENCE_HASHES.some((name) => value.evidence.hashes[`d1_${name}`] !== d1Receipt.value.evidence[name])) {
-    fail('production terminal evidence is invalid')
+  if (value.stage_counts.d1_identity === 0) {
+    if (d1Receipt !== null || D1_EVIDENCE_HASHES.some((name) => value.evidence.hashes[`d1_${name}`] !== null)) {
+      fail('production terminal evidence is invalid')
+    }
+  } else {
+    const normalizedD1 = normalizeProductionD1Result(d1Receipt)
+    if (!isPlainRecord(d1Receipt?.value)
+      || !Buffer.from(d1Receipt.bytes ?? []).equals(canonicalJsonBytes(d1Receipt.value))
+      || normalizedD1.sha256 !== value.evidence.hashes.d1_stage_receipt_sha256
+      || d1Receipt.value.evidence.source !== 'production'
+      || d1Receipt.value.evidence.production !== true
+      || d1Receipt.value.evidence.promotable !== (d1Receipt.value.outcome === 'PASS')
+      || d1Receipt.value.evidence.candidate_id !== parsedManifest.repository.commit
+      || d1Receipt.value.evidence.account_id !== parsedManifest.target.account_id
+      || d1Receipt.value.evidence.d1_database_id !== parsedManifest.target.d1_database_id
+      || d1Receipt.value.evidence.config_sha256 !== parsedManifest.d1.config_sha256
+      || d1Receipt.value.evidence.wrangler_sha256 !== parsedManifest.d1.wrangler_sha256
+      || d1Receipt.value.evidence.expected_reconciliation_sha256 !== parsedManifest.d1.expected_reconciliation_sha256
+      || PRODUCTION_D1_STAGES.some((stage) => value.stage_counts[stage] !== d1Receipt.value.stage_counts[stage])
+      || D1_EVIDENCE_HASHES.some((name) => value.evidence.hashes[`d1_${name}`] !== d1Receipt.value.evidence[name])) {
+      fail('production terminal evidence is invalid')
+    }
   }
 
   const workerHash = value.evidence.hashes.worker_stage_receipt_sha256

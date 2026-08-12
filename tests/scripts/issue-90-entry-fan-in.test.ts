@@ -531,6 +531,25 @@ function workerResult() {
   return { value, bytes, sha256: hash(bytes) }
 }
 
+function passingWorkerResult() {
+  const value = {
+    format: 'blogman-issue-23-worker-stages/v1', outcome: 'PASS', first_terminal_stage: null, failure: null,
+    stage_counts: { worker_deploy: 1, version_traffic_verification: 1, smoke_control_t0: 1 },
+    stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 1, smoke_control_t0: 1 },
+    mutation_counts: { attempted: 2, confirmed: 2 },
+    evidence: {
+      source: 'production', production: true, promotable: true,
+      hashes: {
+        upload_acceptance_sha256: '1'.repeat(64), version_traffic_sha256: '2'.repeat(64),
+        smoke_control_t0_sha256: '3'.repeat(64),
+      },
+    },
+    finalized: true,
+  }
+  const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  return { value, bytes, sha256: hash(bytes) }
+}
+
 function configureWorker() {
   createWorkerTransportMock.mockReturnValue({ livePreconditions: () => ({ outcome: 'PASS', duration_ms: 1 }), execute() {} })
   runWorkerStagesMock.mockReturnValue(workerResult())
@@ -739,6 +758,48 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(createD1TransportMock).not.toHaveBeenCalled()
   })
 
+  it('validates an execute-produced early NON_PASS terminal with no D1 or Worker receipt', () => {
+    const prepared = actualPreparedManifest()
+    createWorkerTransportMock.mockReturnValue({
+      livePreconditions: () => ({ outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }),
+      execute() {},
+    })
+
+    const terminal = execute(prepared, authorizationFor(prepared, 'fan-in-early-production-terminal'))
+
+    expect(terminal.value).toMatchObject({
+      outcome: 'NON_PASS', first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'Manifest Drift' },
+    })
+    expect(terminal.receipts).toEqual(expect.objectContaining({
+      manifest: expect.objectContaining({ sha256: prepared.sha256 }), d1: null, worker: null,
+    }))
+    expect(validateProductionTerminalEvidence(terminal)).toBe(true)
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+  })
+
+  it('validates an execute-produced D1 terminal with its D1 receipt and no Worker receipt', () => {
+    const prepared = actualPreparedManifest()
+    const receipt = d1Result('d1_identity')
+    receipt.value.evidence.account_id = prepared.value.target.account_id
+    receipt.value.evidence.d1_database_id = prepared.value.target.d1_database_id
+    receipt.value.evidence.candidate_id = prepared.value.repository.commit
+    receipt.value.evidence.config_sha256 = prepared.value.d1.config_sha256
+    receipt.value.evidence.wrangler_sha256 = prepared.value.d1.wrangler_sha256
+    receipt.value.evidence.expected_reconciliation_sha256 = prepared.value.d1.expected_reconciliation_sha256
+    receipt.bytes = Buffer.from(`${JSON.stringify(receipt.value, null, 2)}\n`, 'utf8')
+    receipt.sha256 = hash(receipt.bytes)
+    configureD1('d1_identity', receipt)
+
+    const terminal = execute(prepared, authorizationFor(prepared, 'fan-in-d1-production-terminal'))
+
+    expect(terminal.value).toMatchObject({ outcome: 'NON_PASS', first_terminal_stage: 'd1_identity' })
+    expect(terminal.receipts).toEqual(expect.objectContaining({
+      d1: expect.objectContaining({ sha256: receipt.sha256 }), worker: null,
+    }))
+    expect(validateProductionTerminalEvidence(terminal)).toBe(true)
+  })
+
   it('rejects rehearsal schema drift and an unbound expected reconciliation hash before selecting a production adapter', () => {
     configureD1()
     const missingCleanup = manifest()
@@ -864,16 +925,53 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(Object.isFrozen(terminal.receipts)).toBe(true)
     expect(validateProductionTerminalEvidence(terminal)).toBe(true)
 
-    const forgedValue = structuredClone(terminal.value)
-    forgedValue.identities.manifest_sha256 = 'f'.repeat(64)
-    forgedValue.attempt_id = hash(Buffer.from(`${JSON.stringify({
-      format: 'blogman-issue-23-attempt/v1',
-      ...forgedValue.identities,
-    }, null, 2)}\n`, 'utf8'))
-    const forgedBytes = Buffer.from(`${JSON.stringify(forgedValue, null, 2)}\n`, 'utf8')
-    const forgedTerminal = { value: forgedValue, bytes: forgedBytes, sha256: hash(forgedBytes) }
-    expect(() => validateProductionTerminalEvidence(forgedTerminal))
+    const copiedReceipts = terminal.receipts
+    const spreadTerminal = { ...terminal }
+    Object.defineProperty(spreadTerminal, 'receipts', {
+      value: copiedReceipts, enumerable: false, writable: false, configurable: false,
+    })
+    expect(() => validateProductionTerminalEvidence(spreadTerminal))
       .toThrow(/production terminal evidence/u)
+
+    const clonedTerminal = structuredClone(terminal)
+    Object.defineProperty(clonedTerminal, 'receipts', {
+      value: copiedReceipts, enumerable: false, writable: false, configurable: false,
+    })
+    expect(() => validateProductionTerminalEvidence(clonedTerminal))
+      .toThrow(/production terminal evidence/u)
+
+    const descriptorTamperedTerminal = { ...terminal }
+    Object.defineProperty(descriptorTamperedTerminal, 'receipts', {
+      value: copiedReceipts, enumerable: true, writable: false, configurable: false,
+    })
+    expect(() => validateProductionTerminalEvidence(descriptorTamperedTerminal))
+      .toThrow(/production terminal evidence/u)
+  })
+
+  it('keeps PASS valid when execute produces every receipt sidecar', () => {
+    const prepared = actualPreparedManifest()
+    const d1Receipt = d1Result()
+    d1Receipt.value.evidence.account_id = prepared.value.target.account_id
+    d1Receipt.value.evidence.d1_database_id = prepared.value.target.d1_database_id
+    d1Receipt.value.evidence.candidate_id = prepared.value.repository.commit
+    d1Receipt.value.evidence.config_sha256 = prepared.value.d1.config_sha256
+    d1Receipt.value.evidence.wrangler_sha256 = prepared.value.d1.wrangler_sha256
+    d1Receipt.value.evidence.expected_reconciliation_sha256 = prepared.value.d1.expected_reconciliation_sha256
+    d1Receipt.bytes = Buffer.from(`${JSON.stringify(d1Receipt.value, null, 2)}\n`, 'utf8')
+    d1Receipt.sha256 = hash(d1Receipt.bytes)
+    configureD1(null, d1Receipt)
+    const workerReceipt = passingWorkerResult()
+    runWorkerStagesMock.mockReturnValue(workerReceipt)
+
+    const terminal = execute(prepared, authorizationFor(prepared, 'fan-in-passing-terminal-evidence'))
+
+    expect(terminal.value.outcome).toBe('PASS')
+    expect(terminal.receipts).toEqual(expect.objectContaining({
+      manifest: expect.objectContaining({ sha256: prepared.sha256 }),
+      d1: expect.objectContaining({ sha256: d1Receipt.sha256 }),
+      worker: expect.objectContaining({ sha256: workerReceipt.sha256 }),
+    }))
+    expect(validateProductionTerminalEvidence(terminal)).toBe(true)
   })
 
   it('accepts the canonical output produced by prepare at the execute seam', () => {
