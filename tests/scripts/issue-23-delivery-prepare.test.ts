@@ -441,6 +441,16 @@ describe('OpenNext generated resolver-link removal', () => {
     expect((error as Error).message).not.toContain(repositoryPath)
   }
 
+  it('maps missing repository node_modules to a fixed path-free unavailable error', () => {
+    withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
+      expectPathFreeResolverFailure(
+        () => removeVerifiedOpenNextResolverLinks(repositoryPath),
+        repositoryPath,
+        'OpenNext frozen node_modules is unavailable',
+      )
+    })
+  })
+
   it('maps a missing server-functions root to a fixed path-free error', () => {
     withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
       mkdirSync(join(repositoryPath, 'node_modules'))
@@ -464,19 +474,77 @@ describe('OpenNext generated resolver-link removal', () => {
     })
   })
 
-  it('maps an unreadable server-function root to a fixed path-free error', () => {
+  function expectInjectedResolverFilesystemFailure(
+    repositoryPath: string,
+    faultPath: string,
+    faultOperation: 'readdirSync' | 'unlinkSync',
+    reason: string,
+  ) {
+    const preloadPath = join(repositoryPath, 'resolver-filesystem-fault.cjs')
+    writeFileSync(preloadPath, String.raw`
+const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const original = fs[process.env.RESOLVER_FAULT_OPERATION]
+fs[process.env.RESOLVER_FAULT_OPERATION] = function (path, ...args) {
+  if (path === process.env.RESOLVER_FAULT_PATH) {
+    const error = new Error('resolver fixture filesystem fault')
+    error.code = 'EIO'
+    throw error
+  }
+  return original.call(this, path, ...args)
+}
+syncBuiltinESMExports()
+`)
+    const result = spawnSync(process.execPath, [
+      '--require', preloadPath,
+      '--input-type=module',
+      '--eval', String.raw`
+import { removeVerifiedOpenNextResolverLinks } from ${JSON.stringify(new URL('../../scripts/issue-23-delivery-prepare.mjs', import.meta.url).href)}
+try {
+  removeVerifiedOpenNextResolverLinks(process.env.RESOLVER_REPOSITORY_PATH)
+  process.exitCode = 2
+} catch (error) {
+  process.stdout.write(error.message)
+}
+`,
+    ], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        RESOLVER_FAULT_OPERATION: faultOperation,
+        RESOLVER_FAULT_PATH: faultPath,
+        RESOLVER_REPOSITORY_PATH: repositoryPath,
+      },
+    })
+    expect(result).toMatchObject({ status: 0, stderr: '' })
+    expect(result.stdout).toBe(`Canonical Frozen Manifest: ${reason}`)
+    expect(result.stdout).not.toContain(repositoryPath)
+  }
+
+  it('maps a per-function readdir failure to a fixed path-free read error', () => {
     withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
       const functionRoot = writeGeneratedResolverLinkFixture(repositoryPath, join(repositoryPath, 'node_modules'))
-      chmodSync(functionRoot, 0o000)
-      try {
-        expectPathFreeResolverFailure(
-          () => removeVerifiedOpenNextResolverLinks(repositoryPath),
-          repositoryPath,
-          'OpenNext server function required evidence could not be read',
-        )
-      } finally {
-        chmodSync(functionRoot, 0o700)
-      }
+      expectInjectedResolverFilesystemFailure(
+        repositoryPath,
+        functionRoot,
+        'readdirSync',
+        'OpenNext server function directory could not be read',
+      )
+      expect(lstatSync(join(functionRoot, 'node_modules')).isSymbolicLink()).toBe(true)
+    })
+  })
+
+  it('maps an unlink failure to a controlled path-free removal diagnostic', () => {
+    withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
+      const functionRoot = writeGeneratedResolverLinkFixture(repositoryPath, join(repositoryPath, 'node_modules'))
+      const resolverLink = join(functionRoot, 'node_modules')
+      expectInjectedResolverFilesystemFailure(
+        repositoryPath,
+        resolverLink,
+        'unlinkSync',
+        'OpenNext runtime resolver link is not the generated frozen-node-modules link (metadata=symbolic-link raw_target=repository-node-modules real_target=repository-node-modules target_location=checkout removal=failed)',
+      )
+      expect(lstatSync(resolverLink).isSymbolicLink()).toBe(true)
     })
   })
 
