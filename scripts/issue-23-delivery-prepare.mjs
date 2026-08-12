@@ -762,6 +762,10 @@ function resolveCiFacts(repositoryPath, config, repository) {
   }
 }
 
+export function isExactWorkflowPath(path, workflow) {
+  return typeof path === 'string' && path === workflow
+}
+
 function resolveFormalCiFacts(repositoryPath, config, repository) {
   const runId = process.env.GITHUB_RUN_ID
   const attempt = process.env.GITHUB_RUN_ATTEMPT
@@ -800,8 +804,7 @@ function resolveFormalCiFacts(repositoryPath, config, repository) {
     || run.head_sha !== repository.commit
     || run.status !== 'in_progress'
     || run.conclusion !== null
-    || typeof run.path !== 'string'
-    || !run.path.includes(`/${config.ci.workflow}@`)) {
+    || !isExactWorkflowPath(run.path, config.ci.workflow)) {
     fail('formal rehearsal current run receipt is not an in-progress exact candidate run')
   }
   const commit = parse(command(repositoryPath, 'gh', [
