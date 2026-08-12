@@ -12,6 +12,7 @@
     "toolchain",
     "artifact",
     "migration",
+    "d1",
     "target",
     "policy",
     "rehearsal"
@@ -400,6 +401,190 @@
             },
             "historical_baseline_queries": {
               "const": "NOT_APPLICABLE"
+            }
+          }
+        }
+      }
+    },
+    "d1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "database",
+        "config_path",
+        "config_sha256",
+        "wrangler_sha256",
+        "account_id",
+        "d1_database_id",
+        "reset_sql_path",
+        "reset_sql_sha256",
+        "migration_runner_path",
+        "migration_runner_sha256",
+        "migration_catalog_path",
+        "migration_catalog_sha256",
+        "rollout_safety_path",
+        "rollout_safety_sha256",
+        "expected_reconciliation_format",
+        "expected_reconciliation_sha256",
+        "expected_reconciliation",
+        "candidate_id",
+        "evidence_class",
+        "migrations"
+      ],
+      "properties": {
+        "mode": {
+          "enum": ["remote", "local"]
+        },
+        "database": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "config_path": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+        },
+        "config_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "wrangler_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "account_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "d1_database_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "reset_sql_path": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+        },
+        "reset_sql_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "migration_runner_path": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+        },
+        "migration_runner_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "migration_catalog_path": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+        },
+        "migration_catalog_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "rollout_safety_path": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+        },
+        "rollout_safety_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "expected_reconciliation_format": {
+          "const": "blogman-d1-reconciliation/v1"
+        },
+        "expected_reconciliation_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "expected_reconciliation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["format", "schema", "migration_ledger", "posts"],
+          "properties": {
+            "format": {
+              "const": "blogman-d1-reconciliation/v1"
+            },
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["sha256"],
+              "properties": {
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              }
+            },
+            "migration_ledger": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["state", "row_count", "sha256"],
+              "properties": {
+                "state": {
+                  "enum": ["absent", "present"]
+                },
+                "row_count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              }
+            },
+            "posts": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["count", "status", "content_sha256"],
+              "properties": {
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "status": {
+                  "type": "object"
+                },
+                "content_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              }
+            }
+          }
+        },
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "evidence_class": {
+          "enum": ["production", "local-non-production", "test-non-production", "synthetic-non-production"]
+        },
+        "migrations": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["number", "name", "checksum"],
+            "properties": {
+              "number": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 6
+              },
+              "name": {
+                "type": "string",
+                "pattern": "^[0-9]{3}_[A-Za-z0-9._-]+$"
+              },
+              "checksum": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
             }
           }
         }

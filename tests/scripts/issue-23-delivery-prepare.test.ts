@@ -510,6 +510,7 @@ describe('Issue #23 Delivery Preparation', () => {
       'toolchain',
       'artifact',
       'migration',
+      'd1',
       'target',
       'policy',
       'rehearsal',
@@ -1270,12 +1271,20 @@ describe('Issue #23 Delivery Preparation', () => {
       const fixtureRepo = join(directory, 'repo')
       execFileSync('git', ['clone', '--local', repoRoot, fixtureRepo])
       execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/nardinmarcus/blogman.git'], { cwd: fixtureRepo })
-      copyFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-prepare.mjs'), join(fixtureRepo, 'scripts', 'issue-23-delivery-prepare.mjs'))
-      copyFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-entry.mjs'), join(fixtureRepo, 'scripts', 'issue-23-delivery-entry.mjs'))
-      copyFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-rehearsal.mjs'), join(fixtureRepo, 'scripts', 'issue-23-delivery-rehearsal.mjs'))
+      const copiedPaths = [
+        'scripts/issue-23-delivery-prepare.mjs',
+        'scripts/issue-23-delivery-entry.mjs',
+        'scripts/issue-23-delivery-rehearsal.mjs',
+        'scripts/issue-23-delivery-d1-child.mjs',
+        'scripts/issue-23-delivery-d1-contracts.mjs',
+        'scripts/issue-23-delivery-d1-stages.mjs',
+        'scripts/issue-23-delivery-d1-transport.mjs',
+        'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
+      ]
+      for (const path of copiedPaths) copyFileSync(join(repoRoot, path), join(fixtureRepo, path))
       writeFileSync(join(fixtureRepo, 'fixture-marker.txt'), 'Issue #23 prepare fixture\n')
       symlinkSync(join(repoRoot, 'node_modules'), join(fixtureRepo, 'node_modules'))
-      execFileSync('git', ['add', 'fixture-marker.txt', 'scripts/issue-23-delivery-prepare.mjs', 'scripts/issue-23-delivery-entry.mjs', 'scripts/issue-23-delivery-rehearsal.mjs'], { cwd: fixtureRepo })
+      execFileSync('git', ['add', 'fixture-marker.txt', ...copiedPaths], { cwd: fixtureRepo })
       execFileSync('git', ['commit', '-m', 'test fixture'], { cwd: fixtureRepo, env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' } })
       const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: fixtureRepo, encoding: 'utf8' }).trim()
       const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: fixtureRepo, encoding: 'utf8' }).trim()
@@ -1573,5 +1582,49 @@ describe('Issue #23 Delivery Preparation', () => {
       rmSync(join(repoRoot, runnerPath), { force: true })
       rmSync(directory, { recursive: true, force: true })
     }
+  })
+
+  it('derives the canonical production D1 block after rehearsal without accepting caller injection', () => {
+    const expectedReconciliation = {
+      format: 'blogman-d1-reconciliation/v1',
+      schema: { sha256: hash('1') },
+      migration_ledger: { state: 'present', row_count: 6, sha256: hash('2') },
+      posts: { count: 0, status: {}, content_sha256: hash('3') },
+    }
+    const result = prepareFixture(baseConfig(), {
+      rehearsalRunner: () => ({
+        runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
+        network: 'disabled',
+        status: 'PASS',
+        receipt_sha256: hash('a'),
+        production_write_adapter_calls: 0,
+        expected_reconciliation: expectedReconciliation,
+      }),
+    })
+
+    expect(result.value.d1).toMatchObject({
+      mode: 'remote',
+      database: 'DB',
+      config_path: 'wrangler.toml',
+      account_id: result.value.target.account_id,
+      d1_database_id: result.value.target.d1_database_id,
+      reset_sql_path: 'db/issue-23-clean-start-reset.sql',
+      migration_runner_path: 'scripts/migrations.mjs',
+      migration_catalog_path: 'db/ledger-migrations',
+      rollout_safety_path: 'scripts/rollout-safety.mjs',
+      expected_reconciliation_format: expectedReconciliation.format,
+      candidate_id: result.value.repository.commit,
+      evidence_class: 'production',
+      migrations: expect.arrayContaining([
+        expect.objectContaining({ number: 1, name: '001_initial_schema' }),
+        expect.objectContaining({ number: 6, name: '006_add_rollout_safety_controls' }),
+      ]),
+    })
+    expect(result.value.d1.expected_reconciliation_sha256).toMatch(/^[a-f0-9]{64}$/u)
+    expect(result.value.d1.expected_reconciliation).toEqual(expectedReconciliation)
+
+    const injected = baseConfig()
+    Reflect.set(injected, 'd1', { mode: 'local' })
+    expect(() => prepareFixture(injected)).toThrow(/not allowed/u)
   })
 })

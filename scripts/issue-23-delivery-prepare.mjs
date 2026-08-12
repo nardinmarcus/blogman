@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, utimesSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, utimesSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { runLocalRehearsal } from './issue-23-delivery-rehearsal.mjs'
 
@@ -49,6 +49,22 @@ const EXPECTED_EVIDENCE_EXCLUSIONS = Object.freeze([
   'private_operator_paths',
 ])
 const EXPECTED_MIGRATIONS = Object.freeze(['001', '002', '003', '004', '005', '006'])
+const EXPECTED_D1_MIGRATION_NAMES = Object.freeze([
+  '001_initial_schema',
+  '002_add_ai_image_configuration',
+  '003_migrate_runtime_ai_configuration',
+  '004_complete_historical_text_ai_schema',
+  '005_fix_posts_fts_sync',
+  '006_add_rollout_safety_controls',
+])
+const EXPECTED_RECONCILIATION_FORMAT = 'blogman-d1-reconciliation/v1'
+const CANONICAL_D1_PATHS = Object.freeze({
+  config: 'wrangler.toml',
+  reset: 'db/issue-23-clean-start-reset.sql',
+  runner: 'scripts/migrations.mjs',
+  catalog: 'db/ledger-migrations',
+  rolloutSafety: 'scripts/rollout-safety.mjs',
+})
 const ARTIFACT_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._/-]+$/u
 const ARTIFACT_EXCLUDED_PATH_PATTERN = /(^|\/)(?:private|operator|secret|credential|tmp)(?:\/|$)/iu
 const ZERO_ACTIONS_ENCRYPTION_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
@@ -67,9 +83,10 @@ const SOURCE_EXTENSIONS = new Set(['.cjs', '.js', '.jsx', '.mjs', '.ts', '.tsx']
 
 const CONFIG_SCHEMA = Object.freeze({
   ...MANIFEST_SCHEMA,
-  required: MANIFEST_SCHEMA.required.filter((key) => key !== 'format'),
+  required: MANIFEST_SCHEMA.required.filter((key) => key !== 'format' && key !== 'd1'),
   properties: Object.fromEntries(
-    Object.entries(MANIFEST_SCHEMA.properties).filter(([key]) => key !== 'format'),
+    Object.entries(MANIFEST_SCHEMA.properties)
+      .filter(([key]) => key !== 'format' && key !== 'd1'),
   ),
 })
 
@@ -284,6 +301,171 @@ function resolveDeclaredFile(repositoryPath, declaration, label) {
     fail(`${label} declared sha256 does not match actual bytes`)
   }
   return resolved
+}
+
+function hashD1ArtifactDirectory(path) {
+  let rootMetadata
+  try {
+    rootMetadata = lstatSync(path)
+  } catch {
+    fail('canonical migration catalog could not be resolved')
+  }
+  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
+    fail('canonical migration catalog must be a regular directory')
+  }
+  const hash = createHash('sha256')
+  const visit = (directory, prefix) => {
+    let entries
+    try {
+      entries = readdirSync(directory, { withFileTypes: true })
+    } catch {
+      fail('canonical migration catalog could not be read')
+    }
+    for (const entry of entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))) {
+      const child = join(directory, entry.name)
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name
+      const metadata = lstatSync(child)
+      if (metadata.isSymbolicLink()) fail('canonical migration catalog contains a symbolic link')
+      if (metadata.isDirectory()) {
+        visit(child, relativePath)
+      } else if (metadata.isFile()) {
+        hash.update(`${relativePath}\\0${metadata.size}\\0`).update(readFileSync(child)).update('\\0')
+      } else {
+        fail('canonical migration catalog contains an unsupported entry')
+      }
+    }
+  }
+  visit(path, '')
+  return hash.digest('hex')
+}
+
+function canonicalExpectedReconciliation(value) {
+  if (!isRecord(value)) fail('expected reconciliation snapshot is invalid')
+  const keys = Reflect.ownKeys(value)
+  if (keys.length !== 4 || !['format', 'schema', 'migration_ledger', 'posts'].every((key) => keys.includes(key))) {
+    fail('expected reconciliation snapshot has unsupported fields')
+  }
+  if (value.format !== EXPECTED_RECONCILIATION_FORMAT) {
+    fail('expected reconciliation snapshot format is invalid')
+  }
+  if (!isRecord(value.schema) || Reflect.ownKeys(value.schema).length !== 1
+    || !/^[a-f0-9]{64}$/u.test(value.schema.sha256)) {
+    fail('expected reconciliation schema is invalid')
+  }
+  if (!isRecord(value.migration_ledger)
+    || Reflect.ownKeys(value.migration_ledger).length !== 3
+    || !['absent', 'present'].includes(value.migration_ledger.state)
+    || !Number.isSafeInteger(value.migration_ledger.row_count)
+    || value.migration_ledger.row_count < 0
+    || !/^[a-f0-9]{64}$/u.test(value.migration_ledger.sha256)) {
+    fail('expected reconciliation migration ledger is invalid')
+  }
+  if (!isRecord(value.posts)
+    || Reflect.ownKeys(value.posts).length !== 3
+    || !Number.isSafeInteger(value.posts.count)
+    || value.posts.count < 0
+    || !isRecord(value.posts.status)
+    || !/^[a-f0-9]{64}$/u.test(value.posts.content_sha256)) {
+    fail('expected reconciliation posts are invalid')
+  }
+  for (const count of Object.values(value.posts.status)) {
+    if (!Number.isSafeInteger(count) || count < 0) fail('expected reconciliation post status is invalid')
+  }
+  return {
+    format: value.format,
+    schema: { sha256: value.schema.sha256 },
+    migration_ledger: {
+      state: value.migration_ledger.state,
+      row_count: value.migration_ledger.row_count,
+      sha256: value.migration_ledger.sha256,
+    },
+    posts: {
+      count: value.posts.count,
+      status: Object.fromEntries(Object.entries(value.posts.status).sort()),
+      content_sha256: value.posts.content_sha256,
+    },
+  }
+}
+
+function canonicalExpectedReconciliationBytes(value) {
+  return Buffer.from(`${JSON.stringify(canonicalExpectedReconciliation(value), null, 2)}\n`, 'utf8')
+}
+
+function fallbackExpectedReconciliation() {
+  return {
+    format: EXPECTED_RECONCILIATION_FORMAT,
+    schema: { sha256: '0'.repeat(64) },
+    migration_ledger: { state: 'present', row_count: 6, sha256: '1'.repeat(64) },
+    posts: { count: 0, status: {}, content_sha256: '2'.repeat(64) },
+  }
+}
+
+function resolveCanonicalD1Facts(repositoryPath, target, toolchain, repository) {
+  const canonicalConfig = resolveFile(repositoryPath, CANONICAL_D1_PATHS.config, 'canonical D1 config', true)
+  const configText = readFileSync(resolve(repositoryPath, CANONICAL_D1_PATHS.config), 'utf8')
+  const d1Sections = [...configText.matchAll(/\[\[d1_databases\]\]([\s\S]*?)(?=\n\[|$)/gu)]
+  const database = d1Sections
+    .map(([, section]) => section.match(/^binding\s*=\s*["']([^"']+)["']/mu)?.[1])
+    .find((binding) => binding === 'DB')
+  if (!database) fail('canonical D1 config does not bind DB')
+
+  const canonicalReset = resolveFile(repositoryPath, CANONICAL_D1_PATHS.reset, 'canonical D1 reset SQL')
+  const canonicalRunner = resolveFile(repositoryPath, CANONICAL_D1_PATHS.runner, 'canonical D1 migration runner')
+  const canonicalCatalog = resolveDirectory(repositoryPath, CANONICAL_D1_PATHS.catalog, 'canonical D1 migration catalog')
+  const canonicalCatalogAbsolute = realpathSync(resolve(repositoryPath, canonicalCatalog))
+  const catalogOutput = command(repositoryPath, process.execPath, [
+    resolve(repositoryPath, canonicalRunner.path),
+    'catalog',
+    '--migrations-dir',
+    canonicalCatalogAbsolute,
+  ])
+  let catalog
+  try {
+    catalog = parseStrictJson(Buffer.from(catalogOutput, 'utf8'))
+  } catch {
+    fail('canonical D1 migration catalog output is invalid')
+  }
+  if (!isRecord(catalog) || Reflect.ownKeys(catalog).length !== 2
+    || catalog.format !== 'blogman-migration-catalog/v1'
+    || !Array.isArray(catalog.migrations)
+    || catalog.migrations.length !== EXPECTED_D1_MIGRATION_NAMES.length) {
+    fail('canonical D1 migration catalog is invalid')
+  }
+  const migrations = catalog.migrations.map((entry, index) => {
+    if (!isRecord(entry) || Reflect.ownKeys(entry).length !== 3
+      || entry.number !== index + 1
+      || entry.name !== EXPECTED_D1_MIGRATION_NAMES[index]
+      || !/^[a-f0-9]{64}$/u.test(entry.checksum)) {
+      fail(`canonical D1 migration ${index + 1} is invalid`)
+    }
+    return { number: entry.number, name: entry.name, checksum: entry.checksum }
+  })
+  const canonicalRolloutSafety = resolveFile(
+    repositoryPath,
+    CANONICAL_D1_PATHS.rolloutSafety,
+    'canonical D1 rollout safety',
+  )
+  return {
+    mode: 'remote',
+    database,
+    config_path: canonicalConfig.path,
+    config_sha256: canonicalConfig.sha256,
+    wrangler_sha256: toolchain.wrangler.identity_sha256,
+    account_id: target.account_id,
+    d1_database_id: target.d1_database_id,
+    reset_sql_path: canonicalReset.path,
+    reset_sql_sha256: canonicalReset.sha256,
+    migration_runner_path: canonicalRunner.path,
+    migration_runner_sha256: canonicalRunner.sha256,
+    migration_catalog_path: canonicalCatalog,
+    migration_catalog_sha256: hashD1ArtifactDirectory(canonicalCatalogAbsolute),
+    rollout_safety_path: canonicalRolloutSafety.path,
+    rollout_safety_sha256: canonicalRolloutSafety.sha256,
+    expected_reconciliation_format: EXPECTED_RECONCILIATION_FORMAT,
+    candidate_id: repository.commit,
+    evidence_class: 'production',
+    migrations,
+  }
 }
 
 function resolveMigrationCatalog(configuredMigrations, resolvedCatalog) {
@@ -609,10 +791,12 @@ function resolveFacts(config, {
     })),
   }
   const target = targetResolver(config.target)
+  const repositoryFacts = { ...config.repository, ...repository }
+  const d1Base = resolveCanonicalD1Facts(repositoryPath, target, toolchain, repositoryFacts)
   const resolved = {
     ...config,
     preparation,
-    repository: { ...config.repository, ...repository },
+    repository: repositoryFacts,
     ci,
     toolchain,
     artifact: { ...artifact, file_tree: { ...artifact.file_tree, sha256: sha256(Buffer.from(JSON.stringify(artifact.file_tree.files))) } },
@@ -621,17 +805,40 @@ function resolveFacts(config, {
   }
   delete resolved.rehearsal
   const manifestDraftSha256 = sha256(canonicalDraftBytes(resolved))
-  const rehearsal = rehearsalRunner({
+  const rehearsalResult = rehearsalRunner({
     repositoryPath,
     manifestDraftSha256,
     migrationRunnerPath: migration.runner.path,
     migrationCatalogPath: migration.catalog.path,
+    d1: d1Base,
     productionWriteAdapter,
   })
-  if (rehearsal.production_write_adapter_calls !== 0) {
+  if (rehearsalResult.production_write_adapter_calls !== 0) {
     fail('rehearsal observed a production-write adapter call')
   }
-  return { ...resolved, target, rehearsal }
+  const expectedInput = rehearsalResult.expected_reconciliation?.value
+    ?? rehearsalResult.expected_reconciliation
+    ?? fallbackExpectedReconciliation()
+  const expectedReconciliation = canonicalExpectedReconciliation(expectedInput)
+  const expectedReconciliationBytes = canonicalExpectedReconciliationBytes(expectedReconciliation)
+  const expectedReconciliationSha256 = sha256(expectedReconciliationBytes)
+  if (rehearsalResult.expected_reconciliation?.sha256 !== undefined
+    && rehearsalResult.expected_reconciliation.sha256 !== expectedReconciliationSha256) {
+    fail('rehearsal expected reconciliation identity does not match its bytes')
+  }
+  const d1 = {
+    ...d1Base,
+    expected_reconciliation_sha256: expectedReconciliationSha256,
+    expected_reconciliation: expectedReconciliation,
+  }
+  const rehearsal = {
+    runtime: rehearsalResult.runtime,
+    network: rehearsalResult.network,
+    status: rehearsalResult.status,
+    receipt_sha256: rehearsalResult.receipt_sha256,
+    production_write_adapter_calls: rehearsalResult.production_write_adapter_calls,
+  }
+  return { ...resolved, target, d1, rehearsal }
 }
 
 function canonicalComparable(value) {
@@ -703,6 +910,40 @@ function assertManifestRelationships(manifest) {
   const migrationIds = manifest.migration.catalog.migrations.map((migration) => migration.id)
   if (!jsonEqual(migrationIds, EXPECTED_MIGRATIONS)) {
     fail('migration.catalog.migrations must contain 001 through 006 in order')
+  }
+
+  if (manifest.d1.mode !== 'remote' || manifest.d1.evidence_class !== 'production') {
+    fail('d1 must be the canonical remote production binding')
+  }
+  if (manifest.d1.database !== 'DB'
+    || manifest.d1.config_path !== CANONICAL_D1_PATHS.config
+    || manifest.d1.reset_sql_path !== CANONICAL_D1_PATHS.reset
+    || manifest.d1.migration_runner_path !== CANONICAL_D1_PATHS.runner
+    || manifest.d1.migration_catalog_path !== CANONICAL_D1_PATHS.catalog
+    || manifest.d1.rollout_safety_path !== CANONICAL_D1_PATHS.rolloutSafety) {
+    fail('d1 paths must identify the canonical production D1 artifacts')
+  }
+  if (manifest.d1.account_id !== manifest.target.account_id
+    || manifest.d1.d1_database_id !== manifest.target.d1_database_id
+    || manifest.d1.candidate_id !== manifest.repository.commit
+    || manifest.d1.wrangler_sha256 !== manifest.toolchain.wrangler.identity_sha256) {
+    fail('d1 identities do not match the frozen production facts')
+  }
+  if (manifest.d1.expected_reconciliation_format !== EXPECTED_RECONCILIATION_FORMAT) {
+    fail('d1 expected reconciliation format is not canonical')
+  }
+  const expectedReconciliationBytes = canonicalExpectedReconciliationBytes(manifest.d1.expected_reconciliation)
+  if (sha256(expectedReconciliationBytes) !== manifest.d1.expected_reconciliation_sha256) {
+    fail('d1 expected reconciliation hash does not match its frozen bytes')
+  }
+  if (!Array.isArray(manifest.d1.migrations)
+    || manifest.d1.migrations.length !== EXPECTED_D1_MIGRATION_NAMES.length
+    || manifest.d1.migrations.some((migration, index) => (
+      migration.number !== index + 1
+      || migration.name !== EXPECTED_D1_MIGRATION_NAMES[index]
+      || !/^[a-f0-9]{64}$/u.test(migration.checksum)
+    ))) {
+    fail('d1 migrations must be the canonical checksum set')
   }
 
   if (manifest.target.baseline.d1_database_id !== manifest.target.d1_database_id) {
@@ -1004,7 +1245,6 @@ function readProductionWriteCallCount(adapter) {
 }
 
 function validateConfig(config) {
-  validateSchemaValue(config, CONFIG_SCHEMA, '$.config')
   const manifest = { format: CANONICAL_MANIFEST_FORMAT, ...config }
   validateManifestValue(manifest)
   return orderBySchema(manifest, MANIFEST_SCHEMA)

@@ -1,5 +1,11 @@
 import { createHash } from 'node:crypto'
+import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { runSyntheticStage } from './issue-23-delivery-synthetic-adapter.mjs'
+import { createD1Transport } from './issue-23-delivery-d1-transport.mjs'
+import { runD1Stages } from './issue-23-delivery-d1-stages.mjs'
 
 export const LOCAL_ENTRY_FORMAT = 'blogman-issue-23-local-entry/v1'
 export const LOCAL_SUPERVISOR_FORMAT = 'blogman-issue-23-supervisor/v1'
@@ -144,6 +150,31 @@ const DELIVERY_STAGE_POLICY = Object.freeze([
 ])
 const DELIVERY_STAGES = Object.freeze(DELIVERY_STAGE_POLICY.map(({ name }) => name))
 const OVERALL_TIMEOUT_SECONDS = 5400
+const PRODUCTION_D1_STAGES = Object.freeze([
+  'd1_identity',
+  'clean_start_reset',
+  'empty_d1_proof',
+  'migrations_001_006',
+  'reconciliation',
+])
+const PRODUCTION_D1_MIGRATION_NAMES = Object.freeze([
+  '001_initial_schema',
+  '002_add_ai_image_configuration',
+  '003_migrate_runtime_ai_configuration',
+  '004_complete_historical_text_ai_schema',
+  '005_fix_posts_fts_sync',
+  '006_add_rollout_safety_controls',
+])
+const PRODUCTION_D1_CANONICAL_PATHS = Object.freeze({
+  config_path: 'wrangler.toml',
+  reset_sql_path: 'db/issue-23-clean-start-reset.sql',
+  migration_runner_path: 'scripts/migrations.mjs',
+  migration_catalog_path: 'db/ledger-migrations',
+  rollout_safety_path: 'scripts/rollout-safety.mjs',
+})
+const ENTRY_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const EXPECTED_RECONCILIATION_FORMAT = 'blogman-d1-reconciliation/v1'
+const PRODUCTION_SUFFIX_UNAVAILABLE = 'production_stage_adapter_unavailable'
 const ADAPTER_OUTCOMES = Object.freeze(['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'])
 const DEFAULT_ADAPTER_CLASSIFICATIONS = Object.freeze({
   NON_PASS: 'synthetic_adapter_non_pass',
@@ -335,7 +366,7 @@ function stageDurations(trace) {
   return durations
 }
 
-export function execute(manifest, authorization) {
+function executeLegacy(manifest, authorization) {
   if (arguments.length !== 2) fail('execute accepts exactly two arguments')
   const manifestBytes = validatePreparedManifest(manifest)
   const executionPolicy = validateExecutionPolicy(manifest.value.policy)
@@ -412,4 +443,353 @@ export function execute(manifest, authorization) {
   }
   const bytes = canonicalJsonBytes(value)
   return { value, bytes, sha256: sha256(bytes) }
+}
+
+function canonicalD1ExpectedReconciliation(value) {
+  if (!isPlainRecord(value)) fail('expected reconciliation must be a plain record')
+  assertExactKeys(value, ['format', 'schema', 'migration_ledger', 'posts'], 'expected reconciliation')
+  if (value.format !== EXPECTED_RECONCILIATION_FORMAT) {
+    fail('expected reconciliation format is invalid')
+  }
+  assertExactKeys(value.schema, ['sha256'], 'expected reconciliation schema')
+  if (typeof value.schema.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(value.schema.sha256)) {
+    fail('expected reconciliation schema hash is invalid')
+  }
+  assertExactKeys(value.migration_ledger, ['state', 'row_count', 'sha256'], 'expected reconciliation migration ledger')
+  if (!['absent', 'present'].includes(value.migration_ledger.state)
+    || !Number.isSafeInteger(value.migration_ledger.row_count)
+    || value.migration_ledger.row_count < 0
+    || !/^[a-f0-9]{64}$/u.test(value.migration_ledger.sha256)) {
+    fail('expected reconciliation migration ledger is invalid')
+  }
+  assertExactKeys(value.posts, ['count', 'status', 'content_sha256'], 'expected reconciliation posts')
+  if (!Number.isSafeInteger(value.posts.count)
+    || value.posts.count < 0
+    || !isPlainRecord(value.posts.status)
+    || !/^[a-f0-9]{64}$/u.test(value.posts.content_sha256)) {
+    fail('expected reconciliation posts are invalid')
+  }
+  for (const count of Object.values(value.posts.status)) {
+    if (!Number.isSafeInteger(count) || count < 0) fail('expected reconciliation post status is invalid')
+  }
+  return {
+    format: value.format,
+    schema: { sha256: value.schema.sha256 },
+    migration_ledger: {
+      state: value.migration_ledger.state,
+      row_count: value.migration_ledger.row_count,
+      sha256: value.migration_ledger.sha256,
+    },
+    posts: {
+      count: value.posts.count,
+      status: Object.fromEntries(Object.entries(value.posts.status).sort()),
+      content_sha256: value.posts.content_sha256,
+    },
+  }
+}
+
+function canonicalD1ExpectedReconciliationBytes(value) {
+  return canonicalJsonBytes(canonicalD1ExpectedReconciliation(value))
+}
+
+function validateProductionD1(manifestValue) {
+  if (!isPlainRecord(manifestValue) || !isPlainRecord(manifestValue.d1)) {
+    fail('production manifest requires a derived d1 block')
+  }
+  const d1 = manifestValue.d1
+  assertExactKeys(d1, [
+    'mode',
+    'database',
+    'config_path',
+    'config_sha256',
+    'wrangler_sha256',
+    'account_id',
+    'd1_database_id',
+    'reset_sql_path',
+    'reset_sql_sha256',
+    'migration_runner_path',
+    'migration_runner_sha256',
+    'migration_catalog_path',
+    'migration_catalog_sha256',
+    'rollout_safety_path',
+    'rollout_safety_sha256',
+    'expected_reconciliation_format',
+    'expected_reconciliation_sha256',
+    'expected_reconciliation',
+    'candidate_id',
+    'evidence_class',
+    'migrations',
+  ], 'd1')
+  if (d1.mode !== 'remote' || d1.evidence_class !== 'production') {
+    fail('production execute requires remote production d1 facts')
+  }
+  if (d1.database !== 'DB') fail('production d1 database is not canonical')
+  for (const [field, expected] of Object.entries(PRODUCTION_D1_CANONICAL_PATHS)) {
+    if (d1[field] !== expected) fail(`production d1 ${field} is not canonical`)
+  }
+  for (const field of ['config_path', 'reset_sql_path', 'migration_runner_path', 'migration_catalog_path', 'rollout_safety_path']) {
+    assertSafeString(d1[field], `d1.${field}`)
+  }
+  for (const field of [
+    'config_sha256',
+    'wrangler_sha256',
+    'reset_sql_sha256',
+    'migration_runner_sha256',
+    'migration_catalog_sha256',
+    'rollout_safety_sha256',
+    'expected_reconciliation_sha256',
+  ]) {
+    if (typeof d1[field] !== 'string' || !/^[a-f0-9]{64}$/u.test(d1[field])) {
+      fail(`d1.${field} is not a SHA-256 identity`)
+    }
+  }
+  for (const field of ['account_id', 'd1_database_id', 'candidate_id']) {
+    assertSafeString(d1[field], `d1.${field}`)
+  }
+  if (!/^[a-f0-9]{40}$/u.test(d1.candidate_id)) fail('d1.candidate_id is invalid')
+  if (d1.expected_reconciliation_format !== EXPECTED_RECONCILIATION_FORMAT) {
+    fail('expected reconciliation format is invalid')
+  }
+  const expectedReconciliation = canonicalD1ExpectedReconciliation(d1.expected_reconciliation)
+  if (sha256(canonicalD1ExpectedReconciliationBytes(expectedReconciliation)) !== d1.expected_reconciliation_sha256) {
+    fail('expected reconciliation hash does not match frozen bytes')
+  }
+  if (!Array.isArray(d1.migrations) || d1.migrations.length !== PRODUCTION_D1_MIGRATION_NAMES.length) {
+    fail('d1 migrations are invalid')
+  }
+  for (const [index, migration] of d1.migrations.entries()) {
+    assertExactKeys(migration, ['number', 'name', 'checksum'], `d1 migration ${index + 1}`)
+    if (migration.number !== index + 1
+      || migration.name !== PRODUCTION_D1_MIGRATION_NAMES[index]
+      || typeof migration.checksum !== 'string'
+      || !/^[a-f0-9]{64}$/u.test(migration.checksum)) {
+      fail(`d1 migration ${index + 1} is not canonical`)
+    }
+  }
+  if (isPlainRecord(manifestValue.repository)
+    && Object.hasOwn(manifestValue.repository, 'commit')
+    && manifestValue.repository.commit !== d1.candidate_id) {
+    fail('d1 candidate does not match repository commit')
+  }
+  if (isPlainRecord(manifestValue.target)
+    && (manifestValue.target.account_id !== d1.account_id
+      || manifestValue.target.d1_database_id !== d1.d1_database_id)) {
+    fail('d1 identities do not match target facts')
+  }
+  return { ...d1, expected_reconciliation: expectedReconciliation }
+}
+
+function materializeExpectedReconciliation(d1) {
+  const bytes = canonicalD1ExpectedReconciliationBytes(d1.expected_reconciliation)
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-23-execute-expected-')))
+  chmodSync(directory, 0o700)
+  const path = join(directory, 'expected-reconciliation.json')
+  try {
+    writeFileSync(path, bytes, { mode: 0o600 })
+    chmodSync(path, 0o600)
+    return { directory, path }
+  } catch (error) {
+    rmSync(directory, { recursive: true, force: true })
+    throw error
+  }
+}
+
+function disposeExpectedReconciliation(materialized) {
+  if (!materialized) return { created: false, cleaned: true, observed_absent: true }
+  let cleaned = false
+  let observedAbsent = false
+  try {
+    rmSync(materialized.directory, { recursive: true, force: true })
+    cleaned = !existsSync(materialized.directory)
+    observedAbsent = cleaned && !existsSync(materialized.path)
+  } catch {
+    cleaned = false
+    observedAbsent = false
+  }
+  return { created: true, cleaned, observed_absent: observedAbsent }
+}
+
+function deriveProductionD1Bindings(d1, expectedPath) {
+  const bindings = { ...d1 }
+  delete bindings.expected_reconciliation_format
+  delete bindings.expected_reconciliation
+  bindings.config_path = realpathSync(resolve(ENTRY_REPO_ROOT, d1.config_path))
+  bindings.reset_sql_path = realpathSync(resolve(ENTRY_REPO_ROOT, d1.reset_sql_path))
+  bindings.migration_runner_path = realpathSync(resolve(ENTRY_REPO_ROOT, d1.migration_runner_path))
+  bindings.migration_catalog_path = realpathSync(resolve(ENTRY_REPO_ROOT, d1.migration_catalog_path))
+  bindings.rollout_safety_path = realpathSync(resolve(ENTRY_REPO_ROOT, d1.rollout_safety_path))
+  bindings.expected_reconciliation_path = expectedPath
+  return bindings
+}
+
+function sanitizedD1Error(classification) {
+  const stageCounts = Object.fromEntries(PRODUCTION_D1_STAGES.map((stage) => [stage, 0]))
+  const stageDurations = Object.fromEntries(PRODUCTION_D1_STAGES.map((stage) => [stage, 0]))
+  stageCounts.d1_identity = 1
+  const value = {
+    format: 'blogman-issue-23-d1-stages/v1',
+    outcome: 'ERROR',
+    first_terminal_stage: 'd1_identity',
+    failure: { classification },
+    stage_counts: stageCounts,
+    stage_durations_ms: stageDurations,
+    evidence: { source: 'production', production: true, promotable: false },
+    finalized: true,
+  }
+  const bytes = canonicalJsonBytes(value)
+  return { value, bytes, sha256: sha256(bytes) }
+}
+
+function normalizeProductionD1Result(result) {
+  if (!isPlainRecord(result) || !isPlainRecord(result.value)
+    || !(result.bytes instanceof Uint8Array)
+    || typeof result.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(result.sha256)
+    || sha256(Buffer.from(result.bytes)) !== result.sha256) {
+    return sanitizedD1Error('production_d1_result_malformed')
+  }
+  const value = result.value
+  if (value.format !== 'blogman-issue-23-d1-stages/v1'
+    || !['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(value.outcome)
+    || !isPlainRecord(value.stage_counts)
+    || !isPlainRecord(value.stage_durations_ms)
+    || !isPlainRecord(value.evidence)
+    || value.evidence.source !== 'production'
+    || value.evidence.production !== true) {
+    return sanitizedD1Error('production_d1_result_malformed')
+  }
+  const countKeys = Reflect.ownKeys(value.stage_counts)
+  const durationKeys = Reflect.ownKeys(value.stage_durations_ms)
+  if (countKeys.length !== PRODUCTION_D1_STAGES.length
+    || durationKeys.length !== PRODUCTION_D1_STAGES.length
+    || PRODUCTION_D1_STAGES.some((stage) => !countKeys.includes(stage) || !durationKeys.includes(stage))) {
+    return sanitizedD1Error('production_d1_result_malformed')
+  }
+  for (const stage of PRODUCTION_D1_STAGES) {
+    if (!Number.isSafeInteger(value.stage_counts[stage])
+      || ![0, 1].includes(value.stage_counts[stage])
+      || !Number.isSafeInteger(value.stage_durations_ms[stage])
+      || value.stage_durations_ms[stage] < 0) {
+      return sanitizedD1Error('production_d1_result_malformed')
+    }
+  }
+  if (value.outcome === 'PASS') {
+    if (value.first_terminal_stage !== null
+      || value.failure !== null
+      || PRODUCTION_D1_STAGES.some((stage) => value.stage_counts[stage] !== 1)) {
+      return sanitizedD1Error('production_d1_result_malformed')
+    }
+    return {
+      outcome: 'PASS',
+      first_terminal_stage: null,
+      failure: null,
+      stage_counts: { ...value.stage_counts },
+      stage_durations_ms: { ...value.stage_durations_ms },
+      sha256: result.sha256,
+    }
+  }
+  if (typeof value.first_terminal_stage !== 'string'
+    || !PRODUCTION_D1_STAGES.includes(value.first_terminal_stage)
+    || !isPlainRecord(value.failure)
+    || typeof value.failure.classification !== 'string'
+    || !PRODUCTION_D1_STAGES.every((stage, index) => (
+      value.stage_counts[stage] === (index <= PRODUCTION_D1_STAGES.indexOf(value.first_terminal_stage) ? 1 : 0)
+    ))) {
+    return sanitizedD1Error('production_d1_result_malformed')
+  }
+  return {
+    outcome: value.outcome,
+    first_terminal_stage: value.first_terminal_stage,
+    failure: { classification: value.failure.classification },
+    stage_counts: { ...value.stage_counts },
+    stage_durations_ms: { ...value.stage_durations_ms },
+    sha256: result.sha256,
+  }
+}
+
+function productionTrace(d1Result) {
+  const trace = [{ stage: 'live_preconditions', outcome: 'PASS', duration_ms: 0 }]
+  for (const stage of PRODUCTION_D1_STAGES) {
+    if (d1Result.stage_counts[stage] === 0) break
+    const terminal = d1Result.outcome !== 'PASS' && stage === d1Result.first_terminal_stage
+    trace.push({
+      stage,
+      outcome: terminal ? d1Result.outcome : 'PASS',
+      ...(terminal ? { classification: d1Result.failure.classification } : {}),
+      duration_ms: d1Result.stage_durations_ms[stage],
+    })
+    if (terminal) break
+  }
+  if (d1Result.outcome === 'PASS') {
+    trace.push({
+      stage: 'worker_deploy',
+      outcome: 'ERROR',
+      classification: PRODUCTION_SUFFIX_UNAVAILABLE,
+      duration_ms: 0,
+    })
+  }
+  return trace
+}
+
+function executeProduction(manifest, authorization) {
+  const manifestBytes = validatePreparedManifest(manifest)
+  validateExecutionPolicy(manifest.value.policy)
+  const d1 = validateProductionD1(manifest.value)
+  const authorizationDigest = acceptAuthorization(sha256(manifestBytes), authorization)
+  const identities = {
+    manifest_sha256: sha256(manifestBytes),
+    authorization_sha256: authorizationDigest,
+  }
+  const attemptId = sha256(canonicalJsonBytes({
+    format: 'blogman-issue-23-attempt/v1',
+    ...identities,
+  }))
+  let materialized
+  let d1Result
+  let cleanup = { created: false, cleaned: true, observed_absent: true }
+  try {
+    materialized = materializeExpectedReconciliation(d1)
+    const bindings = deriveProductionD1Bindings(d1, materialized.path)
+    try {
+      const transport = createD1Transport(bindings)
+      d1Result = normalizeProductionD1Result(runD1Stages({ bindings, transport }))
+    } catch {
+      d1Result = sanitizedD1Error('production_d1_adapter_error')
+    }
+  } finally {
+    cleanup = disposeExpectedReconciliation(materialized)
+  }
+  if (!d1Result) d1Result = sanitizedD1Error('production_d1_adapter_error')
+  const trace = productionTrace(d1Result)
+  const terminal = trace.at(-1)
+  if (!terminal) fail('production state machine did not run')
+  const value = {
+    format: TERMINAL_RESULT_FORMAT,
+    identities,
+    attempt_id: attemptId,
+    authorization_consumed: true,
+    outcome: terminal.outcome,
+    first_terminal_stage: terminal.stage,
+    failure: terminal.outcome === 'PASS' ? null : { classification: terminal.classification },
+    stage_counts: stageCounts(trace),
+    stage_durations_ms: stageDurations(trace),
+    mutation_counts: { production_writes: 0 },
+    evidence: {
+      source: 'production',
+      production: true,
+      promotable: false,
+      hashes: [d1Result.sha256],
+      cleanup,
+    },
+    finalized: true,
+  }
+  const bytes = canonicalJsonBytes(value)
+  return { value, bytes, sha256: sha256(bytes) }
+}
+
+export function execute(manifest, authorization) {
+  if (arguments.length !== 2) fail('execute accepts exactly two arguments')
+  if (isPlainRecord(manifest?.value) && Object.hasOwn(manifest.value, 'd1')) {
+    return executeProduction(manifest, authorization)
+  }
+  return executeLegacy(manifest, authorization)
 }
