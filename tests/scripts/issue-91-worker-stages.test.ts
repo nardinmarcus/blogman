@@ -22,7 +22,17 @@ describe('Issue #91 worker suffix', () => {
       response({ deployment_id: deployment, version_id: version, d1_database_id: 'd1-id', traffic: [{ version_id: version, percentage: 100 }] }),
       response({ before: { deployment_id: deployment, version_id: version, d1_database_id: 'd1-id', traffic: [{ version_id: version, percentage: 100 }] }, after: { deployment_id: deployment, version_id: version, d1_database_id: 'd1-id', traffic: [{ version_id: version, percentage: 100 }] }, checks: Object.fromEntries(smoke.requests.map(({ path, status }) => [path, status])), controls: { producer: 'disabled', authority: 'disabled', executors: { scheduled: 'disabled' } }, reconciliation: { state: 'matched', checks: { schema: 'matched', migration_ledger: 'matched', post_count: 'matched', post_status: 'matched', post_content: 'matched' } } }),
     ]) })
-    expect(result.value).toMatchObject({ outcome: 'PASS', first_terminal_stage: null, stage_counts: { worker_deploy: 1, version_traffic_verification: 1, smoke_control_t0: 1 }, mutation_counts: { attempted: 2, confirmed: 2 } })
+    expect(result.value).toMatchObject({
+      outcome: 'PASS',
+      first_terminal_stage: null,
+      stage_counts: { worker_deploy: 1, version_traffic_verification: 1, smoke_control_t0: 1 },
+      mutation_counts: { attempted: 2, confirmed: 2 },
+      evidence: {
+        source: 'untrusted-test-transport',
+        production: false,
+        promotable: false,
+      },
+    })
     expect(JSON.stringify(result.value)).not.toMatch(/stdout|stderr|token|cookie|private/i)
   })
 

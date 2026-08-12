@@ -32,12 +32,16 @@ vi.mock('node:fs', async () => {
 
 vi.mock('../../scripts/issue-23-delivery-d1-transport.mjs', () => ({
   createD1Transport: createD1TransportMock,
+  createRehearsalD1Transport: createD1TransportMock,
 }))
 vi.mock('../../scripts/issue-23-delivery-d1-stages.mjs', () => ({
   D1_STAGE_ORDER: ['d1_identity', 'clean_start_reset', 'empty_d1_proof', 'migrations_001_006', 'reconciliation'],
   runD1Stages: runD1StagesMock,
 }))
-vi.mock('../../scripts/issue-23-delivery-worker-transport.mjs', () => ({ createWorkerTransport: createWorkerTransportMock }))
+vi.mock('../../scripts/issue-23-delivery-worker-transport.mjs', () => ({
+  createWorkerTransport: createWorkerTransportMock,
+  createRehearsalWorkerTransport: createWorkerTransportMock,
+}))
 vi.mock('../../scripts/issue-23-delivery-worker-stages.mjs', () => ({ runWorkerStages: runWorkerStagesMock }))
 
 afterEach(() => {

@@ -584,3 +584,127 @@ export function createD1Transport(config) {
 export function getD1TransportProvenance(transport) {
   return transportCapabilities.get(transport)
 }
+
+const REHEARSAL_D1_STAGE_BY_OPERATION = Object.freeze({
+  d1_identity: 'd1_identity',
+  clean_start_reset: 'clean_start_reset',
+  empty_d1_proof: 'empty_d1_proof',
+  migration_catalog: 'migrations_001_006',
+  migration_plan: 'migrations_001_006',
+  migration_apply: 'migrations_001_006',
+  migration_verify: 'migrations_001_006',
+  reconciliation: 'reconciliation',
+})
+
+function rehearsalD1Stdout(operation, bindings) {
+  if (operation === 'd1_identity') {
+    return JSON.stringify({
+      account_id: bindings.account_id,
+      config_sha256: bindings.config_sha256,
+      d1_database_id: bindings.d1_database_id,
+    })
+  }
+  if (operation === 'clean_start_reset') {
+    return JSON.stringify([{
+      finalBookmark: `blogman-rehearsal-reset-${bindings.candidate_id}`,
+      meta: { rows_read: 0, rows_written: 0, size_after: 1_000_000 },
+      results: [{
+        'Database size (MB)': '1.00',
+        'Rows read': 0,
+        'Rows written': 0,
+        'Total queries executed': 1,
+      }],
+      success: true,
+    }])
+  }
+  if (operation === 'empty_d1_proof') {
+    return JSON.stringify([{ meta: { duration: 0 }, results: [], success: true }])
+  }
+  if (operation === 'migration_catalog') {
+    return JSON.stringify({
+      format: 'blogman-migration-catalog/v1',
+      migrations: bindings.migrations.map(({ number, name, checksum }) => ({ number, name, checksum })),
+    })
+  }
+  if (operation === 'migration_plan') {
+    return JSON.stringify({
+      applied: [],
+      pending: bindings.migrations.map(({ number, name, checksum }) => ({ action: 'apply', checksum, name, number })),
+      state: 'pending',
+    })
+  }
+  const ledger = bindings.migrations.map(({ number, name, checksum }) => ({
+    applied_at: `blogman-rehearsal-${number}`,
+    candidate_id: bindings.candidate_id,
+    checksum,
+    name,
+    number,
+  }))
+  if (operation === 'migration_apply') {
+    return JSON.stringify({ applied: ledger, pending: [], state: 'current' })
+  }
+  if (operation === 'migration_verify') {
+    return JSON.stringify({ applied: ledger, pending: [], state: 'verified' })
+  }
+  if (operation === 'reconciliation') {
+    return JSON.stringify({
+      state: 'matched',
+      checks: {
+        schema: 'matched',
+        migration_ledger: 'matched',
+        post_count: 'matched',
+        post_status: 'matched',
+        post_content: 'matched',
+      },
+    })
+  }
+  fail(`rehearsal D1 operation ${operation} is not synthesizable`)
+}
+
+function rehearsalD1FailStdout(operation, bindings) {
+  if (operation === 'd1_identity') {
+    return JSON.stringify({
+      account_id: `rehearsal-mismatch-${bindings.account_id}`,
+      config_sha256: bindings.config_sha256,
+      d1_database_id: bindings.d1_database_id,
+    })
+  }
+  return JSON.stringify({ rehearsal_fail_closed: true })
+}
+
+/** Source-level test-evidence provenance for formal no-network rehearsal transports. */
+export const FORMAL_REHEARSAL_D1_EVIDENCE_SOURCE = 'formal-rehearsal-test-evidence'
+
+/**
+ * No-network rehearsal adapter. It synthesizes the exact production contract
+ * shapes directly from the frozen manifest facts, records every operation, and
+ * never performs network, subprocess, or production-write I/O.
+ *
+ * Provenance is non-production at the transport source. Stage evidence inherits
+ * that classification directly; callers must never relabel it as production and
+ * later downgrade it.
+ */
+export function createRehearsalD1Transport(bindings, sink, scenario) {
+  if (!isPlainRecord(bindings)) fail('rehearsal D1 bindings must be an object')
+  const bindingsSha256 = d1StageBindingsSha256(bindings)
+  function execute(request) {
+    if (!isPlainRecord(request) || typeof request.operation !== 'string') {
+      fail('rehearsal D1 request is invalid')
+    }
+    const stage = REHEARSAL_D1_STAGE_BY_OPERATION[request.operation]
+    if (!stage) fail(`rehearsal D1 operation ${request.operation} is not supported`)
+    if (sink) sink.push({ adapter: 'd1', operation: request.operation, stage })
+    if (scenario && scenario.failStage === stage) {
+      return { status: 0, stdout: rehearsalD1FailStdout(request.operation, bindings), stderr: '', duration_ms: 1 }
+    }
+    return { status: 0, stdout: rehearsalD1Stdout(request.operation, bindings), stderr: '', duration_ms: 1 }
+  }
+  const transport = Object.freeze({ execute })
+  transportCapabilities.set(transport, Object.freeze({
+    source: FORMAL_REHEARSAL_D1_EVIDENCE_SOURCE,
+    production: false,
+    bindings_sha256: bindingsSha256,
+    wrangler_sha256: bindings.wrangler_sha256,
+  }))
+  return transport
+}

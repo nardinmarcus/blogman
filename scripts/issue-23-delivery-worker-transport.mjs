@@ -23,6 +23,13 @@ function record(value) { return value !== null && typeof value === 'object' && !
 function exact(value, keys) { return record(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key)) }
 function safeId(value) { return typeof value === 'string' && /^[A-Za-z0-9._-]+$/u.test(value) }
 function sha256(value) { return typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value) }
+
+const transportCapabilities = new WeakMap()
+export const FORMAL_REHEARSAL_WORKER_EVIDENCE_SOURCE = 'formal-rehearsal-test-evidence'
+
+export function getWorkerTransportProvenance(transport) {
+  return transportCapabilities.get(transport)
+}
 function parseJson(stdout, label, duration_ms = 1) {
   try { return JSON.parse(stdout) } catch { throw new WorkerTransportError('ERROR', `${label}_malformed`, duration_ms) }
 }
@@ -243,7 +250,7 @@ export function createWorkerTransport(bindings) {
     }
   }
 
-  return Object.freeze({ livePreconditions, execute(request) {
+  const transport = Object.freeze({ livePreconditions, execute(request) {
     if (!exact(request, ['operation', 'stage', 'timeout_ms', 'elapsed_ms', 'version_id', 'deployment_id'])
       || request.operation !== request.stage || !['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'].includes(request.operation)
       || !Number.isSafeInteger(request.timeout_ms) || !Number.isSafeInteger(request.elapsed_ms)
@@ -323,4 +330,114 @@ export function createWorkerTransport(bindings) {
     spent += reconciliationResult.duration_ms
     return response({ before: before.value, after: after.value, checks, controls, reconciliation: parseReconciliation(reconciliationResult.stdout, reconciliationResult.duration_ms) }, spent)
   } })
+  transportCapabilities.set(transport, Object.freeze({
+    source: 'production',
+    production: true,
+  }))
+  return transport
+}
+
+function rehearsalDeployment(bindings, versionId = bindings.baseline.version_id) {
+  return {
+    deployment_id: bindings.baseline.deployment_id,
+    version_id: versionId,
+    d1_database_id: bindings.d1_database_id,
+    traffic: [{ version_id: versionId, percentage: 100 }],
+  }
+}
+
+function rehearsalFailClosed() {
+  throw new WorkerTransportError('NON_PASS', 'formal_rehearsal_fail_closed', 1)
+}
+
+/**
+ * No-network formal rehearsal worker adapter. Synthesizes production contract
+ * shapes from frozen bindings only. Provenance is non-production at source.
+ */
+export function createRehearsalWorkerTransport(bindings, sink, scenario) {
+  if (!bindings || typeof bindings !== 'object') fail('bindings are required')
+  for (const key of [
+    'candidate_id', 'worker_name', 'd1_database_id', 'config_sha256', 'artifact_sha256',
+    'origin', 'smoke', 'baseline', 'database',
+  ]) if (!Object.hasOwn(bindings, key)) fail(`${key} is required`)
+  if (!safeId(bindings.candidate_id) || !safeId(bindings.worker_name) || !safeId(bindings.d1_database_id)
+    || !safeId(bindings.database) || typeof bindings.origin !== 'string'
+    || !Array.isArray(bindings.smoke?.requests)
+    || !exact(bindings.baseline, ['deployment_id', 'version_id', 'd1_database_id', 'traffic'])) {
+    fail('bindings are invalid')
+  }
+  const origin = new URL(bindings.origin)
+  if (!['http:', 'https:'].includes(origin.protocol)) fail('origin is invalid')
+
+  function refuseNetwork(label) {
+    fail(`rehearsal worker refused network or production-write path: ${label}`)
+  }
+
+  function livePreconditions(elapsed_ms = 0) {
+    if (!Number.isSafeInteger(elapsed_ms) || elapsed_ms < 0) {
+      return { outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: 1 }
+    }
+    if (sink) sink.push({ adapter: 'worker', operation: 'live_preconditions', stage: 'live_preconditions' })
+    if (scenario?.failStage === 'live_preconditions') {
+      return { outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }
+    }
+    if (scenario?.networkProbe === 'live_preconditions') refuseNetwork('live_preconditions')
+    return { outcome: 'PASS', duration_ms: 1 }
+  }
+
+  function execute(request) {
+    if (!exact(request, ['operation', 'stage', 'timeout_ms', 'elapsed_ms', 'version_id', 'deployment_id'])
+      || request.operation !== request.stage
+      || !['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'].includes(request.operation)
+      || !Number.isSafeInteger(request.timeout_ms) || !Number.isSafeInteger(request.elapsed_ms)
+      || request.timeout_ms <= 0 || request.elapsed_ms < 0) fail('request is invalid')
+    if (sink) sink.push({ adapter: 'worker', operation: request.operation, stage: request.stage })
+    if (scenario?.networkProbe === request.operation) refuseNetwork(request.operation)
+    if (scenario?.writeProbe === request.operation) refuseNetwork(`write:${request.operation}`)
+    if (scenario?.failStage === request.operation) rehearsalFailClosed()
+
+    if (request.operation === 'worker_deploy') {
+      const version_id = `rehearsal-version-${bindings.candidate_id.slice(0, 12)}`
+      return response({
+        format: 'blogman-upload-source-lifecycle-acceptance/v1',
+        state: 'accepted',
+        upload_operation_id: `issue-23-${bindings.candidate_id}-upload-1`,
+        version_id,
+        config_sha256: bindings.config_sha256,
+        snapshot_tree_sha256: bindings.artifact_sha256,
+        snapshot_identity_sha256: 'a'.repeat(64),
+        snapshot_proof_before_sha256: 'b'.repeat(64),
+        snapshot_proof_after_sha256: 'c'.repeat(64),
+        build_directory_proof_sha256: 'd'.repeat(64),
+        wrangler_output_sha256: 'e'.repeat(64),
+      }, 1)
+    }
+    if (request.operation === 'version_traffic_verification') {
+      if (!safeId(request.version_id)) throw new WorkerTransportError('ERROR', 'worker_adapter_uncertain')
+      return response(rehearsalDeployment(bindings, request.version_id), 1)
+    }
+    if (!safeId(request.version_id) || !safeId(request.deployment_id)) {
+      throw new WorkerTransportError('ERROR', 'worker_adapter_uncertain')
+    }
+    const deployment = rehearsalDeployment(bindings, request.version_id)
+    deployment.deployment_id = request.deployment_id
+    const checks = Object.fromEntries(bindings.smoke.requests.map(({ path, status }) => [path, status]))
+    return response({
+      before: deployment,
+      after: deployment,
+      checks,
+      controls: { producer: 'disabled', authority: 'disabled', executors: { scheduler: 'disabled' } },
+      reconciliation: {
+        state: 'matched',
+        checks: Object.fromEntries(RECONCILIATION_DIMENSIONS.map((key) => [key, 'matched'])),
+      },
+    }, 1)
+  }
+
+  const transport = Object.freeze({ livePreconditions, execute })
+  transportCapabilities.set(transport, Object.freeze({
+    source: FORMAL_REHEARSAL_WORKER_EVIDENCE_SOURCE,
+    production: false,
+  }))
+  return transport
 }

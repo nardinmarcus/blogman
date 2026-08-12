@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { getWorkerTransportProvenance } from './issue-23-delivery-worker-transport.mjs'
 
 export const WORKER_STAGE_ORDER = Object.freeze(['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'])
 const TIMEOUT_MS = Object.freeze({ worker_deploy: 600000, version_traffic_verification: 300000, smoke_control_t0: 300000 })
@@ -33,8 +34,20 @@ function emptyEvidenceHashes() {
   return Object.fromEntries(EVIDENCE_HASHES.map((name) => [name, null]))
 }
 
-function terminal(trace, evidenceHashes, mutation_counts) {
+function terminal(trace, evidenceHashes, mutation_counts, provenance) {
   const last = trace.at(-1)
+  // Unbranded transports never gain production evidence rights.
+  const evidenceProvenance = provenance ?? Object.freeze({
+    source: 'untrusted-test-transport',
+    production: false,
+  })
+  if (evidenceProvenance.production === true && evidenceProvenance.source !== 'production') {
+    throw new Error('production worker transport provenance source is invalid')
+  }
+  if (evidenceProvenance.production !== true && evidenceProvenance.source === 'production') {
+    throw new Error('non-production worker transport must not claim production source')
+  }
+  const production = evidenceProvenance.production === true
   const value = {
     format: 'blogman-issue-23-worker-stages/v1', outcome: last.outcome,
     first_terminal_stage: last.outcome === 'PASS' ? null : last.stage,
@@ -43,7 +56,9 @@ function terminal(trace, evidenceHashes, mutation_counts) {
     stage_durations_ms: Object.fromEntries(WORKER_STAGE_ORDER.map((stage) => [stage, trace.filter((entry) => entry.stage === stage).reduce((sum, entry) => sum + entry.duration_ms, 0)])),
     mutation_counts,
     evidence: {
-      source: 'production', production: true, promotable: last.outcome === 'PASS',
+      source: evidenceProvenance.source,
+      production,
+      promotable: production && last.outcome === 'PASS',
       hashes: evidenceHashes,
     },
     finalized: true,
@@ -88,6 +103,7 @@ function deploymentMatches(value, version, d1DatabaseId) {
 
 /** Private suffix seam. A response has only public facts; raw adapter output never escapes. */
 export function runWorkerStages({ bindings, transport, elapsed_ms = 0 }) {
+  const provenance = getWorkerTransportProvenance(transport)
   const trace = []
   const evidenceHashes = emptyEvidenceHashes()
   const mutation_counts = { attempted: 0, confirmed: 0 }
@@ -175,5 +191,5 @@ export function runWorkerStages({ bindings, transport, elapsed_ms = 0 }) {
     }
     trace.push({ stage, outcome: 'PASS', duration_ms: parsed.duration_ms })
   }
-  return terminal(trace, evidenceHashes, mutation_counts)
+  return terminal(trace, evidenceHashes, mutation_counts, provenance)
 }

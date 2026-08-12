@@ -1,16 +1,30 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { arch, platform, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runSyntheticStage } from './issue-23-delivery-synthetic-adapter.mjs'
-import { createD1Transport } from './issue-23-delivery-d1-transport.mjs'
+import {
+  createD1Transport,
+  createRehearsalD1Transport,
+} from './issue-23-delivery-d1-transport.mjs'
 import { runD1Stages } from './issue-23-delivery-d1-stages.mjs'
-import { createWorkerTransport } from './issue-23-delivery-worker-transport.mjs'
+import {
+  createRehearsalWorkerTransport,
+  createWorkerTransport,
+} from './issue-23-delivery-worker-transport.mjs'
 import { runWorkerStages } from './issue-23-delivery-worker-stages.mjs'
 
 export const LOCAL_ENTRY_FORMAT = 'blogman-issue-23-local-entry/v1'
 export const LOCAL_SUPERVISOR_FORMAT = 'blogman-issue-23-supervisor/v1'
+
+const FORMAL_REHEARSAL_EVIDENCE_SOURCE = 'formal-rehearsal-test-evidence'
+const FORMAL_RUNTIME_RECEIPT_FORMAT = 'blogman-issue-23-formal-rehearsal-runtime-receipt/v1'
+const TERMINAL_RESULT_FORMAT = 'blogman-issue-23-terminal-result/v1'
+const formalRehearsalContext = new AsyncLocalStorage()
+const ENTRY_MODULE_PATH = fileURLToPath(import.meta.url)
 
 function fail(message) {
   throw new Error(`Issue #23 local entry: ${message}`)
@@ -137,7 +151,6 @@ export function buildLocalEntryReceipt({
 }
 
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
-const TERMINAL_RESULT_FORMAT = 'blogman-issue-23-terminal-result/v1'
 const DELIVERY_STAGE_POLICY = Object.freeze([
   Object.freeze({ name: 'authorization_accept', timeout_seconds: 30 }),
   Object.freeze({ name: 'live_preconditions', timeout_seconds: 120 }),
@@ -1257,7 +1270,21 @@ function deriveProductionD1Bindings(d1, expectedPath) {
   return bindings
 }
 
-function sanitizedD1Error(classification) {
+const PRODUCTION_D1_EVIDENCE_POLICY = Object.freeze({
+  source: 'production',
+  production: true,
+  allow_promotable_pass: true,
+  malformed_classification: 'production_d1_result_malformed',
+})
+
+const FORMAL_REHEARSAL_D1_EVIDENCE_POLICY = Object.freeze({
+  source: FORMAL_REHEARSAL_EVIDENCE_SOURCE,
+  production: false,
+  allow_promotable_pass: false,
+  malformed_classification: 'formal_rehearsal_d1_result_malformed',
+})
+
+function sanitizedD1Error(classification, evidencePolicy = PRODUCTION_D1_EVIDENCE_POLICY) {
   const stageCounts = Object.fromEntries(PRODUCTION_D1_STAGES.map((stage) => [stage, 0]))
   const stageDurations = Object.fromEntries(PRODUCTION_D1_STAGES.map((stage) => [stage, 0]))
   stageCounts.d1_identity = 1
@@ -1268,7 +1295,11 @@ function sanitizedD1Error(classification) {
     failure: { classification },
     stage_counts: stageCounts,
     stage_durations_ms: stageDurations,
-    evidence: { source: 'production', production: true, promotable: false },
+    evidence: {
+      source: evidencePolicy.source,
+      production: evidencePolicy.production,
+      promotable: false,
+    },
     finalized: true,
   }
   const bytes = canonicalJsonBytes(value)
@@ -1282,12 +1313,13 @@ function sanitizedD1Error(classification) {
   }
 }
 
-function normalizeProductionD1Result(result) {
+function normalizeD1Result(result, evidencePolicy) {
+  const malformed = () => sanitizedD1Error(evidencePolicy.malformed_classification, evidencePolicy)
   if (!isPlainRecord(result) || !isPlainRecord(result.value)
     || !(result.bytes instanceof Uint8Array)
     || typeof result.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(result.sha256)
     || sha256(Buffer.from(result.bytes)) !== result.sha256) {
-    return sanitizedD1Error('production_d1_result_malformed')
+    return malformed()
   }
   const value = result.value
   if (value.format !== 'blogman-issue-23-d1-stages/v1'
@@ -1299,31 +1331,34 @@ function normalizeProductionD1Result(result) {
       'source', 'production', 'promotable', ...D1_EVIDENCE_HASHES,
       'account_id', 'd1_database_id', 'candidate_id',
     ])
-    || value.evidence.source !== 'production'
-    || value.evidence.production !== true
+    || value.evidence.source !== evidencePolicy.source
+    || value.evidence.production !== evidencePolicy.production
+    || value.evidence.promotable !== (
+      evidencePolicy.allow_promotable_pass && evidencePolicy.production && value.outcome === 'PASS'
+    )
     || D1_EVIDENCE_HASHES.some((name) => !/^[a-f0-9]{64}$/u.test(value.evidence[name]))) {
-    return sanitizedD1Error('production_d1_result_malformed')
+    return malformed()
   }
   const countKeys = Reflect.ownKeys(value.stage_counts)
   const durationKeys = Reflect.ownKeys(value.stage_durations_ms)
   if (countKeys.length !== PRODUCTION_D1_STAGES.length
     || durationKeys.length !== PRODUCTION_D1_STAGES.length
     || PRODUCTION_D1_STAGES.some((stage) => !countKeys.includes(stage) || !durationKeys.includes(stage))) {
-    return sanitizedD1Error('production_d1_result_malformed')
+    return malformed()
   }
   for (const stage of PRODUCTION_D1_STAGES) {
     if (!Number.isSafeInteger(value.stage_counts[stage])
       || ![0, 1].includes(value.stage_counts[stage])
       || !Number.isSafeInteger(value.stage_durations_ms[stage])
       || value.stage_durations_ms[stage] < 0) {
-      return sanitizedD1Error('production_d1_result_malformed')
+      return malformed()
     }
   }
   if (value.outcome === 'PASS') {
     if (value.first_terminal_stage !== null
       || value.failure !== null
       || PRODUCTION_D1_STAGES.some((stage) => value.stage_counts[stage] !== 1)) {
-      return sanitizedD1Error('production_d1_result_malformed')
+      return malformed()
     }
     return {
       outcome: 'PASS',
@@ -1342,7 +1377,7 @@ function normalizeProductionD1Result(result) {
     || !PRODUCTION_D1_STAGES.every((stage, index) => (
       value.stage_counts[stage] === (index <= PRODUCTION_D1_STAGES.indexOf(value.first_terminal_stage) ? 1 : 0)
     ))) {
-    return sanitizedD1Error('production_d1_result_malformed')
+    return malformed()
   }
   return {
     outcome: value.outcome,
@@ -1353,6 +1388,15 @@ function normalizeProductionD1Result(result) {
     evidence_hashes: Object.fromEntries(D1_EVIDENCE_HASHES.map((name) => [name, value.evidence[name]])),
     sha256: result.sha256,
   }
+}
+
+function normalizeProductionD1Result(result) {
+  return normalizeD1Result(result, PRODUCTION_D1_EVIDENCE_POLICY)
+}
+
+/** Private rehearsal path only. Never used by public production execute. */
+function normalizeFormalRehearsalD1Result(result) {
+  return normalizeD1Result(result, FORMAL_REHEARSAL_D1_EVIDENCE_POLICY)
 }
 
 const WORKER_RESULT_STAGES = Object.freeze(['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'])
@@ -1390,7 +1434,19 @@ function malformedWorkerResult() {
   }
 }
 
-export function normalizeWorkerResultForTestsOnly(result) {
+const PRODUCTION_WORKER_EVIDENCE_POLICY = Object.freeze({
+  source: 'production',
+  production: true,
+  allow_promotable_pass: true,
+})
+
+const FORMAL_REHEARSAL_WORKER_EVIDENCE_POLICY = Object.freeze({
+  source: FORMAL_REHEARSAL_EVIDENCE_SOURCE,
+  production: false,
+  allow_promotable_pass: false,
+})
+
+function normalizeWorkerResult(result, evidencePolicy = PRODUCTION_WORKER_EVIDENCE_POLICY) {
   if (!isPlainRecord(result) || !isPlainRecord(result.value) || !(result.bytes instanceof Uint8Array)
     || !/^[a-f0-9]{64}$/u.test(result.sha256)) return malformedWorkerResult()
   const value = result.value
@@ -1407,7 +1463,11 @@ export function normalizeWorkerResultForTestsOnly(result) {
     || !exact(value.stage_durations_ms, WORKER_RESULT_STAGES)
     || !exact(value.mutation_counts, ['attempted', 'confirmed'])
     || !exact(value.evidence, ['source', 'production', 'promotable', 'hashes'])
-    || value.evidence.source !== 'production' || value.evidence.production !== true
+    || value.evidence.source !== evidencePolicy.source
+    || value.evidence.production !== evidencePolicy.production
+    || value.evidence.promotable !== (
+      evidencePolicy.allow_promotable_pass && evidencePolicy.production && value.outcome === 'PASS'
+    )
     || !isPlainRecord(value.evidence.hashes) || !exact(value.evidence.hashes, WORKER_EVIDENCE_HASHES)) {
     return malformedWorkerResult()
   }
@@ -1434,12 +1494,11 @@ export function normalizeWorkerResultForTestsOnly(result) {
           : value.evidence.hashes[name] !== null
     ))) return malformedWorkerResult()
   if (value.outcome === 'PASS') {
-    if (value.first_terminal_stage !== null || value.failure !== null || value.evidence.promotable !== true
+    if (value.first_terminal_stage !== null || value.failure !== null
       || value.mutation_counts.attempted !== 2 || value.mutation_counts.confirmed !== 2) {
       return malformedWorkerResult()
     }
   } else if (!exact(value.failure, ['classification']) || typeof value.failure.classification !== 'string'
-    || value.evidence.promotable !== false
     || value.mutation_counts.attempted !== (terminalIndex >= 1 ? 2 : 1)
     || value.mutation_counts.confirmed !== (terminalIndex >= 1 ? 1 : 0)) {
     return malformedWorkerResult()
@@ -1454,6 +1513,14 @@ export function normalizeWorkerResultForTestsOnly(result) {
     evidence_hashes: Object.fromEntries(WORKER_EVIDENCE_HASHES.map((name) => [name, value.evidence.hashes[name]])),
     sha256: result.sha256,
   }
+}
+
+export function normalizeWorkerResultForTestsOnly(result) {
+  return normalizeWorkerResult(result, PRODUCTION_WORKER_EVIDENCE_POLICY)
+}
+
+function normalizeFormalRehearsalWorkerResult(result) {
+  return normalizeWorkerResult(result, FORMAL_REHEARSAL_WORKER_EVIDENCE_POLICY)
 }
 
 function npmCliPath(nodePath) {
@@ -1489,11 +1556,62 @@ function workerBindings(manifest, expectedReconciliationPath) {
   }
 }
 
+function currentFormalContext() {
+  return formalRehearsalContext.getStore() ?? null
+}
+
+function formalAdapterFactories(context) {
+  return Object.freeze({
+    createD1Transport(bindings) {
+      return createRehearsalD1Transport(bindings, context.sink, context.scenario)
+    },
+    createWorkerTransport(bindings) {
+      return createRehearsalWorkerTransport(bindings, context.sink, context.scenario)
+    },
+    normalizeD1Result: normalizeFormalRehearsalD1Result,
+    normalizeWorkerResult: normalizeFormalRehearsalWorkerResult,
+    d1Error(classification) {
+      return sanitizedD1Error(classification, FORMAL_REHEARSAL_D1_EVIDENCE_POLICY)
+    },
+    evidence: Object.freeze({
+      source: FORMAL_REHEARSAL_EVIDENCE_SOURCE,
+      production: false,
+      promotable: false,
+    }),
+    zeroMutations: true,
+  })
+}
+
+function productionAdapterFactories() {
+  return Object.freeze({
+    createD1Transport,
+    createWorkerTransport,
+    normalizeD1Result: normalizeProductionD1Result,
+    normalizeWorkerResult: normalizeWorkerResultForTestsOnly,
+    d1Error(classification) {
+      return sanitizedD1Error(classification, PRODUCTION_D1_EVIDENCE_POLICY)
+    },
+    evidence: Object.freeze({
+      source: 'production',
+      production: true,
+      promotable: null,
+    }),
+    zeroMutations: false,
+  })
+}
+
+function activeAdapterFactories() {
+  const context = currentFormalContext()
+  return context ? formalAdapterFactories(context) : productionAdapterFactories()
+}
+
 function runLivePreconditions(manifest, d1, elapsed_ms = 0) {
+  const adapters = activeAdapterFactories()
   let materialized
   try {
     materialized = materializeExpectedReconciliation(d1)
-    const result = createWorkerTransport(workerBindings(manifest, materialized.path)).livePreconditions(elapsed_ms)
+    const result = adapters.createWorkerTransport(workerBindings(manifest, materialized.path))
+      .livePreconditions(elapsed_ms)
     if (!isPlainRecord(result) || !['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(result.outcome)
       || !Number.isSafeInteger(result.duration_ms) || result.duration_ms <= 0
       || (result.outcome === 'PASS' ? Object.hasOwn(result, 'classification')
@@ -1554,6 +1672,8 @@ function productionTrace(liveResult, d1Result, workerResult = null) {
 }
 
 function executeProduction(manifest, authorization) {
+  const adapters = activeAdapterFactories()
+  const formal = currentFormalContext()
   const manifestBytes = validatePreparedManifest(manifest)
   const d1 = validateCanonicalManifest(manifest.value, manifestBytes)
   const authorizationDigest = acceptAuthorization(sha256(manifestBytes), authorization)
@@ -1575,42 +1695,42 @@ function executeProduction(manifest, authorization) {
       const bindings = deriveProductionD1Bindings(d1, materialized.path)
       let transport
       try {
-        transport = createD1Transport(bindings)
+        transport = adapters.createD1Transport(bindings)
       } catch {
-        d1Result = sanitizedD1Error('production_d1_setup_error')
+        d1Result = adapters.d1Error(formal ? 'formal_rehearsal_d1_setup_error' : 'production_d1_setup_error')
       }
       if (!d1Result) {
         try {
-          d1Result = normalizeProductionD1Result(runD1Stages({
+          d1Result = adapters.normalizeD1Result(runD1Stages({
             bindings,
             transport,
             elapsed_ms: liveResult.duration_ms,
           }))
         } catch {
-          d1Result = sanitizedD1Error('production_d1_adapter_error')
+          d1Result = adapters.d1Error(formal ? 'formal_rehearsal_d1_adapter_error' : 'production_d1_adapter_error')
         }
       }
     } catch (error) {
       materialized ??= error?.materialized
-      d1Result = sanitizedD1Error('production_d1_setup_error')
+      d1Result = adapters.d1Error(formal ? 'formal_rehearsal_d1_setup_error' : 'production_d1_setup_error')
     } finally {
       cleanup = disposeExpectedReconciliation(materialized)
     }
   }
-  if (!d1Result) d1Result = sanitizedD1Error('production_d1_adapter_error')
+  if (!d1Result) d1Result = adapters.d1Error(formal ? 'formal_rehearsal_d1_adapter_error' : 'production_d1_adapter_error')
   let workerResult
   if (d1Result.outcome === 'PASS') {
     let workerExpected
     try {
       workerExpected = materializeExpectedReconciliation(d1)
       const bindings = workerBindings(manifest.value, workerExpected.path)
-      workerResult = normalizeWorkerResultForTestsOnly(runWorkerStages({
+      workerResult = adapters.normalizeWorkerResult(runWorkerStages({
         bindings,
-        transport: createWorkerTransport(bindings),
+        transport: adapters.createWorkerTransport(bindings),
         elapsed_ms: liveResult.duration_ms
           + Object.values(d1Result.stage_durations_ms).reduce((sum, duration) => sum + duration, 0),
       }))
-    } catch { workerResult = normalizeWorkerResultForTestsOnly(null) }
+    } catch { workerResult = adapters.normalizeWorkerResult(null) }
     finally { disposeExpectedReconciliation(workerExpected) }
   }
   const trace = productionTrace(liveResult, d1Result, workerResult)
@@ -1622,6 +1742,14 @@ function executeProduction(manifest, authorization) {
       : d1TerminalIndex > PRODUCTION_D1_STAGES.indexOf('clean_start_reset') ? 1 : 0)
   const terminal = trace.at(-1)
   if (!terminal) fail('production state machine did not run')
+  const productionWrites = d1MutationConfirmed + (workerResult?.mutation_counts.confirmed ?? 0)
+  const attempted = d1MutationAttempted + (workerResult?.mutation_counts.attempted ?? 0)
+  const confirmed = d1MutationConfirmed + (workerResult?.mutation_counts.confirmed ?? 0)
+  const evidenceSource = adapters.evidence.source
+  const evidenceProduction = adapters.evidence.production
+  const evidencePromotable = adapters.evidence.promotable === null
+    ? terminal.outcome === 'PASS'
+    : adapters.evidence.promotable
   const value = {
     format: TERMINAL_RESULT_FORMAT,
     identities,
@@ -1632,15 +1760,13 @@ function executeProduction(manifest, authorization) {
     failure: terminal.outcome === 'PASS' ? null : { classification: terminal.classification },
     stage_counts: stageCounts(trace),
     stage_durations_ms: stageDurations(trace),
-    mutation_counts: {
-      production_writes: d1MutationConfirmed + (workerResult?.mutation_counts.confirmed ?? 0),
-      attempted: d1MutationAttempted + (workerResult?.mutation_counts.attempted ?? 0),
-      confirmed: d1MutationConfirmed + (workerResult?.mutation_counts.confirmed ?? 0),
-    },
+    mutation_counts: adapters.zeroMutations
+      ? { production_writes: 0, attempted: 0, confirmed: 0 }
+      : { production_writes: productionWrites, attempted, confirmed },
     evidence: {
-      source: 'production',
-      production: true,
-      promotable: terminal.outcome === 'PASS',
+      source: evidenceSource,
+      production: evidenceProduction,
+      promotable: evidencePromotable,
       hashes: productionEvidenceHashes(d1Result, workerResult),
       cleanup,
     },
@@ -1648,6 +1774,113 @@ function executeProduction(manifest, authorization) {
   }
   const bytes = canonicalJsonBytes(value)
   return { value, bytes, sha256: sha256(bytes) }
+}
+
+function hashFile(path) {
+  return sha256(readFileSync(path))
+}
+
+function buildFormalRuntimeReceipt() {
+  const nodePath = realpathSync(process.execPath)
+  const npmPath = realpathSync(npmCliPath(nodePath))
+  const wranglerPath = realpathSync(resolve(ENTRY_REPO_ROOT, 'node_modules/.bin/wrangler'))
+  const openNextPath = realpathSync(resolve(ENTRY_REPO_ROOT, 'node_modules/.bin/opennextjs-cloudflare'))
+  const curlPath = realpathSync(SYSTEM_CURL_PATH)
+  const entryPath = realpathSync(ENTRY_MODULE_PATH)
+  const npmVersion = execFileSync(nodePath, [npmPath, '--version'], { encoding: 'utf8', timeout: 15_000 })
+    .trim()
+    .replace(/^v/u, '')
+  const wranglerVersion = execFileSync(wranglerPath, ['--version'], { encoding: 'utf8', timeout: 15_000 })
+    .match(/([0-9]+\.[0-9]+\.[0-9]+)/u)?.[1]
+  const curlVersion = execFileSync(curlPath, ['--version'], { encoding: 'utf8', timeout: 15_000 })
+    .match(/^curl ([0-9]+(?:\.[0-9]+){1,2})\b/mu)?.[1]
+  const lockfile = JSON.parse(readFileSync(resolve(ENTRY_REPO_ROOT, 'package-lock.json'), 'utf8'))
+  const openNextVersion = lockfile.packages?.['node_modules/@opennextjs/cloudflare']?.version
+  if (!wranglerVersion || !curlVersion || !openNextVersion || !npmVersion) {
+    fail('formal runtime receipt tool identity is incomplete')
+  }
+  const value = {
+    format: FORMAL_RUNTIME_RECEIPT_FORMAT,
+    os: platform() === 'darwin' ? 'macos' : platform(),
+    arch: arch(),
+    node: { version: process.versions.node, identity_sha256: hashFile(nodePath) },
+    npm: { version: npmVersion, identity_sha256: hashFile(npmPath) },
+    wrangler: { version: wranglerVersion, identity_sha256: hashFile(wranglerPath) },
+    opennextjs_cloudflare: { version: openNextVersion, identity_sha256: hashFile(openNextPath) },
+    curl: { version: curlVersion, identity_sha256: hashFile(curlPath) },
+    entry: {
+      path: 'scripts/issue-23-delivery-entry.mjs',
+      identity_sha256: hashFile(entryPath),
+    },
+  }
+  const bytes = canonicalJsonBytes(value)
+  return Object.freeze({ value: Object.freeze(value), bytes, sha256: sha256(bytes) })
+}
+
+/**
+ * Production Evidence validator. Formal/test Terminal Results must fail this check.
+ */
+export function validateProductionTerminalEvidence(result) {
+  if (!isPlainRecord(result) || !isPlainRecord(result.value) || !(result.bytes instanceof Uint8Array)
+    || typeof result.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(result.sha256)
+    || sha256(Buffer.from(result.bytes)) !== result.sha256) {
+    fail('production terminal evidence is malformed')
+  }
+  const value = result.value
+  if (value.format !== TERMINAL_RESULT_FORMAT
+    || value.finalized !== true
+    || value.authorization_consumed !== true
+    || !isPlainRecord(value.evidence)
+    || value.evidence.source !== 'production'
+    || value.evidence.production !== true
+    || value.evidence.promotable !== (value.outcome === 'PASS')
+    || !isPlainRecord(value.mutation_counts)
+    || !Number.isSafeInteger(value.mutation_counts.production_writes)
+    || value.mutation_counts.production_writes < 0) {
+    fail('production terminal evidence is invalid')
+  }
+  return true
+}
+
+/**
+ * Module-owned formal attempt entry. Enters private context, then calls public
+ * execute(manifest, authorization) with exactly two arguments.
+ */
+export function runFormalRehearsalAttempt(manifest, options = {}) {
+  if (arguments.length < 1 || arguments.length > 2) {
+    fail('runFormalRehearsalAttempt accepts manifest and optional options')
+  }
+  if (options !== undefined && !isPlainRecord(options)) fail('formal rehearsal options must be an object')
+  const scenario = options.scenario === undefined ? null : options.scenario
+  if (scenario !== null && !isPlainRecord(scenario)) fail('formal rehearsal scenario must be an object')
+  const sink = []
+  const runtime_receipt = buildFormalRuntimeReceipt()
+  const context = Object.freeze({ sink, scenario, runtime_receipt })
+  return formalRehearsalContext.run(context, () => {
+    const authorization = {
+      format: AUTHORIZATION_FORMAT,
+      authorization_id: typeof options.authorization_id === 'string' && options.authorization_id.length > 0
+        ? options.authorization_id
+        : `formal-rehearsal-${manifest.sha256.slice(0, 16)}`,
+      manifest_sha256: manifest.sha256,
+      decision: 'approve',
+    }
+    const terminal = execute(manifest, authorization)
+    if (terminal.value.evidence.production === true || terminal.value.evidence.source === 'production') {
+      fail('formal rehearsal must not emit production evidence')
+    }
+    try {
+      validateProductionTerminalEvidence(terminal)
+      fail('formal rehearsal terminal result must not pass production evidence validation')
+    } catch (error) {
+      if (!/production terminal evidence/u.test(error.message)) throw error
+    }
+    return Object.freeze({
+      terminal,
+      runtime_receipt,
+      operations: Object.freeze(sink.map((entry) => Object.freeze({ ...entry }))),
+    })
+  })
 }
 
 export function execute(manifest, authorization) {

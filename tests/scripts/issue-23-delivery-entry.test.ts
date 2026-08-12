@@ -674,7 +674,20 @@ describe('Issue #23 pure local entry seam', () => {
         },
       },
     })
-    const normalizedWorker = normalizeWorkerResultForTestsOnly(worker)
+    // Unbranded transports stay non-production; production normalizer must reject them.
+    expect(worker.value.evidence).toMatchObject({
+      source: 'untrusted-test-transport',
+      production: false,
+      promotable: false,
+    })
+    expect(normalizeWorkerResultForTestsOnly(worker)).toMatchObject({
+      outcome: 'ERROR',
+      failure: { classification: 'worker_result_malformed' },
+    })
+    const workerHashes = {
+      sha256: worker.sha256,
+      evidence_hashes: worker.value.evidence.hashes,
+    }
     const d1Hashes = Object.fromEntries([
       'bindings_sha256', 'wrangler_sha256', 'config_sha256', 'reset_sql_sha256',
       'migration_runner_sha256', 'migration_catalog_sha256', 'rollout_safety_sha256',
@@ -682,9 +695,9 @@ describe('Issue #23 pure local entry seam', () => {
     ].map((name, index) => [name, String(index).repeat(64)]))
     const terminalHashes = productionEvidenceHashesForTestsOnly({
       sha256: '2'.repeat(64), evidence_hashes: d1Hashes,
-    }, normalizedWorker)
+    }, workerHashes)
 
-    expect(normalizedWorker.evidence_hashes).toEqual({
+    expect(workerHashes.evidence_hashes).toEqual({
       upload_acceptance_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
       version_traffic_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
       smoke_control_t0_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),

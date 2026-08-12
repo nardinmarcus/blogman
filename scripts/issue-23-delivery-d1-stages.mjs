@@ -699,6 +699,14 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0 }
     source: 'untrusted-test-transport',
     production: false,
   })
+  // Production evidence may only come from a production-sourced transport.
+  // Non-production transports (including formal rehearsal) keep their source label.
+  if (evidenceProvenance.production === true && evidenceProvenance.source !== 'production') {
+    fail('production D1 transport provenance source is invalid')
+  }
+  if (evidenceProvenance.production !== true && evidenceProvenance.source === 'production') {
+    fail('non-production D1 transport must not claim production source')
+  }
   const production = evidenceProvenance.production === true
   const traceSha256 = sha256(canonicalBytes(trace))
   const value = {

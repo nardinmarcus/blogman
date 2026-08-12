@@ -67,6 +67,12 @@ jobs:
           NEXT_TELEMETRY_DISABLED: '1'
         run: npm run test:run -- tests/scripts/issue-23-delivery-prepare.test.ts --reporter=verbose
 
+      - name: Run Issue #92 formal rehearsal macOS exact gate
+        env:
+          CI: true
+          NEXT_TELEMETRY_DISABLED: '1'
+        run: npm run test:run -- tests/scripts/issue-92-formal-rehearsal.test.ts --reporter=verbose
+
   verify-migrations:
     runs-on: ubuntu-latest
     timeout-minutes: 55
