@@ -81,13 +81,20 @@ const REACHABLE_PREVIEW_PATTERN = /\b(?:draftMode|previewData|setPreviewData|cle
 const REACHABLE_PREVIEW_ROUTE_PATTERN = /(?:^|\/)(?:preview|draft(?:mode|data)?)(?:\/|$)/iu
 const SOURCE_EXTENSIONS = new Set(['.cjs', '.js', '.jsx', '.mjs', '.ts', '.tsx'])
 
+const CONFIG_REHEARSAL_SCHEMA = Object.freeze({
+  ...MANIFEST_SCHEMA.properties.rehearsal,
+  required: ['runtime', 'network', 'status', 'receipt_sha256', 'production_write_adapter_calls'],
+})
 const CONFIG_SCHEMA = Object.freeze({
   ...MANIFEST_SCHEMA,
   required: MANIFEST_SCHEMA.required.filter((key) => key !== 'format' && key !== 'd1'),
-  properties: Object.fromEntries(
-    Object.entries(MANIFEST_SCHEMA.properties)
-      .filter(([key]) => key !== 'format' && key !== 'd1'),
-  ),
+  properties: {
+    ...Object.fromEntries(
+      Object.entries(MANIFEST_SCHEMA.properties)
+        .filter(([key]) => key !== 'format' && key !== 'd1' && key !== 'rehearsal'),
+    ),
+    rehearsal: CONFIG_REHEARSAL_SCHEMA,
+  },
 })
 
 function fail(message) {
@@ -329,7 +336,12 @@ function hashD1ArtifactDirectory(path) {
       if (metadata.isDirectory()) {
         visit(child, relativePath)
       } else if (metadata.isFile()) {
-        hash.update(`${relativePath}\\0${metadata.size}\\0`).update(readFileSync(child)).update('\\0')
+        hash.update(Buffer.from(relativePath, 'utf8'))
+          .update(Buffer.from([0]))
+          .update(Buffer.from(String(metadata.size), 'utf8'))
+          .update(Buffer.from([0]))
+          .update(readFileSync(child))
+          .update(Buffer.from([0]))
       } else {
         fail('canonical migration catalog contains an unsupported entry')
       }
@@ -389,15 +401,6 @@ function canonicalExpectedReconciliation(value) {
 
 function canonicalExpectedReconciliationBytes(value) {
   return Buffer.from(`${JSON.stringify(canonicalExpectedReconciliation(value), null, 2)}\n`, 'utf8')
-}
-
-function fallbackExpectedReconciliation() {
-  return {
-    format: EXPECTED_RECONCILIATION_FORMAT,
-    schema: { sha256: '0'.repeat(64) },
-    migration_ledger: { state: 'present', row_count: 6, sha256: '1'.repeat(64) },
-    posts: { count: 0, status: {}, content_sha256: '2'.repeat(64) },
-  }
 }
 
 function resolveCanonicalD1Facts(repositoryPath, target, toolchain, repository) {
@@ -690,6 +693,72 @@ function resolveTargetFacts(target) {
   return structuredClone(target)
 }
 
+function assertCanonicalProductionPaths(config) {
+  const paths = [
+    ['migration.reset_sql.path', config.migration.reset_sql.path, CANONICAL_D1_PATHS.reset],
+    ['migration.runner.path', config.migration.runner.path, CANONICAL_D1_PATHS.runner],
+    ['migration.catalog.path', config.migration.catalog.path, CANONICAL_D1_PATHS.catalog],
+  ]
+  for (const [label, actual, expected] of paths) {
+    if (actual !== expected) fail(`${label} must identify the canonical production artifact`)
+  }
+  for (const [index, migration] of config.migration.catalog.migrations.entries()) {
+    const expected = `${CANONICAL_D1_PATHS.catalog}/${EXPECTED_D1_MIGRATION_NAMES[index]}.sql`
+    if (migration.path !== expected) {
+      fail(`migration.catalog.migrations[${index}] must identify the canonical production artifact`)
+    }
+  }
+}
+
+function resolveRehearsalEvidence(rehearsalResult) {
+  if (!isRecord(rehearsalResult)
+    || rehearsalResult.status !== 'PASS'
+    || rehearsalResult.network !== 'disabled'
+    || rehearsalResult.production_write_adapter_calls !== 0) {
+    fail('local rehearsal evidence is not a canonical PASS with disabled network and zero production writes')
+  }
+
+  const expectedEvidence = rehearsalResult.expected_reconciliation
+  if (!isRecord(expectedEvidence)
+    || Reflect.ownKeys(expectedEvidence).length !== 2
+    || !Object.hasOwn(expectedEvidence, 'value')
+    || !Object.hasOwn(expectedEvidence, 'sha256')) {
+    fail('expected reconciliation evidence is required')
+  }
+  const expectedReconciliationBytes = canonicalExpectedReconciliationBytes(expectedEvidence.value)
+  const expectedReconciliationSha256 = sha256(expectedReconciliationBytes)
+  if (expectedEvidence.sha256 !== expectedReconciliationSha256) {
+    fail('rehearsal expected reconciliation identity does not match its bytes')
+  }
+
+  const d1Evidence = rehearsalResult.d1
+  if (!isRecord(d1Evidence)
+    || d1Evidence.outcome !== 'PASS'
+    || d1Evidence.production !== false
+    || d1Evidence.promotable !== false
+    || !/^[a-f0-9]{64}$/u.test(d1Evidence.sha256)) {
+    fail('D1 stage receipt evidence is invalid')
+  }
+
+  const cleanup = rehearsalResult.cleanup
+  if (!isRecord(cleanup)
+    || cleanup.created !== true
+    || cleanup.cleaned !== true
+    || cleanup.observed_absent !== true) {
+    fail('local rehearsal cleanup proof is incomplete')
+  }
+  if (!/^[a-f0-9]{64}$/u.test(rehearsalResult.receipt_sha256)) {
+    fail('local rehearsal receipt identity is invalid')
+  }
+
+  return {
+    expectedReconciliation: canonicalExpectedReconciliation(expectedEvidence.value),
+    expectedReconciliationSha256,
+    d1ReceiptSha256: d1Evidence.sha256,
+    cleanup: { created: true, cleaned: true, observed_absent: true },
+  }
+}
+
 function resolveFacts(config, {
   repositoryPath = REPO_ROOT,
   ciResolver = resolveCiFacts,
@@ -813,23 +882,11 @@ function resolveFacts(config, {
     d1: d1Base,
     productionWriteAdapter,
   })
-  if (rehearsalResult.production_write_adapter_calls !== 0) {
-    fail('rehearsal observed a production-write adapter call')
-  }
-  const expectedInput = rehearsalResult.expected_reconciliation?.value
-    ?? rehearsalResult.expected_reconciliation
-    ?? fallbackExpectedReconciliation()
-  const expectedReconciliation = canonicalExpectedReconciliation(expectedInput)
-  const expectedReconciliationBytes = canonicalExpectedReconciliationBytes(expectedReconciliation)
-  const expectedReconciliationSha256 = sha256(expectedReconciliationBytes)
-  if (rehearsalResult.expected_reconciliation?.sha256 !== undefined
-    && rehearsalResult.expected_reconciliation.sha256 !== expectedReconciliationSha256) {
-    fail('rehearsal expected reconciliation identity does not match its bytes')
-  }
+  const rehearsalEvidence = resolveRehearsalEvidence(rehearsalResult)
   const d1 = {
     ...d1Base,
-    expected_reconciliation_sha256: expectedReconciliationSha256,
-    expected_reconciliation: expectedReconciliation,
+    expected_reconciliation_sha256: rehearsalEvidence.expectedReconciliationSha256,
+    expected_reconciliation: rehearsalEvidence.expectedReconciliation,
   }
   const rehearsal = {
     runtime: rehearsalResult.runtime,
@@ -837,6 +894,9 @@ function resolveFacts(config, {
     status: rehearsalResult.status,
     receipt_sha256: rehearsalResult.receipt_sha256,
     production_write_adapter_calls: rehearsalResult.production_write_adapter_calls,
+    expected_reconciliation_sha256: rehearsalEvidence.expectedReconciliationSha256,
+    d1_stage_receipt_sha256: rehearsalEvidence.d1ReceiptSha256,
+    cleanup: rehearsalEvidence.cleanup,
   }
   return { ...resolved, target, d1, rehearsal }
 }
@@ -972,6 +1032,17 @@ function assertManifestRelationships(manifest) {
   }
   if (manifest.rehearsal.production_write_adapter_calls !== 0) {
     fail('rehearsal must record zero production-write adapter calls')
+  }
+  if (manifest.rehearsal.expected_reconciliation_sha256 !== manifest.d1.expected_reconciliation_sha256) {
+    fail('rehearsal expected reconciliation identity must bind the D1 snapshot')
+  }
+  if (!/^[a-f0-9]{64}$/u.test(manifest.rehearsal.d1_stage_receipt_sha256)) {
+    fail('rehearsal D1 stage receipt identity is invalid')
+  }
+  if (manifest.rehearsal.cleanup.created !== true
+    || manifest.rehearsal.cleanup.cleaned !== true
+    || manifest.rehearsal.cleanup.observed_absent !== true) {
+    fail('rehearsal cleanup proof is incomplete')
   }
 }
 
@@ -1250,26 +1321,50 @@ function validateConfig(config) {
   return orderBySchema(manifest, MANIFEST_SCHEMA)
 }
 
-export function prepare(config, options = {}) {
-  const { productionWriteAdapter } = options
-  const callsBefore = readProductionWriteCallCount(productionWriteAdapter)
-  validateSchemaValue(config, CONFIG_SCHEMA, '$.config')
-  const resolvedConfig = resolveFacts(config, options)
-  const value = validateConfig(resolvedConfig)
-  const bytes = canonicalBytes(value)
-  const callsAfter = readProductionWriteCallCount(productionWriteAdapter)
-  if (callsBefore !== undefined && callsAfter !== callsBefore) {
-    fail('production-write adapter was called during read-only preparation')
-  }
-  const canonical = Buffer.from(bytes)
+function preparedResult(value, testOnly = false) {
+  const ordered = orderBySchema(value, MANIFEST_SCHEMA)
+  const canonical = Buffer.from(`${JSON.stringify(ordered, null, 2)}\n`, 'utf8')
   const identity = sha256(canonical)
   return Object.freeze({
+    ...(testOnly ? { test_only: true } : {}),
     value: deepFreeze(JSON.parse(canonical.toString('utf8'))),
     get bytes() {
       return Buffer.from(canonical)
     },
     sha256: identity,
   })
+}
+
+function assertReadOnlyPreparation(productionWriteAdapter, callsBefore) {
+  const callsAfter = readProductionWriteCallCount(productionWriteAdapter)
+  if (callsBefore !== undefined && callsAfter !== callsBefore) {
+    fail('production-write adapter was called during read-only preparation')
+  }
+}
+
+export function prepareForTestsOnly(config, options = {}) {
+  const { productionWriteAdapter } = options
+  const callsBefore = readProductionWriteCallCount(productionWriteAdapter)
+  validateSchemaValue(config, CONFIG_SCHEMA, '$.config')
+  const resolvedConfig = resolveFacts(config, options)
+  const productionValue = validateConfig(resolvedConfig)
+  const value = structuredClone(productionValue)
+  value.d1.mode = 'local'
+  value.d1.evidence_class = 'test-non-production'
+  validateSchemaValue(value, MANIFEST_SCHEMA)
+  assertReadOnlyPreparation(productionWriteAdapter, callsBefore)
+  return preparedResult(value, true)
+}
+
+export function prepare(config, options) {
+  if (options !== undefined) {
+    fail('public prepare does not accept adapter overrides')
+  }
+  validateSchemaValue(config, CONFIG_SCHEMA, '$.config')
+  assertCanonicalProductionPaths(config)
+  const resolvedConfig = resolveFacts(config)
+  const value = validateConfig(resolvedConfig)
+  return preparedResult(value)
 }
 
 function readConfig(configPath) {
@@ -1282,7 +1377,7 @@ function runCli(argv) {
   if (configIndex === -1 || !argv[configIndex + 1]) {
     throw new Error('Usage: node scripts/issue-23-delivery-prepare.mjs --config <path>')
   }
-  const result = prepare(readConfig(argv[configIndex + 1]), { repositoryPath: REPO_ROOT })
+  const result = prepare(readConfig(argv[configIndex + 1]))
   process.stdout.write(result.bytes)
 }
 

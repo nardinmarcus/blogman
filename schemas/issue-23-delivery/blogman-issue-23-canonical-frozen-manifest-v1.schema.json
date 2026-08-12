@@ -781,7 +781,16 @@
     "rehearsal": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["runtime", "network", "status", "receipt_sha256", "production_write_adapter_calls"],
+      "required": [
+        "runtime",
+        "network",
+        "status",
+        "receipt_sha256",
+        "production_write_adapter_calls",
+        "expected_reconciliation_sha256",
+        "d1_stage_receipt_sha256",
+        "cleanup"
+      ],
       "properties": {
         "runtime": {
           "type": "object",
@@ -813,6 +822,24 @@
         },
         "production_write_adapter_calls": {
           "const": 0
+        },
+        "expected_reconciliation_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "d1_stage_receipt_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "cleanup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["created", "cleaned", "observed_absent"],
+          "properties": {
+            "created": { "const": true },
+            "cleaned": { "const": true },
+            "observed_absent": { "const": true }
+          }
         }
       }
     }

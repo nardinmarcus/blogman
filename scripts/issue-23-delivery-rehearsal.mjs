@@ -516,6 +516,10 @@ function runCanonicalLocalRehearsal({
     expectedSnapshot = normalizeExpectedReconciliation(captured)
     const snapshotBytes = expectedReconciliationBytes(expectedSnapshot)
     expectedSnapshotSha256 = sha256(snapshotBytes)
+    if (d1.expected_reconciliation_sha256 !== undefined
+      && d1.expected_reconciliation_sha256 !== expectedSnapshotSha256) {
+      throw new Error('Issue #23 local rehearsal expected reconciliation identity drifted')
+    }
     expectedSnapshotPath = join(expectedStateDirectory, 'expected-reconciliation.json')
     writeFileSync(expectedSnapshotPath, snapshotBytes, { mode: 0o600 })
     chmodSync(expectedSnapshotPath, 0o600)
@@ -659,26 +663,38 @@ function runCanonicalLocalRehearsal({
 }
 
 export function runLocalRehearsal(options = {}) {
-  const configuredRunnerPath = options.runnerPath ?? options.migrationRunnerPath
-  const canonicalRunnerPath = resolve(repositoryPathOrDefault(options.repositoryPath), 'scripts/migrations.mjs')
-  const canonicalCatalogPath = resolve(repositoryPathOrDefault(options.repositoryPath), 'db/ledger-migrations')
-  const runnerIsCanonical = configuredRunnerPath === undefined
-    || resolveConfiguredRunner(options.repositoryPath ?? repoRoot, configuredRunnerPath) === realpathSync(canonicalRunnerPath)
-  const catalogIsCanonical = (options.migrationCatalogPath ?? 'db/ledger-migrations')
-    && resolveMigrationCatalogDirectory(options.repositoryPath ?? repoRoot, options.migrationCatalogPath ?? 'db/ledger-migrations')
-      === relative(resolve(options.repositoryPath ?? repoRoot), realpathSync(canonicalCatalogPath)).split(sep).join('/')
-  if (options.d1 && runnerIsCanonical && catalogIsCanonical) {
-    return runCanonicalLocalRehearsal({
-      repositoryPath: options.repositoryPath ?? repoRoot,
-      d1: options.d1,
-      manifestDraftSha256: options.manifestDraftSha256,
-      productionWriteAdapter: options.productionWriteAdapter ?? { calls: 0 },
-      childTimeoutMs: options.childTimeoutMs ?? LOCAL_REHEARSAL_CHILD_TIMEOUT_MS,
-      maxOutputBytes: options.maxOutputBytes ?? LOCAL_REHEARSAL_MAX_OUTPUT_BYTES,
-      environment: options.environment ?? {},
-    })
+  const repositoryPath = repositoryPathOrDefault(options.repositoryPath)
+  if (!isRecord(options.d1)) {
+    throw new Error('Issue #23 local rehearsal requires canonical D1 facts')
   }
-  return runLegacyLocalRehearsal(options)
+  const configuredRunnerPath = options.runnerPath ?? options.migrationRunnerPath
+  if (configuredRunnerPath !== undefined && configuredRunnerPath !== 'scripts/migrations.mjs') {
+    throw new Error('Issue #23 local rehearsal runner path is not canonical')
+  }
+  if (options.migrationCatalogPath !== undefined
+    && options.migrationCatalogPath !== 'db/ledger-migrations') {
+    throw new Error('Issue #23 local rehearsal catalog path is not canonical')
+  }
+  if (options.resetSqlPath !== undefined
+    && options.resetSqlPath !== 'db/issue-23-clean-start-reset.sql') {
+    throw new Error('Issue #23 local rehearsal reset SQL path is not canonical')
+  }
+  return runCanonicalLocalRehearsal({
+    repositoryPath,
+    d1: options.d1,
+    manifestDraftSha256: options.manifestDraftSha256,
+    productionWriteAdapter: options.productionWriteAdapter ?? { calls: 0 },
+    childTimeoutMs: options.childTimeoutMs ?? LOCAL_REHEARSAL_CHILD_TIMEOUT_MS,
+    maxOutputBytes: options.maxOutputBytes ?? LOCAL_REHEARSAL_MAX_OUTPUT_BYTES,
+    environment: options.environment ?? {},
+  })
+}
+
+export function runLocalRehearsalForTestsOnly(options = {}) {
+  return {
+    ...runLegacyLocalRehearsal(options),
+    test_only: true,
+  }
 }
 
 function repositoryPathOrDefault(path) {

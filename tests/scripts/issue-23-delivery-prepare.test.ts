@@ -8,10 +8,12 @@ import { describe, expect, it } from 'vitest'
 import {
   CANONICAL_MANIFEST_FORMAT,
   DEFAULT_STAGE_POLICY,
+  canonicalBytes,
   parseCanonicalManifest,
   prepare,
+  prepareForTestsOnly,
 } from '../../scripts/issue-23-delivery-prepare.mjs'
-import { runLocalRehearsal } from '../../scripts/issue-23-delivery-rehearsal.mjs'
+import { runLocalRehearsal, runLocalRehearsalForTestsOnly } from '../../scripts/issue-23-delivery-rehearsal.mjs'
 
 const SHA40 = 'a'.repeat(40)
 const SHA40_B = 'b'.repeat(40)
@@ -22,6 +24,48 @@ const FORMAL_CLI_TEST_TIMEOUT_MS = FORMAL_CLI_CHILD_TIMEOUT_MS + 60_000
 
 function hash(character: string) {
   return character.repeat(64)
+}
+
+const CANONICAL_EXPECTED_RECONCILIATION = {
+  format: 'blogman-d1-reconciliation/v1',
+  schema: { sha256: '94d188515e4b8fcb1e97be029431328808c142a26adf50c045482f3fa8371c76' },
+  migration_ledger: {
+    state: 'present',
+    row_count: 6,
+    sha256: '1cf7c10bff6cf3d26bd46a59ef07af11bdf3376b3e989efd7e41c706b66a9f40',
+  },
+  posts: {
+    count: 0,
+    status: {},
+    content_sha256: '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+  },
+}
+const CANONICAL_EXPECTED_RECONCILIATION_SHA256 = '48a68fc43d4ffe66f9df969865ad232c0e3071129e63bed3660314eb809ac5dd'
+
+function testRehearsalResult(overrides: Record<string, unknown> = {}) {
+  return {
+    runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
+    network: 'disabled',
+    status: 'PASS',
+    receipt_sha256: hash('a'),
+    production_write_adapter_calls: 0,
+    expected_reconciliation: {
+      value: structuredClone(CANONICAL_EXPECTED_RECONCILIATION),
+      sha256: CANONICAL_EXPECTED_RECONCILIATION_SHA256,
+    },
+    d1: {
+      outcome: 'PASS',
+      production: false,
+      promotable: false,
+      sha256: hash('d'),
+    },
+    cleanup: {
+      created: true,
+      cleaned: true,
+      observed_absent: true,
+    },
+    ...overrides,
+  }
 }
 
 function baseConfig() {
@@ -81,7 +125,7 @@ function baseConfig() {
     migration: {
       delivery_mode: 'clean-start',
       reset_sql: {
-        path: 'db/schema.sql',
+        path: 'db/issue-23-clean-start-reset.sql',
         sha256: hash('f'),
       },
       runner: { path: 'scripts/migrations.mjs', sha256: '643594349a3f70d3bf9a7185c6449065cab497c07582cb92aacddb9dbf934c4d' },
@@ -161,6 +205,13 @@ function baseConfig() {
       status: 'PASS',
       receipt_sha256: hash('c'),
       production_write_adapter_calls: 0,
+      expected_reconciliation_sha256: CANONICAL_EXPECTED_RECONCILIATION_SHA256,
+      d1_stage_receipt_sha256: hash('d'),
+      cleanup: {
+        created: true,
+        cleaned: true,
+        observed_absent: true,
+      },
     },
   }
 }
@@ -266,7 +317,7 @@ function prepareFixture(config: ReturnType<typeof baseConfig>, options: Record<s
   fixture.ci.tree = tree
   const fixtureOptions = { ...options }
   if (!Object.hasOwn(fixtureOptions, 'buildRunner')) fixtureOptions.buildRunner = fixtureBuild
-  return prepare(fixture, {
+  return prepareForTestsOnly(fixture, {
     repositoryPath: repoRoot,
     repositoryResolver: () => ({ commit, tree, clean: true }),
     ciResolver: (_path, source, repository) => ({
@@ -278,13 +329,7 @@ function prepareFixture(config: ReturnType<typeof baseConfig>, options: Record<s
       tree: repository.tree,
       conclusion: 'success',
     }),
-    rehearsalRunner: () => ({
-      runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
-      network: 'disabled',
-      status: 'PASS',
-      receipt_sha256: hash('a'),
-      production_write_adapter_calls: 0,
-    }),
+    rehearsalRunner: () => testRehearsalResult(),
     ...fixtureOptions,
   })
 }
@@ -520,7 +565,11 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(text).not.toContain('secret-value')
     expect(text).not.toContain('PRIVATE')
     expect(text).not.toContain('DROP TABLE')
-    expect(parseCanonicalManifest(result.bytes, result.sha256)).toEqual(result.value)
+    const canonicalValue = structuredClone(result.value)
+    canonicalValue.d1.mode = 'remote'
+    canonicalValue.d1.evidence_class = 'production'
+    const canonical = canonicalBytes(canonicalValue)
+    expect(parseCanonicalManifest(canonical, sha256(canonical))).toEqual(canonicalValue)
   })
 
   it('returns an isolated bytes copy so mutation cannot diverge from its identity', () => {
@@ -531,7 +580,7 @@ describe('Issue #23 Delivery Preparation', () => {
 
     expect(result.bytes).toEqual(originalBytes)
     expect(result.sha256).toBe(sha256(originalBytes))
-    expect(parseCanonicalManifest(result.bytes, result.sha256)).toEqual(result.value)
+    expect(() => parseCanonicalManifest(result.bytes, result.sha256)).toThrow(/canonical remote production/u)
   })
 
   it('binds the configured migration runner to catalog and rehearsal', () => {
@@ -555,13 +604,7 @@ describe('Issue #23 Delivery Preparation', () => {
       const result = prepareFixture(config, {
         rehearsalRunner: ({ migrationRunnerPath }: { migrationRunnerPath: string }) => {
           rehearsalRunnerPath = migrationRunnerPath
-          return {
-            runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
-            network: 'disabled',
-            status: 'PASS',
-            receipt_sha256: hash('a'),
-            production_write_adapter_calls: 0,
-          }
+          return testRehearsalResult()
         },
       })
 
@@ -645,11 +688,14 @@ describe('Issue #23 Delivery Preparation', () => {
           repositoryPath: string
           migrationRunnerPath: string
           manifestDraftSha256: string
-        }) => runLocalRehearsal({
-          repositoryPath,
-          migrationRunnerPath,
-          migrationCatalogPath: catalogPath,
-          manifestDraftSha256,
+        }) => ({
+          ...runLocalRehearsalForTestsOnly({
+            repositoryPath,
+            migrationRunnerPath,
+            migrationCatalogPath: catalogPath,
+            manifestDraftSha256,
+          }),
+          ...testRehearsalResult(),
         }),
       }))
     }
@@ -977,12 +1023,8 @@ describe('Issue #23 Delivery Preparation', () => {
   })
 
   it('derives draft and receipt identity from schema-ordered bytes, not key insertion order', () => {
-    const receiptRunner = ({ manifestDraftSha256 }: { manifestDraftSha256: string }) => ({
-      runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
-      network: 'disabled',
-      status: 'PASS',
+    const receiptRunner = ({ manifestDraftSha256 }: { manifestDraftSha256: string }) => testRehearsalResult({
       receipt_sha256: manifestDraftSha256,
-      production_write_adapter_calls: 0,
     })
     const first = prepareFixture(baseConfig(), { rehearsalRunner: receiptRunner })
     const reordered = reverseObjectKeys(baseConfig())
@@ -1136,7 +1178,7 @@ describe('Issue #23 Delivery Preparation', () => {
     try {
       let thrown: Error | undefined
       try {
-        runLocalRehearsal({
+        runLocalRehearsalForTestsOnly({
           repositoryPath: repoRoot,
           runnerPath,
           migrationCatalogPath: 'tests/scripts/.issue-23-rehearsal-catalog-directory',
@@ -1197,14 +1239,65 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(result.value.rehearsal.production_write_adapter_calls).toBe(0)
   })
 
+  it('fails closed when canonical expected reconciliation evidence is missing', () => {
+    expect(() => prepareFixture(baseConfig(), {
+      rehearsalRunner: () => testRehearsalResult({ expected_reconciliation: undefined }),
+    })).toThrow(/expected reconciliation evidence is required/u)
+  })
+
+  it('fails closed when canonical expected reconciliation evidence hash drifts', () => {
+    expect(() => prepareFixture(baseConfig(), {
+      rehearsalRunner: () => testRehearsalResult({
+        expected_reconciliation: {
+          value: structuredClone(CANONICAL_EXPECTED_RECONCILIATION),
+          sha256: '0'.repeat(64),
+        },
+      }),
+    })).toThrow(/identity does not match its bytes/u)
+  })
+
+  it('rejects caller adapter injection at the public prepare boundary', () => {
+    let invoked = false
+    expect(() => prepare(baseConfig(), {
+      repositoryResolver: () => {
+        invoked = true
+        throw new Error('caller repository resolver must not run')
+      },
+      rehearsalRunner: () => {
+        invoked = true
+        throw new Error('caller rehearsal runner must not run')
+      },
+    } as never)).toThrow(/public prepare does not accept adapter overrides/u)
+    expect(invoked).toBe(false)
+  })
+
+  it('rejects a custom migration runner in public production preparation', () => {
+    const config = baseConfig()
+    config.migration.runner.path = 'tests/scripts/custom-runner.mjs'
+
+    expect(() => prepare(config)).toThrow(/canonical production artifact/u)
+  })
+
+  it('marks test-only prepared output as non-production and rejects it at the canonical manifest seam', () => {
+    const result = prepareFixture(baseConfig())
+
+    expect(result.test_only).toBe(true)
+    expect(result.value.d1.mode).toBe('local')
+    expect(result.value.d1.evidence_class).toBe('test-non-production')
+    expect(() => parseCanonicalManifest(result.bytes, result.sha256)).toThrow(/canonical remote production/u)
+  })
+
   it('does not trust caller-supplied repository facts', () => {
     const forged = baseConfig()
     const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim()
     const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoRoot, encoding: 'utf8' }).trim()
 
-    expect(() => prepare(forged, {
+    expect(() => prepareForTestsOnly(forged, {
       repositoryPath: repoRoot,
       repositoryResolver: () => ({ commit, tree, clean: true }),
+      ciResolver: (_path, source, repository) => ({ ...source.ci, run_id: 1, attempt: 1, event: 'pull_request', head_sha: repository.commit, tree: repository.tree, conclusion: 'success' }),
+      buildRunner: fixtureBuild,
+      rehearsalRunner: () => testRehearsalResult(),
     })).toThrow(
       /resolved repository identity/u,
     )
@@ -1234,11 +1327,11 @@ describe('Issue #23 Delivery Preparation', () => {
     dirty.ci.head_sha = dirty.repository.commit
     dirty.ci.tree = dirty.repository.tree
 
-    expect(() => prepare(dirty, {
+    expect(() => prepareForTestsOnly(dirty, {
       repositoryPath: repoRoot,
       repositoryResolver: () => ({ commit: dirty.repository.commit, tree: dirty.repository.tree, clean: false }),
       ciResolver: (_path, source, repository) => ({ ...source.ci, run_id: 1, attempt: 1, event: 'pull_request', head_sha: repository.commit, tree: repository.tree, conclusion: 'success' }),
-      rehearsalRunner: () => ({ runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node }, network: 'disabled', status: 'PASS', receipt_sha256: hash('a'), production_write_adapter_calls: 0 }),
+      rehearsalRunner: () => testRehearsalResult(),
     })).toThrow(/valid Git commit\/tree/u)
   })
 
@@ -1251,18 +1344,24 @@ describe('Issue #23 Delivery Preparation', () => {
       productionWriteAdapter: adapter,
       rehearsalRunner: () => {
         invocations += 1
-        return {
-          runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
-          network: 'disabled',
-          status: 'PASS',
-          receipt_sha256: hash('a'),
-          production_write_adapter_calls: 0,
-        }
+        return testRehearsalResult()
       },
     })
 
     expect(invocations).toBe(1)
     expect(adapter.calls).toBe(0)
+  })
+
+  it('rejects non-canonical rehearsal paths before executing a D1-aware run', () => {
+    expect(() => runLocalRehearsal({
+      repositoryPath: repoRoot,
+      d1: {
+        candidate_id: SHA40,
+        config_path: 'wrangler.toml',
+        reset_sql_path: 'db/schema.sql',
+      },
+      manifestDraftSha256: hash('a'),
+    })).toThrow(/reset SQL path is not canonical/u)
   })
 
   it('writes only canonical manifest bytes through the formal CLI entry', { timeout: FORMAL_CLI_TEST_TIMEOUT_MS }, () => (
@@ -1293,11 +1392,6 @@ describe('Issue #23 Delivery Preparation', () => {
       expectedConfig.repository.tree = tree
       expectedConfig.ci.head_sha = commit
       expectedConfig.ci.tree = tree
-      const expected = withTargetMacosRuntime(() => prepare(expectedConfig, {
-        repositoryPath: fixtureRepo,
-        ciResolver: (_path, source, repository) => ({ ...source.ci, run_id: 1, attempt: 1, event: 'pull_request', head_sha: repository.commit, tree: repository.tree, conclusion: 'success' }),
-        buildRunner: fixtureBuild,
-      }))
       const config = expectedConfig
       writeFileSync(configPath, JSON.stringify(config, null, 2))
       const fakeBin = join(directory, 'bin')
@@ -1310,7 +1404,18 @@ describe('Issue #23 Delivery Preparation', () => {
       }
       writeFileSync(fakeGh, '#!/bin/sh\nprintf \'[{"databaseId":1,"headSha":"%s","status":"completed","conclusion":"success","event":"pull_request","attempt":1}]\n\' "$BLOGMAN_TEST_HEAD"\n')
       chmodSync(fakeGh, 0o755)
-      writeFileSync(fakeNpx, '#!/bin/sh\nmkdir -p .open-next/assets\nprintf \'%s\\n\' \'fixture artifact: .open-next/assets/index.html\' > .open-next/assets/index.html\nprintf \'%s\\n\' \'fixture worker: .open-next/worker.js\' > .open-next/worker.js\nprintf \'%s\\n\' \'fixture runtime\' > .open-next/runtime.js\n')
+      writeFileSync(fakeNpx, `#!/bin/sh
+mkdir -p .open-next/assets .next/server
+printf '%s\\n' 'fixture artifact: .open-next/assets/index.html' > .open-next/assets/index.html
+printf '%s\\n' 'fixture worker: .open-next/worker.js' > .open-next/worker.js
+printf '%s\\n' 'fixture runtime' > .open-next/runtime.js
+printf '%s\\n' '{}' > .next/server/app-paths-manifest.json
+printf '%s\\n' '{}' > .next/server/pages-manifest.json
+printf '%s\\n' '{"version":3,"middleware":{},"functions":{},"sortedMiddleware":[]}' > .next/server/middleware-manifest.json
+printf '%s\\n' '{"staticRoutes":[],"dynamicRoutes":[],"rewrites":{"beforeFiles":[],"afterFiles":[],"fallback":[]}}' > .next/routes-manifest.json
+printf '%s\\n' '{"node":{},"edge":{},"encryptionKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}' > .next/server/server-reference-manifest.json
+printf '%s\\n' 'self.__RSC_SERVER_MANIFEST="{\\"node\\":{},\\"edge\\":{},\\"encryptionKey\\":\\"process.env.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY\\"}"' > .next/server/server-reference-manifest.js
+`)
       chmodSync(fakeNpx, 0o755)
 
       const childEnv = {
@@ -1332,13 +1437,16 @@ describe('Issue #23 Delivery Preparation', () => {
       expect(result.error, JSON.stringify({ error: result.error?.message, signal: result.signal })).toBeUndefined()
       expect(result.status, result.stderr.toString('utf8')).toBe(0)
       expect(result.stderr.toString('utf8')).toBe('')
-      expect(JSON.parse(result.stdout.toString('utf8')).rehearsal).toMatchObject({
+      const parsed = parseCanonicalManifest(result.stdout, sha256(result.stdout))
+      expect(parsed.rehearsal).toMatchObject({
         runtime: { os: 'macos' },
         network: 'disabled',
         status: 'PASS',
         production_write_adapter_calls: 0,
+        cleanup: { created: true, cleaned: true, observed_absent: true },
       })
-      expect(result.stdout, JSON.stringify({ status: result.status, stdoutLength: result.stdout.length, stderr: result.stderr.toString('utf8') })).toEqual(expected.bytes)
+      expect(parsed.d1.mode).toBe('remote')
+      expect(parsed.d1.evidence_class).toBe('production')
     })
   ))
 
@@ -1452,7 +1560,7 @@ describe('Issue #23 Delivery Preparation', () => {
     `)
 
     try {
-      expect(() => runLocalRehearsal({
+      expect(() => runLocalRehearsalForTestsOnly({
         repositoryPath: repoRoot,
         runnerPath,
         manifestDraftSha256: hash('a'),
@@ -1477,7 +1585,7 @@ describe('Issue #23 Delivery Preparation', () => {
     `)
 
     try {
-      expect(() => runLocalRehearsal({
+      expect(() => runLocalRehearsalForTestsOnly({
         repositoryPath: repoRoot,
         runnerPath,
         manifestDraftSha256: hash('a'),
@@ -1511,7 +1619,7 @@ describe('Issue #23 Delivery Preparation', () => {
     `)
 
     try {
-      expect(() => runLocalRehearsal({
+      expect(() => runLocalRehearsalForTestsOnly({
         repositoryPath: repoRoot,
         runnerPath,
         manifestDraftSha256: hash('a'),
@@ -1557,7 +1665,7 @@ describe('Issue #23 Delivery Preparation', () => {
     const adapter = { calls: 0 }
 
     try {
-      expect(() => runLocalRehearsal({
+      expect(() => runLocalRehearsalForTestsOnly({
         repositoryPath: repoRoot,
         runnerPath,
         manifestDraftSha256: hash('a'),
@@ -1585,25 +1693,18 @@ describe('Issue #23 Delivery Preparation', () => {
   })
 
   it('derives the canonical production D1 block after rehearsal without accepting caller injection', () => {
-    const expectedReconciliation = {
-      format: 'blogman-d1-reconciliation/v1',
-      schema: { sha256: hash('1') },
-      migration_ledger: { state: 'present', row_count: 6, sha256: hash('2') },
-      posts: { count: 0, status: {}, content_sha256: hash('3') },
-    }
+    const expectedReconciliation = structuredClone(CANONICAL_EXPECTED_RECONCILIATION)
     const result = prepareFixture(baseConfig(), {
-      rehearsalRunner: () => ({
-        runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
-        network: 'disabled',
-        status: 'PASS',
-        receipt_sha256: hash('a'),
-        production_write_adapter_calls: 0,
-        expected_reconciliation: expectedReconciliation,
+      rehearsalRunner: () => testRehearsalResult({
+        expected_reconciliation: {
+          value: expectedReconciliation,
+          sha256: CANONICAL_EXPECTED_RECONCILIATION_SHA256,
+        },
       }),
     })
 
     expect(result.value.d1).toMatchObject({
-      mode: 'remote',
+      mode: 'local',
       database: 'DB',
       config_path: 'wrangler.toml',
       account_id: result.value.target.account_id,
@@ -1614,7 +1715,7 @@ describe('Issue #23 Delivery Preparation', () => {
       rollout_safety_path: 'scripts/rollout-safety.mjs',
       expected_reconciliation_format: expectedReconciliation.format,
       candidate_id: result.value.repository.commit,
-      evidence_class: 'production',
+      evidence_class: 'test-non-production',
       migrations: expect.arrayContaining([
         expect.objectContaining({ number: 1, name: '001_initial_schema' }),
         expect.objectContaining({ number: 6, name: '006_add_rollout_safety_controls' }),

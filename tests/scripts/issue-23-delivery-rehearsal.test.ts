@@ -96,5 +96,36 @@ describe('Issue #90 local D1 rehearsal', () => {
       },
       sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
     })
+    expect(result.d1.sha256).toMatch(/^[a-f0-9]{64}$/u)
+    expect(result.cleanup).toEqual({ created: true, cleaned: true, observed_absent: true })
+  })
+
+  it('fails closed instead of falling back when a D1-aware rehearsal receives a custom runner', () => {
+    expect(() => runLocalRehearsal({
+      repositoryPath: repoRoot,
+      d1: canonicalD1(),
+      runnerPath: 'tests/scripts/custom-runner.mjs',
+      manifestDraftSha256: 'a'.repeat(64),
+    })).toThrow(/runner path is not canonical/u)
+  })
+
+  it('fails closed instead of falling back when a D1-aware rehearsal receives a custom catalog', () => {
+    expect(() => runLocalRehearsal({
+      repositoryPath: repoRoot,
+      d1: canonicalD1(),
+      migrationCatalogPath: 'tests/scripts/custom-catalog',
+      manifestDraftSha256: 'a'.repeat(64),
+    })).toThrow(/catalog path is not canonical/u)
+  })
+
+  it('fails closed when the D1 binding reset path is non-canonical', () => {
+    const d1 = canonicalD1()
+    d1.reset_sql_path = 'db/schema.sql'
+
+    expect(() => runLocalRehearsal({
+      repositoryPath: repoRoot,
+      d1,
+      manifestDraftSha256: 'a'.repeat(64),
+    })).toThrow(/reset SQL path is not canonical/u)
   })
 })
