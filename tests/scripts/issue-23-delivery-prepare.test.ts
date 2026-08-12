@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -482,11 +482,43 @@ describe('OpenNext generated resolver-link removal', () => {
   it('maps a missing server-functions root to a fixed path-free error', () => {
     withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
       mkdirSync(join(repositoryPath, 'node_modules'))
+      mkdirSync(join(repositoryPath, '.open-next'))
       expectPathFreeResolverFailure(
         () => removeVerifiedOpenNextResolverLinks(repositoryPath),
         repositoryPath,
         'OpenNext server functions directory could not be read',
       )
+    })
+  })
+
+  it.each([
+    ['.open-next', (repositoryPath: string, outside: string) => {
+      mkdirSync(join(repositoryPath, 'node_modules'))
+      symlinkSync(outside, join(repositoryPath, '.open-next'))
+    }, 'OpenNext artifact root is not a real directory'],
+    ['server-functions', (repositoryPath: string, outside: string) => {
+      mkdirSync(join(repositoryPath, 'node_modules'))
+      mkdirSync(join(repositoryPath, '.open-next'))
+      symlinkSync(outside, join(repositoryPath, '.open-next', 'server-functions'))
+    }, 'OpenNext server functions directory could not be read'],
+    ['function root', (repositoryPath: string, outside: string) => {
+      mkdirSync(join(repositoryPath, 'node_modules'))
+      mkdirSync(join(repositoryPath, '.open-next', 'server-functions'), { recursive: true })
+      symlinkSync(outside, join(repositoryPath, '.open-next', 'server-functions', 'default'))
+    }, 'OpenNext server function directory is invalid'],
+  ])('rejects a symlinked %s ancestry directory before resolver enumeration', (_name, arrange, reason) => {
+    withTemporaryDirectory('blogman-open-next-ancestry-', (repositoryPath) => {
+      const outside = mkdtempSync(join(tmpdir(), 'blogman-open-next-ancestry-outside-'))
+      try {
+        arrange(repositoryPath, outside)
+        expectPathFreeResolverFailure(
+          () => removeVerifiedOpenNextResolverLinks(repositoryPath),
+          repositoryPath,
+          reason,
+        )
+      } finally {
+        rmSync(outside, { recursive: true, force: true })
+      }
     })
   })
 
@@ -640,6 +672,18 @@ try {
         () => removeVerifiedOpenNextResolverLinks(repositoryPath),
         repositoryPath,
         'OpenNext generated runtime dependency tree contains unsupported entry',
+      )
+    })
+  })
+
+  it('fails closed for a hard-linked runtime dependency file', () => {
+    withTemporaryDirectory('blogman-open-next-directory-', (repositoryPath) => {
+      const { dependencyFile } = writeGeneratedRuntimeDependencyDirectoryFixture(repositoryPath)
+      linkSync(dependencyFile, join(dirname(dependencyFile), 'hard-link.js'))
+      expectPathFreeResolverFailure(
+        () => removeVerifiedOpenNextResolverLinks(repositoryPath),
+        repositoryPath,
+        'OpenNext generated runtime dependency tree contains hard-linked file',
       )
     })
   })

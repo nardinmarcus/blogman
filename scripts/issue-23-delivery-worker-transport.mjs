@@ -16,6 +16,7 @@ const SMOKE_PATHS = Object.freeze([
   ['/api/admin/articles/__blogman_smoke_absent__', 404],
 ])
 const RECONCILIATION_DIMENSIONS = Object.freeze(['schema', 'migration_ledger', 'post_count', 'post_status', 'post_content'])
+const ARTIFACT_FILE_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9@._/-]+$/u
 
 function fail(message) { throw new Error(`Issue #23 worker transport: ${message}`) }
 function hash(bytes) { return createHash('sha256').update(bytes).digest('hex') }
@@ -50,7 +51,7 @@ function assertBoundFile(path, expectedHash) {
 }
 function artifactFile(value) {
   return exact(value, ['path', 'sha256', 'bytes'])
-    && typeof value.path === 'string' && /^(?:\.open-next\/)?[A-Za-z0-9@._/-]+$/u.test(value.path)
+    && typeof value.path === 'string' && ARTIFACT_FILE_PATH_PATTERN.test(value.path)
     && sha256(value.sha256) && Number.isSafeInteger(value.bytes) && value.bytes >= 0
 }
 function validateArtifactSource(bindings) {

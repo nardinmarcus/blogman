@@ -260,7 +260,8 @@ function sameJsonValue(left, right) {
   return JSON.stringify(normalizedJsonValue(left)) === JSON.stringify(normalizedJsonValue(right))
 }
 
-const CANONICAL_MANIFEST_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9@._/-]+$/u
+const CANONICAL_MANIFEST_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._/-]+$/u
+const CANONICAL_MANIFEST_ARTIFACT_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9@._/-]+$/u
 const CANONICAL_MANIFEST_SHA256_PATTERN = /^[a-f0-9]{64}$/u
 const CANONICAL_MANIFEST_SHA40_PATTERN = /^[a-f0-9]{40}$/u
 const CANONICAL_MANIFEST_VERSION_PATTERN = /^[0-9]+(?:\.[0-9]+){1,2}(?:[-+][A-Za-z0-9._-]+)?$/u
@@ -343,6 +344,10 @@ function schemaSha256(value, label) {
 
 function schemaPath(value, label) {
   return schemaString(value, label, CANONICAL_MANIFEST_PATH_PATTERN)
+}
+
+function schemaArtifactPath(value, label) {
+  return schemaString(value, label, CANONICAL_MANIFEST_ARTIFACT_PATH_PATTERN)
 }
 
 function schemaVersion(value, label) {
@@ -433,7 +438,11 @@ function validateCanonicalManifestSchema(value, policy = PRODUCTION_MANIFEST_POL
     fail('manifest artifact.file_tree.files is invalid')
   }
   value.artifact.file_tree.files.forEach((file, index) => {
-    validateManifestReference(file, `manifest artifact.file_tree.files[${index}]`, true)
+    const label = `manifest artifact.file_tree.files[${index}]`
+    schemaRecord(file, ['path', 'sha256', 'bytes'], label)
+    schemaArtifactPath(file.path, `${label}.path`)
+    schemaSha256(file.sha256, `${label}.sha256`)
+    schemaNonNegativeInteger(file.bytes, `${label}.bytes`)
   })
 
   schemaRecord(

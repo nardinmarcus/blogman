@@ -303,6 +303,8 @@ function manifest(overrides: Record<string, unknown> = {}) {
   return preparedFromValue(value)
 }
 
+type ManifestValue = ReturnType<typeof manifest>['value']
+
 function authorizationFor(prepared: ReturnType<typeof manifest>, id: string) {
   return {
     format: AUTHORIZATION_FORMAT,
@@ -615,6 +617,63 @@ describe('Issue #90 formal entry fan-in', () => {
 
     expect(createD1TransportMock).not.toHaveBeenCalled()
     expect(runD1StagesMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['preparation path', (value: ManifestValue) => { value.preparation.prepare_entry.path = 'scripts/@prepare.mjs' }],
+    ['CI workflow path', (value: ManifestValue) => { value.ci.workflow = '.github/workflows/@verify.yml' }],
+    ['artifact archive path', (value: ManifestValue) => { value.artifact.archive.path = '.open-next/@build.zip' }],
+    ['artifact worker path', (value: ManifestValue) => { value.artifact.worker.path = '.open-next/@worker.js' }],
+    ['migration path', (value: ManifestValue) => { value.migration.reset_sql.path = 'db/@reset.sql' }],
+  ])('rejects @ in a generic manifest %s before Authorization or adapter selection', (_name, mutate) => {
+    const value = structuredClone(manifest().value) as ManifestValue
+    mutate(value)
+    const prepared = preparedFromValue(value)
+    let authorizationRead = false
+    const authorization = new Proxy(authorizationFor(prepared, `generic-path-${_name}`), {
+      get() {
+        authorizationRead = true
+        throw new Error('Authorization must not be read for an invalid manifest')
+      },
+    })
+
+    expect(() => execute(prepared, authorization)).toThrow(/(?:path|workflow) is invalid/u)
+    expect(authorizationRead).toBe(false)
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+    expect(runD1StagesMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    '/absolute.js',
+    '.open-next/../worker.js',
+    '../worker.js',
+    '.open-next\\worker.js',
+    '.open-next/control\nworker.js',
+  ])('rejects unsafe artifact file-tree path %j before Authorization or adapter selection', (path) => {
+    const value = structuredClone(manifest().value) as ManifestValue
+    value.artifact.file_tree.files[0].path = path
+    const prepared = preparedFromValue(value)
+    let authorizationRead = false
+    const authorization = new Proxy(authorizationFor(prepared, `artifact-path-${path}`), {
+      get() {
+        authorizationRead = true
+        throw new Error('Authorization must not be read for an invalid manifest')
+      },
+    })
+
+    expect(() => execute(prepared, authorization)).toThrow(/path is invalid/u)
+    expect(authorizationRead).toBe(false)
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+    expect(runD1StagesMock).not.toHaveBeenCalled()
+  })
+
+  it('allows @ only in artifact file-tree paths', () => {
+    configureD1()
+    const value = structuredClone(manifest().value) as ManifestValue
+    value.artifact.file_tree.files[0].path = '.open-next/@scope/index.js'
+    const prepared = preparedFromValue(value)
+
+    expect(() => execute(prepared, authorizationFor(prepared, 'artifact-file-tree-at-sign'))).not.toThrow()
   })
 
   it('does not select an adapter until Authorization has been consumed', () => {

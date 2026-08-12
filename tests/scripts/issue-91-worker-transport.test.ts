@@ -169,4 +169,54 @@ describe('Issue #91 private smoke_control_t0 adapter', () => {
       else process.env.WORKER_FAKE_LOG = originalLog
     }
   }, 30000)
+
+  it.each([
+    '/absolute.js',
+    '.open-next/../worker.js',
+    '../worker.js',
+    '.open-next\\worker.js',
+    '.open-next/control\nworker.js',
+  ])('rejects artifact file-tree path %j before source enumeration', (path) => {
+    const current = fixture()
+    const value = bindings(current, 1)
+    value.artifact_file_tree_files = [{
+      path,
+      sha256: hash(join(current.source, 'worker.js')),
+      bytes: readFileSync(join(current.source, 'worker.js')).byteLength,
+    }]
+    value.artifact_file_tree_sha256 = createHash('sha256')
+      .update(JSON.stringify(value.artifact_file_tree_files))
+      .digest('hex')
+
+    expect(createWorkerTransport(value).livePreconditions()).toMatchObject({
+      outcome: 'NON_PASS',
+      classification: 'Manifest Drift',
+    })
+    expect(readFileSync(current.log, 'utf8')).toBe('')
+  })
+
+  it('accepts @ in an artifact file-tree path', () => {
+    const current = fixture()
+    const sourcePath = join(current.source, '@fixture', 'runtime', 'worker.js')
+    mkdirSync(join(current.source, '@fixture', 'runtime'), { recursive: true })
+    writeFileSync(sourcePath, 'scoped worker\n')
+    const value = bindings(current, 1)
+    rmSync(join(current.source, 'worker.js'))
+    value.artifact_file_tree_files = [{
+      path: '.open-next/@fixture/runtime/worker.js',
+      sha256: hash(sourcePath),
+      bytes: readFileSync(sourcePath).byteLength,
+    }]
+    value.artifact_file_tree_sha256 = createHash('sha256')
+      .update(JSON.stringify(value.artifact_file_tree_files))
+      .digest('hex')
+    const originalLog = process.env.WORKER_FAKE_LOG
+    process.env.WORKER_FAKE_LOG = current.log
+    try {
+      expect(createWorkerTransport(value).livePreconditions()).toMatchObject({ outcome: 'PASS' })
+    } finally {
+      if (originalLog === undefined) delete process.env.WORKER_FAKE_LOG
+      else process.env.WORKER_FAKE_LOG = originalLog
+    }
+  })
 })

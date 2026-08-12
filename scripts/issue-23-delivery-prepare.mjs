@@ -618,6 +618,22 @@ function failOpenNextResolverLink(description) {
   fail(`OpenNext runtime resolver link is not the generated frozen-node-modules link (${description})`)
 }
 
+function requireRealOpenNextDirectory(path, realParent, failureMessage) {
+  let metadata
+  let realPath
+  try {
+    metadata = lstatSync(path)
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error('not a real directory')
+    realPath = realpathSync(path)
+    if (realParent !== undefined && dirname(realPath) !== realParent) {
+      throw new Error('outside exact parent')
+    }
+  } catch {
+    fail(failureMessage)
+  }
+  return realPath
+}
+
 function verifyGeneratedRuntimeDependencyTree(buildRoot, functionRoot, dependencyRoot, relativeEntry) {
   let realBuildRoot
   let realFunctionRoot
@@ -632,6 +648,16 @@ function verifyGeneratedRuntimeDependencyTree(buildRoot, functionRoot, dependenc
   if (!realFunctionRoot.startsWith(`${realBuildRoot}${sep}`)
     || !realDependencyRoot.startsWith(`${realFunctionRoot}${sep}`)) {
     fail('OpenNext generated runtime dependency tree is outside its server function')
+  }
+
+  let dependencyMetadata
+  try {
+    dependencyMetadata = lstatSync(dependencyRoot)
+  } catch {
+    fail('OpenNext generated runtime dependency tree could not be read')
+  }
+  if (!dependencyMetadata.isDirectory() || dependencyMetadata.isSymbolicLink()) {
+    fail('OpenNext generated runtime dependency tree is not a real directory')
   }
 
   const files = []
@@ -655,8 +681,14 @@ function verifyGeneratedRuntimeDependencyTree(buildRoot, functionRoot, dependenc
         fail('OpenNext generated runtime dependency tree contains symbolic link')
       }
       if (metadata.isDirectory()) {
+        if (metadata.dev !== dependencyMetadata.dev) {
+          fail('OpenNext generated runtime dependency tree crosses device boundary')
+        }
         visit(path, relativePath)
       } else if (metadata.isFile()) {
+        if (metadata.nlink !== 1) {
+          fail('OpenNext generated runtime dependency tree contains hard-linked file')
+        }
         files.push(relativePath)
       } else {
         fail('OpenNext generated runtime dependency tree contains unsupported entry')
@@ -664,15 +696,6 @@ function verifyGeneratedRuntimeDependencyTree(buildRoot, functionRoot, dependenc
     }
   }
 
-  let metadata
-  try {
-    metadata = lstatSync(dependencyRoot)
-  } catch {
-    fail('OpenNext generated runtime dependency tree could not be read')
-  }
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-    fail('OpenNext generated runtime dependency tree is not a real directory')
-  }
   visit(dependencyRoot, relativeEntry)
   if (files.length === 0) fail('OpenNext generated runtime dependency tree has no files')
   return files
@@ -689,7 +712,17 @@ export function removeVerifiedOpenNextResolverLinks(repositoryPath) {
   } catch {
     fail('OpenNext frozen node_modules is unavailable')
   }
+  const realBuildRoot = requireRealOpenNextDirectory(
+    buildRoot,
+    undefined,
+    'OpenNext artifact root is not a real directory',
+  )
   const serverFunctionsRoot = join(buildRoot, 'server-functions')
+  const realServerFunctionsRoot = requireRealOpenNextDirectory(
+    serverFunctionsRoot,
+    realBuildRoot,
+    'OpenNext server functions directory could not be read',
+  )
   let entries
   try {
     entries = readdirSync(serverFunctionsRoot, { withFileTypes: true })
@@ -701,6 +734,11 @@ export function removeVerifiedOpenNextResolverLinks(repositoryPath) {
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.isSymbolicLink()) fail('OpenNext server function directory is invalid')
     const functionRoot = join(serverFunctionsRoot, entry.name)
+    requireRealOpenNextDirectory(
+      functionRoot,
+      realServerFunctionsRoot,
+      'OpenNext server function directory is invalid',
+    )
     for (const required of ['handler.mjs', 'open-next.config.mjs', 'package.json']) {
       let metadata
       try {
