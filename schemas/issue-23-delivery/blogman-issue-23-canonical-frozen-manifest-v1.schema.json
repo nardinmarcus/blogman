@@ -593,7 +593,7 @@
     "target": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["account_id", "d1_database_id", "worker_name", "origin", "baseline"],
+      "required": ["account_id", "d1_database_id", "worker_name", "origin", "baseline", "smoke"],
       "properties": {
         "account_id": {
           "type": "string",
@@ -610,6 +610,28 @@
         "origin": {
           "type": "string",
           "pattern": "^https://[A-Za-z0-9._/-]+$"
+        },
+        "smoke": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requests", "admin_credential_slot"],
+          "properties": {
+            "requests": {
+              "type": "array",
+              "minItems": 6,
+              "maxItems": 6,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "status"],
+                "properties": {
+                  "path": { "type": "string", "pattern": "^/[A-Za-z0-9_/?=&.-]+$" },
+                  "status": { "type": "integer", "minimum": 100, "maximum": 599 }
+                }
+              }
+            },
+            "admin_credential_slot": { "const": "delivery_smoke_admin" }
+          }
         },
         "baseline": {
           "type": "object",

@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url'
 import { runSyntheticStage } from './issue-23-delivery-synthetic-adapter.mjs'
 import { createD1Transport } from './issue-23-delivery-d1-transport.mjs'
 import { runD1Stages } from './issue-23-delivery-d1-stages.mjs'
+import { createWorkerTransport } from './issue-23-delivery-worker-transport.mjs'
+import { runWorkerStages } from './issue-23-delivery-worker-stages.mjs'
 
 export const LOCAL_ENTRY_FORMAT = 'blogman-issue-23-local-entry/v1'
 export const LOCAL_SUPERVISOR_FORMAT = 'blogman-issue-23-supervisor/v1'
@@ -174,7 +176,6 @@ const PRODUCTION_D1_CANONICAL_PATHS = Object.freeze({
 })
 const ENTRY_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const EXPECTED_RECONCILIATION_FORMAT = 'blogman-d1-reconciliation/v1'
-const PRODUCTION_SUFFIX_UNAVAILABLE = 'production_stage_adapter_unavailable'
 const ADAPTER_OUTCOMES = Object.freeze(['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'])
 const DEFAULT_ADAPTER_CLASSIFICATIONS = Object.freeze({
   NON_PASS: 'synthetic_adapter_non_pass',
@@ -432,7 +433,7 @@ function validateCanonicalManifestSchema(value) {
 
   schemaRecord(
     value.target,
-    ['account_id', 'd1_database_id', 'worker_name', 'origin', 'baseline'],
+    ['account_id', 'd1_database_id', 'worker_name', 'origin', 'baseline', 'smoke'],
     'manifest target',
   )
   schemaString(value.target.account_id, 'manifest target.account_id', CANONICAL_MANIFEST_ID_PATTERN)
@@ -455,6 +456,16 @@ function validateCanonicalManifestSchema(value) {
     schemaString(traffic.version_id, `manifest target.baseline.traffic[${index}].version_id`, CANONICAL_MANIFEST_WORKER_PATTERN)
     schemaNonNegativeInteger(traffic.percentage, `manifest target.baseline.traffic[${index}].percentage`)
   })
+  schemaRecord(value.target.smoke, ['requests', 'admin_credential_slot'], 'manifest target.smoke')
+  if (value.target.smoke.admin_credential_slot !== 'delivery_smoke_admin'
+    || !sameJsonValue(value.target.smoke.requests, [
+      { path: '/api/search', status: 200 },
+      { path: '/api/settings/appearance', status: 200 },
+      { path: '/api/settings/tokens', status: 200 },
+      { path: '/api/settings/ai-provider', status: 200 },
+      { path: '/api/settings/ai-generators', status: 200 },
+      { path: '/api/admin/articles/__blogman_smoke_absent__', status: 404 },
+    ])) fail('manifest target.smoke is not canonical')
 
   schemaRecord(
     value.policy,
@@ -773,6 +784,7 @@ const CANONICAL_MANIFEST_ORDER = {
     d1_database_id: null,
     worker_name: null,
     origin: null,
+    smoke: { requests: { path: null, status: null }, admin_credential_slot: null },
     baseline: {
       deployment_id: null,
       version_id: null,
@@ -1325,7 +1337,30 @@ function normalizeProductionD1Result(result) {
   }
 }
 
-function productionTrace(d1Result) {
+function normalizeWorkerResult(result) {
+  if (!isPlainRecord(result) || !isPlainRecord(result.value) || !(result.bytes instanceof Uint8Array)
+    || !/^[a-f0-9]{64}$/u.test(result.sha256)) {
+    return { outcome: 'UNCERTAIN', first_terminal_stage: 'worker_deploy', failure: { classification: 'worker_result_malformed' }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, stage_durations_ms: { worker_deploy: 0, version_traffic_verification: 0, smoke_control_t0: 0 }, mutation_counts: { attempted: 0, confirmed: 0 }, sha256: sha256(canonicalJsonBytes({ malformed: 'worker' })) }
+  }
+  const value = result.value
+  if (!['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(value.outcome)
+    || !isPlainRecord(value.stage_counts) || !isPlainRecord(value.stage_durations_ms) || !isPlainRecord(value.mutation_counts)
+    || !['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'].every((stage) => [0, 1].includes(value.stage_counts[stage]) && Number.isSafeInteger(value.stage_durations_ms[stage]) && value.stage_durations_ms[stage] >= 0)
+    || !Number.isSafeInteger(value.mutation_counts.attempted) || !Number.isSafeInteger(value.mutation_counts.confirmed)) return normalizeWorkerResult(null)
+  return { outcome: value.outcome, first_terminal_stage: value.first_terminal_stage, failure: value.failure, stage_counts: value.stage_counts, stage_durations_ms: value.stage_durations_ms, mutation_counts: value.mutation_counts, sha256: result.sha256 }
+}
+
+function workerBindings(manifest) {
+  return {
+    config_path: resolve(ENTRY_REPO_ROOT, manifest.d1.config_path), config_sha256: manifest.d1.config_sha256,
+    artifact_archive_path: resolve(ENTRY_REPO_ROOT, manifest.artifact.archive.path), artifact_archive_sha256: manifest.artifact.archive.sha256,
+    artifact_source_path: resolve(ENTRY_REPO_ROOT, dirname(manifest.artifact.worker.path)), artifact_sha256: manifest.artifact.file_tree.sha256,
+    candidate_id: manifest.repository.commit, worker_name: manifest.target.worker_name, d1_database_id: manifest.target.d1_database_id,
+    rollout_safety_path: resolve(ENTRY_REPO_ROOT, manifest.d1.rollout_safety_path), smoke: manifest.target.smoke,
+  }
+}
+
+function productionTrace(d1Result, workerResult = null) {
   const trace = [{ stage: 'live_preconditions', outcome: 'PASS', duration_ms: 0 }]
   for (const stage of PRODUCTION_D1_STAGES) {
     if (d1Result.stage_counts[stage] === 0) break
@@ -1339,12 +1374,12 @@ function productionTrace(d1Result) {
     if (terminal) break
   }
   if (d1Result.outcome === 'PASS') {
-    trace.push({
-      stage: 'worker_deploy',
-      outcome: 'ERROR',
-      classification: PRODUCTION_SUFFIX_UNAVAILABLE,
-      duration_ms: 0,
-    })
+    for (const stage of ['worker_deploy', 'version_traffic_verification', 'smoke_control_t0']) {
+      if (workerResult.stage_counts[stage] === 0) break
+      const terminal = workerResult.outcome !== 'PASS' && stage === workerResult.first_terminal_stage
+      trace.push({ stage, outcome: terminal ? workerResult.outcome : 'PASS', ...(terminal ? { classification: workerResult.failure.classification } : {}), duration_ms: workerResult.stage_durations_ms[stage] })
+      if (terminal) break
+    }
   }
   return trace
 }
@@ -1387,7 +1422,20 @@ function executeProduction(manifest, authorization) {
     cleanup = disposeExpectedReconciliation(materialized)
   }
   if (!d1Result) d1Result = sanitizedD1Error('production_d1_adapter_error')
-  const trace = productionTrace(d1Result)
+  let workerResult
+  if (d1Result.outcome === 'PASS') {
+    try {
+      const bindings = workerBindings(manifest.value)
+      workerResult = normalizeWorkerResult(runWorkerStages({ bindings, transport: createWorkerTransport(bindings), elapsed_ms: Object.values(d1Result.stage_durations_ms).reduce((sum, duration) => sum + duration, 0) }))
+    } catch { workerResult = normalizeWorkerResult(null) }
+  }
+  const trace = productionTrace(d1Result, workerResult)
+  const d1MutationAttempted = (d1Result.stage_counts.clean_start_reset ?? 0) + (d1Result.stage_counts.migrations_001_006 ?? 0)
+  const d1TerminalIndex = PRODUCTION_D1_STAGES.indexOf(d1Result.first_terminal_stage)
+  const d1MutationConfirmed = d1Result.outcome === 'PASS'
+    ? 2
+    : (d1TerminalIndex > PRODUCTION_D1_STAGES.indexOf('migrations_001_006') ? 2
+      : d1TerminalIndex > PRODUCTION_D1_STAGES.indexOf('clean_start_reset') ? 1 : 0)
   const terminal = trace.at(-1)
   if (!terminal) fail('production state machine did not run')
   const value = {
@@ -1400,12 +1448,16 @@ function executeProduction(manifest, authorization) {
     failure: terminal.outcome === 'PASS' ? null : { classification: terminal.classification },
     stage_counts: stageCounts(trace),
     stage_durations_ms: stageDurations(trace),
-    mutation_counts: { production_writes: 0 },
+    mutation_counts: {
+      production_writes: d1MutationConfirmed + (workerResult?.mutation_counts.confirmed ?? 0),
+      attempted: d1MutationAttempted + (workerResult?.mutation_counts.attempted ?? 0),
+      confirmed: d1MutationConfirmed + (workerResult?.mutation_counts.confirmed ?? 0),
+    },
     evidence: {
       source: 'production',
       production: true,
-      promotable: false,
-      hashes: [d1Result.sha256],
+      promotable: terminal.outcome === 'PASS',
+      hashes: [d1Result.sha256, ...(workerResult ? [workerResult.sha256] : [])],
       cleanup,
     },
     finalized: true,

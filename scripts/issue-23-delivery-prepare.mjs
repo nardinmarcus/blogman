@@ -86,6 +86,17 @@ const CONFIG_REHEARSAL_SCHEMA = Object.freeze({
   ...MANIFEST_SCHEMA.properties.rehearsal,
   required: ['runtime', 'network', 'status', 'receipt_sha256', 'production_write_adapter_calls'],
 })
+const FIXED_SMOKE_CONTRACT = Object.freeze({
+  requests: Object.freeze([
+    Object.freeze({ path: '/api/search', status: 200 }),
+    Object.freeze({ path: '/api/settings/appearance', status: 200 }),
+    Object.freeze({ path: '/api/settings/tokens', status: 200 }),
+    Object.freeze({ path: '/api/settings/ai-provider', status: 200 }),
+    Object.freeze({ path: '/api/settings/ai-generators', status: 200 }),
+    Object.freeze({ path: '/api/admin/articles/__blogman_smoke_absent__', status: 404 }),
+  ]),
+  admin_credential_slot: 'delivery_smoke_admin',
+})
 const CONFIG_SCHEMA = Object.freeze({
   ...MANIFEST_SCHEMA,
   required: MANIFEST_SCHEMA.required.filter((key) => key !== 'format' && key !== 'd1'),
@@ -94,6 +105,10 @@ const CONFIG_SCHEMA = Object.freeze({
       Object.entries(MANIFEST_SCHEMA.properties)
         .filter(([key]) => key !== 'format' && key !== 'd1' && key !== 'rehearsal'),
     ),
+    target: {
+      ...MANIFEST_SCHEMA.properties.target,
+      required: MANIFEST_SCHEMA.properties.target.required.filter((key) => key !== 'smoke'),
+    },
     rehearsal: CONFIG_REHEARSAL_SCHEMA,
   },
 })
@@ -650,7 +665,7 @@ function resolveTargetFacts(target) {
     || target.baseline.traffic[0]?.percentage !== 100) {
     fail('resolved target facts are incomplete or inconsistent')
   }
-  return structuredClone(target)
+  return { ...structuredClone(target), smoke: structuredClone(FIXED_SMOKE_CONTRACT) }
 }
 
 function assertCanonicalProductionPaths(config) {

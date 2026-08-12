@@ -1389,6 +1389,8 @@ describe('Issue #23 Delivery Preparation', () => {
         'scripts/issue-23-delivery-d1-contracts.mjs',
         'scripts/issue-23-delivery-d1-stages.mjs',
         'scripts/issue-23-delivery-d1-transport.mjs',
+        'scripts/issue-23-delivery-worker-transport.mjs',
+        'scripts/issue-23-delivery-worker-stages.mjs',
         'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
       ]
       for (const path of copiedPaths) copyFileSync(join(repoRoot, path), join(fixtureRepo, path))

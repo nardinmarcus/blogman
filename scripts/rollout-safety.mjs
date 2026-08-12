@@ -2125,6 +2125,54 @@ function emergencySwitch(controlKey) {
   return { disabled: true, valid: false }
 }
 
+export function captureReadOnlyControls({ query, emergency = process.env }) {
+  const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+  const exactKeys = (value, keys) => record(value)
+    && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
+  const schemaRows = query(`SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name`, 'rollout schema')
+  if (!Array.isArray(schemaRows) || schemaRows.some((row) => !record(row) || !exactKeys(row, ['name']) || typeof row.name !== 'string')) fail('Invalid rollout schema evidence')
+  if (new Set(schemaRows.map((row) => row.name)).size !== schemaRows.length) fail('Duplicate rollout schema evidence')
+  const rows = schemaRows.some((row) => row.name === 'rollout_controls')
+    ? query(`SELECT control_key, control_kind, desired_enabled, candidate_id, evidence_sha256
+FROM rollout_controls
+ORDER BY control_kind, control_key`, 'rollout controls')
+    : []
+  if (!Array.isArray(rows)) fail('Invalid rollout controls evidence')
+  const controls = new Map()
+  for (const row of rows) {
+    if (!record(row) || !exactKeys(row, ['candidate_id', 'control_key', 'control_kind', 'desired_enabled', 'evidence_sha256'])
+      || typeof row.candidate_id !== 'string' || typeof row.evidence_sha256 !== 'string' || ![0, 1].includes(row.desired_enabled)) fail('Invalid rollout control row')
+    const control = rolloutControl(row.control_key)
+    if (control.kind !== row.control_kind || controls.has(control.key)) fail('Invalid rollout control row')
+    controls.set(control.key, row.desired_enabled === 1)
+  }
+  const stateFor = (key) => {
+    const emergencyState = emergencySwitchFor(key, emergency)
+    if (!emergencyState.valid) fail('Invalid rollout emergency switch')
+    return controls.get(key) === true && !emergencyState.disabled ? 'enabled' : 'disabled'
+  }
+  const executors = Object.fromEntries([...controls.keys()].filter((key) => key.startsWith('executor:')).sort()
+    .map((key) => [key.slice('executor:'.length), stateFor(key)]))
+  return { state: 'captured', producer: stateFor('producer'), authority: stateFor('authority'), executors }
+}
+
+function emergencySwitchFor(controlKey, environment) {
+  const suffix = controlKey === 'producer' || controlKey === 'authority'
+    ? controlKey.toUpperCase()
+    : `EXECUTOR_${controlKey.slice('executor:'.length).toUpperCase().replaceAll('-', '_')}`
+  const value = environment[`BLOGMAN_DISABLE_${suffix}`]
+  if (value === undefined || value === '' || value === '0' || value === 'false') return { disabled: false, valid: true }
+  if (value === '1' || value === 'true') return { disabled: true, valid: true }
+  return { disabled: true, valid: false }
+}
+
+function rolloutControlsStatus(options) {
+  const allowed = ['config', 'database', 'remote']
+  for (const key of options.keys()) if (!allowed.includes(key)) fail('Unexpected rollout controls-status option')
+  if (options.get('remote') !== 'true') fail('Rollout controls-status requires --remote')
+  return captureReadOnlyControls({ query: (sql, evidenceName) => queryD1(options, sql, evidenceName) })
+}
+
 function rolloutStatus(options) {
   const candidate = verifyCandidate(options)
   const migrationVerified = verifyMigrationState(options)
@@ -2369,7 +2417,9 @@ async function main() {
       ? rolloutSet(options)
       : action === 'status'
         ? rolloutStatus(options)
-        : fail('Expected rollout action: set or status')
+        : action === 'controls-status'
+          ? rolloutControlsStatus(options)
+          : fail('Expected rollout action: set, status, or controls-status')
   } else if (domain === 'request') {
     report = action === 'smoke'
       ? await requestSmoke(options)

@@ -9,11 +9,13 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { createD1TransportMock, runD1StagesMock, fsActual } = vi.hoisted(() => ({
+const { createD1TransportMock, runD1StagesMock, createWorkerTransportMock, runWorkerStagesMock, fsActual } = vi.hoisted(() => ({
   createD1TransportMock: vi.fn(),
   runD1StagesMock: vi.fn(),
+  createWorkerTransportMock: vi.fn(),
+  runWorkerStagesMock: vi.fn(),
   fsActual: {
     realpathSync: undefined as typeof import('node:fs').realpathSync | undefined,
   },
@@ -32,15 +34,11 @@ vi.mock('../../scripts/issue-23-delivery-d1-transport.mjs', () => ({
   createD1Transport: createD1TransportMock,
 }))
 vi.mock('../../scripts/issue-23-delivery-d1-stages.mjs', () => ({
-  D1_STAGE_ORDER: [
-    'd1_identity',
-    'clean_start_reset',
-    'empty_d1_proof',
-    'migrations_001_006',
-    'reconciliation',
-  ],
+  D1_STAGE_ORDER: ['d1_identity', 'clean_start_reset', 'empty_d1_proof', 'migrations_001_006', 'reconciliation'],
   runD1Stages: runD1StagesMock,
 }))
+vi.mock('../../scripts/issue-23-delivery-worker-transport.mjs', () => ({ createWorkerTransport: createWorkerTransportMock }))
+vi.mock('../../scripts/issue-23-delivery-worker-stages.mjs', () => ({ runWorkerStages: runWorkerStagesMock }))
 
 afterEach(() => {
   vi.mocked(realpathSync).mockImplementation(fsActual.realpathSync!)
@@ -257,6 +255,17 @@ function manifest(overrides: Record<string, unknown> = {}) {
       d1_database_id: 'd1-id',
       worker_name: 'blogman',
       origin: 'https://blog.example.com',
+      smoke: {
+        requests: [
+          { path: '/api/search', status: 200 },
+          { path: '/api/settings/appearance', status: 200 },
+          { path: '/api/settings/tokens', status: 200 },
+          { path: '/api/settings/ai-provider', status: 200 },
+          { path: '/api/settings/ai-generators', status: 200 },
+          { path: '/api/admin/articles/__blogman_smoke_absent__', status: 404 },
+        ],
+        admin_credential_slot: 'delivery_smoke_admin',
+      },
       baseline: {
         deployment_id: 'deployment-before',
         version_id: 'version-before',
@@ -382,6 +391,17 @@ function actualPreparedManifest() {
       d1_database_id: 'd1-id',
       worker_name: 'blogman',
       origin: 'https://blog.example.com',
+      smoke: {
+        requests: [
+          { path: '/api/search', status: 200 },
+          { path: '/api/settings/appearance', status: 200 },
+          { path: '/api/settings/tokens', status: 200 },
+          { path: '/api/settings/ai-provider', status: 200 },
+          { path: '/api/settings/ai-generators', status: 200 },
+          { path: '/api/admin/articles/__blogman_smoke_absent__', status: 404 },
+        ],
+        admin_credential_slot: 'delivery_smoke_admin',
+      },
       baseline: {
         deployment_id: 'deployment-before',
         version_id: 'version-before',
@@ -487,6 +507,13 @@ function d1Result(failedStage: string | null = null) {
   return { value, bytes, sha256: hash(bytes) }
 }
 
+function configureWorker() {
+  createWorkerTransportMock.mockReturnValue({ execute() {} })
+  const value = { format: 'blogman-issue-23-worker-stages/v1', outcome: 'ERROR', first_terminal_stage: 'worker_deploy', failure: { classification: 'worker_adapter_error' }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, mutation_counts: { attempted: 1, confirmed: 0 }, evidence: {}, finalized: true }
+  const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  runWorkerStagesMock.mockReturnValue({ value, bytes, sha256: hash(bytes) })
+}
+
 function configureD1(failedStage: string | null = null) {
   const calls: string[] = []
   const transport = {
@@ -507,6 +534,7 @@ function configureD1(failedStage: string | null = null) {
 }
 
 describe('Issue #90 formal entry fan-in', () => {
+  beforeEach(() => configureWorker())
   it('rejects missing-d1 and d1-only wrappers before Authorization or adapter selection', () => {
     configureD1()
     const complete = manifest()
@@ -610,7 +638,7 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(result.value).toMatchObject({
       outcome: 'ERROR',
       first_terminal_stage: 'worker_deploy',
-      failure: { classification: 'production_stage_adapter_unavailable' },
+      failure: { classification: 'worker_adapter_error' },
       evidence: { source: 'production', production: true, promotable: false },
     })
   })
@@ -651,7 +679,7 @@ describe('Issue #90 formal entry fan-in', () => {
       smoke_control_t0: 0,
     })
     expect(result.value.outcome).not.toBe('PASS')
-    expect(result.value.failure.classification).toBe('production_stage_adapter_unavailable')
+    expect(result.value.failure.classification).toBe('worker_adapter_error')
   })
 
   it('rejects rehearsal schema drift and an unbound expected reconciliation hash before selecting a production adapter', () => {
@@ -765,7 +793,7 @@ describe('Issue #90 formal entry fan-in', () => {
       authorization_consumed: true,
       outcome: 'ERROR',
       first_terminal_stage: 'worker_deploy',
-      failure: { classification: 'production_stage_adapter_unavailable' },
+      failure: { classification: 'worker_adapter_error' },
       evidence: { source: 'production', production: true },
     })
   })

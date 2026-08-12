@@ -10,7 +10,8 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { captureReadOnlyControls } from '../../scripts/rollout-safety.mjs'
 
 const repoRoot = process.cwd()
 const rolloutSafetyPath = join(repoRoot, 'scripts', 'rollout-safety.mjs')
@@ -864,6 +865,28 @@ afterEach(() => {
 })
 
 describe('rollout safety CLI', () => {
+  it('captures only disabled control states without candidate evidence or writes', () => {
+    const query = vi.fn((sql: string) => sql.startsWith('SELECT name')
+      ? [{ name: 'migration_ledger' }, { name: 'rollout_controls' }]
+      : [{ control_key: 'executor:publication', control_kind: 'executor', desired_enabled: 0, candidate_id: 'candidate', evidence_sha256: 'a'.repeat(64) }])
+
+    expect(captureReadOnlyControls({ query })).toEqual({
+      state: 'captured', producer: 'disabled', authority: 'disabled', executors: { publication: 'disabled' },
+    })
+    expect(query).toHaveBeenCalledTimes(2)
+  })
+
+  it('fails closed on duplicate rows or an invalid emergency switch', () => {
+    const duplicate = () => captureReadOnlyControls({ query: (sql: string) => sql.startsWith('SELECT name')
+      ? [{ name: 'rollout_controls' }]
+      : [
+        { control_key: 'producer', control_kind: 'producer', desired_enabled: 0, candidate_id: 'candidate', evidence_sha256: 'a'.repeat(64) },
+        { control_key: 'producer', control_kind: 'producer', desired_enabled: 0, candidate_id: 'candidate', evidence_sha256: 'a'.repeat(64) },
+      ] })
+    expect(duplicate).toThrow(/Invalid rollout control row/)
+    expect(() => captureReadOnlyControls({ query: () => [], emergency: { BLOGMAN_DISABLE_PRODUCER: 'perhaps' } }))
+      .toThrow(/Invalid rollout emergency switch/)
+  })
   it('verifies only a candidate-bound clean-start T0 contract', () => {
     const candidate = createCleanStartCandidateEvidence()
     const options = cleanStartCandidateVerificationOptions(candidate)
