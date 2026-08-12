@@ -425,6 +425,61 @@ describe('OpenNext generated resolver-link removal', () => {
     )
   }
 
+  function expectPathFreeResolverFailure(
+    callback: () => unknown,
+    repositoryPath: string,
+    reason: string,
+  ) {
+    let error: unknown
+    try {
+      callback()
+    } catch (thrown) {
+      error = thrown
+    }
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toBe(`Canonical Frozen Manifest: ${reason}`)
+    expect((error as Error).message).not.toContain(repositoryPath)
+  }
+
+  it('maps a missing server-functions root to a fixed path-free error', () => {
+    withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
+      mkdirSync(join(repositoryPath, 'node_modules'))
+      expectPathFreeResolverFailure(
+        () => removeVerifiedOpenNextResolverLinks(repositoryPath),
+        repositoryPath,
+        'OpenNext server functions directory could not be read',
+      )
+    })
+  })
+
+  it('maps missing required server-function evidence to a fixed path-free error', () => {
+    withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
+      const functionRoot = writeGeneratedResolverLinkFixture(repositoryPath, join(repositoryPath, 'node_modules'))
+      rmSync(join(functionRoot, 'handler.mjs'))
+      expectPathFreeResolverFailure(
+        () => removeVerifiedOpenNextResolverLinks(repositoryPath),
+        repositoryPath,
+        'OpenNext server function required evidence could not be read',
+      )
+    })
+  })
+
+  it('maps an unreadable server-function root to a fixed path-free error', () => {
+    withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
+      const functionRoot = writeGeneratedResolverLinkFixture(repositoryPath, join(repositoryPath, 'node_modules'))
+      chmodSync(functionRoot, 0o000)
+      try {
+        expectPathFreeResolverFailure(
+          () => removeVerifiedOpenNextResolverLinks(repositoryPath),
+          repositoryPath,
+          'OpenNext server function required evidence could not be read',
+        )
+      } finally {
+        chmodSync(functionRoot, 0o700)
+      }
+    })
+  })
+
   it('reports but rejects a resolver link to standalone node_modules', () => {
     withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
       const standaloneNodeModules = join(repositoryPath, '.next', 'standalone', 'node_modules')

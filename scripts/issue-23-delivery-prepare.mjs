@@ -626,17 +626,33 @@ export function removeVerifiedOpenNextResolverLinks(repositoryPath) {
     fail('OpenNext frozen node_modules is unavailable')
   }
   const serverFunctionsRoot = join(buildRoot, 'server-functions')
+  let entries
+  try {
+    entries = readdirSync(serverFunctionsRoot, { withFileTypes: true })
+  } catch {
+    fail('OpenNext server functions directory could not be read')
+  }
   let removed = 0
-  const entries = readdirSync(serverFunctionsRoot, { withFileTypes: true })
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.isSymbolicLink()) fail('OpenNext server function directory is invalid')
     const functionRoot = join(serverFunctionsRoot, entry.name)
     for (const required of ['handler.mjs', 'open-next.config.mjs', 'package.json']) {
-      const metadata = lstatSync(join(functionRoot, required))
+      let metadata
+      try {
+        metadata = lstatSync(join(functionRoot, required))
+      } catch {
+        fail('OpenNext server function required evidence could not be read')
+      }
       if (!metadata.isFile() || metadata.isSymbolicLink()) fail('OpenNext server function evidence is invalid')
     }
     const resolverLink = join(functionRoot, 'node_modules')
-    for (const child of readdirSync(functionRoot, { withFileTypes: true })) {
+    let children
+    try {
+      children = readdirSync(functionRoot, { withFileTypes: true })
+    } catch {
+      fail('OpenNext server function directory could not be read')
+    }
+    for (const child of children) {
       if (child.isSymbolicLink() && child.name !== 'node_modules') {
         fail('OpenNext server function contains an unexpected symbolic link')
       }
