@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import {
   D1_CANONICAL_MIGRATION_NAMES,
   D1_STAGE_TIMEOUT_MS,
+  d1StageBindingsSha256,
   parseStrictJson,
 } from './issue-23-delivery-d1-contracts.mjs'
 import { getD1TransportProvenance } from './issue-23-delivery-d1-transport.mjs'
@@ -260,6 +261,9 @@ function readTransportResponse(response, stage, elapsedMs) {
     typeof key !== 'string' || !allowedKeys.includes(key)
   ))) throw stageFailure('ERROR', 'malformed', durationMs)
   if (operationDurationMs === 0) throw stageFailure('ERROR', 'malformed', durationMs)
+  if (Object.hasOwn(response, 'timed_out') && typeof response.timed_out !== 'boolean') {
+    throw stageFailure('ERROR', 'malformed', durationMs)
+  }
   if (response.timed_out === true) throw stageFailure('TIMEOUT', 'timeout', durationMs)
   if (response.signal !== undefined && response.signal !== null) {
     throw stageFailure('UNCERTAIN', 'uncertain', durationMs)
@@ -623,6 +627,10 @@ const STAGE_RUNNERS = Object.freeze({
 export function runD1Stages({ bindings: rawBindings, transport }) {
   const bindings = normalizeBindings(rawBindings)
   validateTransport(transport)
+  const provenance = getD1TransportProvenance(transport)
+  const bindingSha256 = d1StageBindingsSha256(bindings)
+  const bindingMismatch = provenance !== undefined
+    && provenance.bindings_sha256 !== bindingSha256
   const stageCounts = Object.fromEntries(D1_STAGE_ORDER.map((stage) => [stage, 0]))
   const stageDurations = Object.fromEntries(D1_STAGE_ORDER.map((stage) => [stage, 0]))
   const trace = []
@@ -634,6 +642,7 @@ export function runD1Stages({ bindings: rawBindings, transport }) {
     let classification
     let durationMs = 0
     try {
+      if (bindingMismatch) throw stageFailure('ERROR', 'transport_binding_mismatch')
       durationMs = STAGE_RUNNERS[stage](bindings, transport)
       assertNonNegativeInteger(durationMs, `${stage} duration`)
       if (durationMs > D1_STAGE_TIMEOUT_MS[stage]) {
@@ -666,11 +675,11 @@ export function runD1Stages({ bindings: rawBindings, transport }) {
 
   const terminal = trace.at(-1)
   if (!terminal) fail('D1 stage contract did not execute')
-  const provenance = getD1TransportProvenance(transport) ?? Object.freeze({
+  const evidenceProvenance = provenance ?? Object.freeze({
     source: 'untrusted-test-transport',
     production: false,
   })
-  const production = provenance.production === true
+  const production = evidenceProvenance.production === true
   const traceSha256 = sha256(canonicalBytes(trace))
   const value = {
     format: 'blogman-issue-23-d1-stages/v1',
@@ -680,9 +689,11 @@ export function runD1Stages({ bindings: rawBindings, transport }) {
     stage_counts: stageCounts,
     stage_durations_ms: stageDurations,
     evidence: {
-      source: provenance.source,
+      source: evidenceProvenance.source,
       production,
       promotable: production && terminal.outcome === 'PASS',
+      bindings_sha256: bindingSha256,
+      wrangler_sha256: bindings.wrangler_sha256,
       account_id: bindings.account_id,
       d1_database_id: bindings.d1_database_id,
       config_sha256: bindings.config_sha256,

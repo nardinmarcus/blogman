@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 export const D1_STAGE_TIMEOUT_MS = Object.freeze({
   d1_identity: 120_000,
   clean_start_reset: 300_000,
@@ -14,6 +16,45 @@ export const D1_CANONICAL_MIGRATION_NAMES = Object.freeze([
   '005_fix_posts_fts_sync',
   '006_add_rollout_safety_controls',
 ])
+
+const D1_STAGE_BINDING_KEYS = Object.freeze([
+  'mode',
+  'database',
+  'config_path',
+  'config_sha256',
+  'wrangler_sha256',
+  'account_id',
+  'd1_database_id',
+  'reset_sql_path',
+  'reset_sql_sha256',
+  'migration_runner_path',
+  'migration_runner_sha256',
+  'migration_catalog_path',
+  'migration_catalog_sha256',
+  'rollout_safety_path',
+  'rollout_safety_sha256',
+  'expected_reconciliation_path',
+  'expected_reconciliation_sha256',
+  'candidate_id',
+  'evidence_class',
+  'migrations',
+  'persist_path',
+])
+
+function canonicalD1StageBindings(bindings) {
+  return Object.fromEntries(D1_STAGE_BINDING_KEYS.map((key) => {
+    if (key === 'migrations') {
+      return [key, bindings.migrations.map(({ number, name, checksum }) => ({ number, name, checksum }))]
+    }
+    if (key === 'persist_path') return [key, bindings.persist_path ?? null]
+    return [key, bindings[key]]
+  }))
+}
+
+export function d1StageBindingsSha256(bindings) {
+  const bytes = Buffer.from(`${JSON.stringify(canonicalD1StageBindings(bindings), null, 2)}\n`, 'utf8')
+  return createHash('sha256').update(bytes).digest('hex')
+}
 
 const REMOTE_D1_INFO_VARIANTS = Object.freeze([
   Object.freeze({

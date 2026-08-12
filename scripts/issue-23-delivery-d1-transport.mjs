@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import {
   D1_CANONICAL_MIGRATION_NAMES,
   D1_STAGE_TIMEOUT_MS,
+  d1StageBindingsSha256,
   identityDurationMs,
   parseRemoteD1InfoResponse,
   parseStrictJson,
@@ -250,6 +251,9 @@ function validateConfig(config) {
   ]) assertHash(config[field], field)
   if (!['production', 'local-non-production', 'test-non-production', 'synthetic-non-production'].includes(config.evidence_class)) {
     fail('evidence_class is invalid')
+  }
+  if (config.mode === 'remote' && config.evidence_class !== 'production') {
+    fail('remote transport requires production evidence')
   }
   if (!Array.isArray(config.migrations) || config.migrations.length !== 6) {
     fail('migrations must contain exactly six entries')
@@ -531,6 +535,7 @@ export function createD1Transport(config) {
   if (arguments.length !== 1) fail('createD1Transport accepts exactly one config argument')
   const normalizedConfig = validateConfig(config)
   const persistIdentity = validateBoundArtifactsOrThrow(normalizedConfig)
+  const bindingsSha256 = d1StageBindingsSha256(normalizedConfig)
 
   function execute(request) {
     if (arguments.length !== 1) fail('execute accepts exactly one request argument')
@@ -591,6 +596,8 @@ export function createD1Transport(config) {
   transportCapabilities.set(transport, Object.freeze({
     source: normalizedConfig.mode === 'remote' ? 'production' : 'local-non-production',
     production: normalizedConfig.mode === 'remote',
+    bindings_sha256: bindingsSha256,
+    wrangler_sha256: normalizedConfig.wrangler_sha256,
   }))
   return transport
 }

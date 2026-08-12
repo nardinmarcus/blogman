@@ -120,6 +120,25 @@ function createLocalIntegrationBindings(
   }
 }
 
+function createBoundTransportBindings() {
+  const statePath = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-90-stage-bound-')))
+  temporaryDirectories.push(statePath)
+  const expectedPath = join(statePath, 'expected-reconciliation.json')
+  writeFileSync(expectedPath, `${JSON.stringify({
+    format: 'blogman-d1-reconciliation/v1',
+    schema: { sha256: 'a'.repeat(64) },
+    migration_ledger: { state: 'present', row_count: 6, sha256: 'b'.repeat(64) },
+    posts: { count: 0, status: {}, content_sha256: 'c'.repeat(64) },
+  })}\n`, { mode: 0o600 })
+  return {
+    ...BINDINGS,
+    persist_path: statePath,
+    expected_reconciliation_path: expectedPath,
+    expected_reconciliation_sha256: sha256File(expectedPath),
+    evidence_class: 'local-non-production',
+  }
+}
+
 function createExpectedReconciliation(statePath: string): string {
   const expectedDirectory = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-90-expected-')))
   temporaryDirectories.push(expectedDirectory)
@@ -363,8 +382,55 @@ describe('Issue #23 D1 delivery stages', () => {
     expect(result.value).not.toHaveProperty('sql')
     expect(result.value).not.toHaveProperty('content')
     expect(result.value).not.toHaveProperty('password')
+    expect(result.value.evidence).toMatchObject({
+      bindings_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      wrangler_sha256: BINDINGS.wrangler_sha256,
+    })
     expect(result.bytes).toEqual(Buffer.from(`${JSON.stringify(result.value, null, 2)}\n`, 'utf8'))
     expect(result.sha256).toMatch(/^[a-f0-9]{64}$/u)
+  })
+
+  it('keeps binding digest stable across equivalent input key order', () => {
+    const reordered = Object.fromEntries(
+      Reflect.ownKeys(BINDINGS).reverse().map((key) => [key, BINDINGS[key as keyof typeof BINDINGS]]),
+    )
+    const first = runD1Stages({ bindings: BINDINGS, transport: createSuccessTransport() })
+    const second = runD1Stages({ bindings: reordered, transport: createSuccessTransport() })
+
+    expect(second.value.evidence.bindings_sha256).toBe(first.value.evidence.bindings_sha256)
+  })
+
+  it('terminalizes a transport-A and bindings-B digest mismatch before any child call', () => {
+    const transportBindingsA = createBoundTransportBindings()
+    const transportA = createD1Transport(transportBindingsA)
+    const bindingsB = { ...transportBindingsA, candidate_id: 'd'.repeat(40) }
+
+    const result = runD1Stages({ bindings: bindingsB, transport: transportA })
+
+    expect(result.value).toMatchObject({
+      outcome: 'ERROR',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'transport_binding_mismatch' },
+      stage_counts: {
+        d1_identity: 1,
+        clean_start_reset: 0,
+        empty_d1_proof: 0,
+        migrations_001_006: 0,
+        reconciliation: 0,
+      },
+      stage_durations_ms: {
+        d1_identity: 0,
+        clean_start_reset: 0,
+        empty_d1_proof: 0,
+        migrations_001_006: 0,
+        reconciliation: 0,
+      },
+      evidence: {
+        production: false,
+        promotable: false,
+        wrangler_sha256: bindingsB.wrangler_sha256,
+      },
+    })
   })
 
   it('fails closed on account, config, or D1 identity drift before reset', () => {
@@ -743,6 +809,8 @@ describe('Issue #23 D1 delivery stages', () => {
 
   it.each([
     ['timed out', { status: 0, stdout: '', stderr: '', duration_ms: 3, timed_out: true }, 'TIMEOUT', 'timeout'],
+    ['string timed_out', { status: 0, stdout: '', stderr: '', duration_ms: 3, timed_out: 'true' }, 'ERROR', 'malformed'],
+    ['null timed_out', { status: 0, stdout: '', stderr: '', duration_ms: 3, timed_out: null }, 'ERROR', 'malformed'],
     ['nonzero', { status: 7, stdout: '', stderr: '', duration_ms: 3 }, 'ERROR', 'nonzero'],
     ['uncertain signal', { status: 0, signal: 'SIGKILL', stdout: '', stderr: '', duration_ms: 3 }, 'UNCERTAIN', 'uncertain'],
     ['malformed transport response', { status: 0, stdout: '', stderr: '' }, 'ERROR', 'malformed'],
@@ -883,10 +951,7 @@ describe('Issue #23 D1 delivery stages', () => {
     const bindings = createLocalIntegrationBindings(statePath, expectedPath)
     const transport = createD1Transport(bindings)
 
-    const result = runD1Stages({
-      bindings: { ...bindings, evidence_class: 'production' },
-      transport,
-    })
+    const result = runD1Stages({ bindings, transport })
 
     expect(result.value).toMatchObject({
       outcome: 'PASS',

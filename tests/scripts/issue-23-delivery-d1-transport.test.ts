@@ -20,6 +20,7 @@ import {
   D1TransportError,
   D1_TRANSPORT_MAX_OUTPUT_BYTES,
   createD1Transport,
+  getD1TransportProvenance,
 } from '../../scripts/issue-23-delivery-d1-transport.mjs'
 import {
   identityDurationMs,
@@ -118,6 +119,29 @@ afterEach(() => {
 })
 
 describe('Issue #90 D1 transport', () => {
+  it('rejects remote transport config without production evidence', () => {
+    const { config } = createConfig({
+      mode: 'remote',
+      evidence_class: 'test-non-production',
+    })
+    const remoteConfig = { ...config }
+    Reflect.deleteProperty(remoteConfig, 'persist_path')
+
+    expect(() => createD1Transport(remoteConfig)).toThrow('remote transport requires production evidence')
+  })
+
+  it('keeps local transport provenance non-production', () => {
+    const { config } = createConfig()
+    const transport = createD1Transport(config)
+
+    expect(getD1TransportProvenance(transport)).toMatchObject({
+      source: 'local-non-production',
+      production: false,
+      bindings_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      wrangler_sha256: config.wrangler_sha256,
+    })
+  })
+
   it('exposes the internal execute contract and dispatches a bounded local D1 query', () => {
     const { config } = createConfig()
     const transport = createD1Transport(config)
