@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync, chmodSync, lstatSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { D1ChildError, runBoundedChild } from './issue-23-delivery-d1-child.mjs'
 import { WorkerTransportError } from './issue-23-delivery-worker-stages.mjs'
 
@@ -55,6 +55,11 @@ function artifactFile(value) {
     && sha256(value.sha256) && Number.isSafeInteger(value.bytes) && value.bytes >= 0
 }
 function validateArtifactSource(bindings) {
+  const sourcePath = resolve(bindings.artifact_source_path)
+  const archivePath = resolve(bindings.artifact_archive_path)
+  if (dirname(archivePath) !== sourcePath) {
+    throw new WorkerTransportError('NON_PASS', 'Manifest Drift')
+  }
   if (!Array.isArray(bindings.artifact_file_tree_files)
     || !bindings.artifact_file_tree_files.every(artifactFile)
     || JSON.stringify(bindings.artifact_file_tree_files) !== JSON.stringify([...bindings.artifact_file_tree_files].sort((left, right) => left.path.localeCompare(right.path)))
@@ -66,6 +71,7 @@ function validateArtifactSource(bindings) {
     for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
       const path = join(directory, entry.name)
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name
+      if (path === archivePath) continue
       if (entry.isSymbolicLink()) throw new Error('symlink')
       if (entry.isDirectory()) visit(path, relative)
       else if (entry.isFile()) actual.push({

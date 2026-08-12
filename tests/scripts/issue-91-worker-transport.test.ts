@@ -25,8 +25,8 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'blogman-issue-91-worker-transport-'))
   roots.push(root)
   const config = join(root, 'wrangler.toml')
-  const archive = join(root, 'build.zip')
   const source = join(root, 'source')
+  const archive = join(source, 'build.zip')
   const expected = join(root, 'expected.json')
   const log = join(root, 'calls.log')
   const wrangler = join(root, 'wrangler')
@@ -38,10 +38,10 @@ function fixture() {
   const packageJson = join(root, 'package.json')
   const lockfile = join(root, 'package-lock.json')
   writeFileSync(config, 'name = "test"\n')
-  writeFileSync(archive, 'fake archive\n')
   writeFileSync(expected, '{}\n')
   writeFileSync(log, '')
   mkdirSync(source)
+  writeFileSync(archive, 'fake archive\n')
   writeFileSync(join(source, 'worker.js'), 'fake worker\n')
   writeFileSync(phaseB, 'process.stdout.write("{}")\n')
   writeFileSync(npm, '#!/bin/sh\nexit 0\n')
@@ -151,6 +151,7 @@ describe('Issue #91 private smoke_control_t0 adapter', () => {
 
   it.each([
     ['config', (current: ReturnType<typeof fixture>) => writeFileSync(current.config, 'drift\n')],
+    ['artifact archive', (current: ReturnType<typeof fixture>) => writeFileSync(current.archive, 'drift\n')],
     ['complete artifact source', (current: ReturnType<typeof fixture>) => writeFileSync(join(current.source, 'worker.js'), 'drift\n')],
     ['upload lifecycle script', (current: ReturnType<typeof fixture>) => writeFileSync(current.phaseB, 'drift\n')],
   ])('returns manifest drift for %s before D1 selection or any fake production command', async (_name, drift) => {
@@ -193,6 +194,70 @@ describe('Issue #91 private smoke_control_t0 adapter', () => {
       classification: 'Manifest Drift',
     })
     expect(readFileSync(current.log, 'utf8')).toBe('')
+  })
+
+  it('accepts a direct archive binding that is absent from the upload source manifest', () => {
+    const current = fixture()
+    const value = bindings(current, 1)
+    const originalLog = process.env.WORKER_FAKE_LOG
+    process.env.WORKER_FAKE_LOG = current.log
+    try {
+      expect(value.artifact_file_tree_files.map(({ path }) => path)).not.toContain('.open-next/build.zip')
+      expect(createWorkerTransport(value).livePreconditions()).toMatchObject({ outcome: 'PASS' })
+    } finally {
+      if (originalLog === undefined) delete process.env.WORKER_FAKE_LOG
+      else process.env.WORKER_FAKE_LOG = originalLog
+    }
+  })
+
+  it('rejects an archive binding outside the exact direct source location', () => {
+    const current = fixture()
+    const outsideArchive = join(current.root, 'outside-build.zip')
+    writeFileSync(outsideArchive, readFileSync(current.archive))
+    const value = bindings(current, 1)
+    value.artifact_archive_path = outsideArchive
+    value.artifact_archive_sha256 = hash(outsideArchive)
+
+    expect(createWorkerTransport(value).livePreconditions()).toMatchObject({
+      outcome: 'NON_PASS',
+      classification: 'Manifest Drift',
+    })
+  })
+
+  it('includes a nested file with the archive basename and rejects its manifest omission', () => {
+    const current = fixture()
+    const nested = join(current.source, 'nested', 'build.zip')
+    mkdirSync(join(current.source, 'nested'), { recursive: true })
+    writeFileSync(nested, 'nested archive-named deployable\n')
+    const value = bindings(current, 1)
+    const nestedEntry = {
+      path: '.open-next/nested/build.zip',
+      sha256: hash(nested),
+      bytes: readFileSync(nested).byteLength,
+    }
+    value.artifact_file_tree_files = [...value.artifact_file_tree_files, nestedEntry]
+      .sort((left, right) => left.path.localeCompare(right.path))
+    value.artifact_file_tree_sha256 = createHash('sha256')
+      .update(JSON.stringify(value.artifact_file_tree_files))
+      .digest('hex')
+
+    const originalLog = process.env.WORKER_FAKE_LOG
+    process.env.WORKER_FAKE_LOG = current.log
+    try {
+      expect(createWorkerTransport(value).livePreconditions()).toMatchObject({ outcome: 'PASS' })
+
+      value.artifact_file_tree_files = value.artifact_file_tree_files.filter(({ path }) => path !== nestedEntry.path)
+      value.artifact_file_tree_sha256 = createHash('sha256')
+        .update(JSON.stringify(value.artifact_file_tree_files))
+        .digest('hex')
+      expect(createWorkerTransport(value).livePreconditions()).toMatchObject({
+        outcome: 'NON_PASS',
+        classification: 'Manifest Drift',
+      })
+    } finally {
+      if (originalLog === undefined) delete process.env.WORKER_FAKE_LOG
+      else process.env.WORKER_FAKE_LOG = originalLog
+    }
   })
 
   it('accepts @ in an artifact file-tree path', () => {

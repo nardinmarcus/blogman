@@ -119,10 +119,8 @@ function uploadSourceSnapshotFixture() {
   return { asset, destination, directory, source }
 }
 
-function sealedBuildArchive(directory: string, source: string) {
-  const archiveDirectory = join(directory, 'sealed-build')
-  const archive = join(archiveDirectory, 'open-next-build.zip')
-  mkdirSync(archiveDirectory)
+function sealedBuildArchive(_directory: string, source: string) {
+  const archive = join(source, 'open-next-build.zip')
   const zipped = spawnSync('/usr/bin/zip', [
     '-X', '-q', archive, 'worker.js', 'assets/asset.txt',
   ], { cwd: source, encoding: 'utf8' })
@@ -159,14 +157,12 @@ function uploadSourceLifecycleFixture(
   const uploadOutput = join(reportDirectory, 'upload-private.jsonl')
   const counter = join(directory, 'upload-count.txt')
   const fakeBin = join(directory, 'fake-bin')
-  const archiveDirectory = join(project, 'sealed-build')
-  const archive = join(archiveDirectory, 'open-next-build.zip')
+  const archive = join(source, 'open-next-build.zip')
   mkdirSync(join(source, 'assets'), { recursive: true })
   mkdirSync(reportDirectory, { recursive: true })
   chmodSync(reportDirectory, 0o700)
   mkdirSync(operatorDirectory)
   mkdirSync(fakeBin)
-  mkdirSync(archiveDirectory)
   writeFileSync(join(source, 'worker.js'), 'sealed worker\n')
   writeFileSync(join(source, 'assets', 'asset.txt'), 'sealed asset\n')
   const configBytes = `[assets]\ndirectory = ${JSON.stringify(join(source, 'assets'))}\n`
@@ -714,6 +710,63 @@ process.stdout.write('OpenNext upload log\\n')
       tree_sha256: before.tree_sha256,
       identity_sha256: before.identity_sha256,
     })
+  })
+
+  it('excludes only the direct configured archive and retains a nested same-basename file', () => {
+    const fixture = uploadSourceLifecycleFixture()
+    const nested = join(fixture.source, 'nested', 'open-next-build.zip')
+    mkdirSync(dirname(nested), { recursive: true })
+    writeFileSync(nested, 'nested deployable bytes\n')
+    rmSync(fixture.archive)
+    const zipped = spawnSync('/usr/bin/zip', [
+      '-X', '-q', fixture.archive, 'worker.js', 'assets/asset.txt', 'nested/open-next-build.zip',
+    ], { cwd: fixture.source, encoding: 'utf8' })
+    expect(zipped.status, zipped.stderr).toBe(0)
+    fixture.archiveSha256 = createHash('sha256').update(readFileSync(fixture.archive)).digest('hex')
+    installCountingUpload(fixture)
+
+    const lifecycle = runCurrentUploadLifecycle(fixture)
+
+    expect(lifecycle.status, lifecycle.stderr).toBe(0)
+    expect(existsSync(join(fixture.destination, 'open-next-build.zip'))).toBe(false)
+    expect(readFileSync(join(fixture.destination, 'nested', 'open-next-build.zip'), 'utf8'))
+      .toBe('nested deployable bytes\n')
+    expect(JSON.parse(readFileSync(fixture.buildProof, 'utf8'))).toMatchObject({ state: 'matched' })
+  })
+
+  it('rejects an archive proof that omits a nested file sharing the archive basename', () => {
+    const fixture = uploadSourceLifecycleFixture()
+    const nested = join(fixture.source, 'nested', 'open-next-build.zip')
+    mkdirSync(dirname(nested), { recursive: true })
+    writeFileSync(nested, 'nested unsealed bytes\n', { flag: 'wx' })
+    installCountingUpload(fixture)
+
+    const lifecycle = runCurrentUploadLifecycle(fixture)
+
+    expect(lifecycle).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+    })
+    expect(readFileSync(fixture.counter, 'utf8')).toBe('0')
+  })
+
+  it('rejects an archive path outside the exact direct upload source location', () => {
+    const fixture = uploadSourceLifecycleFixture()
+    const outsideArchive = join(fixture.directory, 'outside-open-next-build.zip')
+    writeFileSync(outsideArchive, readFileSync(fixture.archive))
+    fixture.archive = outsideArchive
+    fixture.archiveSha256 = createHash('sha256').update(readFileSync(outsideArchive)).digest('hex')
+    installCountingUpload(fixture)
+
+    const lifecycle = runCurrentUploadLifecycle(fixture)
+
+    expect(lifecycle).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+    })
+    expect(readFileSync(fixture.counter, 'utf8')).toBe('0')
   })
 
   it('rejects a complete report-directory swap-read-restore across the upload window', () => {

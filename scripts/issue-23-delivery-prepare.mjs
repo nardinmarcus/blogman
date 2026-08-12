@@ -802,10 +802,20 @@ export function removeVerifiedOpenNextResolverLinks(repositoryPath) {
   })
 }
 
+function directArtifactArchivePath(repositoryPath, archivePath) {
+  const buildRoot = resolve(repositoryPath, '.open-next')
+  const archive = resolve(repositoryPath, archivePath)
+  if (dirname(archive) !== buildRoot) {
+    fail('artifact archive must be created directly under .open-next')
+  }
+  return archive
+}
+
 function enumeratePublicBuildFiles(repositoryPath, archivePath) {
-  const archiveName = basename(resolve(repositoryPath, archivePath))
+  const buildRoot = resolve(repositoryPath, '.open-next')
+  const archive = directArtifactArchivePath(repositoryPath, archivePath)
   return enumerateBuildFiles(repositoryPath)
-    .filter((path) => path !== archiveName)
+    .filter((path) => resolve(buildRoot, path) !== archive)
     .filter((path) => {
       const publicPath = `.open-next/${path}`
       return ARTIFACT_PATH_PATTERN.test(publicPath) && !ARTIFACT_EXCLUDED_PATH_PATTERN.test(publicPath)
@@ -885,10 +895,7 @@ function assertZeroActionsBuild(repositoryPath) {
 
 function createBuildArchive(repositoryPath, archivePath, files) {
   const buildRoot = resolve(repositoryPath, '.open-next')
-  const absoluteArchive = resolve(repositoryPath, archivePath)
-  if (dirname(absoluteArchive) !== buildRoot) {
-    fail('artifact archive must be created directly under .open-next')
-  }
+  const absoluteArchive = directArtifactArchivePath(repositoryPath, archivePath)
   if (files.length === 0) fail('final OpenNext artifact is empty')
   const fixedTime = new Date('1980-01-01T00:00:00.000Z')
   for (const path of files) {

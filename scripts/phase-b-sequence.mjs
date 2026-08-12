@@ -675,8 +675,11 @@ function requireCanonicalDirectory(path, mode) {
   return stat
 }
 
-function copyUploadSourceSnapshot(source, destination) {
+function copyUploadSourceSnapshot(source, destination, archive = undefined) {
   requireCanonicalDirectory(source)
+  const sourcePath = resolve(source)
+  const archivePath = archive === undefined ? undefined : resolve(archive)
+  if (archivePath !== undefined && dirname(archivePath) !== sourcePath) throw new Error()
   requireCanonicalDirectory(dirname(destination), 0o700)
   if (!isAbsolute(destination) || destination !== resolve(destination)
     || !shellSafeAbsolutePath.test(destination)
@@ -692,6 +695,7 @@ function copyUploadSourceSnapshot(source, destination) {
       const sourcePath = join(sourceDirectory, name)
       const destinationPath = join(destinationDirectory, name)
       const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name
+      if (sourcePath === archivePath) continue
       const stat = lstatSync(sourcePath)
       if (stat.isDirectory() && realpathSync(sourcePath) === sourcePath) {
         mkdirSync(destinationPath, { mode: 0o700 })
@@ -879,7 +883,7 @@ async function runUploadSourceLifecycle({
         throw new Error()
       }
     }
-    const before = copyUploadSourceSnapshot(source, destination)
+    const before = copyUploadSourceSnapshot(source, destination, archive)
     for (const path of held.filter((entry) => entry.path === reportDirectory)) {
       refreshHeldPath(path)
     }

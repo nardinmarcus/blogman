@@ -1268,6 +1268,31 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(paths).toContain('.open-next/assets/index.html')
   })
 
+  it('keeps only the configured direct archive out of file_tree while binding it separately', () => {
+    const result = prepareFixture(baseConfig(), {
+      buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
+        fixtureBuild(repositoryPath, options)
+        writeFileSync(join(repositoryPath, '.open-next', 'open-next-build.zip'), 'stale archive\n')
+        const nestedArchive = join(repositoryPath, '.open-next', 'nested', 'open-next-build.zip')
+        mkdirSync(dirname(nestedArchive), { recursive: true })
+        writeFileSync(nestedArchive, 'nested deployable bytes\n')
+      },
+    })
+    const paths = result.value.artifact.file_tree.files.map((file) => file.path)
+    const archivePath = result.value.artifact.archive.path
+    const archiveBytes = readFileSync(join(repoRoot, archivePath))
+    const archiveEntries = execFileSync('unzip', ['-Z1', join(repoRoot, archivePath)], { encoding: 'utf8' })
+      .trim().split(/\r?\n/u).filter(Boolean)
+
+    expect(paths).not.toContain(archivePath)
+    expect(paths).toContain('.open-next/nested/open-next-build.zip')
+    expect(result.value.artifact.archive).toMatchObject({
+      sha256: sha256(archiveBytes),
+      bytes: archiveBytes.byteLength,
+    })
+    expect(archiveEntries).toContain('nested/open-next-build.zip')
+  })
+
   it('excludes generated private files from archive membership', () => {
     const result = prepareFixture(baseConfig(), {
       buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
