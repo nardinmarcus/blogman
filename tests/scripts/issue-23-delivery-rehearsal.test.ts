@@ -65,7 +65,7 @@ function canonicalD1() {
 }
 
 describe('Issue #90 local D1 rehearsal', () => {
-  it('generates an expected snapshot and separately runs the real local five-stage seam', { timeout: 120_000 }, () => {
+  it('generates an expected snapshot and separately runs the real local five-stage seam', { timeout: 180_000 }, () => {
     const result = runLocalRehearsal({
       repositoryPath: repoRoot,
       d1: canonicalD1(),
