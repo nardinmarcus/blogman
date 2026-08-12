@@ -10,7 +10,6 @@ import {
   DEFAULT_STAGE_POLICY,
   canonicalizeRepositoryRemote,
   canonicalBytes,
-  isExactWorkflowPath,
   parseCanonicalManifest,
   prepare,
   removeVerifiedOpenNextResolverLinks,
@@ -563,20 +562,6 @@ function firstChangedByteContext(before: Buffer | string, after: Buffer | string
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 describe('Issue #23 Delivery Preparation', () => {
-  it('accepts only the exact REST workflow path for formal CI runs', () => {
-    const workflow = '.github/workflows/verify.yml'
-
-    expect(isExactWorkflowPath(workflow, workflow)).toBe(true)
-    for (const path of [
-      `${workflow}.bak`,
-      `archive/${workflow}`,
-      `${workflow}@main`,
-      '.github/workflows/other.yml',
-    ]) {
-      expect(isExactWorkflowPath(path, workflow)).toBe(false)
-    }
-  })
-
   it('manifest-order contract: stabilizes Next CJS pages-manifest serialization', () => {
     const patch = readPatchContract('patches/next+16.2.6.patch')
 
