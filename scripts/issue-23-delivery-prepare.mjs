@@ -686,6 +686,9 @@ function verifyGeneratedRuntimeDependencyTree(buildRoot, functionRoot, dependenc
         }
         visit(path, relativePath)
       } else if (metadata.isFile()) {
+        if (metadata.dev !== dependencyMetadata.dev) {
+          fail('OpenNext generated runtime dependency tree crosses device boundary')
+        }
         if (metadata.nlink !== 1) {
           fail('OpenNext generated runtime dependency tree contains hard-linked file')
         }
