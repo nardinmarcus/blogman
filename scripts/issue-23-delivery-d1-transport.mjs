@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   lstatSync,
@@ -6,12 +5,25 @@ import {
   readdirSync,
   realpathSync,
 } from 'node:fs'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { D1_STAGE_TIMEOUT_MS } from './issue-23-delivery-d1-stages.mjs'
+import {
+  D1_CANONICAL_MIGRATION_NAMES,
+  D1_STAGE_TIMEOUT_MS,
+  identityDurationMs,
+  parseRemoteD1InfoResponse,
+  parseStrictJson,
+  parseWranglerWhoamiResponse,
+} from './issue-23-delivery-d1-contracts.mjs'
+import {
+  D1ChildError,
+  runBoundedChild,
+} from './issue-23-delivery-d1-child.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const wranglerPath = realpathSync(join(repoRoot, 'node_modules', '.bin', 'wrangler'))
+const transportCapabilities = new WeakMap()
+
 const canonicalPaths = Object.freeze({
   reset: join(repoRoot, 'db', 'issue-23-clean-start-reset.sql'),
   runner: join(repoRoot, 'scripts', 'migrations.mjs'),
@@ -50,14 +62,6 @@ const TRANSPORT_CONFIG_KEYS = Object.freeze([
   'evidence_class',
   'migrations',
 ])
-const CANONICAL_MIGRATION_NAMES = Object.freeze([
-  '001_initial_schema',
-  '002_add_ai_image_configuration',
-  '003_migrate_runtime_ai_configuration',
-  '004_complete_historical_text_ai_schema',
-  '005_fix_posts_fts_sync',
-  '006_add_rollout_safety_controls',
-])
 const OPERATION_STAGES = Object.freeze({
   d1_identity: 'd1_identity',
   clean_start_reset: 'clean_start_reset',
@@ -79,39 +83,9 @@ WHERE name NOT GLOB 'sqlite_*'
 ORDER BY type, name, tbl_name, sql
 `.trim()
 const IDENTITY_QUERY = 'SELECT 1 AS __blogman_d1_identity_probe'
-const SUPERVISOR_GRACE_MS = 2_000
 const SAFE_ABSOLUTE_PATH = /^\/[A-Za-z0-9._/-]+$/u
 const SAFE_TOKEN = /^[A-Za-z0-9._:-]+$/u
 const EXPECTED_RECONCILIATION_FORMAT = 'blogman-d1-reconciliation/v1'
-const SUPERVISOR_SOURCE = [
-  "import { spawn } from 'node:child_process'",
-  "const [executable, argsText, timeoutText, maxOutputText] = process.argv.slice(1)",
-  'const args = JSON.parse(argsText)',
-  'const timeoutMs = Number(timeoutText)',
-  'const maxOutputBytes = Number(maxOutputText)',
-  'let child = null',
-  'let stdout = []',
-  'let stderr = []',
-  'let stdoutBytes = 0',
-  'let stderrBytes = 0',
-  'let timedOut = false',
-  'let outputOverflow = false',
-  'let childError = null',
-  'let emitted = false',
-  'let hardTimer = null',
-  'const started = process.hrtime.bigint()',
-  'const duration = () => Math.max(1, Math.ceil(Number(process.hrtime.bigint() - started) / 1e6))',
-  "const killGroup = (signal = 'SIGKILL') => { if (!child?.pid) return; try { process.kill(-child.pid, signal) } catch { try { child.kill(signal) } catch {} } }",
-  'const hasResidual = () => { if (!child?.pid) return false; try { process.kill(-child.pid, 0); return true } catch { return false } }',
-  'const append = (target, chunk) => { const bytes = Buffer.byteLength(chunk); if (target === stdout) stdoutBytes += bytes; else stderrBytes += bytes; if ((target === stdout ? stdoutBytes : stderrBytes) > maxOutputBytes) { outputOverflow = true; killGroup() } else target.push(Buffer.from(chunk)) }',
-  "const emit = (status, code = null, signal = null, residual = false) => { if (emitted) return; emitted = true; const value = { child_error: childError?.code || null, child_signal: signal, child_status: code, duration_ms: duration(), residual_process_group: residual, status, stderr_b64: Buffer.concat(stderr).toString('base64'), stdout_b64: Buffer.concat(stdout).toString('base64') }; process.stdout.write(JSON.stringify(value), () => process.exit(0)) }",
-  'const finish = (code, signal) => { if (hardTimer) clearTimeout(hardTimer); const residualBefore = hasResidual(); if (timedOut || outputOverflow || residualBefore || code !== 0 || signal || childError) killGroup(); setTimeout(() => { const residualAfter = hasResidual(); if (residualAfter) emit(\'uncertain\', code, signal, true); else if (timedOut) emit(\'timed_out\', code, signal); else if (outputOverflow) emit(\'output_overflow\', code, signal); else if (childError || signal) emit(\'uncertain\', code, signal); else if (code !== 0) emit(\'nonzero\', code, signal); else emit(\'completed\', code, signal) }, residualBefore || timedOut || outputOverflow ? 50 : 0) }',
-  'try { child = spawn(executable, args, { cwd: process.cwd(), detached: true, stdio: [\'ignore\', \'pipe\', \'pipe\'] }) } catch (error) { childError = error; emit(\'uncertain\') }',
-  "if (child) { child.stdout.on('data', (chunk) => append(stdout, chunk)); child.stderr.on('data', (chunk) => append(stderr, chunk)); child.on('error', (error) => { childError = error; killGroup() }); child.on('close', finish); setTimeout(() => { timedOut = true; killGroup() }, timeoutMs); hardTimer = setTimeout(() => { killGroup(); emit('uncertain', null, null, true) }, timeoutMs + 1000) }",
-  "process.once('SIGTERM', () => { timedOut = true; killGroup() })",
-  "process.once('SIGINT', () => { timedOut = true; killGroup() })",
-].join('\n')
-
 export class D1TransportError extends Error {
   constructor(classification, durationMs = 0) {
     super(`D1 transport ${classification}`)
@@ -134,7 +108,7 @@ function isPlainRecord(value) {
 
 function assertExactKeys(value, keys, label) {
   if (!isPlainRecord(value)) fail(`${label} must be an object`)
-  const actual = Object.keys(value)
+  const actual = Reflect.ownKeys(value)
   if (actual.length !== keys.length || keys.some((key) => !actual.includes(key))) {
     fail(`${label} contains unsupported fields`)
   }
@@ -228,7 +202,7 @@ function validateExpectedReconciliation(path) {
   if (bytes.length > D1_TRANSPORT_MAX_OUTPUT_BYTES) fail('expected reconciliation is too large')
   let value
   try {
-    value = JSON.parse(bytes.toString('utf8'))
+    value = parseStrictJson(bytes.toString('utf8'))
   } catch {
     fail('expected reconciliation is not JSON')
   }
@@ -277,15 +251,12 @@ function validateConfig(config) {
   if (!['production', 'local-non-production', 'test-non-production', 'synthetic-non-production'].includes(config.evidence_class)) {
     fail('evidence_class is invalid')
   }
-  if (config.mode === 'remote' && config.evidence_class !== 'production') {
-    fail('remote config must be production evidence')
-  }
   if (!Array.isArray(config.migrations) || config.migrations.length !== 6) {
     fail('migrations must contain exactly six entries')
   }
   for (const [index, migration] of config.migrations.entries()) {
     assertExactKeys(migration, ['checksum', 'name', 'number'], `migrations[${index}]`)
-    if (migration.number !== index + 1 || migration.name !== CANONICAL_MIGRATION_NAMES[index]
+    if (migration.number !== index + 1 || migration.name !== D1_CANONICAL_MIGRATION_NAMES[index]
       || !/^[a-f0-9]{64}$/u.test(migration.checksum)) {
       fail(`migrations[${index}] is invalid`)
     }
@@ -293,15 +264,46 @@ function validateConfig(config) {
   return Object.freeze({ ...config })
 }
 
-function validateBoundArtifactsOrThrow(config) {
+function assertOutsideRepository(path, label) {
+  const pathFromRepository = relative(repoRoot, path)
+  if (pathFromRepository === ''
+    || (pathFromRepository !== '..' && !pathFromRepository.startsWith('../'))) {
+    fail(`${label} must be outside the repository`)
+  }
+}
+
+function assertPrivatePersistDirectory(path) {
+  const metadata = assertSafeFilesystemEntry(path, 'directory', 'local D1 persist path')
+  if ((metadata.mode & 0o777) !== 0o700) {
+    fail('local D1 persist path must have mode 0700')
+  }
+  assertOutsideRepository(path, 'local D1 persist path')
+  return Object.freeze({
+    dev: metadata.dev,
+    ino: metadata.ino,
+    realpath: realpathSync(path),
+  })
+}
+
+function assertPersistIdentity(path, expectedIdentity) {
+  const actualIdentity = assertPrivatePersistDirectory(path)
+  if (actualIdentity.dev !== expectedIdentity.dev
+    || actualIdentity.ino !== expectedIdentity.ino
+    || actualIdentity.realpath !== expectedIdentity.realpath) {
+    fail('local D1 persist path identity drifted')
+  }
+  return actualIdentity
+}
+
+function validateBoundArtifactsOrThrow(config, expectedPersistIdentity = null) {
   try {
-    validateBoundArtifacts(config)
+    return validateBoundArtifacts(config, expectedPersistIdentity)
   } catch {
     throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED)
   }
 }
 
-function validateBoundArtifacts(config) {
+function validateBoundArtifacts(config, expectedPersistIdentity = null) {
   assertSafeFilesystemEntry(wranglerPath, 'file', 'Wrangler executable')
   if (sha256(readFileSync(wranglerPath)) !== config.wrangler_sha256) {
     fail('Wrangler executable hash drifted')
@@ -334,7 +336,13 @@ function validateBoundArtifacts(config) {
     fail('bound expected reconciliation hash drifted')
   }
   validateExpectedReconciliation(config.expected_reconciliation_path)
-  if (config.mode === 'local') assertSafeFilesystemEntry(config.persist_path, 'directory', 'local D1 persist path')
+  if (config.mode === 'local') {
+    const persistIdentity = expectedPersistIdentity === null
+      ? assertPrivatePersistDirectory(config.persist_path)
+      : assertPersistIdentity(config.persist_path, expectedPersistIdentity)
+    return persistIdentity
+  }
+  return null
 }
 
 function validateRequest(request) {
@@ -367,7 +375,7 @@ function d1Arguments(config, suffix) {
   return args
 }
 
-export function buildD1Command(config, request) {
+function buildD1Command(config, request) {
   const normalized = validateConfig(config)
   const normalizedRequest = validateRequest(request)
   const timeoutMs = remainingTimeout(normalizedRequest)
@@ -396,104 +404,20 @@ export function buildD1Command(config, request) {
   })
 }
 
-function decodeUtf8(base64) {
-  const bytes = Buffer.from(base64, 'base64')
-  if (bytes.length > D1_TRANSPORT_MAX_OUTPUT_BYTES) {
-    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.UNCERTAIN)
-  }
-  const text = bytes.toString('utf8')
-  if (!Buffer.from(text, 'utf8').equals(bytes)) {
-    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED)
-  }
-  return text
-}
-
-function parseSupervisorOutput(output) {
-  try {
-    const value = JSON.parse(output)
-    assertExactKeys(value, [
-      'child_error',
-      'child_signal',
-      'child_status',
-      'duration_ms',
-      'residual_process_group',
-      'status',
-      'stderr_b64',
-      'stdout_b64',
-    ], 'supervisor response')
-    if (!Number.isSafeInteger(value.duration_ms) || value.duration_ms <= 0
-      || typeof value.residual_process_group !== 'boolean'
-      || typeof value.stdout_b64 !== 'string'
-      || typeof value.stderr_b64 !== 'string'
-      || !['completed', 'nonzero', 'timed_out', 'output_overflow', 'uncertain'].includes(value.status)) {
-      throw new Error('invalid supervisor response')
-    }
-    return value
-  } catch {
-    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.UNCERTAIN)
-  }
-}
-
 function runBounded(executable, args, timeoutMs) {
-  const result = spawnSync(
-    process.execPath,
-    [
-      '-e',
-      SUPERVISOR_SOURCE,
-      executable,
-      JSON.stringify(args),
-      String(timeoutMs),
-      String(D1_TRANSPORT_MAX_OUTPUT_BYTES),
-    ],
-    {
-      cwd: repoRoot,
-      encoding: 'utf8',
-      maxBuffer: D1_TRANSPORT_MAX_OUTPUT_BYTES * 2 + 64 * 1024,
-      timeout: timeoutMs + SUPERVISOR_GRACE_MS,
-      killSignal: 'SIGTERM',
-      shell: false,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  )
-  if (result.error?.code === 'ETIMEDOUT') {
+  try {
+    return runBoundedChild(executable, args, timeoutMs, D1_TRANSPORT_MAX_OUTPUT_BYTES, repoRoot)
+  } catch (error) {
+    if (error instanceof D1ChildError) {
+      throw new D1TransportError(error.classification, error.durationMs)
+    }
     throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.UNCERTAIN)
-  }
-  if (result.error || result.signal || result.status !== 0 || typeof result.stdout !== 'string') {
-    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.UNCERTAIN)
-  }
-  const supervisor = parseSupervisorOutput(result.stdout)
-  if (supervisor.residual_process_group || supervisor.status === 'uncertain'
-    || supervisor.status === 'output_overflow') {
-    throw new D1TransportError(
-      D1_TRANSPORT_FAILURE_CLASSIFICATIONS.UNCERTAIN,
-      supervisor.duration_ms,
-    )
-  }
-  if (supervisor.status === 'timed_out') {
-    throw new D1TransportError(
-      D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT,
-      supervisor.duration_ms,
-    )
-  }
-  if (supervisor.status === 'nonzero') {
-    throw new D1TransportError(
-      D1_TRANSPORT_FAILURE_CLASSIFICATIONS.NONZERO,
-      supervisor.duration_ms,
-    )
-  }
-  const stdout = decodeUtf8(supervisor.stdout_b64)
-  const stderr = decodeUtf8(supervisor.stderr_b64)
-  return {
-    status: 0,
-    stdout,
-    stderr,
-    duration_ms: supervisor.duration_ms,
   }
 }
 
 function parseLocalIdentity(stdout) {
   try {
-    const response = JSON.parse(stdout)
+    const response = parseStrictJson(stdout)
     if (!Array.isArray(response) || response.length !== 1 || !isPlainRecord(response[0])) {
       throw new Error('invalid identity response')
     }
@@ -515,47 +439,7 @@ function parseLocalIdentity(stdout) {
 
 function parseRemoteIdentity(stdout, expectedDatabaseId) {
   try {
-    const response = JSON.parse(stdout)
-    if (!isPlainRecord(response)) throw new Error('invalid D1 info response')
-    const expectedKeys = [
-      'created_at',
-      'database_size',
-      'jurisdiction',
-      'name',
-      'num_tables',
-      'read_queries_24h',
-      'read_replication',
-      'rows_read_24h',
-      'rows_written_24h',
-      'running_in_region',
-      'uuid',
-    ]
-    if (JSON.stringify(Reflect.ownKeys(response).sort()) !== JSON.stringify(expectedKeys.sort())
-      || typeof response.uuid !== 'string'
-      || response.uuid !== expectedDatabaseId) {
-      throw new Error('invalid D1 info response')
-    }
-    for (const field of [
-      'database_size',
-      'num_tables',
-      'read_queries_24h',
-      'rows_read_24h',
-      'rows_written_24h',
-    ]) {
-      if (!Number.isSafeInteger(response[field]) || response[field] < 0) {
-        throw new Error('invalid D1 info response')
-      }
-    }
-    for (const field of ['created_at', 'name', 'running_in_region']) {
-      if (typeof response[field] !== 'string') throw new Error('invalid D1 info response')
-    }
-    if (response.jurisdiction !== null && typeof response.jurisdiction !== 'string') {
-      throw new Error('invalid D1 info response')
-    }
-    assertExactKeys(response.read_replication, ['mode'], 'D1 info replication')
-    if (typeof response.read_replication.mode !== 'string') {
-      throw new Error('invalid D1 info response')
-    }
+    parseRemoteD1InfoResponse(stdout, expectedDatabaseId)
   } catch {
     throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED)
   }
@@ -563,68 +447,33 @@ function parseRemoteIdentity(stdout, expectedDatabaseId) {
 
 function parseRemoteWhoami(stdout, expectedAccountId) {
   try {
-    const response = JSON.parse(stdout)
-    if (!isPlainRecord(response)) throw new Error('invalid Wrangler identity response')
-    const keys = Object.keys(response).sort()
-    const withEmail = ['accounts', 'authType', 'email', 'loggedIn', 'tokenPermissions']
-    const withoutEmail = ['accounts', 'authType', 'loggedIn', 'tokenPermissions']
-    if (JSON.stringify(keys) !== JSON.stringify(withEmail)
-      && JSON.stringify(keys) !== JSON.stringify(withoutEmail)) {
-      throw new Error('invalid Wrangler identity response')
-    }
-    if (response.loggedIn !== true
-      || !['Account API Token', 'Global API Key', 'OAuth Token', 'User API Token'].includes(response.authType)
-      || (Object.hasOwn(response, 'email') && typeof response.email !== 'string')
-      || !Array.isArray(response.accounts)
-      || !Array.isArray(response.tokenPermissions)
-      || response.tokenPermissions.some((permission) => typeof permission !== 'string')) {
-      throw new Error('invalid Wrangler identity response')
-    }
-    for (const account of response.accounts) {
-      assertExactKeys(account, [
-        'created_on',
-        'id',
-        'legacy_flags',
-        'name',
-        'settings',
-        'type',
-      ], 'Wrangler account')
-      if (typeof account.created_on !== 'string'
-        || typeof account.id !== 'string'
-        || typeof account.name !== 'string'
-        || account.type !== 'standard') {
-        throw new Error('invalid Wrangler account')
-      }
-      assertExactKeys(account.settings, [
-        'abuse_contact_email',
-        'access_approval_expiry',
-        'api_access_enabled',
-        'enforce_twofactor',
-        'oauth_app_access_enabled',
-      ], 'Wrangler account settings')
-      assertExactKeys(account.legacy_flags, ['enterprise_zone_quota'], 'Wrangler account legacy flags')
-      assertExactKeys(
-        account.legacy_flags.enterprise_zone_quota,
-        ['available', 'current', 'maximum'],
-        'Wrangler account quota',
-      )
-      for (const value of Object.values(account.legacy_flags.enterprise_zone_quota)) {
-        if (!Number.isSafeInteger(value) || value < 0) throw new Error('invalid Wrangler account quota')
-      }
-    }
-    if (response.accounts.filter((account) => account.id === expectedAccountId).length !== 1) {
-      throw new Error('Wrangler account identity drift')
-    }
+    parseWranglerWhoamiResponse(stdout, expectedAccountId)
   } catch {
     throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED)
   }
 }
 
 function identityResponse(config, infoCommand, whoamiCommand = null) {
-  if (config.mode === 'local') parseLocalIdentity(infoCommand.stdout)
-  else {
-    parseRemoteIdentity(infoCommand.stdout, config.d1_database_id)
-    parseRemoteWhoami(whoamiCommand.stdout, config.account_id)
+  let durationMs
+  try {
+    durationMs = identityDurationMs(infoCommand, whoamiCommand, config.mode === 'remote')
+  } catch (error) {
+    throw new D1TransportError(
+      error.classification ?? D1_TRANSPORT_FAILURE_CLASSIFICATIONS.UNCERTAIN,
+      error.durationMs,
+    )
+  }
+  try {
+    if (config.mode === 'local') parseLocalIdentity(infoCommand.stdout)
+    else {
+      parseRemoteIdentity(infoCommand.stdout, config.d1_database_id)
+      parseRemoteWhoami(whoamiCommand.stdout, config.account_id)
+    }
+  } catch (error) {
+    if (error instanceof D1TransportError) {
+      throw new D1TransportError(error.classification, durationMs)
+    }
+    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED, durationMs)
   }
   return {
     status: 0,
@@ -634,7 +483,7 @@ function identityResponse(config, infoCommand, whoamiCommand = null) {
       d1_database_id: config.d1_database_id,
     }),
     stderr: '',
-    duration_ms: infoCommand.duration_ms + (whoamiCommand?.duration_ms ?? 0),
+    duration_ms: durationMs,
   }
 }
 
@@ -681,12 +530,12 @@ function rolloutSafetyCommand(config) {
 export function createD1Transport(config) {
   if (arguments.length !== 1) fail('createD1Transport accepts exactly one config argument')
   const normalizedConfig = validateConfig(config)
-  validateBoundArtifactsOrThrow(normalizedConfig)
+  const persistIdentity = validateBoundArtifactsOrThrow(normalizedConfig)
 
   function execute(request) {
     if (arguments.length !== 1) fail('execute accepts exactly one request argument')
     const normalizedRequest = validateRequest(request)
-    validateBoundArtifactsOrThrow(normalizedConfig)
+    validateBoundArtifactsOrThrow(normalizedConfig, persistIdentity)
     const timeoutMs = remainingTimeout(normalizedRequest)
     if (normalizedRequest.operation === 'd1_identity'
       || normalizedRequest.operation === 'clean_start_reset'
@@ -696,16 +545,28 @@ export function createD1Transport(config) {
         return runBounded(command.executable, command.args, timeoutMs)
       }
       const infoCommand = runBounded(command.executable, command.args, timeoutMs)
+      if (infoCommand.stderr !== '') return identityResponse(normalizedConfig, infoCommand)
       if (normalizedConfig.mode === 'local') return identityResponse(normalizedConfig, infoCommand)
       const whoamiTimeout = timeoutMs - infoCommand.duration_ms
       if (whoamiTimeout <= 0) {
         throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT, infoCommand.duration_ms)
       }
-      const whoamiCommand = runBounded(
-        wranglerPath,
-        buildRemoteWhoamiCommand(normalizedConfig),
-        whoamiTimeout,
-      )
+      let whoamiCommand
+      try {
+        whoamiCommand = runBounded(
+          wranglerPath,
+          buildRemoteWhoamiCommand(normalizedConfig),
+          whoamiTimeout,
+        )
+      } catch (error) {
+        if (error instanceof D1TransportError) {
+          throw new D1TransportError(
+            error.classification,
+            infoCommand.duration_ms + error.durationMs,
+          )
+        }
+        throw error
+      }
       return identityResponse(normalizedConfig, infoCommand, whoamiCommand)
     }
     if (normalizedRequest.operation === 'migration_catalog') {
@@ -726,5 +587,14 @@ export function createD1Transport(config) {
     fail('operation is not supported')
   }
 
-  return Object.freeze({ execute })
+  const transport = Object.freeze({ execute })
+  transportCapabilities.set(transport, Object.freeze({
+    source: normalizedConfig.mode === 'remote' ? 'production' : 'local-non-production',
+    production: normalizedConfig.mode === 'remote',
+  }))
+  return transport
+}
+
+export function getD1TransportProvenance(transport) {
+  return transportCapabilities.get(transport)
 }

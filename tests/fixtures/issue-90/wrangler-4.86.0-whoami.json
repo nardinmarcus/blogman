@@ -1,0 +1,31 @@
+{
+  "accounts": [
+    {
+      "created_on": "2026-08-12T00:00:00.000Z",
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "legacy_flags": {
+        "enterprise_zone_quota": {
+          "available": 1000,
+          "current": 0,
+          "maximum": 1000
+        }
+      },
+      "name": "Offline Fixture Account",
+      "settings": {
+        "abuse_contact_email": null,
+        "access_approval_expiry": null,
+        "api_access_enabled": true,
+        "enforce_twofactor": false,
+        "oauth_app_access_enabled": true
+      },
+      "type": "standard"
+    }
+  ],
+  "authType": "User API Token",
+  "email": "offline-fixture@example.invalid",
+  "loggedIn": true,
+  "tokenPermissions": [
+    "account:D1:read",
+    "account:D1:write"
+  ]
+}

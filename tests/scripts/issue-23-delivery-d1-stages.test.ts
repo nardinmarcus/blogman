@@ -261,6 +261,44 @@ function overrideTransport(
 }
 
 describe('Issue #23 D1 delivery stages', () => {
+  it('forces unbranded transports to explicit non-production provenance', () => {
+    const transport = createSuccessTransport()
+    const result = runD1Stages({
+      bindings: { ...BINDINGS, evidence_class: 'production' },
+      transport,
+    })
+
+    expect(result.value.evidence).toMatchObject({
+      source: 'untrusted-test-transport',
+      production: false,
+      promotable: false,
+    })
+  })
+
+  it('never marks an unbranded terminal failure promotable', () => {
+    const transport = overrideTransport({
+      clean_start_reset: () => ({
+        status: 0,
+        stdout: '{}',
+        stderr: '',
+        duration_ms: D1_STAGE_TIMEOUT_MS.clean_start_reset + 1,
+      }),
+    })
+    const result = runD1Stages({
+      bindings: { ...BINDINGS, evidence_class: 'production' },
+      transport,
+    })
+
+    expect(result.value).toMatchObject({
+      outcome: 'TIMEOUT',
+      evidence: {
+        source: 'untrusted-test-transport',
+        production: false,
+        promotable: false,
+      },
+    })
+  })
+
   it('runs the five stages in order and returns only a sanitized PASS receipt', () => {
     const transport = createSuccessTransport()
 
@@ -724,6 +762,32 @@ describe('Issue #23 D1 delivery stages', () => {
     ])
   })
 
+  it('rejects identity stderr as UNCERTAIN without exposing it or calling suffix stages', () => {
+    const transport = overrideTransport({
+      d1_identity: () => ({
+        status: 0,
+        stdout: JSON.stringify({
+          account_id: BINDINGS.account_id,
+          config_sha256: BINDINGS.config_sha256,
+          d1_database_id: BINDINGS.d1_database_id,
+        }),
+        stderr: 'private identity stderr',
+        duration_ms: 13,
+      }),
+    })
+
+    const result = runD1Stages({ bindings: BINDINGS, transport })
+
+    expect(result.value).toMatchObject({
+      outcome: 'UNCERTAIN',
+      first_terminal_stage: 'd1_identity',
+      stage_durations_ms: { d1_identity: 13 },
+      failure: { classification: 'uncertain' },
+    })
+    expect(transport.calls.map(({ operation }) => operation)).toEqual(['d1_identity'])
+    expect(JSON.stringify(result.value)).not.toContain('private identity stderr')
+  })
+
   it('rejects successful transport with stderr before parsing its response', () => {
     const transport = overrideTransport({
       clean_start_reset: () => ({ ...resetResponse(), stderr: 'private stderr body' }),
@@ -758,6 +822,60 @@ describe('Issue #23 D1 delivery stages', () => {
     })
   })
 
+  it('rejects escaped duplicate keys in identity and reconciliation contracts', () => {
+    const identityTransport = overrideTransport({
+      d1_identity: () => ({
+        status: 0,
+        stderr: '',
+        stdout: `{"account_id":"${BINDINGS.account_id}","config_sha256":"${BINDINGS.config_sha256}","d1_database_id":"${BINDINGS.d1_database_id}","\\u0064\\u0031_database_id":"forged"}`,
+        duration_ms: 1,
+      }),
+    })
+    const identity = runD1Stages({ bindings: BINDINGS, transport: identityTransport })
+
+    expect(identity.value).toMatchObject({
+      outcome: 'ERROR',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'd1_identity_response_invalid' },
+    })
+
+    const reconciliationTransport = overrideTransport({
+      reconciliation: () => ({
+        status: 0,
+        stderr: '',
+        stdout: `{"state":"matched","checks":{"schema":"matched","migration_ledger":"matched","post_count":"matched","post_status":"matched","post_content":"matched"},"\\u0063hecks":{"forged":true}}`,
+        duration_ms: 1,
+      }),
+    })
+    const reconciliation = runD1Stages({ bindings: BINDINGS, transport: reconciliationTransport })
+
+    expect(reconciliation.value).toMatchObject({
+      outcome: 'ERROR',
+      first_terminal_stage: 'reconciliation',
+      failure: { classification: 'reconciliation_response_invalid' },
+    })
+  })
+
+  it.each([
+    ['malformed', { status: 0, stdout: '{}', stderr: '', duration_ms: 7 }, 14],
+    ['timeout', { status: 0, stdout: '', stderr: '', duration_ms: 11, timed_out: true }, 18],
+  ] as const)('accounts migration operation duration exactly once for %s responses', (_label, response, expectedDuration) => {
+    const transport = overrideTransport({
+      migration_catalog: () => ({
+        status: 0,
+        stdout: JSON.stringify({ format: 'blogman-migration-catalog/v1', migrations: MIGRATIONS }),
+        stderr: '',
+        duration_ms: 7,
+      }),
+      migration_plan: () => response,
+    })
+
+    const result = runD1Stages({ bindings: BINDINGS, transport })
+
+    expect(result.value.stage_durations_ms.migrations_001_006).toBe(expectedDuration)
+    expect(result.value.stage_durations_ms.migrations_001_006).not.toBe(expectedDuration * 2)
+  })
+
   it('composes the real local transport with all five D1 stages', () => {
     const statePath = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-90-stage-integration-')))
     temporaryDirectories.push(statePath)
@@ -765,7 +883,10 @@ describe('Issue #23 D1 delivery stages', () => {
     const bindings = createLocalIntegrationBindings(statePath, expectedPath)
     const transport = createD1Transport(bindings)
 
-    const result = runD1Stages({ bindings, transport })
+    const result = runD1Stages({
+      bindings: { ...bindings, evidence_class: 'production' },
+      transport,
+    })
 
     expect(result.value).toMatchObject({
       outcome: 'PASS',

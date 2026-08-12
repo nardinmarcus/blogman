@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto'
 import {
   chmodSync,
+  mkdirSync,
   mkdtempSync,
   unlinkSync,
   readdirSync,
   readFileSync,
+  renameSync,
   realpathSync,
   rmSync,
   statSync,
@@ -17,9 +19,18 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   D1TransportError,
   D1_TRANSPORT_MAX_OUTPUT_BYTES,
-  buildD1Command,
   createD1Transport,
 } from '../../scripts/issue-23-delivery-d1-transport.mjs'
+import {
+  identityDurationMs,
+  parseRemoteD1InfoResponse,
+  parseStrictJson,
+  parseWranglerWhoamiResponse,
+} from '../../scripts/issue-23-delivery-d1-contracts.mjs'
+import {
+  D1ChildError,
+  runBoundedChild,
+} from '../../scripts/issue-23-delivery-d1-child.mjs'
 import { D1_STAGE_TIMEOUT_MS } from '../../scripts/issue-23-delivery-d1-stages.mjs'
 
 const repoRoot = process.cwd()
@@ -120,20 +131,15 @@ describe('Issue #90 D1 transport', () => {
     expect(JSON.parse(result.stdout)).toEqual([{ results: [], success: true, meta: { duration: expect.any(Number) } }])
   })
 
-  it('builds only fixed logical D1 commands and binds the stage timeout at the child boundary', () => {
+  it('keeps command construction private while exposing only the bounded execute seam', { timeout: 30_000 }, async () => {
     const { config } = createConfig()
-    const command = buildD1Command(config, request('empty_d1_proof', 'empty_d1_proof', 23))
+    const transport = createD1Transport(config)
+    const transportModule = await import('../../scripts/issue-23-delivery-d1-transport.mjs')
 
-    expect(command.args).toEqual([
-      'd1', 'execute', 'DB', '--local',
-      '--persist-to', config.persist_path,
-      '--config', config.config_path,
-      '--command', expect.stringContaining('sqlite_schema'),
-      '--json',
-    ])
-    expect(command.timeout_ms).toBe(D1_STAGE_TIMEOUT_MS.empty_d1_proof - 23)
-    expect(command.args).not.toContain('SELECT 1')
-    expect(command.options.shell).toBe(false)
+    expect(transportModule).not.toHaveProperty('buildD1Command')
+    expect(transportModule).not.toHaveProperty('registerD1TransportCapability')
+    expect(Object.keys(transport)).toEqual(['execute'])
+    expect(transport.execute(request('empty_d1_proof')).status).toBe(0)
   })
 
   it('dispatches migration operations through the canonical runner instead of accepting SQL or file overrides', () => {
@@ -165,6 +171,17 @@ describe('Issue #90 D1 transport', () => {
     expect(() => createD1Transport(config, { runChild: () => ({}) })).toThrow(/exactly one|unsupported/u)
     expect(() => createD1Transport({ ...config, command: '/tmp/evil' })).toThrow(/unsupported/u)
     expect(() => createD1Transport({ ...config, timeout_ms: 1 })).toThrow(/unsupported/u)
+  })
+
+  it('rejects duplicate keys in the bound expected reconciliation contract before spawning a child', () => {
+    const { config, expectedPath } = createConfig()
+    const duplicate = '{"format":"blogman-d1-reconciliation/v1","\\u0066ormat":"forged"}'
+    writeFileSync(expectedPath, duplicate, { mode: 0o600 })
+
+    expect(() => createD1Transport({
+      ...config,
+      expected_reconciliation_sha256: sha256File(expectedPath),
+    })).toThrow('D1 transport malformed')
   })
 
   it('fails closed on a bound config mutation before spawning a child', () => {
@@ -225,6 +242,26 @@ describe('Issue #90 D1 transport', () => {
     expect(() => createD1Transport(config)).toThrow('D1 transport malformed')
   })
 
+  it('requires a local persist directory to be private and outside the repository', () => {
+    const { config, statePath } = createConfig()
+    chmodSync(statePath, 0o755)
+    expect(() => createD1Transport(config)).toThrow('D1 transport malformed')
+    chmodSync(statePath, 0o700)
+
+    expect(() => createD1Transport({ ...config, persist_path: repoRoot })).toThrow('D1 transport malformed')
+  })
+
+  it('binds the local persist directory identity for the full transport lifecycle', () => {
+    const { config, statePath } = createConfig()
+    const transport = createD1Transport(config)
+    const movedPath = `${statePath}.moved`
+    renameSync(statePath, movedPath)
+    mkdirSync(statePath, { mode: 0o700 })
+    temporaryDirectories.push(movedPath)
+
+    expect(() => transport.execute(request('empty_d1_proof'))).toThrow('D1 transport malformed')
+  })
+
   it.each([
     ['config', configPath],
     ['reset SQL', resetSqlPath],
@@ -255,5 +292,110 @@ describe('Issue #90 D1 transport', () => {
     } finally {
       unlinkSync(marker)
     }
+  })
+
+  it('accepts the pinned Wrangler 4.86.0 D1 info fixture with write_queries_24h', () => {
+    const info = readFileSync(
+      join(repoRoot, 'tests', 'fixtures', 'issue-90', 'wrangler-4.86.0-d1-info.json'),
+      'utf8',
+    )
+
+    expect(parseRemoteD1InfoResponse(info, '11111111-2222-4333-8444-555555555555')).toMatchObject({
+      read_queries_24h: 12,
+      write_queries_24h: 7,
+    })
+    expect(() => parseRemoteD1InfoResponse(
+      info.replace('"uuid": "11111111-2222-4333-8444-555555555555"', '"uuid": "11111111-2222-4333-8444-555555555555", "\\u0075uid": "forged"'),
+      '11111111-2222-4333-8444-555555555555',
+    )).toThrow()
+  })
+
+  it('accepts only the pinned Wrangler alpha D1 info variant', () => {
+    const info = readFileSync(
+      join(repoRoot, 'tests', 'fixtures', 'issue-90', 'wrangler-4.86.0-d1-info-alpha.json'),
+      'utf8',
+    )
+
+    expect(parseRemoteD1InfoResponse(info, '11111111-2222-4333-8444-555555555555')).toMatchObject({
+      version: 'alpha',
+    })
+    expect(() => parseRemoteD1InfoResponse(
+      info.replace('"version": "alpha"', '"version": "beta"'),
+      '11111111-2222-4333-8444-555555555555',
+    )).toThrow()
+  })
+
+  it('accepts the pinned Wrangler whoami fixture and rejects unsupported key/type variants', () => {
+    const whoami = readFileSync(
+      join(repoRoot, 'tests', 'fixtures', 'issue-90', 'wrangler-4.86.0-whoami.json'),
+      'utf8',
+    )
+
+    expect(parseWranglerWhoamiResponse(whoami, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).toMatchObject({
+      loggedIn: true,
+    })
+    expect(() => parseWranglerWhoamiResponse(
+      whoami.replace('"api_access_enabled": true', '"api_access_enabled": "true"'),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    )).toThrow()
+    expect(() => parseWranglerWhoamiResponse(
+      whoami.replace('"loggedIn": true', '"loggedIn": true, "\\u006coggedIn": false'),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    )).toThrow()
+  })
+
+  it('rejects escaped duplicate keys before JSON.parse', () => {
+    expect(() => parseStrictJson('{"account_id":"a","\\u0061ccount_id":"b"}')).toThrow()
+  })
+
+  it('classifies stderr from every identity child as UNCERTAIN with accumulated duration', () => {
+    expect(() => identityDurationMs({ duration_ms: 5, stderr: 'private info stderr' }, null, true))
+      .toThrowError(expect.objectContaining({ classification: 'uncertain', durationMs: 5 }))
+    expect(() => identityDurationMs(
+      { duration_ms: 5, stderr: '' },
+      { duration_ms: 7, stderr: 'private whoami stderr' },
+      true,
+    )).toThrowError(expect.objectContaining({ classification: 'uncertain', durationMs: 12 }))
+  })
+
+  it.each([
+    ['timeout', 'setInterval(() => {}, 1000)', 'timeout'],
+    ['nonzero', 'process.stderr.write("private child secret"); process.exit(7)', 'nonzero'],
+  ] as const)('classifies a real child %s once without exposing raw output', (_name, source, classification) => {
+    try {
+      runBoundedChild(process.execPath, ['-e', source], 40, 1024)
+      throw new Error('expected child failure')
+    } catch (error) {
+      expect(error).toBeInstanceOf(D1ChildError)
+      expect(error.classification).toBe(classification)
+      expect(error.durationMs).toBeGreaterThan(0)
+      expect(String(error)).not.toContain('private child secret')
+    }
+  })
+
+  it('keeps malformed child stdout bounded until the strict evidence parser rejects it', () => {
+    const result = runBoundedChild(
+      process.execPath,
+      ['-e', 'process.stdout.write("{")'],
+      500,
+      1024,
+    )
+
+    expect(result.status).toBe(0)
+    expect(() => parseStrictJson(result.stdout)).toThrow()
+    expect(result.stderr).toBe('')
+  })
+
+  it('marks a child that leaves a residual process group UNCERTAIN and consumes one attempt', () => {
+    const source = [
+      "const { spawn } = require('node:child_process')",
+      "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })",
+      'child.unref()',
+      'process.exit(0)',
+    ].join(';')
+
+    expect(() => runBoundedChild(process.execPath, ['-e', source], 500, 1024)).toThrowError(
+      expect.objectContaining({ classification: 'uncertain' }),
+    )
   })
 })

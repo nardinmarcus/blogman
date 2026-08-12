@@ -1,4 +1,12 @@
 import { createHash } from 'node:crypto'
+import {
+  D1_CANONICAL_MIGRATION_NAMES,
+  D1_STAGE_TIMEOUT_MS,
+  parseStrictJson,
+} from './issue-23-delivery-d1-contracts.mjs'
+import { getD1TransportProvenance } from './issue-23-delivery-d1-transport.mjs'
+
+export { D1_STAGE_TIMEOUT_MS }
 
 export const D1_STAGE_ORDER = Object.freeze([
   'd1_identity',
@@ -16,26 +24,11 @@ export const D1_RECONCILIATION_DIMENSIONS = Object.freeze([
   'post_content',
 ])
 
-export const D1_STAGE_TIMEOUT_MS = Object.freeze({
-  d1_identity: 120_000,
-  clean_start_reset: 300_000,
-  empty_d1_proof: 300_000,
-  migrations_001_006: 2_100_000,
-  reconciliation: 300_000,
-})
 
 const D1_OVERALL_TIMEOUT_MS = 5_400_000
 const MAX_STAGE_OUTPUT_BYTES = 64 * 1024
 const RESET_RESPONSE_PREFIX = '\u251c Checking if file needs uploading\n\u2502\n'
 const RESET_LOCAL_STATEMENT_COUNT = 15
-const CANONICAL_MIGRATION_NAMES = Object.freeze([
-  '001_initial_schema',
-  '002_add_ai_image_configuration',
-  '003_migrate_runtime_ai_configuration',
-  '004_complete_historical_text_ai_schema',
-  '005_fix_posts_fts_sync',
-  '006_add_rollout_safety_controls',
-])
 const BINDING_KEYS = Object.freeze([
   'mode',
   'database',
@@ -57,12 +50,6 @@ const BINDING_KEYS = Object.freeze([
   'candidate_id',
   'evidence_class',
   'migrations',
-])
-const EVIDENCE_CLASSES = Object.freeze([
-  'production',
-  'local-non-production',
-  'test-non-production',
-  'synthetic-non-production',
 ])
 const TRANSPORT_FAILURE_OUTCOMES = Object.freeze({
   timeout: ['TIMEOUT', 'timeout'],
@@ -152,100 +139,9 @@ function stageFailure(outcome, classification, durationMs = 0) {
   return new StageFailure(outcome, classification, durationMs)
 }
 
-function assertUniqueJsonObjectKeys(json) {
-  let index = 0
-
-  function skipWhitespace() {
-    while (index < json.length && /[ \t\n\r]/u.test(json[index])) index += 1
-  }
-
-  function scanString() {
-    const start = index
-    if (json[index] !== '"') throw new SyntaxError()
-    index += 1
-    while (index < json.length) {
-      if (json[index] === '"') {
-        index += 1
-        return JSON.parse(json.slice(start, index))
-      }
-      if (json[index] === '\\') index += 1
-      index += 1
-    }
-    throw new SyntaxError()
-  }
-
-  function scanPrimitive() {
-    const start = index
-    while (index < json.length && !',]} \t\n\r'.includes(json[index])) index += 1
-    if (start === index) throw new SyntaxError()
-  }
-
-  function scanArray() {
-    index += 1
-    skipWhitespace()
-    if (json[index] === ']') {
-      index += 1
-      return
-    }
-    while (index < json.length) {
-      scanValue()
-      skipWhitespace()
-      if (json[index] === ']') {
-        index += 1
-        return
-      }
-      if (json[index] !== ',') throw new SyntaxError()
-      index += 1
-      skipWhitespace()
-    }
-    throw new SyntaxError()
-  }
-
-  function scanObject() {
-    index += 1
-    skipWhitespace()
-    if (json[index] === '}') {
-      index += 1
-      return
-    }
-    const keys = new Set()
-    while (index < json.length) {
-      const key = scanString()
-      if (keys.has(key)) throw new SyntaxError()
-      keys.add(key)
-      skipWhitespace()
-      if (json[index] !== ':') throw new SyntaxError()
-      index += 1
-      scanValue()
-      skipWhitespace()
-      if (json[index] === '}') {
-        index += 1
-        return
-      }
-      if (json[index] !== ',') throw new SyntaxError()
-      index += 1
-      skipWhitespace()
-    }
-    throw new SyntaxError()
-  }
-
-  function scanValue() {
-    skipWhitespace()
-    if (json[index] === '{') scanObject()
-    else if (json[index] === '[') scanArray()
-    else if (json[index] === '"') scanString()
-    else scanPrimitive()
-  }
-
-  scanValue()
-  skipWhitespace()
-  if (index !== json.length) throw new SyntaxError()
-}
-
 function parseJson(stdout, classification = 'malformed') {
   try {
-    assertUniqueJsonObjectKeys(stdout)
-    return JSON.parse(stdout)
+    return parseStrictJson(stdout)
   } catch {
     throw stageFailure('ERROR', classification)
   }
@@ -257,7 +153,7 @@ function normalizeMigration(entry, index, label) {
   if (!Number.isSafeInteger(entry.number) || entry.number !== index + 1) {
     fail(`${label}[${index}] number is invalid`)
   }
-  if (entry.name !== CANONICAL_MIGRATION_NAMES[index]) {
+  if (entry.name !== D1_CANONICAL_MIGRATION_NAMES[index]) {
     fail(`${label}[${index}] name is invalid`)
   }
   assertHash(entry.checksum, `${label}[${index}].checksum`)
@@ -311,10 +207,9 @@ function normalizeBindings(value) {
       fail(`bindings.${field} must identify the canonical ${suffix}`)
     }
   }
-  if (!EVIDENCE_CLASSES.includes(value.evidence_class)) fail('bindings.evidence_class is invalid')
-  if ((value.mode === 'remote' && value.evidence_class !== 'production')
-    || (value.mode === 'local' && value.evidence_class === 'production')) {
-    fail('bindings mode and evidence class are inconsistent')
+  if (!['production', 'local-non-production', 'test-non-production', 'synthetic-non-production']
+    .includes(value.evidence_class)) {
+    fail('bindings.evidence_class is invalid')
   }
   if (!Array.isArray(value.migrations) || value.migrations.length !== 6) {
     fail('bindings.migrations must contain exactly six entries')
@@ -356,16 +251,15 @@ function transportFailure(error, durationMs) {
 
 function readTransportResponse(response, stage, elapsedMs) {
   if (!isRecord(response)) throw stageFailure('ERROR', 'malformed', elapsedMs)
+  const operationDurationMs = Number.isSafeInteger(response.duration_ms) && response.duration_ms > 0
+    ? response.duration_ms
+    : 0
+  const durationMs = elapsedMs + operationDurationMs
   const allowedKeys = ['duration_ms', 'signal', 'status', 'stderr', 'stdout', 'timed_out']
   if (Reflect.ownKeys(response).some((key) => (
     typeof key !== 'string' || !allowedKeys.includes(key)
-  ))) throw stageFailure('ERROR', 'malformed', elapsedMs)
-  if (!Object.hasOwn(response, 'duration_ms')
-    || !Number.isSafeInteger(response.duration_ms)
-    || response.duration_ms <= 0) {
-    throw stageFailure('ERROR', 'malformed', elapsedMs)
-  }
-  const durationMs = response.duration_ms
+  ))) throw stageFailure('ERROR', 'malformed', durationMs)
+  if (operationDurationMs === 0) throw stageFailure('ERROR', 'malformed', durationMs)
   if (response.timed_out === true) throw stageFailure('TIMEOUT', 'timeout', durationMs)
   if (response.signal !== undefined && response.signal !== null) {
     throw stageFailure('UNCERTAIN', 'uncertain', durationMs)
@@ -382,10 +276,10 @@ function readTransportResponse(response, stage, elapsedMs) {
     throw stageFailure('UNCERTAIN', 'uncertain', durationMs)
   }
   if (response.stderr !== '') throw stageFailure('UNCERTAIN', 'uncertain', durationMs)
-  if (elapsedMs + durationMs > D1_STAGE_TIMEOUT_MS[stage]) {
-    throw stageFailure('TIMEOUT', 'timeout', elapsedMs + durationMs)
+  if (durationMs > D1_STAGE_TIMEOUT_MS[stage]) {
+    throw stageFailure('TIMEOUT', 'timeout', durationMs)
   }
-  return { stdout: response.stdout, durationMs }
+  return { stdout: response.stdout, durationMs: operationDurationMs }
 }
 
 function callOperation({ bindings, transport, stage, operation }, state) {
@@ -403,10 +297,7 @@ function callOperation({ bindings, transport, stage, operation }, state) {
   try {
     result = readTransportResponse(response, stage, state.durationMs)
   } catch (error) {
-    if (error instanceof StageFailure) {
-      error.durationMs += state.durationMs
-      throw error
-    }
+    if (error instanceof StageFailure) throw error
     throw stageFailure('ERROR', 'malformed', state.durationMs)
   }
   state.durationMs += result.durationMs
@@ -418,7 +309,7 @@ function parseOperationOutput(stdout, state, parser, classification) {
     return parser(stdout)
   } catch (error) {
     if (error instanceof StageFailure) {
-      error.durationMs += state.durationMs
+      error.durationMs = state.durationMs
       throw error
     }
     throw stageFailure('ERROR', classification, state.durationMs)
@@ -748,10 +639,10 @@ export function runD1Stages({ bindings: rawBindings, transport }) {
       if (durationMs > D1_STAGE_TIMEOUT_MS[stage]) {
         throw stageFailure('TIMEOUT', 'timeout', durationMs)
       }
-      elapsedMs += durationMs
-      if (elapsedMs > D1_OVERALL_TIMEOUT_MS) {
-        throw stageFailure('TIMEOUT', 'overall_timeout', elapsedMs)
+      if (elapsedMs + durationMs > D1_OVERALL_TIMEOUT_MS) {
+        throw stageFailure('TIMEOUT', 'overall_timeout', durationMs)
       }
+      elapsedMs += durationMs
     } catch (error) {
       if (error instanceof StageFailure) {
         outcome = error.outcome
@@ -775,7 +666,11 @@ export function runD1Stages({ bindings: rawBindings, transport }) {
 
   const terminal = trace.at(-1)
   if (!terminal) fail('D1 stage contract did not execute')
-  const production = bindings.evidence_class === 'production'
+  const provenance = getD1TransportProvenance(transport) ?? Object.freeze({
+    source: 'untrusted-test-transport',
+    production: false,
+  })
+  const production = provenance.production === true
   const traceSha256 = sha256(canonicalBytes(trace))
   const value = {
     format: 'blogman-issue-23-d1-stages/v1',
@@ -785,9 +680,9 @@ export function runD1Stages({ bindings: rawBindings, transport }) {
     stage_counts: stageCounts,
     stage_durations_ms: stageDurations,
     evidence: {
-      source: bindings.evidence_class,
+      source: provenance.source,
       production,
-      promotable: production,
+      promotable: production && terminal.outcome === 'PASS',
       account_id: bindings.account_id,
       d1_database_id: bindings.d1_database_id,
       config_sha256: bindings.config_sha256,
