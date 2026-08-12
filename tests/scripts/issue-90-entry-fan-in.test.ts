@@ -1,11 +1,32 @@
 import { createHash } from 'node:crypto'
-import { existsSync } from 'node:fs'
-import { describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-const { createD1TransportMock, runD1StagesMock } = vi.hoisted(() => ({
+const { createD1TransportMock, runD1StagesMock, fsActual } = vi.hoisted(() => ({
   createD1TransportMock: vi.fn(),
   runD1StagesMock: vi.fn(),
+  fsActual: {
+    realpathSync: undefined as typeof import('node:fs').realpathSync | undefined,
+  },
 }))
+
+vi.mock('node:fs', async () => {
+  const actual = await vi.importActual<typeof import('node:fs')>('node:fs')
+  fsActual.realpathSync = actual.realpathSync
+  return {
+    ...actual,
+    realpathSync: vi.fn(actual.realpathSync),
+  }
+})
 
 vi.mock('../../scripts/issue-23-delivery-d1-transport.mjs', () => ({
   createD1Transport: createD1TransportMock,
@@ -21,7 +42,15 @@ vi.mock('../../scripts/issue-23-delivery-d1-stages.mjs', () => ({
   runD1Stages: runD1StagesMock,
 }))
 
+afterEach(() => {
+  vi.mocked(realpathSync).mockImplementation(fsActual.realpathSync!)
+})
+
 import { execute } from '../../scripts/issue-23-delivery-entry.mjs'
+import {
+  canonicalBytes,
+  prepareForTestsOnly,
+} from '../../scripts/issue-23-delivery-prepare.mjs'
 
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const MANIFEST_FORMAT = 'blogman-issue-23-canonical-frozen-manifest/v1'
@@ -39,6 +68,7 @@ const D1_OPERATIONS = [
   'migration_verify',
   'reconciliation',
 ]
+const REPOSITORY_ROOT = process.cwd()
 
 function hash(bytes: Buffer) {
   return createHash('sha256').update(bytes).digest('hex')
@@ -241,6 +271,9 @@ function manifest(overrides: Record<string, unknown> = {}) {
       status: 'PASS',
       receipt_sha256: HASH,
       production_write_adapter_calls: 0,
+      expected_reconciliation_sha256: d1.expected_reconciliation_sha256,
+      d1_stage_receipt_sha256: D1_TRACE_HASH,
+      cleanup: { created: true, cleaned: true, observed_absent: true },
     },
     ...overrides,
   }
@@ -253,6 +286,173 @@ function authorizationFor(prepared: ReturnType<typeof manifest>, id: string) {
     authorization_id: id,
     manifest_sha256: prepared.sha256,
     decision: 'approve',
+  }
+}
+
+function actualPreparedManifest() {
+  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPOSITORY_ROOT, encoding: 'utf8' }).trim()
+  const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: REPOSITORY_ROOT, encoding: 'utf8' }).trim()
+  const migrationCatalogPath = join(REPOSITORY_ROOT, 'db', 'ledger-migrations')
+  const catalogBytes = Buffer.from(execFileSync(
+    process.execPath,
+    ['scripts/migrations.mjs', 'catalog', '--migrations-dir', realpathSync(migrationCatalogPath)],
+    { cwd: REPOSITORY_ROOT, encoding: 'utf8' },
+  ).trim())
+  const catalog = JSON.parse(catalogBytes.toString('utf8')) as {
+    migrations: Array<{ number: number; name: string }>
+  }
+  const migrationEntries = catalog.migrations.map((entry) => {
+    const name = `${String(entry.number).padStart(3, '0')}_${entry.name.replace(/^\d{3}_/u, '')}.sql`
+    const path = `db/ledger-migrations/${name}`
+    return {
+      id: String(entry.number).padStart(3, '0'),
+      path,
+      sha256: hash(readFileSync(join(REPOSITORY_ROOT, path))),
+    }
+  })
+  const expected = expectedReconciliation()
+  const expectedSha256 = hash(Buffer.from(`${JSON.stringify(expected, null, 2)}\n`, 'utf8'))
+  const config = {
+    preparation: {
+      prepare_entry: { path: 'scripts/issue-23-delivery-prepare.mjs', sha256: HASH },
+      execute_entry: { path: 'scripts/issue-23-delivery-entry.mjs', sha256: HASH },
+      manifest_schema: {
+        path: 'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
+        sha256: HASH,
+      },
+    },
+    repository: {
+      canonical: 'nardinmarcus/blogman',
+      remote: 'https://github.com/nardinmarcus/blogman.git',
+      commit,
+      tree,
+      clean: true,
+    },
+    ci: {
+      provider: 'github-actions',
+      workflow: '.github/workflows/verify.yml',
+      run_id: 1,
+      attempt: 1,
+      event: 'pull_request',
+      head_sha: commit,
+      tree,
+      conclusion: 'success',
+    },
+    toolchain: {
+      node: { version: '22.14.0', identity_sha256: HASH },
+      npm: { version: '10.9.2', identity_sha256: HASH },
+      wrangler: { version: '4.86.0', identity_sha256: HASH },
+      opennextjs_cloudflare: { version: '1.19.10', identity_sha256: HASH },
+      package_json_sha256: HASH,
+      lockfile_sha256: HASH,
+    },
+    artifact: {
+      archive: { path: '.open-next/open-next-build.zip', sha256: HASH, bytes: 1 },
+      worker: { path: '.open-next/worker.js', sha256: HASH, bytes: 1 },
+      file_tree: {
+        sha256: HASH,
+        complete: true,
+        files: [
+          { path: '.open-next/assets/index.html', sha256: HASH, bytes: 1 },
+          { path: '.open-next/worker.js', sha256: HASH, bytes: 1 },
+          { path: 'wrangler.toml', sha256: HASH, bytes: 1 },
+        ],
+      },
+    },
+    migration: {
+      delivery_mode: 'clean-start',
+      reset_sql: { path: 'db/issue-23-clean-start-reset.sql', sha256: HASH },
+      runner: {
+        path: 'scripts/migrations.mjs',
+        sha256: hash(readFileSync(join(REPOSITORY_ROOT, 'scripts/migrations.mjs'))),
+      },
+      catalog: {
+        path: 'db/ledger-migrations',
+        sha256: hash(catalogBytes),
+        migrations: migrationEntries,
+      },
+      historical_data_disposition: {
+        production_export: 'NOT_APPLICABLE',
+        double_restore: 'NOT_APPLICABLE',
+        historical_baseline_queries: 'NOT_APPLICABLE',
+      },
+    },
+    target: {
+      account_id: 'account-id',
+      d1_database_id: 'd1-id',
+      worker_name: 'blogman',
+      origin: 'https://blog.example.com',
+      baseline: {
+        deployment_id: 'deployment-before',
+        version_id: 'version-before',
+        d1_database_id: 'd1-id',
+        traffic: [{ version_id: 'version-before', percentage: 100 }],
+      },
+    },
+    policy: policy(),
+    rehearsal: {
+      runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
+      network: 'disabled',
+      status: 'PASS',
+      receipt_sha256: HASH,
+      production_write_adapter_calls: 0,
+    },
+  }
+  const buildRunner = (repositoryPath: string, { artifact }: { artifact: typeof config.artifact }) => {
+    rmSync(join(repositoryPath, '.open-next'), { recursive: true, force: true })
+    mkdirSync(join(repositoryPath, '.open-next', 'assets'), { recursive: true })
+    writeFileSync(join(repositoryPath, '.open-next', 'assets', 'index.html'), 'index\n')
+    writeFileSync(join(repositoryPath, '.open-next', 'worker.js'), 'worker\n')
+    mkdirSync(join(repositoryPath, '.next', 'server'), { recursive: true })
+    writeFileSync(join(repositoryPath, '.next', 'server', 'server-reference-manifest.json'), JSON.stringify({ node: {}, edge: {}, encryptionKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' }))
+    writeFileSync(join(repositoryPath, '.next', 'server', 'server-reference-manifest.js'), 'self.__RSC_SERVER_MANIFEST="{\\"node\\":{},\\"edge\\":{},\\"encryptionKey\\":\\"process.env.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY\\"}"')
+    writeFileSync(join(repositoryPath, '.next', 'server', 'app-paths-manifest.json'), '{}')
+    writeFileSync(join(repositoryPath, '.next', 'server', 'pages-manifest.json'), '{}')
+    writeFileSync(join(repositoryPath, '.next', 'server', 'middleware-manifest.json'), JSON.stringify({ version: 3, middleware: {}, functions: {}, sortedMiddleware: [] }))
+    writeFileSync(join(repositoryPath, '.next', 'routes-manifest.json'), JSON.stringify({ staticRoutes: [], dynamicRoutes: [], rewrites: { beforeFiles: [], afterFiles: [], fallback: [] } }))
+    expect(artifact.file_tree.files).toHaveLength(3)
+  }
+  try {
+    const prepared = prepareForTestsOnly(config, {
+      repositoryPath: REPOSITORY_ROOT,
+      repositoryResolver: () => ({ commit, tree, clean: true }),
+      ciResolver: (_path: string, source: typeof config, repository: { commit: string; tree: string }) => ({
+        ...source.ci,
+        head_sha: repository.commit,
+        tree: repository.tree,
+        conclusion: 'success',
+      }),
+      buildRunner,
+      rehearsalRunner: () => ({
+        runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
+        network: 'disabled',
+        status: 'PASS',
+        receipt_sha256: HASH,
+        production_write_adapter_calls: 0,
+        expected_reconciliation: { value: expected, sha256: expectedSha256 },
+        d1: { outcome: 'PASS', production: false, promotable: false, sha256: D1_TRACE_HASH },
+        cleanup: { created: true, cleaned: true, observed_absent: true },
+      }),
+    })
+    const value = structuredClone(prepared.value)
+    value.d1.mode = 'remote'
+    value.d1.evidence_class = 'production'
+    const bytes = canonicalBytes(value)
+    const result = { value, bytes, sha256: hash(bytes) }
+    expect(Object.keys(result.value.rehearsal)).toEqual([
+      'runtime',
+      'network',
+      'status',
+      'receipt_sha256',
+      'production_write_adapter_calls',
+      'expected_reconciliation_sha256',
+      'd1_stage_receipt_sha256',
+      'cleanup',
+    ])
+    return result
+  } finally {
+    rmSync(join(REPOSITORY_ROOT, '.next'), { recursive: true, force: true })
+    rmSync(join(REPOSITORY_ROOT, '.open-next'), { recursive: true, force: true })
   }
 }
 
@@ -454,16 +654,120 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(result.value.failure.classification).toBe('production_stage_adapter_unavailable')
   })
 
-  it('rejects expected reconciliation hash drift before selecting a production adapter', () => {
+  it('rejects rehearsal schema drift and an unbound expected reconciliation hash before selecting a production adapter', () => {
+    configureD1()
+    const missingCleanup = manifest()
+    Reflect.deleteProperty(missingCleanup.value.rehearsal, 'cleanup')
+    missingCleanup.bytes = Buffer.from(`${JSON.stringify(missingCleanup.value, null, 2)}\n`, 'utf8')
+    missingCleanup.sha256 = hash(missingCleanup.bytes)
+
+    expect(() => execute(missingCleanup, authorizationFor(missingCleanup, 'fan-in-missing-cleanup')))
+      .toThrow(/rehearsal.*missing|required|cleanup/u)
+
+    const unbound = manifest()
+    unbound.value.rehearsal.expected_reconciliation_sha256 = 'e'.repeat(64)
+    unbound.bytes = Buffer.from(`${JSON.stringify(unbound.value, null, 2)}\n`, 'utf8')
+    unbound.sha256 = hash(unbound.bytes)
+
+    expect(() => execute(unbound, authorizationFor(unbound, 'fan-in-unbound-rehearsal')))
+      .toThrow(/expected reconciliation/u)
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+  })
+
+  it('returns a sanitized terminal D1 error and cleanup proof when expected snapshot materialization fails after authorization', () => {
+    configureD1()
+    const originalRealpathSync = fsActual.realpathSync!
+    let materializedDirectory = ''
+    vi.mocked(realpathSync).mockImplementation((path, options) => {
+      if (String(path).includes('blogman-issue-23-execute-expected-')) {
+        materializedDirectory = String(path)
+        throw new Error('materialization failed')
+      }
+      return originalRealpathSync(path, options)
+    })
+    const prepared = manifest()
+
+    const result = execute(prepared, authorizationFor(prepared, 'fan-in-materialization-failure'))
+
+    expect(result.value).toMatchObject({
+      outcome: 'ERROR',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'production_d1_setup_error' },
+      authorization_consumed: true,
+      evidence: {
+        cleanup: { created: true, cleaned: true, observed_absent: true },
+      },
+    })
+    expect(JSON.stringify(result.value)).not.toMatch(/materialization failed/u)
+    expect(materializedDirectory).not.toBe('')
+    expect(existsSync(materializedDirectory)).toBe(false)
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+    vi.mocked(realpathSync).mockImplementation(originalRealpathSync)
+  })
+
+  it('returns a sanitized terminal D1 error and cleans materialized state when binding setup fails', () => {
     configureD1()
     const prepared = manifest()
-    prepared.value.d1.expected_reconciliation.schema.sha256 = 'e'.repeat(64)
-    prepared.bytes = Buffer.from(`${JSON.stringify(prepared.value, null, 2)}\n`, 'utf8')
-    prepared.sha256 = hash(prepared.bytes)
+    const originalRealpathSync = fsActual.realpathSync!
+    let materializedDirectory = ''
+    vi.mocked(realpathSync).mockImplementation((path, options) => {
+      if (String(path).includes('blogman-issue-23-execute-expected-')) {
+        materializedDirectory = String(path)
+      }
+      if (String(path).endsWith('/scripts/migrations.mjs')) throw new Error('binding setup failed')
+      return originalRealpathSync(path, options)
+    })
 
-    expect(() => execute(prepared, authorizationFor(prepared, 'fan-in-expected-drift')))
-      .toThrow(/expected reconciliation hash/u)
+    const result = execute(prepared, authorizationFor(prepared, 'fan-in-binding-setup-failure'))
+
+    expect(result.value).toMatchObject({
+      outcome: 'ERROR',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'production_d1_setup_error' },
+      evidence: {
+        cleanup: { created: true, cleaned: true, observed_absent: true },
+      },
+    })
+    expect(JSON.stringify(result.value)).not.toMatch(/binding setup failed/u)
+    expect(materializedDirectory).not.toBe('')
+    expect(existsSync(materializedDirectory)).toBe(false)
     expect(createD1TransportMock).not.toHaveBeenCalled()
+    vi.mocked(realpathSync).mockImplementation(originalRealpathSync)
+  })
+
+  it('returns a sanitized terminal D1 error and cleanup proof when transport setup fails', () => {
+    createD1TransportMock.mockImplementationOnce(() => {
+      throw new Error('transport setup failed')
+    })
+    const prepared = manifest()
+
+    const result = execute(prepared, authorizationFor(prepared, 'fan-in-transport-setup-failure'))
+
+    expect(result.value).toMatchObject({
+      outcome: 'ERROR',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'production_d1_setup_error' },
+      evidence: {
+        cleanup: { created: true, cleaned: true, observed_absent: true },
+      },
+    })
+    expect(JSON.stringify(result.value)).not.toMatch(/transport setup failed/u)
+  })
+
+  it('accepts the canonical output produced by prepare at the execute seam', () => {
+    const calls = configureD1()
+    const prepared = actualPreparedManifest()
+
+    const result = execute(prepared, authorizationFor(prepared, 'fan-in-real-prepare-output'))
+
+    expect(calls).toEqual(D1_OPERATIONS)
+    expect(result.value).toMatchObject({
+      authorization_consumed: true,
+      outcome: 'ERROR',
+      first_terminal_stage: 'worker_deploy',
+      failure: { classification: 'production_stage_adapter_unavailable' },
+      evidence: { source: 'production', production: true },
+    })
   })
 
   it('does not select a local non-production lane at the production entry', () => {

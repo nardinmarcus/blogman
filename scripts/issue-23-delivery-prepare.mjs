@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, utimesSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, utimesSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { runLocalRehearsal } from './issue-23-delivery-rehearsal.mjs'
+import { hashD1ArtifactDirectory } from './issue-23-delivery-d1-contracts.mjs'
 
 const MANIFEST_SCHEMA_URL = new URL(
   '../schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
@@ -308,47 +309,6 @@ function resolveDeclaredFile(repositoryPath, declaration, label) {
     fail(`${label} declared sha256 does not match actual bytes`)
   }
   return resolved
-}
-
-function hashD1ArtifactDirectory(path) {
-  let rootMetadata
-  try {
-    rootMetadata = lstatSync(path)
-  } catch {
-    fail('canonical migration catalog could not be resolved')
-  }
-  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
-    fail('canonical migration catalog must be a regular directory')
-  }
-  const hash = createHash('sha256')
-  const visit = (directory, prefix) => {
-    let entries
-    try {
-      entries = readdirSync(directory, { withFileTypes: true })
-    } catch {
-      fail('canonical migration catalog could not be read')
-    }
-    for (const entry of entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))) {
-      const child = join(directory, entry.name)
-      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name
-      const metadata = lstatSync(child)
-      if (metadata.isSymbolicLink()) fail('canonical migration catalog contains a symbolic link')
-      if (metadata.isDirectory()) {
-        visit(child, relativePath)
-      } else if (metadata.isFile()) {
-        hash.update(Buffer.from(relativePath, 'utf8'))
-          .update(Buffer.from([0]))
-          .update(Buffer.from(String(metadata.size), 'utf8'))
-          .update(Buffer.from([0]))
-          .update(readFileSync(child))
-          .update(Buffer.from([0]))
-      } else {
-        fail('canonical migration catalog contains an unsupported entry')
-      }
-    }
-  }
-  visit(path, '')
-  return hash.digest('hex')
 }
 
 function canonicalExpectedReconciliation(value) {

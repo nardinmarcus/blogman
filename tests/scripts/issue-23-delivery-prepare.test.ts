@@ -14,6 +14,7 @@ import {
   prepareForTestsOnly,
 } from '../../scripts/issue-23-delivery-prepare.mjs'
 import { runLocalRehearsal, runLocalRehearsalForTestsOnly } from '../../scripts/issue-23-delivery-rehearsal.mjs'
+import { hashD1ArtifactDirectory as contractHashD1ArtifactDirectory } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
 
 const SHA40 = 'a'.repeat(40)
 const SHA40_B = 'b'.repeat(40)
@@ -538,6 +539,16 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(patch).toContain('a/node_modules/@opennextjs/cloudflare/dist/cli/build/patches/plugins/load-manifest.js')
     expect(patch).toContain('manifestPaths.sort')
     expect(patch).toContain('localeCompare')
+  })
+
+  it('uses the shared D1 contracts catalog hash implementation', () => {
+    const source = readFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-prepare.mjs'), 'utf8')
+    const result = prepareFixture(baseConfig())
+
+    expect(source).toContain("import { hashD1ArtifactDirectory } from './issue-23-delivery-d1-contracts.mjs'")
+    expect(source).not.toMatch(/function hashD1ArtifactDirectory/u)
+    expect(result.value.d1.migration_catalog_sha256)
+      .toBe(contractHashD1ArtifactDirectory(join(repoRoot, 'db', 'ledger-migrations')))
   })
 
   it('emits schema-ordered canonical bytes with an exact-byte identity', () => {

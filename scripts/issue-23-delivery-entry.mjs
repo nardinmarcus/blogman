@@ -535,7 +535,16 @@ function validateCanonicalManifestSchema(value) {
 
   schemaRecord(
     value.rehearsal,
-    ['runtime', 'network', 'status', 'receipt_sha256', 'production_write_adapter_calls'],
+    [
+      'runtime',
+      'network',
+      'status',
+      'receipt_sha256',
+      'production_write_adapter_calls',
+      'expected_reconciliation_sha256',
+      'd1_stage_receipt_sha256',
+      'cleanup',
+    ],
     'manifest rehearsal',
   )
   schemaRecord(value.rehearsal.runtime, ['os', 'architecture', 'node_version'], 'manifest rehearsal.runtime')
@@ -548,6 +557,21 @@ function validateCanonicalManifestSchema(value) {
   schemaSha256(value.rehearsal.receipt_sha256, 'manifest rehearsal.receipt_sha256')
   if (value.rehearsal.production_write_adapter_calls !== 0) {
     fail('manifest rehearsal.production_write_adapter_calls is invalid')
+  }
+  schemaSha256(
+    value.rehearsal.expected_reconciliation_sha256,
+    'manifest rehearsal.expected_reconciliation_sha256',
+  )
+  schemaSha256(value.rehearsal.d1_stage_receipt_sha256, 'manifest rehearsal.d1_stage_receipt_sha256')
+  schemaRecord(
+    value.rehearsal.cleanup,
+    ['created', 'cleaned', 'observed_absent'],
+    'manifest rehearsal.cleanup',
+  )
+  if (value.rehearsal.cleanup.created !== true
+    || value.rehearsal.cleanup.cleaned !== true
+    || value.rehearsal.cleanup.observed_absent !== true) {
+    fail('manifest rehearsal.cleanup is invalid')
   }
 
   return value
@@ -635,6 +659,9 @@ function assertCanonicalManifestRelationships(manifest) {
     fail('manifest d1 migrations must be the canonical checksum set')
   }
 
+  if (manifest.rehearsal.expected_reconciliation_sha256 !== manifest.d1.expected_reconciliation_sha256) {
+    fail('manifest rehearsal expected reconciliation identity must bind the D1 snapshot')
+  }
   if (manifest.target.baseline.d1_database_id !== manifest.target.d1_database_id) {
     fail('manifest target.baseline.d1_database_id must equal target.d1_database_id')
   }
@@ -779,6 +806,9 @@ const CANONICAL_MANIFEST_ORDER = {
     status: null,
     receipt_sha256: null,
     production_write_adapter_calls: null,
+    expected_reconciliation_sha256: null,
+    d1_stage_receipt_sha256: null,
+    cleanup: { created: null, cleaned: null, observed_absent: null },
   },
 }
 
@@ -1158,15 +1188,20 @@ function validateProductionD1(manifestValue) {
 
 function materializeExpectedReconciliation(d1) {
   const bytes = canonicalD1ExpectedReconciliationBytes(d1.expected_reconciliation)
-  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-23-execute-expected-')))
-  chmodSync(directory, 0o700)
-  const path = join(directory, 'expected-reconciliation.json')
+  let temporaryDirectory
+  let directory
+  let path
   try {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-execute-expected-'))
+    directory = realpathSync(temporaryDirectory)
+    chmodSync(directory, 0o700)
+    path = join(directory, 'expected-reconciliation.json')
     writeFileSync(path, bytes, { mode: 0o600 })
     chmodSync(path, 0o600)
     return { directory, path }
   } catch (error) {
-    rmSync(directory, { recursive: true, force: true })
+    const partialDirectory = directory ?? temporaryDirectory
+    if (partialDirectory) error.materialized = { directory: partialDirectory, path }
     throw error
   }
 }
@@ -1214,7 +1249,14 @@ function sanitizedD1Error(classification) {
     finalized: true,
   }
   const bytes = canonicalJsonBytes(value)
-  return { value, bytes, sha256: sha256(bytes) }
+  return {
+    outcome: value.outcome,
+    first_terminal_stage: value.first_terminal_stage,
+    failure: value.failure,
+    stage_counts: value.stage_counts,
+    stage_durations_ms: value.stage_durations_ms,
+    sha256: sha256(bytes),
+  }
 }
 
 function normalizeProductionD1Result(result) {
@@ -1325,12 +1367,22 @@ function executeProduction(manifest, authorization) {
   try {
     materialized = materializeExpectedReconciliation(d1)
     const bindings = deriveProductionD1Bindings(d1, materialized.path)
+    let transport
     try {
-      const transport = createD1Transport(bindings)
-      d1Result = normalizeProductionD1Result(runD1Stages({ bindings, transport }))
+      transport = createD1Transport(bindings)
     } catch {
-      d1Result = sanitizedD1Error('production_d1_adapter_error')
+      d1Result = sanitizedD1Error('production_d1_setup_error')
     }
+    if (!d1Result) {
+      try {
+        d1Result = normalizeProductionD1Result(runD1Stages({ bindings, transport }))
+      } catch {
+        d1Result = sanitizedD1Error('production_d1_adapter_error')
+      }
+    }
+  } catch (error) {
+    materialized ??= error?.materialized
+    d1Result = sanitizedD1Error('production_d1_setup_error')
   } finally {
     cleanup = disposeExpectedReconciliation(materialized)
   }
