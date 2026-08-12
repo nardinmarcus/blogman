@@ -34,6 +34,7 @@ function fixture() {
   const phaseB = join(root, 'phase-b-sequence.mjs')
   const npm = join(root, 'npm')
   const openNext = join(root, 'opennextjs-cloudflare')
+  const curl = join(root, 'curl')
   const packageJson = join(root, 'package.json')
   const lockfile = join(root, 'package-lock.json')
   writeFileSync(config, 'name = "test"\n')
@@ -45,6 +46,10 @@ function fixture() {
   writeFileSync(phaseB, 'process.stdout.write("{}")\n')
   writeFileSync(npm, '#!/bin/sh\nexit 0\n')
   writeFileSync(openNext, '#!/usr/bin/env node\n')
+  writeFileSync(curl, `#!/usr/bin/env node
+const url = process.argv.at(-1)
+process.stdout.write(url.includes('/api/admin/articles/') ? '404' : '200')
+`)
   writeFileSync(packageJson, '{}\n')
   writeFileSync(lockfile, '{}\n')
   writeFileSync(wrangler, `#!/usr/bin/env node
@@ -64,8 +69,9 @@ else console.log(JSON.stringify({ state: 'matched', checks: { schema: 'matched',
   chmodSync(wrangler, 0o755)
   chmodSync(npm, 0o755)
   chmodSync(openNext, 0o755)
+  chmodSync(curl, 0o755)
   return {
-    root, config, archive, source, expected, log, wrangler, rollout, phaseB, npm, openNext,
+    root, config, archive, source, expected, log, wrangler, rollout, phaseB, npm, openNext, curl,
     packageJson, lockfile,
   }
 }
@@ -108,6 +114,7 @@ function bindings(fixture: ReturnType<typeof fixture>, port: number) {
     node_path: process.execPath, node_sha256: hash(process.execPath),
     npm_path: fixture.npm, npm_sha256: hash(fixture.npm),
     open_next_path: fixture.openNext, open_next_sha256: hash(fixture.openNext),
+    curl_path: fixture.curl, curl_sha256: hash(fixture.curl),
     package_json_path: fixture.packageJson, package_json_sha256: hash(fixture.packageJson),
     lockfile_path: fixture.lockfile, lockfile_sha256: hash(fixture.lockfile),
     origin: `http://127.0.0.1:${port}`, smoke,

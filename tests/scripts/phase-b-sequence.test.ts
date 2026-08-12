@@ -215,6 +215,17 @@ fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
   chmodSync(join(fixture.fakeBin, 'npm'), 0o755)
 }
 
+function lifecycleToolchainArgs(fakeBin: string) {
+  const npmPath = join(fakeBin, 'npm')
+  const hash = createHash('sha256').update(readFileSync(npmPath)).digest('hex')
+  return [
+    '--node-path', process.execPath,
+    '--node-sha256', createHash('sha256').update(readFileSync(process.execPath)).digest('hex'),
+    '--npm-path', npmPath, '--npm-sha256', hash,
+    '--open-next-path', npmPath, '--open-next-sha256', hash,
+  ]
+}
+
 function runCurrentUploadLifecycle(
   fixture: ReturnType<typeof uploadSourceLifecycleFixture>,
   environment: NodeJS.ProcessEnv = {},
@@ -223,6 +234,7 @@ function runCurrentUploadLifecycle(
   return spawnSync(process.execPath, [
     parserPath,
     'run-upload-source-lifecycle',
+    ...lifecycleToolchainArgs(fixture.fakeBin),
     '--config', fixture.config,
     '--source', fixture.source,
     '--destination', fixture.destination,
@@ -661,6 +673,7 @@ process.stdout.write('OpenNext upload log\\n')
     const lifecycle = spawnSync(process.execPath, [
       parserPath,
       'run-upload-source-lifecycle',
+      ...lifecycleToolchainArgs(fakeBin),
       '--config', config,
       '--source', snapshot.source,
       '--destination', snapshot.destination,
@@ -687,8 +700,7 @@ process.stdout.write('OpenNext upload log\\n')
       version_id: 'fixture-version',
     })
     expect(JSON.parse(readFileSync(forwardedArgs, 'utf8'))).toEqual([
-      'exec', '--', 'opennextjs-cloudflare', 'upload',
-      '-c', config, '--', join(snapshot.destination, 'worker.js'),
+      'upload', '-c', config, '--', join(snapshot.destination, 'worker.js'),
       '--message', `issue-23-${'a'.repeat(40)}-upload-1`,
       '--assets', join(snapshot.destination, 'assets'),
     ])
@@ -731,8 +743,7 @@ process.stdout.write('OpenNext upload log\\n')
 const fs = require('node:fs')
 const path = require('node:path')
 const args = process.argv.slice(2)
-if (args.shift() !== 'exec' || args.shift() !== '--'
-  || args.shift() !== 'opennextjs-cloudflare' || args.shift() !== 'upload') process.exit(90)
+if (args.shift() !== 'upload') process.exit(90)
 const passthrough = args.indexOf('--')
 if (passthrough < 0) process.exit(91)
 if (args[passthrough + 1] !== process.env.SNAPSHOT_WORKER) process.exit(92)
@@ -754,6 +765,7 @@ fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
     const lifecycle = spawnSync(process.execPath, [
       parserPath,
       'run-upload-source-lifecycle',
+      ...lifecycleToolchainArgs(fakeBin),
       '--config', config,
       '--source', snapshot.source,
       '--destination', snapshot.destination,

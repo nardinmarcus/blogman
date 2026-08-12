@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -251,6 +250,7 @@ const CANONICAL_MANIFEST_NAME_PATTERN = /^[a-z][a-z0-9_:-]*$/u
 const CANONICAL_MANIFEST_ID_PATTERN = /^[A-Za-z0-9_-]+$/u
 const CANONICAL_MANIFEST_WORKER_PATTERN = /^[A-Za-z0-9._-]+$/u
 const CANONICAL_MANIFEST_ORIGIN_PATTERN = /^https:\/\/[A-Za-z0-9._/-]+$/u
+const SYSTEM_CURL_PATH = '/usr/bin/curl'
 const CANONICAL_MANIFEST_ROOT_KEYS = [
   'format',
   'preparation',
@@ -381,11 +381,12 @@ function validateCanonicalManifestSchema(value) {
 
   schemaRecord(
     value.toolchain,
-    ['node', 'npm', 'wrangler', 'opennextjs_cloudflare', 'package_json_sha256', 'lockfile_sha256'],
+    ['node', 'npm', 'curl', 'wrangler', 'opennextjs_cloudflare', 'package_json_sha256', 'lockfile_sha256'],
     'manifest toolchain',
   )
   validateToolchainEntry(value.toolchain.node, 'manifest toolchain.node')
   validateToolchainEntry(value.toolchain.npm, 'manifest toolchain.npm')
+  validateToolchainEntry(value.toolchain.curl, 'manifest toolchain.curl')
   validateToolchainEntry(value.toolchain.wrangler, 'manifest toolchain.wrangler')
   validateToolchainEntry(value.toolchain.opennextjs_cloudflare, 'manifest toolchain.opennextjs_cloudflare')
   schemaSha256(value.toolchain.package_json_sha256, 'manifest toolchain.package_json_sha256')
@@ -731,6 +732,7 @@ const CANONICAL_MANIFEST_ORDER = {
   toolchain: {
     node: { version: null, identity_sha256: null },
     npm: { version: null, identity_sha256: null },
+    curl: { version: null, identity_sha256: null },
     wrangler: { version: null, identity_sha256: null },
     opennextjs_cloudflare: { version: null, identity_sha256: null },
     package_json_sha256: null,
@@ -1454,15 +1456,13 @@ export function normalizeWorkerResultForTestsOnly(result) {
   }
 }
 
-function resolveNpmPath() {
-  const lookup = process.platform === 'win32' ? 'where.exe' : 'which'
-  const path = execFileSync(lookup, ['npm'], { encoding: 'utf8' }).split(/\r?\n/u)[0]?.trim()
-  if (!path) fail('npm executable could not be resolved')
-  return realpathSync(path)
+function npmCliPath(nodePath) {
+  return join(dirname(dirname(nodePath)), 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')
 }
 
 function workerBindings(manifest, expectedReconciliationPath) {
-  const npmPath = resolveNpmPath()
+  const nodePath = realpathSync(process.execPath)
+  const npmPath = realpathSync(npmCliPath(nodePath))
   return {
     config_path: resolve(ENTRY_REPO_ROOT, manifest.d1.config_path), config_sha256: manifest.d1.config_sha256,
     artifact_archive_path: resolve(ENTRY_REPO_ROOT, manifest.artifact.archive.path), artifact_archive_sha256: manifest.artifact.archive.sha256,
@@ -1477,10 +1477,11 @@ function workerBindings(manifest, expectedReconciliationPath) {
     phase_b_sequence_path: resolve(ENTRY_REPO_ROOT, manifest.preparation.execute_entry.path),
     phase_b_sequence_sha256: manifest.preparation.execute_entry.sha256,
     wrangler_path: realpathSync(resolve(ENTRY_REPO_ROOT, 'node_modules/.bin/wrangler')), wrangler_sha256: manifest.d1.wrangler_sha256,
-    node_path: realpathSync(process.execPath), node_sha256: manifest.toolchain.node.identity_sha256,
+    node_path: nodePath, node_sha256: manifest.toolchain.node.identity_sha256,
     npm_path: npmPath, npm_sha256: manifest.toolchain.npm.identity_sha256,
     open_next_path: realpathSync(resolve(ENTRY_REPO_ROOT, 'node_modules/.bin/opennextjs-cloudflare')),
     open_next_sha256: manifest.toolchain.opennextjs_cloudflare.identity_sha256,
+    curl_path: realpathSync(SYSTEM_CURL_PATH), curl_sha256: manifest.toolchain.curl.identity_sha256,
     package_json_path: resolve(ENTRY_REPO_ROOT, 'package.json'), package_json_sha256: manifest.toolchain.package_json_sha256,
     lockfile_path: resolve(ENTRY_REPO_ROOT, 'package-lock.json'), lockfile_sha256: manifest.toolchain.lockfile_sha256,
     database: manifest.d1.database, origin: manifest.target.origin, smoke: manifest.target.smoke,

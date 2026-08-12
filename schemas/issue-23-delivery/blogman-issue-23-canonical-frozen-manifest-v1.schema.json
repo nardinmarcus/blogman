@@ -147,6 +147,7 @@
       "required": [
         "node",
         "npm",
+        "curl",
         "wrangler",
         "opennextjs_cloudflare",
         "package_json_sha256",
@@ -169,6 +170,21 @@
           }
         },
         "npm": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "identity_sha256"],
+          "properties": {
+            "version": {
+              "type": "string",
+              "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}(?:[-+][A-Za-z0-9._-]+)?$"
+            },
+            "identity_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "curl": {
           "type": "object",
           "additionalProperties": false,
           "required": ["version", "identity_sha256"],

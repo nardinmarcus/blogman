@@ -105,6 +105,7 @@ function baseConfig() {
     toolchain: {
       node: { version: '22.14.0', identity_sha256: hash('f') },
       npm: { version: '10.9.2', identity_sha256: hash('a') },
+      curl: { version: '8.0.0', identity_sha256: hash('0') },
       wrangler: { version: '4.84.1', identity_sha256: hash('b') },
       opennextjs_cloudflare: { version: '1.19.1', identity_sha256: hash('c') },
       package_json_sha256: hash('d'),
@@ -1314,17 +1315,21 @@ describe('Issue #23 Delivery Preparation', () => {
     )
   })
 
-  it('binds the actual npm executable and the lockfile OpenNext version', () => {
+  it('binds the node-derived npm script, system curl, and lockfile OpenNext version', () => {
     const result = prepareFixture(baseConfig())
     const npmVersion = execFileSync('npm', ['--version'], { cwd: repoRoot, encoding: 'utf8' })
       .trim()
       .replace(/^v/u, '')
     const lockfile = JSON.parse(readFileSync(join(repoRoot, 'package-lock.json'), 'utf8'))
+    const npmCliPath = join(dirname(dirname(process.execPath)), 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')
     const wranglerBytes = readFileSync(join(repoRoot, 'node_modules', '.bin', 'wrangler'))
     const openNextBytes = readFileSync(join(repoRoot, 'node_modules', '.bin', 'opennextjs-cloudflare'))
+    const curlBytes = readFileSync('/usr/bin/curl')
 
     expect(result.value.toolchain.npm.version).toBe(npmVersion)
     expect(result.value.toolchain.npm.version).not.toBe(process.versions.node)
+    expect(result.value.toolchain.npm.identity_sha256).toBe(sha256(readFileSync(npmCliPath)))
+    expect(result.value.toolchain.curl.identity_sha256).toBe(sha256(curlBytes))
     expect(result.value.toolchain.opennextjs_cloudflare.version)
       .toBe(lockfile.packages['node_modules/@opennextjs/cloudflare'].version)
     expect(result.value.toolchain.wrangler.identity_sha256).toBe(sha256(wranglerBytes))

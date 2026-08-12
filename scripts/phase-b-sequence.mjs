@@ -623,6 +623,16 @@ function verifyFrozenSnapshotAgainstArchive(archive, destination, archiveSha256)
   return Buffer.from(`${JSON.stringify(proof)}\n`)
 }
 
+function verifyBoundExecutable(path, expectedSha256) {
+  if (!sha256.test(expectedSha256 || '')
+    || !isAbsolute(path) || path !== resolve(path) || !shellSafeAbsolutePath.test(path)
+    || realpathSync(path) !== path) {
+    throw new Error()
+  }
+  const stable = stableRegularFileBytes(path)
+  if (!stable.stat.isFile() || sha256Bytes(stable.bytes) !== expectedSha256) throw new Error()
+}
+
 function stableRegularFileBytes(path) {
   const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
@@ -822,6 +832,12 @@ async function runUploadSourceLifecycle({
   buildProofPath,
   config,
   expectedConfigSha256,
+  nodePath,
+  nodeSha256,
+  npmPath,
+  npmSha256,
+  openNextPath,
+  openNextSha256,
   source,
   destination,
   operationId,
@@ -885,9 +901,12 @@ async function runUploadSourceLifecycle({
     for (const path of held) verifyHeldPath(path)
     for (const file of evidence) verifyHeldEvidence(file)
     await verifyConfigBinding()
+    verifyBoundExecutable(nodePath, nodeSha256)
+    verifyBoundExecutable(npmPath, npmSha256)
+    verifyBoundExecutable(openNextPath, openNextSha256)
 
-    const upload = spawnSync('npm', [
-      'exec', '--', 'opennextjs-cloudflare', 'upload',
+    const upload = spawnSync(nodePath, [
+      openNextPath, 'upload',
       '-c', config, '--', join(destination, 'worker.js'),
       '--message', operationId,
       '--assets', join(destination, 'assets'),
@@ -944,30 +963,42 @@ function isMainModule() {
 async function runCli() {
   if (process.argv[2] === 'run-upload-source-lifecycle') {
     try {
-      if (process.argv.length !== 23
-        || process.argv[3] !== '--config'
-        || process.argv[5] !== '--source'
-        || process.argv[7] !== '--destination'
-        || process.argv[9] !== '--operation-id'
-        || process.argv[11] !== '--proof-before'
-        || process.argv[13] !== '--proof-after'
-        || process.argv[15] !== '--archive'
-        || process.argv[17] !== '--archive-sha256'
-        || process.argv[19] !== '--build-proof'
-        || process.argv[21] !== '--expected-config-sha256') {
+      if (process.argv.length !== 35
+        || process.argv[3] !== '--node-path'
+        || process.argv[5] !== '--node-sha256'
+        || process.argv[7] !== '--npm-path'
+        || process.argv[9] !== '--npm-sha256'
+        || process.argv[11] !== '--open-next-path'
+        || process.argv[13] !== '--open-next-sha256'
+        || process.argv[15] !== '--config'
+        || process.argv[17] !== '--source'
+        || process.argv[19] !== '--destination'
+        || process.argv[21] !== '--operation-id'
+        || process.argv[23] !== '--proof-before'
+        || process.argv[25] !== '--proof-after'
+        || process.argv[27] !== '--archive'
+        || process.argv[29] !== '--archive-sha256'
+        || process.argv[31] !== '--build-proof'
+        || process.argv[33] !== '--expected-config-sha256') {
         throw new Error()
       }
       const acceptance = await runUploadSourceLifecycle({
-        archive: process.argv[16],
-        archiveSha256: process.argv[18],
-        buildProofPath: process.argv[20],
-        config: process.argv[4],
-        expectedConfigSha256: process.argv[22],
-        source: process.argv[6],
-        destination: process.argv[8],
-        operationId: process.argv[10],
-        proofBeforePath: process.argv[12],
-        proofAfterPath: process.argv[14],
+        archive: process.argv[28],
+        archiveSha256: process.argv[30],
+        buildProofPath: process.argv[32],
+        config: process.argv[16],
+        expectedConfigSha256: process.argv[34],
+        nodePath: process.argv[4],
+        nodeSha256: process.argv[6],
+        npmPath: process.argv[8],
+        npmSha256: process.argv[10],
+        openNextPath: process.argv[12],
+        openNextSha256: process.argv[14],
+        source: process.argv[18],
+        destination: process.argv[20],
+        operationId: process.argv[22],
+        proofBeforePath: process.argv[24],
+        proofAfterPath: process.argv[26],
       })
       process.stdout.write(`${JSON.stringify(acceptance)}\n`)
     } catch {

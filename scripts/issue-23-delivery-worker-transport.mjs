@@ -142,18 +142,18 @@ export function createWorkerTransport(bindings) {
     'candidate_id', 'worker_name', 'd1_database_id', 'rollout_safety_path', 'rollout_safety_sha256',
     'expected_reconciliation_path', 'expected_reconciliation_sha256', 'phase_b_sequence_path',
     'phase_b_sequence_sha256', 'wrangler_path', 'wrangler_sha256', 'node_path', 'node_sha256',
-    'npm_path', 'npm_sha256', 'open_next_path', 'open_next_sha256', 'package_json_path',
+    'npm_path', 'npm_sha256', 'open_next_path', 'open_next_sha256', 'curl_path', 'curl_sha256', 'package_json_path',
     'package_json_sha256', 'lockfile_path', 'lockfile_sha256', 'database', 'origin', 'smoke', 'baseline',
   ]) if (!Object.hasOwn(bindings, key)) fail(`${key} is required`)
   for (const key of [
     'config_path', 'artifact_archive_path', 'artifact_source_path', 'rollout_safety_path',
     'expected_reconciliation_path', 'phase_b_sequence_path', 'wrangler_path', 'node_path', 'npm_path',
-    'open_next_path', 'package_json_path', 'lockfile_path',
+    'open_next_path', 'curl_path', 'package_json_path', 'lockfile_path',
   ]) assertPath(bindings[key], key)
   for (const key of [
     'config_sha256', 'artifact_archive_sha256', 'artifact_file_tree_sha256', 'artifact_sha256',
     'rollout_safety_sha256', 'expected_reconciliation_sha256', 'phase_b_sequence_sha256', 'wrangler_sha256',
-    'node_sha256', 'npm_sha256', 'open_next_sha256', 'package_json_sha256', 'lockfile_sha256',
+    'node_sha256', 'npm_sha256', 'open_next_sha256', 'curl_sha256', 'package_json_sha256', 'lockfile_sha256',
   ]) assertHash(bindings[key], key)
   if (!safeId(bindings.candidate_id) || !safeId(bindings.worker_name) || !safeId(bindings.d1_database_id)
     || !safeId(bindings.database) || typeof bindings.origin !== 'string' || !Array.isArray(bindings.smoke?.requests)
@@ -181,6 +181,7 @@ export function createWorkerTransport(bindings) {
     assertBoundFile(bindings.node_path, bindings.node_sha256)
     assertBoundFile(bindings.npm_path, bindings.npm_sha256)
     assertBoundFile(bindings.open_next_path, bindings.open_next_sha256)
+    assertBoundFile(bindings.curl_path, bindings.curl_sha256)
     assertBoundFile(bindings.package_json_path, bindings.package_json_sha256)
     assertBoundFile(bindings.lockfile_path, bindings.lockfile_sha256)
   }
@@ -260,6 +261,9 @@ export function createWorkerTransport(bindings) {
         for (const path of [output, before, after, proof]) writeFileSync(path, '', { mode: 0o600 })
         const result = invoke(bindings.node_path, [
           bindings.phase_b_sequence_path, 'run-upload-source-lifecycle',
+          '--node-path', bindings.node_path, '--node-sha256', bindings.node_sha256,
+          '--npm-path', bindings.npm_path, '--npm-sha256', bindings.npm_sha256,
+          '--open-next-path', bindings.open_next_path, '--open-next-sha256', bindings.open_next_sha256,
           '--config', bindings.config_path, '--source', bindings.artifact_source_path,
           '--destination', destination, '--operation-id', `issue-23-${bindings.candidate_id}-upload-1`,
           '--proof-before', before, '--proof-after', after, '--archive', bindings.artifact_archive_path,
@@ -293,7 +297,7 @@ export function createWorkerTransport(bindings) {
     const checks = {}
     for (const { path, status } of bindings.smoke.requests) {
       const url = new URL(path, origin).toString()
-      const requestResult = invoke('curl', [
+      const requestResult = invoke(bindings.curl_path, [
         '--request', 'GET', '--silent', '--show-error', '--output', '/dev/null', '--write-out', '%{http_code}', url,
       ], request, spent)
       spent += requestResult.duration_ms

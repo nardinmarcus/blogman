@@ -56,6 +56,11 @@ const D1_RESULT_FORMAT = 'blogman-issue-23-d1-stages/v1'
 const CANDIDATE = 'a'.repeat(40)
 const HASH = 'b'.repeat(64)
 const D1_TRACE_HASH = 'c'.repeat(64)
+const D1_EVIDENCE_HASHES = [
+  'bindings_sha256', 'wrangler_sha256', 'config_sha256', 'reset_sql_sha256',
+  'migration_runner_sha256', 'migration_catalog_sha256', 'rollout_safety_sha256',
+  'expected_reconciliation_sha256', 'trace_sha256',
+]
 const D1_OPERATIONS = [
   'd1_identity',
   'clean_start_reset',
@@ -183,7 +188,7 @@ function manifest(overrides: Record<string, unknown> = {}) {
     format: MANIFEST_FORMAT,
     preparation: {
       prepare_entry: { path: 'scripts/issue-23-delivery-prepare.mjs', sha256: HASH },
-      execute_entry: { path: 'scripts/issue-23-delivery-entry.mjs', sha256: HASH },
+      execute_entry: { path: 'scripts/phase-b-sequence.mjs', sha256: HASH },
       manifest_schema: {
         path: 'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
         sha256: HASH,
@@ -209,6 +214,7 @@ function manifest(overrides: Record<string, unknown> = {}) {
     toolchain: {
       node: { version: '22.14.0', identity_sha256: HASH },
       npm: { version: '10.9.2', identity_sha256: HASH },
+      curl: { version: '8.0.0', identity_sha256: HASH },
       wrangler: { version: '4.86.0', identity_sha256: HASH },
       opennextjs_cloudflare: { version: '1.19.10', identity_sha256: HASH },
       package_json_sha256: HASH,
@@ -324,7 +330,7 @@ function actualPreparedManifest() {
   const config = {
     preparation: {
       prepare_entry: { path: 'scripts/issue-23-delivery-prepare.mjs', sha256: HASH },
-      execute_entry: { path: 'scripts/issue-23-delivery-entry.mjs', sha256: HASH },
+      execute_entry: { path: 'scripts/phase-b-sequence.mjs', sha256: HASH },
       manifest_schema: {
         path: 'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
         sha256: HASH,
@@ -350,6 +356,7 @@ function actualPreparedManifest() {
     toolchain: {
       node: { version: '22.14.0', identity_sha256: HASH },
       npm: { version: '10.9.2', identity_sha256: HASH },
+      curl: { version: '8.0.0', identity_sha256: HASH },
       wrangler: { version: '4.86.0', identity_sha256: HASH },
       opennextjs_cloudflare: { version: '1.19.10', identity_sha256: HASH },
       package_json_sha256: HASH,
@@ -499,7 +506,10 @@ function d1Result(failedStage: string | null = null) {
       source: 'production',
       production: true,
       promotable: failedStage === null,
-      trace_sha256: D1_TRACE_HASH,
+      ...Object.fromEntries(D1_EVIDENCE_HASHES.map((name) => [name, name === 'trace_sha256' ? D1_TRACE_HASH : HASH])),
+      account_id: 'account-id',
+      d1_database_id: 'd1-id',
+      candidate_id: CANDIDATE,
     },
     finalized: true,
   }

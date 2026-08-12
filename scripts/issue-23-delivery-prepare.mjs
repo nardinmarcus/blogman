@@ -240,16 +240,13 @@ function runOpenNextBuild(repositoryPath, { buildEnv, buildEpochMs } = {}) {
     NEXT_SERVER_ACTIONS_ENCRYPTION_KEY: ZERO_ACTIONS_ENCRYPTION_KEY,
   }
   if (buildEpochMs !== undefined) environment[BUILD_EPOCH_MS_ENV] = String(buildEpochMs)
-  command(repositoryPath, 'npx', ['--no-install', 'opennextjs-cloudflare', 'build'], {
-    env: environment,
-  })
+  command(repositoryPath, process.execPath, [
+    resolve(repositoryPath, 'node_modules', '.bin', 'opennextjs-cloudflare'), 'build',
+  ], { env: environment })
 }
 
-function resolveExecutable(repositoryPath, name) {
-  const lookup = process.platform === 'win32' ? 'where.exe' : 'which'
-  const executable = command(repositoryPath, lookup, [name]).split(/\r?\n/u)[0]?.trim()
-  if (!executable) fail(`could not resolve ${name} executable path`)
-  return executable
+function npmCliPath(nodePath) {
+  return join(dirname(dirname(nodePath)), 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')
 }
 
 function resolveExecutableBytes(path, label) {
@@ -757,11 +754,15 @@ function resolveFacts(config, {
     manifest_schema: resolveFile(repositoryPath, config.preparation.manifest_schema.path, 'manifest schema'),
   }
   const ci = ciResolver(repositoryPath, config, repository)
-  const npmExecutable = resolveExecutable(repositoryPath, 'npm')
-  const npmVersion = command(repositoryPath, npmExecutable, ['--version']).replace(/^v/u, '')
+  const nodeExecutable = realpathSync(process.execPath)
+  const npmExecutableBytes = resolveExecutableBytes(npmCliPath(nodeExecutable), 'npm')
   const wranglerExecutable = resolve(repositoryPath, 'node_modules', '.bin', 'wrangler')
   const openNextExecutable = resolve(repositoryPath, 'node_modules', '.bin', 'opennextjs-cloudflare')
-  const npmExecutableBytes = resolveExecutableBytes(npmExecutable, 'npm')
+  const curlExecutableBytes = resolveExecutableBytes('/usr/bin/curl', 'curl')
+  const npmVersion = command(repositoryPath, nodeExecutable, [npmExecutableBytes.path, '--version']).replace(/^v/u, '')
+  const curlVersion = command(repositoryPath, curlExecutableBytes.path, ['--version'])
+    .match(/^curl ([0-9]+(?:\.[0-9]+){1,2})\b/u)?.[1]
+  if (!curlVersion) fail('resolved curl version is invalid')
   const wranglerExecutableBytes = resolveExecutableBytes(wranglerExecutable, 'Wrangler')
   const openNextExecutableBytes = resolveExecutableBytes(openNextExecutable, 'OpenNext')
   const wranglerVersion = command(repositoryPath, wranglerExecutable, ['--version'])
@@ -774,8 +775,9 @@ function resolveFacts(config, {
   if (!openNextVersion) fail('resolved OpenNext version is missing')
   const toolchain = {
     ...config.toolchain,
-    node: { version: process.versions.node, identity_sha256: sha256(readFileSync(process.execPath)) },
+    node: { version: process.versions.node, identity_sha256: sha256(readFileSync(nodeExecutable)) },
     npm: { version: npmVersion, identity_sha256: sha256(npmExecutableBytes.bytes) },
+    curl: { version: curlVersion, identity_sha256: sha256(curlExecutableBytes.bytes) },
     wrangler: { version: wranglerVersion, identity_sha256: sha256(wranglerExecutableBytes.bytes) },
     opennextjs_cloudflare: { version: openNextVersion, identity_sha256: sha256(openNextExecutableBytes.bytes) },
     package_json_sha256: sha256(packageJsonBytes),
