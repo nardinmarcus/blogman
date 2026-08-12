@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest'
 import {
   CANONICAL_MANIFEST_FORMAT,
   DEFAULT_STAGE_POLICY,
+  canonicalizeRepositoryRemote,
   canonicalBytes,
   parseCanonicalManifest,
   prepare,
@@ -16,6 +17,7 @@ import {
 } from '../../scripts/issue-23-delivery-prepare.mjs'
 import { runLocalRehearsal, runLocalRehearsalForTestsOnly } from '../../scripts/issue-23-delivery-rehearsal.mjs'
 import { hashD1ArtifactDirectory as contractHashD1ArtifactDirectory } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
+import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-formal-runtime.mjs'
 
 const SHA40 = 'a'.repeat(40)
 const SHA40_B = 'b'.repeat(40)
@@ -23,6 +25,7 @@ const ZERO_ACTIONS_TEST_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
 const SERVER_REFERENCE_TEST_PLACEHOLDER = 'process.env.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY'
 const FORMAL_CLI_CHILD_TIMEOUT_MS = 180_000
 const FORMAL_CLI_TEST_TIMEOUT_MS = FORMAL_CLI_CHILD_TIMEOUT_MS
+const RUNTIME_RECEIPT = buildFormalRuntimeReceipt().value
 
 function hash(character: string) {
   return character.repeat(64)
@@ -46,7 +49,11 @@ const CANONICAL_EXPECTED_RECONCILIATION_SHA256 = '48a68fc43d4ffe66f9df969865ad23
 
 function testRehearsalResult(overrides: Record<string, unknown> = {}) {
   return {
-    runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
+    runtime: {
+      os: RUNTIME_RECEIPT.os,
+      architecture: RUNTIME_RECEIPT.arch,
+      node_version: RUNTIME_RECEIPT.node.version,
+    },
     network: 'disabled',
     status: 'PASS',
     receipt_sha256: hash('a'),
@@ -198,7 +205,11 @@ function baseConfig() {
       },
     },
     rehearsal: {
-      runtime: { os: 'macos', architecture: 'arm64', node_version: '22.14.0' },
+      runtime: {
+        os: RUNTIME_RECEIPT.os,
+        architecture: RUNTIME_RECEIPT.arch,
+        node_version: RUNTIME_RECEIPT.node.version,
+      },
       network: 'disabled',
       status: 'PASS',
       receipt_sha256: hash('c'),
@@ -331,6 +342,51 @@ function prepareFixture(config: ReturnType<typeof baseConfig>, options: Record<s
     ...fixtureOptions,
   })
 }
+
+describe('repository remote canonicalization', () => {
+  it('accepts authenticated GitHub HTTPS remotes and strips credentials, query, and fragment', () => {
+    for (const remote of [
+      'https://github.com/nardinmarcus/blogman',
+      'https://github.com/nardinmarcus/blogman.git',
+      'https://x-access-token:token@github.com/nardinmarcus/blogman.git?ref=ci#checkout',
+    ]) {
+      expect(canonicalizeRepositoryRemote(remote)).toBe('https://github.com/nardinmarcus/blogman.git')
+    }
+  })
+
+  it('rejects non-canonical hosts, paths, and schemes', () => {
+    for (const remote of [
+      'http://github.com/nardinmarcus/blogman.git',
+      'git@github.com:nardinmarcus/blogman.git',
+      'https://github.com.evil.test/nardinmarcus/blogman.git',
+      'https://github.com/nardinmarcus/blogman.git/extra',
+      'https://github.com/nardinmarcus/other.git',
+    ]) {
+      expect(() => canonicalizeRepositoryRemote(remote)).toThrow(/resolved repository remote is not canonical/u)
+    }
+  })
+})
+
+describe('target macOS formal runtime receipt', () => {
+  it('binds the target receipt, runtime, toolchain, and formal entry independently of the host OS', () => {
+    const prepared = prepareFixture(baseConfig())
+    const { runtime, runtime_receipt: receipt } = prepared.value.rehearsal
+
+    expect(runtime).toEqual({
+      os: 'macos',
+      architecture: RUNTIME_RECEIPT.arch,
+      node_version: RUNTIME_RECEIPT.node.version,
+    })
+    expect(receipt).toEqual(RUNTIME_RECEIPT)
+    expect(receipt.entry).toEqual({
+      path: 'scripts/issue-23-delivery-entry.mjs',
+      identity_sha256: sha256(readFileSync(join(repoRoot, 'scripts/issue-23-delivery-entry.mjs'))),
+    })
+    for (const tool of ['node', 'npm', 'wrangler', 'opennextjs_cloudflare', 'curl'] as const) {
+      expect(receipt[tool]).toEqual(prepared.value.toolchain[tool])
+    }
+  })
+})
 
 describe('OpenNext generated resolver-link removal', () => {
   function writeGeneratedResolverLinkFixture(repositoryPath: string, target: string) {

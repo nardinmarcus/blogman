@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFileSync, realpathSync } from 'node:fs'
-import { arch, platform } from 'node:os'
+import { arch } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -43,7 +43,7 @@ export function buildFormalRuntimeReceipt() {
   }
   const value = {
     format: FORMAL_RUNTIME_RECEIPT_FORMAT,
-    os: platform() === 'darwin' ? 'macos' : platform(),
+    os: 'macos',
     arch: arch(),
     node: { version: process.versions.node, identity_sha256: hashFile(nodePath) },
     npm: { version: version(nodePath, [npmPath, '--version'], /^v?(.+)\s*$/mu, 'npm'), identity_sha256: hashFile(npmPath) },

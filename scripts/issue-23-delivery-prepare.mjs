@@ -682,6 +682,25 @@ function enumerateArtifactPaths(configuredFiles, buildFiles) {
   return paths
 }
 
+export function canonicalizeRepositoryRemote(remote) {
+  if (typeof remote !== 'string' || remote !== remote.trim()) {
+    fail('resolved repository remote is not canonical')
+  }
+  let url
+  try {
+    url = new URL(remote)
+  } catch {
+    fail('resolved repository remote is not canonical')
+  }
+  if (url.protocol !== 'https:'
+    || url.hostname !== 'github.com'
+    || url.port !== ''
+    || !['/nardinmarcus/blogman', '/nardinmarcus/blogman.git'].includes(url.pathname)) {
+    fail('resolved repository remote is not canonical')
+  }
+  return 'https://github.com/nardinmarcus/blogman.git'
+}
+
 function resolveRepositoryFacts(repositoryPath) {
   const commit = command(repositoryPath, 'git', ['rev-parse', 'HEAD'])
   const tree = command(repositoryPath, 'git', ['rev-parse', 'HEAD^{tree}'])
@@ -690,10 +709,7 @@ function resolveRepositoryFacts(repositoryPath) {
   if (!/^[a-f0-9]{40}$/u.test(commit) || !/^[a-f0-9]{40}$/u.test(tree) || status !== '') {
     fail('resolved repository identity is not a valid Git commit/tree')
   }
-  if (remote !== 'https://github.com/nardinmarcus/blogman.git') {
-    fail('resolved repository remote is not canonical')
-  }
-  return { commit, tree, clean: true }
+  return { commit, tree, clean: true, remote: canonicalizeRepositoryRemote(remote) }
 }
 
 function resolveCiFacts(repositoryPath, config, repository) {

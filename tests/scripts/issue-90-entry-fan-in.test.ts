@@ -421,7 +421,11 @@ function actualPreparedManifest() {
     },
     policy: policy(),
     rehearsal: {
-      runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
+      runtime: {
+        os: RUNTIME_RECEIPT.os,
+        architecture: RUNTIME_RECEIPT.arch,
+        node_version: RUNTIME_RECEIPT.node.version,
+      },
       network: 'disabled',
       status: 'PASS',
       receipt_sha256: HASH,
@@ -458,7 +462,11 @@ function actualPreparedManifest() {
       }),
       buildRunner,
       rehearsalRunner: () => ({
-        runtime: { os: 'macos', architecture: 'arm64', node_version: process.versions.node },
+        runtime: {
+          os: RUNTIME_RECEIPT.os,
+          architecture: RUNTIME_RECEIPT.arch,
+          node_version: RUNTIME_RECEIPT.node.version,
+        },
         network: 'disabled',
         status: 'PASS',
         receipt_sha256: HASH,
