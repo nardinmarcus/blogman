@@ -409,12 +409,25 @@ describe('OpenNext generated resolver-link removal', () => {
     })
   })
 
+  it('reports but rejects a resolver link to standalone node_modules', () => {
+    withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
+      const standaloneNodeModules = join(repositoryPath, '.next', 'standalone', 'node_modules')
+      mkdirSync(standaloneNodeModules, { recursive: true })
+      writeGeneratedResolverLinkFixture(repositoryPath, standaloneNodeModules)
+      expect(() => removeVerifiedOpenNextResolverLinks(repositoryPath)).toThrow(
+        /metadata=symbolic-link raw_equals_repo_node_modules=false raw_equals_standalone_node_modules=true real_equals_repo_node_modules=false real_equals_standalone_node_modules=true target_inside_checkout=true/u,
+      )
+    })
+  })
+
   it('fails closed for a same-named resolver link with an unfrozen target', () => {
     withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
       const outside = mkdtempSync(join(tmpdir(), 'blogman-outside-node-modules-'))
       try {
         writeGeneratedResolverLinkFixture(repositoryPath, outside)
-        expect(() => removeVerifiedOpenNextResolverLinks(repositoryPath)).toThrow(/generated frozen-node-modules/u)
+        expect(() => removeVerifiedOpenNextResolverLinks(repositoryPath)).toThrow(
+          /metadata=symbolic-link raw_equals_repo_node_modules=false raw_equals_standalone_node_modules=false real_equals_repo_node_modules=false real_equals_standalone_node_modules=false target_inside_checkout=false/u,
+        )
       } finally {
         rmSync(outside, { recursive: true, force: true })
       }

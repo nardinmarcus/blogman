@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, utimesSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, utimesSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { runLocalRehearsal } from './issue-23-delivery-rehearsal.mjs'
 import { hashD1ArtifactDirectory } from './issue-23-delivery-d1-contracts.mjs'
@@ -538,6 +538,37 @@ function enumerateBuildFiles(repositoryPath) {
   return files.sort()
 }
 
+function describeOpenNextResolverTarget(repositoryPath, resolverLink, metadata, frozenNodeModules) {
+  const checkoutPath = resolve(repositoryPath)
+  const checkoutRoot = realpathSync(checkoutPath)
+  const repositoryNodeModules = resolve(checkoutPath, 'node_modules')
+  const standaloneNodeModules = resolve(checkoutPath, '.next', 'standalone', 'node_modules')
+  const rawTarget = metadata.isSymbolicLink()
+    ? resolve(dirname(resolverLink), readlinkSync(resolverLink))
+    : null
+  const realTarget = realpathSync(resolverLink)
+  const standaloneRealpath = existsSync(standaloneNodeModules)
+    ? realpathSync(standaloneNodeModules)
+    : null
+  const metadataType = metadata.isSymbolicLink()
+    ? 'symbolic-link'
+    : metadata.isDirectory()
+      ? 'directory'
+      : metadata.isFile()
+        ? 'file'
+        : 'other'
+  const targetInsideCheckout = realTarget !== checkoutRoot
+    && realTarget.startsWith(`${checkoutRoot}${sep}`)
+  return [
+    `metadata=${metadataType}`,
+    `raw_equals_repo_node_modules=${rawTarget === repositoryNodeModules}`,
+    `raw_equals_standalone_node_modules=${rawTarget === standaloneNodeModules}`,
+    `real_equals_repo_node_modules=${realTarget === frozenNodeModules}`,
+    `real_equals_standalone_node_modules=${realTarget === standaloneRealpath}`,
+    `target_inside_checkout=${targetInsideCheckout}`,
+  ].join(' ')
+}
+
 export function removeVerifiedOpenNextResolverLinks(repositoryPath) {
   const buildRoot = resolve(repositoryPath, '.open-next')
   const frozenNodeModules = realpathSync(resolve(repositoryPath, 'node_modules'))
@@ -561,7 +592,7 @@ export function removeVerifiedOpenNextResolverLinks(repositoryPath) {
     const relativeLink = `server-functions/${entry.name}/node_modules`
     if (!GENERATED_RUNTIME_NODE_MODULES_LINK.test(relativeLink) || !metadata.isSymbolicLink()
       || realpathSync(resolverLink) !== frozenNodeModules) {
-      fail('OpenNext runtime resolver link is not the generated frozen-node-modules link')
+      fail(`OpenNext runtime resolver link is not the generated frozen-node-modules link (${describeOpenNextResolverTarget(repositoryPath, resolverLink, metadata, frozenNodeModules)})`)
     }
     unlinkSync(resolverLink)
     removed += 1
