@@ -676,6 +676,52 @@ try {
     })
   })
 
+  it('fails closed before traversal when a runtime dependency root crosses the function-root device boundary', () => {
+    withTemporaryDirectory('blogman-open-next-directory-', (repositoryPath) => {
+      const { functionRoot } = writeGeneratedRuntimeDependencyDirectoryFixture(repositoryPath)
+      const dependencyRoot = join(functionRoot, 'node_modules')
+      const preloadPath = join(repositoryPath, 'runtime-dependency-root-device-mismatch.cjs')
+      writeFileSync(preloadPath, String.raw`
+const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const originalLstatSync = fs.lstatSync
+fs.lstatSync = function (path, ...args) {
+  const metadata = originalLstatSync.call(this, path, ...args)
+  if (path === process.env.RUNTIME_DEPENDENCY_ROOT_DEVICE_MISMATCH_PATH) {
+    return Object.assign(Object.create(metadata), { dev: metadata.dev + 1 })
+  }
+  return metadata
+}
+syncBuiltinESMExports()
+`)
+      const result = spawnSync(process.execPath, [
+        '--require', preloadPath,
+        '--input-type=module',
+        '--eval', String.raw`
+import { removeVerifiedOpenNextResolverLinks } from ${JSON.stringify(new URL('../../scripts/issue-23-delivery-prepare.mjs', import.meta.url).href)}
+try {
+  removeVerifiedOpenNextResolverLinks(process.env.RESOLVER_REPOSITORY_PATH)
+  process.exitCode = 2
+} catch (error) {
+  process.stdout.write(error.message)
+}
+`,
+      ], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          RESOLVER_REPOSITORY_PATH: repositoryPath,
+          RUNTIME_DEPENDENCY_ROOT_DEVICE_MISMATCH_PATH: dependencyRoot,
+        },
+      })
+      expect(result).toMatchObject({ status: 0, stderr: '' })
+      expect(result.stdout).toBe(
+        'Canonical Frozen Manifest: OpenNext generated runtime dependency tree crosses device boundary',
+      )
+      expect(result.stdout).not.toContain(repositoryPath)
+    })
+  })
+
   it('fails closed for a regular runtime dependency file that crosses a device boundary', () => {
     withTemporaryDirectory('blogman-open-next-directory-', (repositoryPath) => {
       const { dependencyFile } = writeGeneratedRuntimeDependencyDirectoryFixture(repositoryPath)

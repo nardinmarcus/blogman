@@ -650,14 +650,19 @@ function verifyGeneratedRuntimeDependencyTree(buildRoot, functionRoot, dependenc
     fail('OpenNext generated runtime dependency tree is outside its server function')
   }
 
+  let functionMetadata
   let dependencyMetadata
   try {
+    functionMetadata = lstatSync(functionRoot)
     dependencyMetadata = lstatSync(dependencyRoot)
   } catch {
     fail('OpenNext generated runtime dependency tree could not be read')
   }
   if (!dependencyMetadata.isDirectory() || dependencyMetadata.isSymbolicLink()) {
     fail('OpenNext generated runtime dependency tree is not a real directory')
+  }
+  if (dependencyMetadata.dev !== functionMetadata.dev) {
+    fail('OpenNext generated runtime dependency tree crosses device boundary')
   }
 
   const files = []
