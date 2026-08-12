@@ -821,6 +821,7 @@
       "additionalProperties": false,
       "required": [
         "runtime",
+        "runtime_receipt",
         "network",
         "status",
         "receipt_sha256",
@@ -845,6 +846,30 @@
             "node_version": {
               "type": "string",
               "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}(?:[-+][A-Za-z0-9._-]+)?$"
+            }
+          }
+        },
+        "runtime_receipt": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["format", "os", "arch", "node", "npm", "wrangler", "opennextjs_cloudflare", "curl", "entry"],
+          "properties": {
+            "format": { "const": "blogman-issue-23-formal-rehearsal-runtime-receipt/v1" },
+            "os": { "const": "macos" },
+            "arch": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+            "node": { "$ref": "#/$defs/runtimeTool" },
+            "npm": { "$ref": "#/$defs/runtimeTool" },
+            "wrangler": { "$ref": "#/$defs/runtimeTool" },
+            "opennextjs_cloudflare": { "$ref": "#/$defs/runtimeTool" },
+            "curl": { "$ref": "#/$defs/runtimeTool" },
+            "entry": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "identity_sha256"],
+              "properties": {
+                "path": { "const": "scripts/issue-23-delivery-entry.mjs" },
+                "identity_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+              }
             }
           }
         },
@@ -879,6 +904,17 @@
             "observed_absent": { "const": true }
           }
         }
+      }
+    }
+  },
+  "$defs": {
+    "runtimeTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "identity_sha256"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}(?:[-+][A-Za-z0-9._-]+)?$" },
+        "identity_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
       }
     }
   }

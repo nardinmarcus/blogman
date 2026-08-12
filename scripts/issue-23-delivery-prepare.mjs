@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, utimesSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, utimesSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { runLocalRehearsal } from './issue-23-delivery-rehearsal.mjs'
 import { hashD1ArtifactDirectory } from './issue-23-delivery-d1-contracts.mjs'
+import { buildFormalRuntimeReceipt } from './issue-23-delivery-formal-runtime.mjs'
 
 const MANIFEST_SCHEMA_URL = new URL(
   '../schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
@@ -68,6 +69,7 @@ const CANONICAL_D1_PATHS = Object.freeze({
 })
 const ARTIFACT_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._/-]+$/u
 const ARTIFACT_EXCLUDED_PATH_PATTERN = /(^|\/)(?:private|operator|secret|credential|tmp)(?:\/|$)/iu
+const GENERATED_RUNTIME_NODE_MODULES_LINK = /^server-functions\/[^/]+\/node_modules$/u
 const ZERO_ACTIONS_ENCRYPTION_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
 const BUILD_PREVIEW_MODE_ID_ENV = 'BLOGMAN_BUILD_PREVIEW_MODE_ID'
 const BUILD_PREVIEW_MODE_SIGNING_KEY_ENV = 'BLOGMAN_BUILD_PREVIEW_MODE_SIGNING_KEY'
@@ -122,6 +124,11 @@ function isRecord(value) {
 }
 
 function validateSchemaValue(value, schema, path = '$') {
+  if (typeof schema.$ref === 'string') {
+    const reference = schema.$ref.match(/^#\/\$defs\/([A-Za-z0-9_]+)$/u)?.[1]
+    if (!reference || !MANIFEST_SCHEMA.$defs?.[reference]) fail(`${path} has an unresolved schema reference`)
+    return validateSchemaValue(value, MANIFEST_SCHEMA.$defs[reference], path)
+  }
   if (Object.hasOwn(schema, 'const') && value !== schema.const) {
     fail(`${path} must equal its schema constant`)
   }
@@ -234,6 +241,10 @@ function resolveProductionBuildInputs(repositoryPath, repository) {
 }
 
 function runOpenNextBuild(repositoryPath, { buildEnv, buildEpochMs } = {}) {
+  // The output directory is agent-controlled only from this point through the
+  // subsequent resolver-link validation; stale or attacker-created links never
+  // participate in the frozen artifact identity.
+  rmSync(resolve(repositoryPath, '.open-next'), { recursive: true, force: true })
   const environment = {
     ...process.env,
     ...(buildEnv ?? {}),
@@ -505,6 +516,38 @@ function enumerateBuildFiles(repositoryPath) {
   return files.sort()
 }
 
+export function removeVerifiedOpenNextResolverLinks(repositoryPath) {
+  const buildRoot = resolve(repositoryPath, '.open-next')
+  const frozenNodeModules = realpathSync(resolve(repositoryPath, 'node_modules'))
+  const serverFunctionsRoot = join(buildRoot, 'server-functions')
+  let removed = 0
+  const entries = readdirSync(serverFunctionsRoot, { withFileTypes: true })
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) fail('OpenNext server function directory is invalid')
+    const functionRoot = join(serverFunctionsRoot, entry.name)
+    for (const required of ['handler.mjs', 'open-next.config.mjs', 'package.json']) {
+      const metadata = lstatSync(join(functionRoot, required))
+      if (!metadata.isFile() || metadata.isSymbolicLink()) fail('OpenNext server function evidence is invalid')
+    }
+    const resolverLink = join(functionRoot, 'node_modules')
+    for (const child of readdirSync(functionRoot, { withFileTypes: true })) {
+      if (child.isSymbolicLink() && child.name !== 'node_modules') {
+        fail('OpenNext server function contains an unexpected symbolic link')
+      }
+    }
+    const metadata = lstatSync(resolverLink)
+    const relativeLink = `server-functions/${entry.name}/node_modules`
+    if (!GENERATED_RUNTIME_NODE_MODULES_LINK.test(relativeLink) || !metadata.isSymbolicLink()
+      || realpathSync(resolverLink) !== frozenNodeModules) {
+      fail('OpenNext runtime resolver link is not the generated frozen-node-modules link')
+    }
+    unlinkSync(resolverLink)
+    removed += 1
+  }
+  if (removed === 0) fail('OpenNext generated runtime resolver link is missing')
+  return removed
+}
+
 function enumeratePublicBuildFiles(repositoryPath, archivePath) {
   const archiveName = basename(resolve(repositoryPath, archivePath))
   return enumerateBuildFiles(repositoryPath)
@@ -631,27 +674,19 @@ function resolveRepositoryFacts(repositoryPath) {
   return { commit, tree, clean: true }
 }
 
-function resolveCiFacts(repositoryPath, config, repository) {
-  const rows = JSON.parse(command(repositoryPath, 'gh', [
-    'run', 'list', '--repo', 'nardinmarcus/blogman', '--workflow', config.ci.workflow,
-    '--commit', repository.commit, '--json',
-    'databaseId,headSha,status,conclusion,event,attempt', '--limit', '20',
-  ]))
-  const run = rows.find((candidate) => (
-    candidate.headSha === repository.commit
-      && candidate.status === 'completed'
-      && candidate.conclusion === 'success'
-  ))
-  if (!run) fail('resolved CI identity has no successful exact-head run')
-  return {
-    ...config.ci,
-    run_id: run.databaseId,
-    attempt: run.attempt,
-    event: run.event,
-    head_sha: repository.commit,
-    tree: repository.tree,
-    conclusion: run.conclusion,
+function resolveCiFacts(_repositoryPath, config, repository) {
+  // Preparation is intentionally network-free. CI identity is a frozen input
+  // checked against the locally resolved candidate, not fetched during a formal
+  // rehearsal (which would make the target gate depend on production network).
+  const ci = config.ci
+  if (!Number.isSafeInteger(ci.run_id) || ci.run_id < 1 || ci.attempt !== 1
+    || !['push', 'pull_request'].includes(ci.event)
+    || ci.conclusion !== 'success'
+    || ci.head_sha !== repository.commit
+    || ci.tree !== repository.tree) {
+    fail('configured CI identity is not a successful exact-head record')
   }
+  return { ...ci }
 }
 
 function resolveTargetFacts(target) {
@@ -739,6 +774,7 @@ function resolveFacts(config, {
   targetResolver = resolveTargetFacts,
   repositoryResolver = resolveRepositoryFacts,
   productionWriteAdapter,
+  verifyGeneratedResolverLinks = false,
 } = {}) {
   const repository = repositoryResolver(repositoryPath)
   if (repository.clean !== true) {
@@ -790,6 +826,7 @@ function resolveFacts(config, {
   })
   assertNoReachablePreviewBuildEvidence(repositoryPath)
   assertZeroActionsBuild(repositoryPath)
+  if (verifyGeneratedResolverLinks) removeVerifiedOpenNextResolverLinks(repositoryPath)
   const artifactBuildFiles = enumeratePublicBuildFiles(repositoryPath, config.artifact.archive.path)
   createBuildArchive(repositoryPath, config.artifact.archive.path, artifactBuildFiles)
   const artifactPaths = enumerateArtifactPaths(
@@ -867,6 +904,7 @@ function resolveFacts(config, {
   }
   const rehearsal = {
     runtime: rehearsalResult.runtime,
+    runtime_receipt: buildFormalRuntimeReceipt().value,
     network: rehearsalResult.network,
     status: rehearsalResult.status,
     receipt_sha256: rehearsalResult.receipt_sha256,
@@ -1009,6 +1047,17 @@ function assertManifestRelationships(manifest) {
   }
   if (manifest.rehearsal.runtime.node_version !== manifest.toolchain.node.version) {
     fail('rehearsal.runtime.node_version must equal toolchain.node.version')
+  }
+  const runtimeReceipt = manifest.rehearsal.runtime_receipt
+  if (runtimeReceipt.os !== 'macos'
+    || runtimeReceipt.arch !== manifest.rehearsal.runtime.architecture
+    || runtimeReceipt.node.version !== manifest.toolchain.node.version
+    || runtimeReceipt.node.identity_sha256 !== manifest.toolchain.node.identity_sha256
+    || runtimeReceipt.npm.identity_sha256 !== manifest.toolchain.npm.identity_sha256
+    || runtimeReceipt.wrangler.identity_sha256 !== manifest.toolchain.wrangler.identity_sha256
+    || runtimeReceipt.opennextjs_cloudflare.identity_sha256 !== manifest.toolchain.opennextjs_cloudflare.identity_sha256
+    || runtimeReceipt.curl.identity_sha256 !== manifest.toolchain.curl.identity_sha256) {
+    fail('rehearsal runtime receipt is not bound to the frozen toolchain')
   }
   if (manifest.rehearsal.production_write_adapter_calls !== 0) {
     fail('rehearsal must record zero production-write adapter calls')
@@ -1342,7 +1391,7 @@ export function prepare(config, options) {
   }
   validateSchemaValue(config, CONFIG_SCHEMA, '$.config')
   assertCanonicalProductionPaths(config)
-  const resolvedConfig = resolveFacts(config)
+  const resolvedConfig = resolveFacts(config, { verifyGeneratedResolverLinks: true })
   const value = validateConfig(resolvedConfig)
   return preparedResult(value)
 }

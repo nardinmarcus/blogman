@@ -661,43 +661,39 @@ function rehearsalD1Stdout(operation, bindings) {
   fail(`rehearsal D1 operation ${operation} is not synthesizable`)
 }
 
-function rehearsalD1FailStdout(operation, bindings) {
-  if (operation === 'd1_identity') {
-    return JSON.stringify({
-      account_id: `rehearsal-mismatch-${bindings.account_id}`,
-      config_sha256: bindings.config_sha256,
-      d1_database_id: bindings.d1_database_id,
-    })
-  }
-  return JSON.stringify({ rehearsal_fail_closed: true })
-}
-
 /** Source-level test-evidence provenance for formal no-network rehearsal transports. */
 export const FORMAL_REHEARSAL_D1_EVIDENCE_SOURCE = 'formal-rehearsal-test-evidence'
 
 /**
  * No-network rehearsal adapter. It synthesizes the exact production contract
- * shapes directly from the frozen manifest facts, records every operation, and
- * never performs network, subprocess, or production-write I/O.
- *
- * Provenance is non-production at the transport source. Stage evidence inherits
- * that classification directly; callers must never relabel it as production and
- * later downgrade it.
+ * shapes only after exercising the real command constructors and stage parsers.
+ * It replaces command I/O only: it never starts a process, opens a network
+ * connection, or writes outside the disposable local preparation rehearsal.
  */
-export function createRehearsalD1Transport(bindings, sink, scenario) {
-  if (!isPlainRecord(bindings)) fail('rehearsal D1 bindings must be an object')
-  const bindingsSha256 = d1StageBindingsSha256(bindings)
+export function createRehearsalD1Transport(bindings, sink) {
+  const normalizedBindings = validateConfig(bindings)
+  const bindingsSha256 = d1StageBindingsSha256(normalizedBindings)
+  function commandFor(request) {
+    const normalizedRequest = validateRequest(request)
+    if (['d1_identity', 'clean_start_reset', 'empty_d1_proof'].includes(normalizedRequest.operation)) {
+      return buildD1Command(normalizedBindings, normalizedRequest)
+    }
+    if (['migration_catalog', 'migration_plan', 'migration_apply', 'migration_verify'].includes(normalizedRequest.operation)) {
+      return Object.freeze({ executable: process.execPath, args: Object.freeze(canonicalRunnerCommand(
+        normalizedBindings,
+        normalizedRequest.operation.replace('migration_', ''),
+      )) })
+    }
+    if (normalizedRequest.operation === 'reconciliation') {
+      return Object.freeze({ executable: process.execPath, args: Object.freeze(rolloutSafetyCommand(normalizedBindings)) })
+    }
+    fail(`rehearsal D1 operation ${normalizedRequest.operation} is not supported`)
+  }
   function execute(request) {
-    if (!isPlainRecord(request) || typeof request.operation !== 'string') {
-      fail('rehearsal D1 request is invalid')
-    }
+    const command = commandFor(request)
     const stage = REHEARSAL_D1_STAGE_BY_OPERATION[request.operation]
-    if (!stage) fail(`rehearsal D1 operation ${request.operation} is not supported`)
-    if (sink) sink.push({ adapter: 'd1', operation: request.operation, stage })
-    if (scenario && scenario.failStage === stage) {
-      return { status: 0, stdout: rehearsalD1FailStdout(request.operation, bindings), stderr: '', duration_ms: 1 }
-    }
-    return { status: 0, stdout: rehearsalD1Stdout(request.operation, bindings), stderr: '', duration_ms: 1 }
+    if (sink) sink.push({ adapter: 'd1', operation: request.operation, stage, command: command.args })
+    return { status: 0, stdout: rehearsalD1Stdout(request.operation, normalizedBindings), stderr: '', duration_ms: 1 }
   }
   const transport = Object.freeze({ execute })
   transportCapabilities.set(transport, Object.freeze({

@@ -1,10 +1,10 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { arch, platform, tmpdir } from 'node:os'
+import { platform, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { prepare } from './issue-23-delivery-prepare.mjs'
 import { runSyntheticStage } from './issue-23-delivery-synthetic-adapter.mjs'
 import {
   createD1Transport,
@@ -21,10 +21,8 @@ export const LOCAL_ENTRY_FORMAT = 'blogman-issue-23-local-entry/v1'
 export const LOCAL_SUPERVISOR_FORMAT = 'blogman-issue-23-supervisor/v1'
 
 const FORMAL_REHEARSAL_EVIDENCE_SOURCE = 'formal-rehearsal-test-evidence'
-const FORMAL_RUNTIME_RECEIPT_FORMAT = 'blogman-issue-23-formal-rehearsal-runtime-receipt/v1'
 const TERMINAL_RESULT_FORMAT = 'blogman-issue-23-terminal-result/v1'
 const formalRehearsalContext = new AsyncLocalStorage()
-const ENTRY_MODULE_PATH = fileURLToPath(import.meta.url)
 
 function fail(message) {
   throw new Error(`Issue #23 local entry: ${message}`)
@@ -568,6 +566,7 @@ function validateCanonicalManifestSchema(value) {
     value.rehearsal,
     [
       'runtime',
+      'runtime_receipt',
       'network',
       'status',
       'receipt_sha256',
@@ -582,6 +581,33 @@ function validateCanonicalManifestSchema(value) {
   if (value.rehearsal.runtime.os !== 'macos') fail('manifest rehearsal.runtime.os is invalid')
   schemaString(value.rehearsal.runtime.architecture, 'manifest rehearsal.runtime.architecture', CANONICAL_MANIFEST_WORKER_PATTERN)
   schemaVersion(value.rehearsal.runtime.node_version, 'manifest rehearsal.runtime.node_version')
+  schemaRecord(value.rehearsal.runtime_receipt, [
+    'format', 'os', 'arch', 'node', 'npm', 'wrangler', 'opennextjs_cloudflare', 'curl', 'entry',
+  ], 'manifest rehearsal.runtime_receipt')
+  if (value.rehearsal.runtime_receipt.format !== 'blogman-issue-23-formal-rehearsal-runtime-receipt/v1'
+    || value.rehearsal.runtime_receipt.os !== 'macos'
+    || value.rehearsal.runtime_receipt.arch !== value.rehearsal.runtime.architecture) {
+    fail('manifest rehearsal.runtime_receipt is invalid')
+  }
+  for (const name of ['node', 'npm', 'wrangler', 'opennextjs_cloudflare', 'curl']) {
+    const tool = value.rehearsal.runtime_receipt[name]
+    schemaRecord(tool, ['version', 'identity_sha256'], `manifest rehearsal.runtime_receipt.${name}`)
+    schemaVersion(tool.version, `manifest rehearsal.runtime_receipt.${name}.version`)
+    schemaSha256(tool.identity_sha256, `manifest rehearsal.runtime_receipt.${name}.identity_sha256`)
+  }
+  schemaRecord(value.rehearsal.runtime_receipt.entry, ['path', 'identity_sha256'], 'manifest rehearsal.runtime_receipt.entry')
+  if (value.rehearsal.runtime_receipt.entry.path !== 'scripts/issue-23-delivery-entry.mjs') {
+    fail('manifest rehearsal.runtime_receipt.entry is invalid')
+  }
+  schemaSha256(value.rehearsal.runtime_receipt.entry.identity_sha256, 'manifest rehearsal.runtime_receipt.entry.identity_sha256')
+  if (value.rehearsal.runtime_receipt.node.version !== value.toolchain.node.version
+    || value.rehearsal.runtime_receipt.node.identity_sha256 !== value.toolchain.node.identity_sha256
+    || value.rehearsal.runtime_receipt.npm.identity_sha256 !== value.toolchain.npm.identity_sha256
+    || value.rehearsal.runtime_receipt.wrangler.identity_sha256 !== value.toolchain.wrangler.identity_sha256
+    || value.rehearsal.runtime_receipt.opennextjs_cloudflare.identity_sha256 !== value.toolchain.opennextjs_cloudflare.identity_sha256
+    || value.rehearsal.runtime_receipt.curl.identity_sha256 !== value.toolchain.curl.identity_sha256) {
+    fail('manifest rehearsal.runtime_receipt is not bound to the frozen toolchain')
+  }
   if (value.rehearsal.network !== 'disabled' || value.rehearsal.status !== 'PASS') {
     fail('manifest rehearsal state is invalid')
   }
@@ -838,6 +864,17 @@ const CANONICAL_MANIFEST_ORDER = {
   },
   rehearsal: {
     runtime: { os: null, architecture: null, node_version: null },
+    runtime_receipt: {
+      format: null,
+      os: null,
+      arch: null,
+      node: { version: null, identity_sha256: null },
+      npm: { version: null, identity_sha256: null },
+      wrangler: { version: null, identity_sha256: null },
+      opennextjs_cloudflare: { version: null, identity_sha256: null },
+      curl: { version: null, identity_sha256: null },
+      entry: { path: null, identity_sha256: null },
+    },
     network: null,
     status: null,
     receipt_sha256: null,
@@ -1563,10 +1600,10 @@ function currentFormalContext() {
 function formalAdapterFactories(context) {
   return Object.freeze({
     createD1Transport(bindings) {
-      return createRehearsalD1Transport(bindings, context.sink, context.scenario)
+      return createRehearsalD1Transport(bindings, context.sink)
     },
     createWorkerTransport(bindings) {
-      return createRehearsalWorkerTransport(bindings, context.sink, context.scenario)
+      return createRehearsalWorkerTransport(bindings, context.sink)
     },
     normalizeD1Result: normalizeFormalRehearsalD1Result,
     normalizeWorkerResult: normalizeFormalRehearsalWorkerResult,
@@ -1776,47 +1813,6 @@ function executeProduction(manifest, authorization) {
   return { value, bytes, sha256: sha256(bytes) }
 }
 
-function hashFile(path) {
-  return sha256(readFileSync(path))
-}
-
-function buildFormalRuntimeReceipt() {
-  const nodePath = realpathSync(process.execPath)
-  const npmPath = realpathSync(npmCliPath(nodePath))
-  const wranglerPath = realpathSync(resolve(ENTRY_REPO_ROOT, 'node_modules/.bin/wrangler'))
-  const openNextPath = realpathSync(resolve(ENTRY_REPO_ROOT, 'node_modules/.bin/opennextjs-cloudflare'))
-  const curlPath = realpathSync(SYSTEM_CURL_PATH)
-  const entryPath = realpathSync(ENTRY_MODULE_PATH)
-  const npmVersion = execFileSync(nodePath, [npmPath, '--version'], { encoding: 'utf8', timeout: 15_000 })
-    .trim()
-    .replace(/^v/u, '')
-  const wranglerVersion = execFileSync(wranglerPath, ['--version'], { encoding: 'utf8', timeout: 15_000 })
-    .match(/([0-9]+\.[0-9]+\.[0-9]+)/u)?.[1]
-  const curlVersion = execFileSync(curlPath, ['--version'], { encoding: 'utf8', timeout: 15_000 })
-    .match(/^curl ([0-9]+(?:\.[0-9]+){1,2})\b/mu)?.[1]
-  const lockfile = JSON.parse(readFileSync(resolve(ENTRY_REPO_ROOT, 'package-lock.json'), 'utf8'))
-  const openNextVersion = lockfile.packages?.['node_modules/@opennextjs/cloudflare']?.version
-  if (!wranglerVersion || !curlVersion || !openNextVersion || !npmVersion) {
-    fail('formal runtime receipt tool identity is incomplete')
-  }
-  const value = {
-    format: FORMAL_RUNTIME_RECEIPT_FORMAT,
-    os: platform() === 'darwin' ? 'macos' : platform(),
-    arch: arch(),
-    node: { version: process.versions.node, identity_sha256: hashFile(nodePath) },
-    npm: { version: npmVersion, identity_sha256: hashFile(npmPath) },
-    wrangler: { version: wranglerVersion, identity_sha256: hashFile(wranglerPath) },
-    opennextjs_cloudflare: { version: openNextVersion, identity_sha256: hashFile(openNextPath) },
-    curl: { version: curlVersion, identity_sha256: hashFile(curlPath) },
-    entry: {
-      path: 'scripts/issue-23-delivery-entry.mjs',
-      identity_sha256: hashFile(entryPath),
-    },
-  }
-  const bytes = canonicalJsonBytes(value)
-  return Object.freeze({ value: Object.freeze(value), bytes, sha256: sha256(bytes) })
-}
-
 /**
  * Production Evidence validator. Formal/test Terminal Results must fail this check.
  */
@@ -1843,28 +1839,22 @@ export function validateProductionTerminalEvidence(result) {
 }
 
 /**
- * Module-owned formal attempt entry. Enters private context, then calls public
- * execute(manifest, authorization) with exactly two arguments.
+ * Exact target-macOS no-network formal entry. Its only caller input is config;
+ * the authorization and adapters are constructed privately from the validated manifest.
  */
-export function runFormalRehearsalAttempt(manifest, options = {}) {
-  if (arguments.length < 1 || arguments.length > 2) {
-    fail('runFormalRehearsalAttempt accepts manifest and optional options')
-  }
-  if (options !== undefined && !isPlainRecord(options)) fail('formal rehearsal options must be an object')
-  const scenario = options.scenario === undefined ? null : options.scenario
-  if (scenario !== null && !isPlainRecord(scenario)) fail('formal rehearsal scenario must be an object')
+export function runFormalRehearsal(config) {
+  if (arguments.length !== 1) fail('runFormalRehearsal accepts exactly one config argument')
+  if (platform() !== 'darwin') fail('runFormalRehearsal requires target macOS')
+  const manifest = prepare(config)
   const sink = []
-  const runtime_receipt = buildFormalRuntimeReceipt()
-  const context = Object.freeze({ sink, scenario, runtime_receipt })
+  const context = Object.freeze({ sink })
   return formalRehearsalContext.run(context, () => {
-    const authorization = {
+    const authorization = Object.freeze({
       format: AUTHORIZATION_FORMAT,
-      authorization_id: typeof options.authorization_id === 'string' && options.authorization_id.length > 0
-        ? options.authorization_id
-        : `formal-rehearsal-${manifest.sha256.slice(0, 16)}`,
+      authorization_id: `formal-rehearsal-${manifest.sha256.slice(0, 16)}`,
       manifest_sha256: manifest.sha256,
       decision: 'approve',
-    }
+    })
     const terminal = execute(manifest, authorization)
     if (terminal.value.evidence.production === true || terminal.value.evidence.source === 'production') {
       fail('formal rehearsal must not emit production evidence')
@@ -1876,8 +1866,8 @@ export function runFormalRehearsalAttempt(manifest, options = {}) {
       if (!/production terminal evidence/u.test(error.message)) throw error
     }
     return Object.freeze({
+      manifest,
       terminal,
-      runtime_receipt,
       operations: Object.freeze(sink.map((entry) => Object.freeze({ ...entry }))),
     })
   })

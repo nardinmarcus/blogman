@@ -140,6 +140,54 @@ function parseReconciliation(stdout, duration_ms = 1) {
   return { state: value.state, checks: value.checks }
 }
 
+// These are the production request-to-command constructors. Formal rehearsal
+// invokes exactly these functions and replaces only their process/network I/O.
+function deploymentStatusCommand(bindings) {
+  return Object.freeze({ executable: bindings.wrangler_path, args: Object.freeze([
+    'deployments', 'status', '--name', bindings.worker_name, '--config', bindings.config_path, '--json',
+  ]) })
+}
+function d1IdentityCommand(bindings) {
+  return Object.freeze({ executable: bindings.wrangler_path, args: Object.freeze([
+    'd1', 'info', bindings.database, '--config', bindings.config_path, '--json',
+  ]) })
+}
+function versionDeployCommand(bindings, versionId) {
+  return Object.freeze({ executable: bindings.wrangler_path, args: Object.freeze([
+    'versions', 'deploy', `${versionId}@100%`, '-y', '--config', bindings.config_path,
+  ]) })
+}
+function smokeCommand(bindings, url) {
+  return Object.freeze({ executable: bindings.curl_path, args: Object.freeze([
+    '--request', 'GET', '--silent', '--show-error', '--output', '/dev/null', '--write-out', '%{http_code}', url,
+  ]) })
+}
+function controlsCommand(bindings) {
+  return Object.freeze({ executable: bindings.node_path, args: Object.freeze([
+    bindings.rollout_safety_path, 'rollout', 'controls-status', '--database', bindings.database,
+    '--remote', '--config', bindings.config_path,
+  ]) })
+}
+function reconciliationCommand(bindings) {
+  return Object.freeze({ executable: bindings.node_path, args: Object.freeze([
+    bindings.rollout_safety_path, 'reconcile', 'compare', '--expected', bindings.expected_reconciliation_path,
+    '--database', bindings.database, '--remote', '--config', bindings.config_path,
+  ]) })
+}
+function uploadCommand(bindings, paths) {
+  return Object.freeze({ executable: bindings.node_path, args: Object.freeze([
+    bindings.phase_b_sequence_path, 'run-upload-source-lifecycle',
+    '--node-path', bindings.node_path, '--node-sha256', bindings.node_sha256,
+    '--npm-path', bindings.npm_path, '--npm-sha256', bindings.npm_sha256,
+    '--open-next-path', bindings.open_next_path, '--open-next-sha256', bindings.open_next_sha256,
+    '--config', bindings.config_path, '--source', bindings.artifact_source_path,
+    '--destination', paths.destination, '--operation-id', `issue-23-${bindings.candidate_id}-upload-1`,
+    '--proof-before', paths.before, '--proof-after', paths.after, '--archive', bindings.artifact_archive_path,
+    '--archive-sha256', bindings.artifact_archive_sha256, '--build-proof', paths.proof,
+    '--expected-config-sha256', bindings.config_sha256,
+  ]) })
+}
+
 /** Private adapter. It emits only bounded, public terminal facts. */
 export function createWorkerTransport(bindings) {
   if (!bindings || typeof bindings !== 'object') fail('bindings are required')
@@ -210,21 +258,13 @@ export function createWorkerTransport(bindings) {
   }
 
   function deploymentStatus(request, spent, version) {
-    const result = invoke(
-      bindings.wrangler_path,
-      ['deployments', 'status', '--name', bindings.worker_name, '--config', bindings.config_path, '--json'],
-      request,
-      spent,
-    )
+    const command = deploymentStatusCommand(bindings)
+    const result = invoke(command.executable, command.args, request, spent)
     return { value: parseDeployment(result.stdout, version, bindings.d1_database_id, result.duration_ms), duration_ms: result.duration_ms }
   }
   function d1Identity(request, spent) {
-    const result = invoke(
-      bindings.wrangler_path,
-      ['d1', 'info', bindings.database, '--config', bindings.config_path, '--json'],
-      request,
-      spent,
-    )
+    const command = d1IdentityCommand(bindings)
+    const result = invoke(command.executable, command.args, request, spent)
     parseD1Identity(result.stdout, bindings.d1_database_id, result.duration_ms)
     return result.duration_ms
   }
@@ -266,26 +306,16 @@ export function createWorkerTransport(bindings) {
         const proof = join(root, 'proof.json')
         const destination = join(root, 'source')
         for (const path of [output, before, after, proof]) writeFileSync(path, '', { mode: 0o600 })
-        const result = invoke(bindings.node_path, [
-          bindings.phase_b_sequence_path, 'run-upload-source-lifecycle',
-          '--node-path', bindings.node_path, '--node-sha256', bindings.node_sha256,
-          '--npm-path', bindings.npm_path, '--npm-sha256', bindings.npm_sha256,
-          '--open-next-path', bindings.open_next_path, '--open-next-sha256', bindings.open_next_sha256,
-          '--config', bindings.config_path, '--source', bindings.artifact_source_path,
-          '--destination', destination, '--operation-id', `issue-23-${bindings.candidate_id}-upload-1`,
-          '--proof-before', before, '--proof-after', after, '--archive', bindings.artifact_archive_path,
-          '--archive-sha256', bindings.artifact_archive_sha256, '--build-proof', proof,
-          '--expected-config-sha256', bindings.config_sha256,
-        ], request, 0)
+        const command = uploadCommand(bindings, { destination, before, after, proof })
+        const result = invoke(command.executable, command.args, request, 0)
         return response(parseJson(result.stdout, 'upload_acceptance', result.duration_ms), result.duration_ms)
       } finally { rmSync(root, { recursive: true, force: true }) }
     }
     if (request.operation === 'version_traffic_verification') {
       if (!safeId(request.version_id)) throw new WorkerTransportError('ERROR', 'worker_adapter_uncertain')
       let spent = 0
-      const deploy = invoke(bindings.wrangler_path, [
-        'versions', 'deploy', `${request.version_id}@100%`, '-y', '--config', bindings.config_path,
-      ], request, spent)
+      const command = versionDeployCommand(bindings, request.version_id)
+      const deploy = invoke(command.executable, command.args, request, spent)
       spent += deploy.duration_ms
       const status = deploymentStatus(request, spent, request.version_id)
       spent += status.duration_ms
@@ -304,9 +334,8 @@ export function createWorkerTransport(bindings) {
     const checks = {}
     for (const { path, status } of bindings.smoke.requests) {
       const url = new URL(path, origin).toString()
-      const requestResult = invoke(bindings.curl_path, [
-        '--request', 'GET', '--silent', '--show-error', '--output', '/dev/null', '--write-out', '%{http_code}', url,
-      ], request, spent)
+      const command = smokeCommand(bindings, url)
+      const requestResult = invoke(command.executable, command.args, request, spent)
       spent += requestResult.duration_ms
       if (requestResult.stdout !== String(status)) {
         throw new WorkerTransportError('NON_PASS', 'smoke_control_contract_invalid', spent)
@@ -317,16 +346,12 @@ export function createWorkerTransport(bindings) {
     spent += after.duration_ms
     if (after.value.deployment_id !== request.deployment_id) throw new WorkerTransportError('NON_PASS', 'version_traffic_mismatch', spent)
     spent += d1Identity(request, spent)
-    const controlsResult = invoke(bindings.node_path, [
-      bindings.rollout_safety_path, 'rollout', 'controls-status', '--database', bindings.database,
-      '--remote', '--config', bindings.config_path,
-    ], request, spent)
+    const controlsPlan = controlsCommand(bindings)
+    const controlsResult = invoke(controlsPlan.executable, controlsPlan.args, request, spent)
     spent += controlsResult.duration_ms
     const controls = parseControls(controlsResult.stdout, controlsResult.duration_ms)
-    const reconciliationResult = invoke(bindings.node_path, [
-      bindings.rollout_safety_path, 'reconcile', 'compare', '--expected', bindings.expected_reconciliation_path,
-      '--database', bindings.database, '--remote', '--config', bindings.config_path,
-    ], request, spent)
+    const reconciliationPlan = reconciliationCommand(bindings)
+    const reconciliationResult = invoke(reconciliationPlan.executable, reconciliationPlan.args, request, spent)
     spent += reconciliationResult.duration_ms
     return response({ before: before.value, after: after.value, checks, controls, reconciliation: parseReconciliation(reconciliationResult.stdout, reconciliationResult.duration_ms) }, spent)
   } })
@@ -346,98 +371,85 @@ function rehearsalDeployment(bindings, versionId = bindings.baseline.version_id)
   }
 }
 
-function rehearsalFailClosed() {
-  throw new WorkerTransportError('NON_PASS', 'formal_rehearsal_fail_closed', 1)
-}
-
 /**
- * No-network formal rehearsal worker adapter. Synthesizes production contract
- * shapes from frozen bindings only. Provenance is non-production at source.
+ * No-network formal adapter. Every would-be subprocess/network/write command
+ * first passes through the same production constructors above. The executor
+ * records that argv and returns a bounded recorded response; it never invokes
+ * a command and rejects anything outside the fixed formal command plan.
  */
-export function createRehearsalWorkerTransport(bindings, sink, scenario) {
+export function createRehearsalWorkerTransport(bindings, sink) {
   if (!bindings || typeof bindings !== 'object') fail('bindings are required')
-  for (const key of [
-    'candidate_id', 'worker_name', 'd1_database_id', 'config_sha256', 'artifact_sha256',
-    'origin', 'smoke', 'baseline', 'database',
-  ]) if (!Object.hasOwn(bindings, key)) fail(`${key} is required`)
-  if (!safeId(bindings.candidate_id) || !safeId(bindings.worker_name) || !safeId(bindings.d1_database_id)
-    || !safeId(bindings.database) || typeof bindings.origin !== 'string'
-    || !Array.isArray(bindings.smoke?.requests)
-    || !exact(bindings.baseline, ['deployment_id', 'version_id', 'd1_database_id', 'traffic'])) {
-    fail('bindings are invalid')
-  }
   const origin = new URL(bindings.origin)
   if (!['http:', 'https:'].includes(origin.protocol)) fail('origin is invalid')
-
-  function refuseNetwork(label) {
-    fail(`rehearsal worker refused network or production-write path: ${label}`)
+  const record = (operation, command, stdout) => {
+    if (!command || typeof command.executable !== 'string' || !Array.isArray(command.args)) {
+      fail(`formal rehearsal refused unconstructed ${operation} command`)
+    }
+    if (sink) sink.push({ adapter: 'worker', operation, argv: [command.executable, ...command.args] })
+    return { status: 0, stdout: JSON.stringify(stdout), stderr: '', duration_ms: 1 }
   }
+  const deploymentRaw = (version) => ({
+    id: bindings.baseline.deployment_id,
+    versions: [{ version_id: version, percentage: 100 }],
+  })
+  const d1Raw = { uuid: bindings.d1_database_id }
+  const controlsRaw = { state: 'captured', controls: { producer: 'disabled', authority: 'disabled', executors: { scheduler: 'disabled' } } }
+  const reconciliationRaw = { state: 'matched', checks: Object.fromEntries(RECONCILIATION_DIMENSIONS.map((key) => [key, 'matched'])) }
 
   function livePreconditions(elapsed_ms = 0) {
-    if (!Number.isSafeInteger(elapsed_ms) || elapsed_ms < 0) {
+    if (!Number.isSafeInteger(elapsed_ms) || elapsed_ms < 0 || elapsed_ms >= OVERALL_TIMEOUT_MS) {
       return { outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: 1 }
     }
-    if (sink) sink.push({ adapter: 'worker', operation: 'live_preconditions', stage: 'live_preconditions' })
-    if (scenario?.failStage === 'live_preconditions') {
-      return { outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }
-    }
-    if (scenario?.networkProbe === 'live_preconditions') refuseNetwork('live_preconditions')
-    return { outcome: 'PASS', duration_ms: 1 }
+    const request = { timeout_ms: 120000, elapsed_ms }
+    const baseline = record('live_preconditions.deployment_status', deploymentStatusCommand(bindings), deploymentRaw(bindings.baseline.version_id))
+    const deployment = parseDeployment(baseline.stdout, bindings.baseline.version_id, bindings.d1_database_id, baseline.duration_ms)
+    if (deployment.deployment_id !== bindings.baseline.deployment_id) return { outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }
+    const identity = record('live_preconditions.d1_identity', d1IdentityCommand(bindings), d1Raw)
+    parseD1Identity(identity.stdout, bindings.d1_database_id, identity.duration_ms)
+    return { outcome: 'PASS', duration_ms: baseline.duration_ms + identity.duration_ms }
   }
 
   function execute(request) {
     if (!exact(request, ['operation', 'stage', 'timeout_ms', 'elapsed_ms', 'version_id', 'deployment_id'])
-      || request.operation !== request.stage
-      || !['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'].includes(request.operation)
+      || request.operation !== request.stage || !['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'].includes(request.operation)
       || !Number.isSafeInteger(request.timeout_ms) || !Number.isSafeInteger(request.elapsed_ms)
       || request.timeout_ms <= 0 || request.elapsed_ms < 0) fail('request is invalid')
-    if (sink) sink.push({ adapter: 'worker', operation: request.operation, stage: request.stage })
-    if (scenario?.networkProbe === request.operation) refuseNetwork(request.operation)
-    if (scenario?.writeProbe === request.operation) refuseNetwork(`write:${request.operation}`)
-    if (scenario?.failStage === request.operation) rehearsalFailClosed()
-
     if (request.operation === 'worker_deploy') {
-      const version_id = `rehearsal-version-${bindings.candidate_id.slice(0, 12)}`
-      return response({
-        format: 'blogman-upload-source-lifecycle-acceptance/v1',
-        state: 'accepted',
-        upload_operation_id: `issue-23-${bindings.candidate_id}-upload-1`,
-        version_id,
-        config_sha256: bindings.config_sha256,
-        snapshot_tree_sha256: bindings.artifact_sha256,
-        snapshot_identity_sha256: 'a'.repeat(64),
-        snapshot_proof_before_sha256: 'b'.repeat(64),
-        snapshot_proof_after_sha256: 'c'.repeat(64),
-        build_directory_proof_sha256: 'd'.repeat(64),
-        wrangler_output_sha256: 'e'.repeat(64),
-      }, 1)
+      const command = uploadCommand(bindings, { destination: '<formal-no-network>', before: '<formal-no-network>', after: '<formal-no-network>', proof: '<formal-no-network>' })
+      return record(request.operation, command, {
+        format: 'blogman-upload-source-lifecycle-acceptance/v1', state: 'accepted',
+        upload_operation_id: `issue-23-${bindings.candidate_id}-upload-1`, version_id: `rehearsal-version-${bindings.candidate_id.slice(0, 12)}`,
+        config_sha256: bindings.config_sha256, snapshot_tree_sha256: bindings.artifact_sha256,
+        snapshot_identity_sha256: 'a'.repeat(64), snapshot_proof_before_sha256: 'b'.repeat(64), snapshot_proof_after_sha256: 'c'.repeat(64),
+        build_directory_proof_sha256: 'd'.repeat(64), wrangler_output_sha256: 'e'.repeat(64),
+      })
     }
+    if (!safeId(request.version_id)) throw new WorkerTransportError('ERROR', 'worker_adapter_uncertain')
     if (request.operation === 'version_traffic_verification') {
-      if (!safeId(request.version_id)) throw new WorkerTransportError('ERROR', 'worker_adapter_uncertain')
-      return response(rehearsalDeployment(bindings, request.version_id), 1)
+      record(`${request.operation}.deploy`, versionDeployCommand(bindings, request.version_id), {})
+      const status = record(`${request.operation}.deployment_status`, deploymentStatusCommand(bindings), deploymentRaw(request.version_id))
+      const deployment = parseDeployment(status.stdout, request.version_id, bindings.d1_database_id, status.duration_ms)
+      const identity = record(`${request.operation}.d1_identity`, d1IdentityCommand(bindings), d1Raw)
+      parseD1Identity(identity.stdout, bindings.d1_database_id, identity.duration_ms)
+      return response(deployment, status.duration_ms + identity.duration_ms + 1)
     }
-    if (!safeId(request.version_id) || !safeId(request.deployment_id)) {
-      throw new WorkerTransportError('ERROR', 'worker_adapter_uncertain')
+    if (!safeId(request.deployment_id)) throw new WorkerTransportError('ERROR', 'worker_adapter_uncertain')
+    const before = parseDeployment(record(`${request.operation}.before`, deploymentStatusCommand(bindings), deploymentRaw(request.version_id)).stdout, request.version_id, bindings.d1_database_id)
+    const identity = record(`${request.operation}.d1_identity`, d1IdentityCommand(bindings), d1Raw)
+    parseD1Identity(identity.stdout, bindings.d1_database_id, identity.duration_ms)
+    const checks = {}
+    for (const { path, status } of bindings.smoke.requests) {
+      const result = record(`${request.operation}.smoke`, smokeCommand(bindings, new URL(path, origin).toString()), status)
+      if (result.stdout !== JSON.stringify(status)) throw new WorkerTransportError('NON_PASS', 'smoke_control_contract_invalid')
+      checks[path] = status
     }
-    const deployment = rehearsalDeployment(bindings, request.version_id)
-    deployment.deployment_id = request.deployment_id
-    const checks = Object.fromEntries(bindings.smoke.requests.map(({ path, status }) => [path, status]))
-    return response({
-      before: deployment,
-      after: deployment,
-      checks,
-      controls: { producer: 'disabled', authority: 'disabled', executors: { scheduler: 'disabled' } },
-      reconciliation: {
-        state: 'matched',
-        checks: Object.fromEntries(RECONCILIATION_DIMENSIONS.map((key) => [key, 'matched'])),
-      },
-    }, 1)
+    const after = parseDeployment(record(`${request.operation}.after`, deploymentStatusCommand(bindings), deploymentRaw(request.version_id)).stdout, request.version_id, bindings.d1_database_id)
+    const controls = parseControls(record(`${request.operation}.controls`, controlsCommand(bindings), controlsRaw).stdout)
+    const reconciliation = parseReconciliation(record(`${request.operation}.reconciliation`, reconciliationCommand(bindings), reconciliationRaw).stdout)
+    return response({ before, after, checks, controls, reconciliation }, 1)
   }
 
   const transport = Object.freeze({ livePreconditions, execute })
-  transportCapabilities.set(transport, Object.freeze({
-    source: FORMAL_REHEARSAL_WORKER_EVIDENCE_SOURCE,
-    production: false,
-  }))
+  transportCapabilities.set(transport, Object.freeze({ source: FORMAL_REHEARSAL_WORKER_EVIDENCE_SOURCE, production: false }))
   return transport
 }

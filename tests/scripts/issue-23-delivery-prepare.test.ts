@@ -11,6 +11,7 @@ import {
   canonicalBytes,
   parseCanonicalManifest,
   prepare,
+  removeVerifiedOpenNextResolverLinks,
   prepareForTestsOnly,
 } from '../../scripts/issue-23-delivery-prepare.mjs'
 import { runLocalRehearsal, runLocalRehearsalForTestsOnly } from '../../scripts/issue-23-delivery-rehearsal.mjs'
@@ -335,6 +336,47 @@ function prepareFixture(config: ReturnType<typeof baseConfig>, options: Record<s
     ...fixtureOptions,
   })
 }
+
+describe('OpenNext generated resolver-link removal', () => {
+  function writeGeneratedResolverLinkFixture(repositoryPath: string, target: string) {
+    const functionRoot = join(repositoryPath, '.open-next', 'server-functions', 'default')
+    mkdirSync(join(repositoryPath, 'node_modules'), { recursive: true })
+    mkdirSync(functionRoot, { recursive: true })
+    for (const file of ['handler.mjs', 'open-next.config.mjs', 'package.json']) {
+      writeFileSync(join(functionRoot, file), `${file}\n`)
+    }
+    symlinkSync(target, join(functionRoot, 'node_modules'))
+    return functionRoot
+  }
+
+  it('removes only the verified OpenNext link before artifact enumeration', () => {
+    withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
+      const functionRoot = writeGeneratedResolverLinkFixture(repositoryPath, join(repositoryPath, 'node_modules'))
+      expect(removeVerifiedOpenNextResolverLinks(repositoryPath)).toBe(1)
+      expect(existsSync(join(functionRoot, 'node_modules'))).toBe(false)
+    })
+  })
+
+  it('fails closed for a same-named resolver link with an unfrozen target', () => {
+    withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
+      const outside = mkdtempSync(join(tmpdir(), 'blogman-outside-node-modules-'))
+      try {
+        writeGeneratedResolverLinkFixture(repositoryPath, outside)
+        expect(() => removeVerifiedOpenNextResolverLinks(repositoryPath)).toThrow(/generated frozen-node-modules/u)
+      } finally {
+        rmSync(outside, { recursive: true, force: true })
+      }
+    })
+  })
+
+  it('fails closed for an extra server-function symbolic link', () => {
+    withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
+      const functionRoot = writeGeneratedResolverLinkFixture(repositoryPath, join(repositoryPath, 'node_modules'))
+      symlinkSync(join(repositoryPath, 'node_modules'), join(functionRoot, 'unexpected-link'))
+      expect(() => removeVerifiedOpenNextResolverLinks(repositoryPath)).toThrow(/unexpected symbolic link/u)
+    })
+  })
+})
 
 function expectPreArchiveFailure(callback: () => unknown) {
   const archivePath = join(repoRoot, '.open-next', 'open-next-build.zip')
