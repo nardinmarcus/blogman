@@ -50,7 +50,7 @@ function assertBoundFile(path, expectedHash) {
 }
 function artifactFile(value) {
   return exact(value, ['path', 'sha256', 'bytes'])
-    && typeof value.path === 'string' && /^(?:\.open-next\/)?[A-Za-z0-9._/-]+$/u.test(value.path)
+    && typeof value.path === 'string' && /^(?:\.open-next\/)?[A-Za-z0-9@._/-]+$/u.test(value.path)
     && sha256(value.sha256) && Number.isSafeInteger(value.bytes) && value.bytes >= 0
 }
 function validateArtifactSource(bindings) {

@@ -68,9 +68,9 @@ const CANONICAL_D1_PATHS = Object.freeze({
   catalog: 'db/ledger-migrations',
   rolloutSafety: 'scripts/rollout-safety.mjs',
 })
-const ARTIFACT_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._/-]+$/u
+const ARTIFACT_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9@._/-]+$/u
 const ARTIFACT_EXCLUDED_PATH_PATTERN = /(^|\/)(?:private|operator|secret|credential|tmp)(?:\/|$)/iu
-const GENERATED_RUNTIME_NODE_MODULES_LINK = /^server-functions\/[^/]+\/node_modules$/u
+const GENERATED_RUNTIME_NODE_MODULES_ENTRY = /^server-functions\/[^/]+\/node_modules$/u
 const ZERO_ACTIONS_ENCRYPTION_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
 const BUILD_PREVIEW_MODE_ID_ENV = 'BLOGMAN_BUILD_PREVIEW_MODE_ID'
 const BUILD_PREVIEW_MODE_SIGNING_KEY_ENV = 'BLOGMAN_BUILD_PREVIEW_MODE_SIGNING_KEY'
@@ -603,6 +603,7 @@ function readOpenNextResolverLinkDiagnostics(repositoryPath, resolverLink, froze
 
   return {
     metadata,
+    rawTarget,
     realTarget,
     description: [
       `metadata=${metadataType}`,
@@ -617,11 +618,74 @@ function failOpenNextResolverLink(description) {
   fail(`OpenNext runtime resolver link is not the generated frozen-node-modules link (${description})`)
 }
 
+function verifyGeneratedRuntimeDependencyTree(buildRoot, functionRoot, dependencyRoot, relativeEntry) {
+  let realBuildRoot
+  let realFunctionRoot
+  let realDependencyRoot
+  try {
+    realBuildRoot = realpathSync(buildRoot)
+    realFunctionRoot = realpathSync(functionRoot)
+    realDependencyRoot = realpathSync(dependencyRoot)
+  } catch {
+    fail('OpenNext generated runtime dependency tree could not be read')
+  }
+  if (!realFunctionRoot.startsWith(`${realBuildRoot}${sep}`)
+    || !realDependencyRoot.startsWith(`${realFunctionRoot}${sep}`)) {
+    fail('OpenNext generated runtime dependency tree is outside its server function')
+  }
+
+  const files = []
+  const visit = (directory, prefix) => {
+    let entries
+    try {
+      entries = readdirSync(directory, { withFileTypes: true })
+    } catch {
+      fail('OpenNext generated runtime dependency tree could not be read')
+    }
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      const path = join(directory, entry.name)
+      const relativePath = `${prefix}/${entry.name}`
+      let metadata
+      try {
+        metadata = lstatSync(path)
+      } catch {
+        fail('OpenNext generated runtime dependency tree could not be read')
+      }
+      if (metadata.isSymbolicLink()) {
+        fail('OpenNext generated runtime dependency tree contains symbolic link')
+      }
+      if (metadata.isDirectory()) {
+        visit(path, relativePath)
+      } else if (metadata.isFile()) {
+        files.push(relativePath)
+      } else {
+        fail('OpenNext generated runtime dependency tree contains unsupported entry')
+      }
+    }
+  }
+
+  let metadata
+  try {
+    metadata = lstatSync(dependencyRoot)
+  } catch {
+    fail('OpenNext generated runtime dependency tree could not be read')
+  }
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    fail('OpenNext generated runtime dependency tree is not a real directory')
+  }
+  visit(dependencyRoot, relativeEntry)
+  if (files.length === 0) fail('OpenNext generated runtime dependency tree has no files')
+  return files
+}
+
 export function removeVerifiedOpenNextResolverLinks(repositoryPath) {
   const buildRoot = resolve(repositoryPath, '.open-next')
+  const repositoryNodeModules = resolve(repositoryPath, 'node_modules')
   let frozenNodeModules
   try {
-    frozenNodeModules = realpathSync(resolve(repositoryPath, 'node_modules'))
+    const metadata = lstatSync(repositoryNodeModules)
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error('not a real directory')
+    frozenNodeModules = realpathSync(repositoryNodeModules)
   } catch {
     fail('OpenNext frozen node_modules is unavailable')
   }
@@ -632,7 +696,8 @@ export function removeVerifiedOpenNextResolverLinks(repositoryPath) {
   } catch {
     fail('OpenNext server functions directory could not be read')
   }
-  let removed = 0
+  let removedResolverLinks = 0
+  const verifiedGeneratedDependencyFiles = []
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.isSymbolicLink()) fail('OpenNext server function directory is invalid')
     const functionRoot = join(serverFunctionsRoot, entry.name)
@@ -645,7 +710,7 @@ export function removeVerifiedOpenNextResolverLinks(repositoryPath) {
       }
       if (!metadata.isFile() || metadata.isSymbolicLink()) fail('OpenNext server function evidence is invalid')
     }
-    const resolverLink = join(functionRoot, 'node_modules')
+    const dependencyRoot = join(functionRoot, 'node_modules')
     let children
     try {
       children = readdirSync(functionRoot, { withFileTypes: true })
@@ -657,21 +722,38 @@ export function removeVerifiedOpenNextResolverLinks(repositoryPath) {
         fail('OpenNext server function contains an unexpected symbolic link')
       }
     }
-    const relativeLink = `server-functions/${entry.name}/node_modules`
-    const resolver = readOpenNextResolverLinkDiagnostics(repositoryPath, resolverLink, frozenNodeModules)
-    if (!GENERATED_RUNTIME_NODE_MODULES_LINK.test(relativeLink) || !resolver.metadata?.isSymbolicLink()
-      || resolver.realTarget !== frozenNodeModules) {
+    const relativeEntry = `server-functions/${entry.name}/node_modules`
+    const resolver = readOpenNextResolverLinkDiagnostics(repositoryPath, dependencyRoot, frozenNodeModules)
+    if (!GENERATED_RUNTIME_NODE_MODULES_ENTRY.test(relativeEntry)) {
       failOpenNextResolverLink(resolver.description)
     }
-    try {
-      unlinkSync(resolverLink)
-    } catch {
-      failOpenNextResolverLink(`${resolver.description} removal=failed`)
+    if (resolver.metadata?.isSymbolicLink()) {
+      if (resolver.rawTarget !== repositoryNodeModules || resolver.realTarget !== frozenNodeModules) {
+        failOpenNextResolverLink(resolver.description)
+      }
+      try {
+        unlinkSync(dependencyRoot)
+      } catch {
+        failOpenNextResolverLink(`${resolver.description} removal=failed`)
+      }
+      removedResolverLinks += 1
+      continue
     }
-    removed += 1
+    if (resolver.metadata?.isDirectory()) {
+      verifiedGeneratedDependencyFiles.push(...verifyGeneratedRuntimeDependencyTree(
+        buildRoot, functionRoot, dependencyRoot, relativeEntry,
+      ))
+      continue
+    }
+    failOpenNextResolverLink(resolver.description)
   }
-  if (removed === 0) fail('OpenNext generated runtime resolver link is missing')
-  return removed
+  if (removedResolverLinks === 0 && verifiedGeneratedDependencyFiles.length === 0) {
+    fail('OpenNext generated runtime dependency entry is missing')
+  }
+  return Object.freeze({
+    removed_resolver_links: removedResolverLinks,
+    verified_generated_dependency_files: Object.freeze(verifiedGeneratedDependencyFiles.sort()),
+  })
 }
 
 function enumeratePublicBuildFiles(repositoryPath, archivePath) {
@@ -1066,8 +1148,13 @@ function resolveFacts(config, {
   })
   assertNoReachablePreviewBuildEvidence(repositoryPath)
   assertZeroActionsBuild(repositoryPath)
-  if (verifyGeneratedResolverLinks) removeVerifiedOpenNextResolverLinks(repositoryPath)
+  const resolverEntries = verifyGeneratedResolverLinks
+    ? removeVerifiedOpenNextResolverLinks(repositoryPath)
+    : { removed_resolver_links: 0, verified_generated_dependency_files: [] }
   const artifactBuildFiles = enumeratePublicBuildFiles(repositoryPath, config.artifact.archive.path)
+  if (resolverEntries.verified_generated_dependency_files.some((path) => !artifactBuildFiles.includes(path))) {
+    fail('OpenNext generated runtime dependency tree is not fully included in the artifact')
+  }
   createBuildArchive(repositoryPath, config.artifact.archive.path, artifactBuildFiles)
   const artifactPaths = enumerateArtifactPaths(
     config.artifact.file_tree.files,

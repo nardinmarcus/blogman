@@ -401,11 +401,39 @@ describe('OpenNext generated resolver-link removal', () => {
     return functionRoot
   }
 
-  it('removes only the verified OpenNext link before artifact enumeration', () => {
+  function writeGeneratedRuntimeDependencyDirectoryFixture(repositoryPath: string) {
+    const functionRoot = join(repositoryPath, '.open-next', 'server-functions', 'default')
+    mkdirSync(join(repositoryPath, 'node_modules'), { recursive: true })
+    mkdirSync(join(functionRoot, 'node_modules', '@fixture', 'runtime'), { recursive: true })
+    for (const file of ['handler.mjs', 'open-next.config.mjs', 'package.json']) {
+      writeFileSync(join(functionRoot, file), `${file}\n`)
+    }
+    const dependencyFile = join(functionRoot, 'node_modules', '@fixture', 'runtime', 'index.js')
+    writeFileSync(dependencyFile, 'export default true\n')
+    return { functionRoot, dependencyFile }
+  }
+
+  it('removes only a resolver symlink whose raw and real target are the frozen repository node_modules', () => {
     withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
       const functionRoot = writeGeneratedResolverLinkFixture(repositoryPath, join(repositoryPath, 'node_modules'))
-      expect(removeVerifiedOpenNextResolverLinks(repositoryPath)).toBe(1)
+      expect(removeVerifiedOpenNextResolverLinks(repositoryPath)).toEqual({
+        removed_resolver_links: 1,
+        verified_generated_dependency_files: [],
+      })
       expect(existsSync(join(functionRoot, 'node_modules'))).toBe(false)
+    })
+  })
+
+  it('accepts a generated runtime dependency directory only after recursively proving regular-file content', () => {
+    withTemporaryDirectory('blogman-open-next-directory-', (repositoryPath) => {
+      const { dependencyFile } = writeGeneratedRuntimeDependencyDirectoryFixture(repositoryPath)
+      expect(removeVerifiedOpenNextResolverLinks(repositoryPath)).toEqual({
+        removed_resolver_links: 0,
+        verified_generated_dependency_files: [
+          'server-functions/default/node_modules/@fixture/runtime/index.js',
+        ],
+      })
+      expect(lstatSync(dependencyFile).isFile()).toBe(true)
     })
   })
 
@@ -586,26 +614,51 @@ try {
     })
   })
 
-  for (const type of ['directory', 'file'] as const) {
-    it(`fails closed for a ${type} resolver entry without native diagnostics`, () => {
-      withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
-        const functionRoot = join(repositoryPath, '.open-next', 'server-functions', 'default')
-        mkdirSync(join(repositoryPath, 'node_modules'), { recursive: true })
-        mkdirSync(functionRoot, { recursive: true })
-        for (const required of ['handler.mjs', 'open-next.config.mjs', 'package.json']) {
-          writeFileSync(join(functionRoot, required), `${required}\n`)
-        }
-        const resolverPath = join(functionRoot, 'node_modules')
-        if (type === 'directory') mkdirSync(resolverPath)
-        else writeFileSync(resolverPath, 'not a resolver link\n')
-
-        expectResolverLinkFailure(
+  it('fails closed for a nested runtime dependency symlink, including one aimed outside the checkout', () => {
+    withTemporaryDirectory('blogman-open-next-directory-', (repositoryPath) => {
+      const outside = mkdtempSync(join(tmpdir(), 'blogman-outside-runtime-dependency-'))
+      try {
+        const { functionRoot } = writeGeneratedRuntimeDependencyDirectoryFixture(repositoryPath)
+        symlinkSync(outside, join(functionRoot, 'node_modules', '@fixture', 'runtime', 'outside-link'))
+        expectPathFreeResolverFailure(
           () => removeVerifiedOpenNextResolverLinks(repositoryPath),
-          `metadata=${type} raw_target=not-applicable real_target=other target_location=checkout`,
+          repositoryPath,
+          'OpenNext generated runtime dependency tree contains symbolic link',
         )
-      })
+      } finally {
+        rmSync(outside, { recursive: true, force: true })
+      }
     })
-  }
+  })
+
+  it('fails closed for a nonregular runtime dependency entry', () => {
+    withTemporaryDirectory('blogman-open-next-directory-', (repositoryPath) => {
+      const { functionRoot } = writeGeneratedRuntimeDependencyDirectoryFixture(repositoryPath)
+      const fifo = join(functionRoot, 'node_modules', '@fixture', 'runtime', 'unsupported')
+      execFileSync('mkfifo', [fifo])
+      expectPathFreeResolverFailure(
+        () => removeVerifiedOpenNextResolverLinks(repositoryPath),
+        repositoryPath,
+        'OpenNext generated runtime dependency tree contains unsupported entry',
+      )
+    })
+  })
+
+  it('fails closed for a file resolver entry without native diagnostics', () => {
+    withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
+      const functionRoot = join(repositoryPath, '.open-next', 'server-functions', 'default')
+      mkdirSync(join(repositoryPath, 'node_modules'), { recursive: true })
+      mkdirSync(functionRoot, { recursive: true })
+      for (const required of ['handler.mjs', 'open-next.config.mjs', 'package.json']) {
+        writeFileSync(join(functionRoot, required), `${required}\n`)
+      }
+      writeFileSync(join(functionRoot, 'node_modules'), 'not a resolver entry\n')
+      expectResolverLinkFailure(
+        () => removeVerifiedOpenNextResolverLinks(repositoryPath),
+        'metadata=file raw_target=not-applicable real_target=other target_location=checkout',
+      )
+    })
+  })
 
   it('fails closed for an extra server-function symbolic link', () => {
     withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
@@ -1711,15 +1764,15 @@ describe('Issue #23 Delivery Preparation', () => {
       const fixtureOpenNext = join(fixtureBin, 'opennextjs-cloudflare')
       const fixtureWrangler = join(fixtureBin, 'wrangler')
       mkdirSync(fixtureBin, { recursive: true })
-      writeFileSync(fixtureOpenNext, `const { mkdirSync, symlinkSync, writeFileSync } = require('node:fs')
+      writeFileSync(fixtureOpenNext, `const { mkdirSync, writeFileSync } = require('node:fs')
 mkdirSync('.open-next/assets', { recursive: true })
 mkdirSync('.next/server', { recursive: true })
 writeFileSync('.open-next/assets/index.html', 'fixture artifact: .open-next/assets/index.html\\n')
 writeFileSync('.open-next/worker.js', 'fixture worker: .open-next/worker.js\\n')
 writeFileSync('.open-next/runtime.js', 'fixture runtime\\n')
-mkdirSync('.open-next/server-functions/default', { recursive: true })
+mkdirSync('.open-next/server-functions/default/node_modules/@fixture/runtime', { recursive: true })
 for (const file of ['handler.mjs', 'open-next.config.mjs', 'package.json']) writeFileSync('.open-next/server-functions/default/' + file, file + '\\n')
-symlinkSync('../../../node_modules', '.open-next/server-functions/default/node_modules')
+writeFileSync('.open-next/server-functions/default/node_modules/@fixture/runtime/index.js', 'export default true\\n')
 writeFileSync('.next/server/app-paths-manifest.json', '{}\\n')
 writeFileSync('.next/server/pages-manifest.json', '{}\\n')
 writeFileSync('.next/server/middleware-manifest.json', '{"version":3,"middleware":{},"functions":{},"sortedMiddleware":[]}\\n')
@@ -1788,6 +1841,10 @@ exec wrangler "$@"
       })
       expect(parsed.d1.mode).toBe('remote')
       expect(parsed.d1.evidence_class).toBe('production')
+      const dependencyPath = '.open-next/server-functions/default/node_modules/@fixture/runtime/index.js'
+      expect(parsed.artifact.file_tree.files).toContainEqual(expect.objectContaining({ path: dependencyPath }))
+      expect(execFileSync('unzip', ['-Z1', join(fixtureRepo, parsed.artifact.archive.path)], { encoding: 'utf8' }))
+        .toContain(dependencyPath.slice('.open-next/'.length))
       const nodeExecutable = process.execPath
       const npmCliPath = join(dirname(dirname(nodeExecutable)), 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')
       expect(parsed.toolchain.npm).toEqual({
@@ -1835,6 +1892,18 @@ exec wrangler "$@"
 
     const first = captureRun(1)
     const second = captureRun(2)
+    const generatedRuntimeDependencyFiles = first.result.value.artifact.file_tree.files
+      .filter(({ path }) => path.startsWith('.open-next/server-functions/default/node_modules/'))
+      .map(({ path }) => path)
+    const archiveEntries = execFileSync(
+      'unzip',
+      ['-Z1', join(repoRoot, first.result.value.artifact.archive.path)],
+      { encoding: 'utf8' },
+    ).trim().split(/\r?\n/u).filter(Boolean)
+    expect(generatedRuntimeDependencyFiles.length).toBeGreaterThan(0)
+    for (const path of generatedRuntimeDependencyFiles) {
+      expect(archiveEntries).toContain(path.slice('.open-next/'.length))
+    }
     const diff = fileMapDiff(first.fileMap, second.fileMap)
     const firstChangedPath = diff.changed.find(({ path }) =>
       path.endsWith('.js') || path.endsWith('.mjs'),
