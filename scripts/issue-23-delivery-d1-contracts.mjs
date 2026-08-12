@@ -1,4 +1,10 @@
 import { createHash } from 'node:crypto'
+import {
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+} from 'node:fs'
 
 export const D1_STAGE_TIMEOUT_MS = Object.freeze({
   d1_identity: 120_000,
@@ -16,6 +22,69 @@ export const D1_CANONICAL_MIGRATION_NAMES = Object.freeze([
   '005_fix_posts_fts_sync',
   '006_add_rollout_safety_controls',
 ])
+
+const D1_CATALOG_NUL = Buffer.from([0])
+
+function assertCatalogEntry(path, type, label) {
+  let metadata
+  try {
+    metadata = lstatSync(path)
+  } catch {
+    throw new Error(`D1 contracts: ${label} is missing`)
+  }
+  if (metadata.isSymbolicLink()) throw new Error(`D1 contracts: ${label} must not be a symlink`)
+  if (type === 'directory' && !metadata.isDirectory()) {
+    throw new Error(`D1 contracts: ${label} must be a directory`)
+  }
+  if (type === 'file' && !metadata.isFile()) {
+    throw new Error(`D1 contracts: ${label} must be a regular file`)
+  }
+  if (typeof process.geteuid !== 'function' || metadata.uid !== process.geteuid()) {
+    throw new Error(`D1 contracts: ${label} has an unsafe owner`)
+  }
+  if ((metadata.mode & 0o022) !== 0) {
+    throw new Error(`D1 contracts: ${label} has unsafe write permissions`)
+  }
+  if (type === 'file' && metadata.nlink !== 1) {
+    throw new Error(`D1 contracts: ${label} has an unsafe link count`)
+  }
+  try {
+    if (realpathSync(path) !== path) throw new Error()
+  } catch {
+    throw new Error(`D1 contracts: ${label} must have a canonical realpath`)
+  }
+  return metadata
+}
+
+export function hashD1ArtifactDirectory(path) {
+  assertCatalogEntry(path, 'directory', 'migration catalog')
+  const hash = createHash('sha256')
+  const visit = (directory, prefix) => {
+    for (const name of readdirSync(directory).sort()) {
+      const child = `${directory}/${name}`
+      const relativePath = prefix ? `${prefix}/${name}` : name
+      const metadata = lstatSync(child)
+      if (metadata.isSymbolicLink()) {
+        throw new Error('D1 contracts: migration catalog contains a symlink')
+      }
+      if (metadata.isDirectory()) {
+        assertCatalogEntry(child, 'directory', `migration catalog directory ${relativePath}`)
+        visit(child, relativePath)
+        continue
+      }
+      assertCatalogEntry(child, 'file', `migration catalog file ${relativePath}`)
+      const bytes = readFileSync(child)
+      hash.update(Buffer.from(relativePath, 'utf8'))
+        .update(D1_CATALOG_NUL)
+        .update(Buffer.from(String(metadata.size), 'utf8'))
+        .update(D1_CATALOG_NUL)
+        .update(bytes)
+        .update(D1_CATALOG_NUL)
+    }
+  }
+  visit(path, '')
+  return hash.digest('hex')
+}
 
 const D1_STAGE_BINDING_KEYS = Object.freeze([
   'mode',

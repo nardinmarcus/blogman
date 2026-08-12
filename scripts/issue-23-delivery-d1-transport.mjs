@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto'
 import {
   lstatSync,
   readFileSync,
-  readdirSync,
   realpathSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -11,6 +10,7 @@ import {
   D1_CANONICAL_MIGRATION_NAMES,
   D1_STAGE_TIMEOUT_MS,
   d1StageBindingsSha256,
+  hashD1ArtifactDirectory,
   identityDurationMs,
   parseRemoteD1InfoResponse,
   parseStrictJson,
@@ -172,31 +172,6 @@ function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
-function hashDirectoryEntry(directory, prefix, hash) {
-  const entries = readdirSync(directory).sort()
-  for (const name of entries) {
-    const path = join(directory, name)
-    const relativePath = prefix ? `${prefix}/${name}` : name
-    const metadata = lstatSync(path)
-    if (metadata.isSymbolicLink()) fail('migration catalog contains a symlink')
-    if (metadata.isDirectory()) {
-      assertSafeFilesystemEntry(path, 'directory', `migration catalog directory ${relativePath}`)
-      hashDirectoryEntry(path, relativePath, hash)
-      continue
-    }
-    if (!metadata.isFile()) fail('migration catalog contains an unsupported entry')
-    assertSafeFilesystemEntry(path, 'file', `migration catalog file ${relativePath}`)
-    const bytes = readFileSync(path)
-    hash.update(`${relativePath}\0${metadata.size}\0`).update(bytes).update('\0')
-  }
-}
-
-export function hashD1ArtifactDirectory(path) {
-  assertSafeFilesystemEntry(path, 'directory', 'migration catalog')
-  const hash = createHash('sha256')
-  hashDirectoryEntry(path, '', hash)
-  return hash.digest('hex')
-}
 
 function validateExpectedReconciliation(path) {
   const bytes = readFileSync(path)
@@ -530,6 +505,8 @@ function rolloutSafetyCommand(config) {
   args.push('--config', config.config_path)
   return args
 }
+
+export { hashD1ArtifactDirectory }
 
 export function createD1Transport(config) {
   if (arguments.length !== 1) fail('createD1Transport accepts exactly one config argument')

@@ -21,8 +21,11 @@ import {
   D1_TRANSPORT_MAX_OUTPUT_BYTES,
   createD1Transport,
   getD1TransportProvenance,
+  hashD1ArtifactDirectory as transportHashD1ArtifactDirectory,
 } from '../../scripts/issue-23-delivery-d1-transport.mjs'
 import {
+  d1StageBindingsSha256,
+  hashD1ArtifactDirectory as contractHashD1ArtifactDirectory,
   identityDurationMs,
   parseRemoteD1InfoResponse,
   parseStrictJson,
@@ -119,6 +122,17 @@ afterEach(() => {
 })
 
 describe('Issue #90 D1 transport', () => {
+  it('uses one exact actual-NUL catalog tree framing across D1 contracts and transport', () => {
+    const expected = '4713f17de5d32b512ab7d5611474a9605576b3f612fd056b355759e96270e32c'
+
+    expect(contractHashD1ArtifactDirectory(catalogPath)).toBe(expected)
+    expect(transportHashD1ArtifactDirectory(catalogPath)).toBe(expected)
+    expect(d1StageBindingsSha256({
+      ...createConfig().config,
+      migration_catalog_sha256: expected,
+    })).toMatch(/^[a-f0-9]{64}$/u)
+  })
+
   it('rejects remote transport config without production evidence', () => {
     const { config } = createConfig({
       mode: 'remote',
