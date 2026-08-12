@@ -63,8 +63,16 @@ describe('Verify workflow test partition', () => {
     expect(workflow).toContain('permissions:\n  contents: read\n  actions: read')
     expect(existsSync(join(repoRoot, '.github', 'workflows', 'formal-rehearsal-macos.yml'))).toBe(false)
     expect(macosJob).toContain('runs-on: macos-latest')
+    expect(macosJob).toContain('timeout-minutes: 20')
     expect(macosJob).toContain("ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}")
     expect(macosJob).toContain('GH_TOKEN: ${{ github.token }}')
+    expect(macosJob.match(/run: npm run test:run/g)).toHaveLength(2)
+    expect(macosJob).toContain(
+      'run: npm run test:run -- tests/scripts/issue-23-delivery-prepare.test.ts --reporter=verbose',
+    )
+    expect(macosJob).toContain(
+      'run: npm run test:run -- tests/scripts/issue-92-formal-rehearsal.test.ts --reporter=verbose',
+    )
     expect(macosJob).not.toContain('workflow_run')
     expect(macosJob).not.toMatch(/secrets\.|contents: write|actions: write/u)
   })

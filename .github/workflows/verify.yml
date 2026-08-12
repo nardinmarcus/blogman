@@ -45,7 +45,7 @@ jobs:
 
   verify-target-macos:
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       - name: Checkout exact candidate
