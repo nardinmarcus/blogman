@@ -409,13 +409,30 @@ describe('OpenNext generated resolver-link removal', () => {
     })
   })
 
+  function expectResolverLinkFailure(
+    callback: () => unknown,
+    diagnostic: string,
+  ) {
+    let error: unknown
+    try {
+      callback()
+    } catch (thrown) {
+      error = thrown
+    }
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toBe(
+      `Canonical Frozen Manifest: OpenNext runtime resolver link is not the generated frozen-node-modules link (${diagnostic})`,
+    )
+  }
+
   it('reports but rejects a resolver link to standalone node_modules', () => {
     withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
       const standaloneNodeModules = join(repositoryPath, '.next', 'standalone', 'node_modules')
       mkdirSync(standaloneNodeModules, { recursive: true })
       writeGeneratedResolverLinkFixture(repositoryPath, standaloneNodeModules)
-      expect(() => removeVerifiedOpenNextResolverLinks(repositoryPath)).toThrow(
-        /metadata=symbolic-link raw_equals_repo_node_modules=false raw_equals_standalone_node_modules=true real_equals_repo_node_modules=false real_equals_standalone_node_modules=true target_inside_checkout=true/u,
+      expectResolverLinkFailure(
+        () => removeVerifiedOpenNextResolverLinks(repositoryPath),
+        'metadata=symbolic-link raw_target=standalone-node-modules real_target=standalone-node-modules target_location=checkout',
       )
     })
   })
@@ -425,14 +442,47 @@ describe('OpenNext generated resolver-link removal', () => {
       const outside = mkdtempSync(join(tmpdir(), 'blogman-outside-node-modules-'))
       try {
         writeGeneratedResolverLinkFixture(repositoryPath, outside)
-        expect(() => removeVerifiedOpenNextResolverLinks(repositoryPath)).toThrow(
-          /metadata=symbolic-link raw_equals_repo_node_modules=false raw_equals_standalone_node_modules=false real_equals_repo_node_modules=false real_equals_standalone_node_modules=false target_inside_checkout=false/u,
+        expectResolverLinkFailure(
+          () => removeVerifiedOpenNextResolverLinks(repositoryPath),
+          'metadata=symbolic-link raw_target=other real_target=other target_location=outside-checkout',
         )
       } finally {
         rmSync(outside, { recursive: true, force: true })
       }
     })
   })
+
+  it('fails closed for a broken resolver symlink without exposing its target', () => {
+    withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
+      const missingTarget = join(repositoryPath, 'missing-node-modules')
+      writeGeneratedResolverLinkFixture(repositoryPath, missingTarget)
+      expectResolverLinkFailure(
+        () => removeVerifiedOpenNextResolverLinks(repositoryPath),
+        'metadata=symbolic-link raw_target=other real_target=unavailable target_location=unavailable',
+      )
+    })
+  })
+
+  for (const type of ['directory', 'file'] as const) {
+    it(`fails closed for a ${type} resolver entry without native diagnostics`, () => {
+      withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
+        const functionRoot = join(repositoryPath, '.open-next', 'server-functions', 'default')
+        mkdirSync(join(repositoryPath, 'node_modules'), { recursive: true })
+        mkdirSync(functionRoot, { recursive: true })
+        for (const required of ['handler.mjs', 'open-next.config.mjs', 'package.json']) {
+          writeFileSync(join(functionRoot, required), `${required}\n`)
+        }
+        const resolverPath = join(functionRoot, 'node_modules')
+        if (type === 'directory') mkdirSync(resolverPath)
+        else writeFileSync(resolverPath, 'not a resolver link\n')
+
+        expectResolverLinkFailure(
+          () => removeVerifiedOpenNextResolverLinks(repositoryPath),
+          `metadata=${type} raw_target=not-applicable real_target=other target_location=checkout`,
+        )
+      })
+    })
+  }
 
   it('fails closed for an extra server-function symbolic link', () => {
     withTemporaryDirectory('blogman-open-next-link-', (repositoryPath) => {
