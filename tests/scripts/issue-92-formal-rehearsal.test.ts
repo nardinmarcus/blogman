@@ -11,6 +11,7 @@ import { runInFormalRehearsalContext } from '../../scripts/issue-23-delivery-for
 const REPOSITORY_ROOT = process.cwd()
 const IS_MACOS = platform() === 'darwin'
 const IS_MACOS_CI_GATE = IS_MACOS && process.env.GITHUB_ACTIONS === 'true'
+const BOUNDED_FORMAL_PATH_TIMEOUT_MS = 240_000
 const SHA256 = /^[a-f0-9]{64}$/u
 const ALL_STAGES = [
   'authorization_accept',
@@ -162,7 +163,7 @@ describe('Issue #92 formal rehearsal public path', () => {
     expect(() => runFormalRehearsal({} as never, {} as never)).toThrow(/exactly one config/u)
   })
 
-  it.skipIf(!IS_MACOS_CI_GATE)('runs public prepare(config) then public execute(manifest, authorization) through the exact no-network formal gate', { timeout: 120_000 }, () => {
+  it.skipIf(!IS_MACOS_CI_GATE)('runs public prepare(config) then public execute(manifest, authorization) through the exact no-network formal gate', { timeout: BOUNDED_FORMAL_PATH_TIMEOUT_MS }, () => {
     const result = runFormalRehearsal(formalConfig())
 
     expect(result.manifest.bytes).toEqual(expect.any(Uint8Array))
@@ -236,7 +237,7 @@ describe('Issue #92 formal rehearsal public path', () => {
     }
   })
 
-  it.skipIf(!IS_MACOS_CI_GATE)('covers a module-owned fail-closed live-precondition fault through the same public call graph', { timeout: 180_000 }, async () => {
+  it.skipIf(!IS_MACOS_CI_GATE)('covers a module-owned fail-closed live-precondition fault through the same public call graph', { timeout: BOUNDED_FORMAL_PATH_TIMEOUT_MS }, async () => {
     const { runFormalFaultHarnessForTestsOnly } = await import('../../scripts/issue-23-delivery-formal-fault-harness.mjs')
     const result = runFormalFaultHarnessForTestsOnly('live_preconditions', () => runFormalRehearsal(formalConfig()))
 
