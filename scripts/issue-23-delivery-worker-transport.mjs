@@ -245,7 +245,7 @@ function uploadCommand(bindings, paths) {
 }
 
 /** Private adapter. It emits only bounded, public terminal facts. */
-export function createWorkerTransport(bindings) {
+export function createWorkerTransport(bindings, environments = { cloudflare: process.env, smoke: process.env }) {
   if (!bindings || typeof bindings !== 'object') fail('bindings are required')
   for (const key of [
     'manifest_sha256', 'authorization_sha256', 'attempt_id', 'smoke_admin_credential',
@@ -301,7 +301,7 @@ export function createWorkerTransport(bindings) {
     assertBoundFile(bindings.lockfile_path, bindings.lockfile_sha256)
   }
 
-  function invoke(executable, args, request, spent, env = process.env, stdin = null) {
+  function invoke(executable, args, request, spent, env = environments.cloudflare, stdin = null) {
     validateLocalBindings()
     const remaining = Math.min(request.timeout_ms - spent, OVERALL_TIMEOUT_MS - request.elapsed_ms - spent)
     if (!Number.isSafeInteger(remaining) || remaining <= 0) {
@@ -372,7 +372,7 @@ export function createWorkerTransport(bindings) {
           command.args,
           request,
           0,
-          { ...process.env, WRANGLER_OUTPUT_FILE_PATH: output },
+          { ...environments.cloudflare, WRANGLER_OUTPUT_FILE_PATH: output },
         )
         return response(parseJson(result.stdout, 'upload_acceptance', result.duration_ms), result.duration_ms)
       } finally {
@@ -408,7 +408,7 @@ export function createWorkerTransport(bindings) {
         command.args,
         request,
         spent,
-        process.env,
+        environments.smoke,
         smokeStdin(bindings.smoke_admin_credential),
       )
       spent += requestResult.duration_ms
@@ -443,15 +443,19 @@ export function createWorkerTransport(bindings) {
  * records that argv and returns a bounded recorded response; it never invokes
  * a command and rejects anything outside the fixed formal command plan.
  */
-export function createRehearsalWorkerTransport(bindings, sink, fault = null) {
+export function createRehearsalWorkerTransport(bindings, sink, fault = null, environments = { cloudflare: {}, smoke: {} }) {
   if (!bindings || typeof bindings !== 'object') fail('bindings are required')
   const origin = new URL(bindings.origin)
   if (!['http:', 'https:'].includes(origin.protocol)) fail('origin is invalid')
-  const record = (operation, command, stdout) => {
+  const record = (operation, command, stdout, request = {}) => {
     if (!command || typeof command.executable !== 'string' || !Array.isArray(command.args)) {
       fail(`formal rehearsal refused unconstructed ${operation} command`)
     }
-    if (sink) sink.push({ adapter: 'worker', operation, argv: [command.executable, ...command.args] })
+    const environment = operation.endsWith('.smoke') ? environments.smoke : environments.cloudflare
+    if (sink) sink.push({
+      adapter: 'worker', operation, argv: [command.executable, ...command.args],
+      env_keys: Object.keys(environment).sort(), ...request,
+    })
     return { status: 0, stdout: JSON.stringify(stdout), stderr: '', duration_ms: 1 }
   }
   const deploymentRaw = (version) => ({
@@ -527,10 +531,16 @@ export function createRehearsalWorkerTransport(bindings, sink, fault = null) {
     parseD1Identity(identity.stdout, bindings.d1_database_id, identity.duration_ms)
     const checks = {}
     for (const { path, status } of bindings.smoke.requests) {
+      const stdin = smokeStdin(bindings.smoke_admin_credential)
       const result = record(
         `${request.operation}.smoke`,
         smokeCommand(bindings, new URL(path, origin).toString()),
         status,
+        {
+          stdin_sha256: hash(stdin),
+          stdin_bytes: stdin.byteLength,
+          env_keys: Object.keys(environments.smoke).sort(),
+        },
       )
       if (result.stdout !== JSON.stringify(status)) throw new WorkerTransportError('NON_PASS', 'smoke_control_contract_invalid')
       checks[path] = status

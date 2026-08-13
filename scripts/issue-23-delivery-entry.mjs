@@ -252,6 +252,12 @@ const CANONICAL_MANIFEST_WORKER_PATTERN = /^[A-Za-z0-9._-]+$/u
 const CANONICAL_MANIFEST_ORIGIN_PATTERN = /^https:\/\/[A-Za-z0-9._/-]+$/u
 const SYSTEM_CURL_PATH = '/usr/bin/curl'
 const SMOKE_CREDENTIAL_ENV = 'DELIVERY_SMOKE_ADMIN'
+const CLOUDFLARE_TOKEN_ENV = 'CLOUDFLARE_API_TOKEN'
+const CLOUDFLARE_ACCOUNT_ENV = 'CLOUDFLARE_ACCOUNT_ID'
+const CLOUDFLARE_SCOPES_ENV = 'CLOUDFLARE_DELIVERY_SCOPES'
+const CLOUDFLARE_TOKEN_PATTERN = /^[A-Za-z0-9._~-]{8,512}$/u
+const CLOUDFLARE_SCOPES = Object.freeze(['account:read', 'd1:write', 'workers:write'])
+const CHILD_ENV_ALLOWLIST = Object.freeze(['HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR'])
 const SMOKE_CREDENTIAL_PATTERN = /^[A-Za-z0-9._~-]+$/u
 const CANONICAL_MANIFEST_ROOT_KEYS = [
   'format',
@@ -978,21 +984,19 @@ function createAttemptClock() {
   const clock = currentFormalContext()?.clock
   const startedMilliseconds = clock ? clock.wallTimeMilliseconds() : Date.now()
   const startedMonotonic = clock ? clock.monotonicNanoseconds() : process.hrtime.bigint()
+  const measuredMilliseconds = () => {
+    const current = clock ? clock.monotonicNanoseconds() : process.hrtime.bigint()
+    return current >= startedMonotonic ? Math.ceil(Number(current - startedMonotonic) / 1e6) : 0
+  }
   if (!Number.isSafeInteger(startedMilliseconds) || startedMilliseconds < 0
     || typeof startedMonotonic !== 'bigint' || startedMonotonic < 0n) {
     fail('internal attempt clock is invalid')
   }
   return Object.freeze({
     started_at: new Date(startedMilliseconds).toISOString(),
+    elapsedMilliseconds: measuredMilliseconds,
     finish(minimumElapsedMilliseconds) {
-      const endedMonotonic = clock ? clock.monotonicNanoseconds() : process.hrtime.bigint()
-      const measured = endedMonotonic >= startedMonotonic
-        ? Math.ceil(Number(endedMonotonic - startedMonotonic) / 1e6)
-        : 0
-      const elapsed = Math.min(
-        OVERALL_TIMEOUT_SECONDS * 1000,
-        Math.max(minimumElapsedMilliseconds, measured),
-      )
+      const elapsed = Math.max(minimumElapsedMilliseconds, measuredMilliseconds())
       return new Date(startedMilliseconds + elapsed).toISOString()
     },
   })
@@ -1011,6 +1015,18 @@ function stageDurations(trace) {
   const durations = Object.fromEntries(DELIVERY_STAGES.map((stage) => [stage, 0]))
   for (const entry of trace) durations[entry.stage] += entry.duration_ms
   return durations
+}
+
+function assertWranglerTargetBinding(manifestValue) {
+  const configText = readFileSync(resolve(ENTRY_REPO_ROOT, manifestValue.d1.config_path), 'utf8')
+  const topLevelConfig = configText.split(/^\s*\[/mu, 1)[0]
+  const workerName = topLevelConfig.match(/^\s*name\s*=\s*["']([^"']+)["']\s*$/mu)?.[1]
+  const databaseSection = [...configText.matchAll(/\[\[d1_databases\]\]([\s\S]*?)(?=\n\[|$)/gu)]
+    .find(([, section]) => section.match(/^binding\s*=\s*["']([^"']+)["']/mu)?.[1] === manifestValue.d1.database)?.[1]
+  const databaseId = databaseSection?.match(/^database_id\s*=\s*["']([^"']+)["']/mu)?.[1]
+  if (workerName !== manifestValue.target.worker_name || databaseId !== manifestValue.target.d1_database_id) {
+    fail('Wrangler config target identity drifted from the manifest')
+  }
 }
 
 function assertCurrentFormalEntryClosure(manifestValue) {
@@ -1305,8 +1321,6 @@ const FORMAL_REHEARSAL_D1_EVIDENCE_POLICY = Object.freeze({
 function sanitizedD1Error(classification, d1, evidencePolicy = PRODUCTION_D1_EVIDENCE_POLICY) {
   const stageCounts = Object.fromEntries(PRODUCTION_D1_STAGES.map((stage) => [stage, 0]))
   const stageDurations = Object.fromEntries(PRODUCTION_D1_STAGES.map((stage) => [stage, 0]))
-  stageCounts.d1_identity = 1
-  stageDurations.d1_identity = 1
   const identity = {
     account_id: d1.account_id,
     d1_database_id: d1.d1_database_id,
@@ -1315,7 +1329,7 @@ function sanitizedD1Error(classification, d1, evidencePolicy = PRODUCTION_D1_EVI
   const value = {
     format: 'blogman-issue-23-d1-stages/v1',
     outcome: 'ERROR',
-    first_terminal_stage: 'd1_identity',
+    first_terminal_stage: null,
     failure: { classification },
     stage_counts: stageCounts,
     stage_durations_ms: stageDurations,
@@ -1332,9 +1346,7 @@ function sanitizedD1Error(classification, d1, evidencePolicy = PRODUCTION_D1_EVI
       migration_catalog_sha256: d1.migration_catalog_sha256,
       rollout_safety_sha256: d1.rollout_safety_sha256,
       expected_reconciliation_sha256: d1.expected_reconciliation_sha256,
-      trace_sha256: sha256(canonicalJsonBytes([{
-        stage: 'd1_identity', outcome: 'ERROR', classification, duration_ms: 1,
-      }])),
+      trace_sha256: sha256(canonicalJsonBytes([])),
     },
     finalized: true,
   }
@@ -1342,8 +1354,8 @@ function sanitizedD1Error(classification, d1, evidencePolicy = PRODUCTION_D1_EVI
   return Object.freeze({ value, bytes, sha256: sha256(bytes) })
 }
 
-function normalizeD1Result(result, evidencePolicy) {
-  const malformed = () => sanitizedD1Error(evidencePolicy.malformed_classification, evidencePolicy)
+function normalizeD1Result(result, evidencePolicy, d1) {
+  const malformed = () => sanitizedD1Error(evidencePolicy.malformed_classification, d1, evidencePolicy)
   if (!isPlainRecord(result) || !isPlainRecord(result.value)
     || !(result.bytes instanceof Uint8Array)
     || typeof result.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(result.sha256)
@@ -1383,6 +1395,20 @@ function normalizeD1Result(result, evidencePolicy) {
       return malformed()
     }
   }
+  if (value.outcome === 'ERROR' && value.first_terminal_stage === null
+    && isPlainRecord(value.failure) && typeof value.failure.classification === 'string'
+    && PRODUCTION_D1_STAGES.every((stage) => value.stage_counts[stage] === 0
+      && value.stage_durations_ms[stage] === 0)) {
+    return {
+      outcome: 'ERROR',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: value.failure.classification },
+      stage_counts: { ...value.stage_counts, d1_identity: 1 },
+      stage_durations_ms: { ...value.stage_durations_ms, d1_identity: 1 },
+      evidence_hashes: Object.fromEntries(D1_EVIDENCE_HASHES.map((name) => [name, value.evidence[name]])),
+      sha256: result.sha256,
+    }
+  }
   if (value.outcome === 'PASS') {
     if (value.first_terminal_stage !== null
       || value.failure !== null
@@ -1419,13 +1445,13 @@ function normalizeD1Result(result, evidencePolicy) {
   }
 }
 
-function normalizeProductionD1Result(result) {
-  return normalizeD1Result(result, PRODUCTION_D1_EVIDENCE_POLICY)
+function normalizeProductionD1Result(result, d1) {
+  return normalizeD1Result(result, PRODUCTION_D1_EVIDENCE_POLICY, d1)
 }
 
 /** Private rehearsal path only. Never used by public production execute. */
-function normalizeFormalRehearsalD1Result(result) {
-  return normalizeD1Result(result, FORMAL_REHEARSAL_D1_EVIDENCE_POLICY)
+function normalizeFormalRehearsalD1Result(result, d1) {
+  return normalizeD1Result(result, FORMAL_REHEARSAL_D1_EVIDENCE_POLICY, d1)
 }
 
 const WORKER_RESULT_STAGES = Object.freeze(['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'])
@@ -1457,12 +1483,11 @@ function malformedWorkerResult(evidencePolicy, identity) {
   const value = {
     format: 'blogman-issue-23-worker-stages/v1',
     outcome: 'ERROR',
-    first_terminal_stage: 'worker_deploy',
+    first_terminal_stage: null,
     failure: { classification: 'worker_result_malformed' },
-    stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 },
-    stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 },
-    // A malformed receipt may have followed a spawned upload; do not erase that attempt.
-    mutation_counts: { attempted: 1, confirmed: 0 },
+    stage_counts: { worker_deploy: 0, version_traffic_verification: 0, smoke_control_t0: 0 },
+    stage_durations_ms: { worker_deploy: 0, version_traffic_verification: 0, smoke_control_t0: 0 },
+    mutation_counts: { attempted: 0, confirmed: 0 },
     evidence: {
       source: evidencePolicy.source,
       production: evidencePolicy.production,
@@ -1480,10 +1505,10 @@ function malformedWorkerResult(evidencePolicy, identity) {
   const receipt = Object.freeze({ value, bytes, sha256: sha256(bytes) })
   return {
     outcome: value.outcome,
-    first_terminal_stage: value.first_terminal_stage,
+    first_terminal_stage: 'worker_deploy',
     failure: value.failure,
-    stage_counts: value.stage_counts,
-    stage_durations_ms: value.stage_durations_ms,
+    stage_counts: { ...value.stage_counts, worker_deploy: 1 },
+    stage_durations_ms: { ...value.stage_durations_ms, worker_deploy: 1 },
     mutation_counts: value.mutation_counts,
     evidence_hashes: { ...value.evidence.hashes },
     sha256: receipt.sha256,
@@ -1624,18 +1649,35 @@ function currentFormalContext() {
   return currentFormalRehearsalContext()
 }
 
+function projectedEnvironment(values = {}) {
+  return Object.assign(Object.create(null), Object.fromEntries([
+    ...CHILD_ENV_ALLOWLIST.filter((name) => typeof process.env[name] === 'string')
+      .map((name) => [name, process.env[name]]),
+    ...Object.entries(values),
+  ]))
+}
+
 function formalAdapterFactories(context) {
   return Object.freeze({
-    createD1Transport(bindings) {
-      return createRehearsalD1Transport(bindings, context.sink, currentFormalFaultForTestsOnly())
+    createD1Transport(bindings, environments) {
+      return createRehearsalD1Transport(bindings, context.sink, currentFormalFaultForTestsOnly(), environments)
     },
-    createWorkerTransport(bindings) {
-      return createRehearsalWorkerTransport(bindings, context.sink, currentFormalFaultForTestsOnly())
+    createWorkerTransport(bindings, environments) {
+      return createRehearsalWorkerTransport(bindings, context.sink, currentFormalFaultForTestsOnly(), environments)
     },
     normalizeD1Result: normalizeFormalRehearsalD1Result,
     normalizeWorkerResult: normalizeFormalRehearsalWorkerResult,
-    resolveSmokeCredential() {
-      return 'formal-rehearsal-smoke-credential'
+    resolveCredentials(manifest) {
+      return Object.freeze({
+        smoke: 'formal-rehearsal-smoke-credential',
+        environments: Object.freeze({
+          cloudflare: Object.freeze(projectedEnvironment({
+            [CLOUDFLARE_TOKEN_ENV]: 'formal-cloudflare-placeholder',
+            [CLOUDFLARE_ACCOUNT_ENV]: manifest.target.account_id,
+          })),
+          smoke: Object.freeze(projectedEnvironment()),
+        }),
+      })
     },
     d1Error(classification, d1) {
       return sanitizedD1Error(classification, d1, FORMAL_REHEARSAL_D1_EVIDENCE_POLICY)
@@ -1651,11 +1693,15 @@ function formalAdapterFactories(context) {
 
 function productionAdapterFactories() {
   return Object.freeze({
-    createD1Transport,
-    createWorkerTransport,
+    createD1Transport(bindings, environments) {
+      return createD1Transport(bindings, environments.cloudflare)
+    },
+    createWorkerTransport(bindings, environments) {
+      return createWorkerTransport(bindings, environments)
+    },
     normalizeD1Result: normalizeProductionD1Result,
     normalizeWorkerResult: normalizeWorkerResultForTestsOnly,
-    resolveSmokeCredential(manifest) {
+    resolveCredentials(manifest) {
       const slot = manifest.policy.authorization.credential_slots.find(({ name }) => (
         name === manifest.target.smoke.admin_credential_slot
       ))
@@ -1666,7 +1712,27 @@ function productionAdapterFactories() {
       if (typeof credential !== 'string' || !SMOKE_CREDENTIAL_PATTERN.test(credential)) {
         throw new Error('smoke authority is unavailable')
       }
-      return credential
+      const cloudflareSlot = manifest.policy.authorization.credential_slots.find(({ name }) => (
+        name === 'cloudflare_delivery'
+      ))
+      const token = process.env[CLOUDFLARE_TOKEN_ENV]
+      const account = process.env[CLOUDFLARE_ACCOUNT_ENV]
+      const scopes = process.env[CLOUDFLARE_SCOPES_ENV]?.split(',').map((scope) => scope.trim()).sort()
+      if (!cloudflareSlot || !sameJsonValue([...cloudflareSlot.scopes].sort(), CLOUDFLARE_SCOPES)
+        || !CLOUDFLARE_TOKEN_PATTERN.test(token ?? '') || account !== manifest.target.account_id
+        || !sameJsonValue(scopes, CLOUDFLARE_SCOPES)) {
+        throw new Error('Cloudflare delivery authority is unavailable')
+      }
+      return Object.freeze({
+        smoke: credential,
+        environments: Object.freeze({
+          cloudflare: Object.freeze(projectedEnvironment({
+            [CLOUDFLARE_TOKEN_ENV]: token,
+            [CLOUDFLARE_ACCOUNT_ENV]: account,
+          })),
+          smoke: Object.freeze(projectedEnvironment()),
+        }),
+      })
     },
     d1Error(classification, d1) {
       return sanitizedD1Error(classification, d1, PRODUCTION_D1_EVIDENCE_POLICY)
@@ -1703,7 +1769,7 @@ function formalFaultResult(stage) {
   return { outcome: 'UNCERTAIN', classification: 'formal_rehearsal_uncertain', duration_ms: 1 }
 }
 
-function runLivePreconditions(manifest, d1, identity, smokeCredential, elapsed_ms = 0) {
+function runLivePreconditions(manifest, d1, identity, credentials, elapsed_ms = 0) {
   const adapters = activeAdapterFactories()
   let materialized
   try {
@@ -1712,8 +1778,8 @@ function runLivePreconditions(manifest, d1, identity, smokeCredential, elapsed_m
       manifest,
       materialized.path,
       identity,
-      smokeCredential,
-    ))
+      credentials.smoke,
+    ), credentials.environments)
       .livePreconditions(elapsed_ms)
     if (!isPlainRecord(result) || !['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(result.outcome)
       || !Number.isSafeInteger(result.duration_ms) || result.duration_ms <= 0
@@ -1781,9 +1847,11 @@ function executeProduction(manifest, authorization) {
     ? validateFormalRehearsalManifest(manifest.value, manifestBytes)
     : validateCanonicalManifest(manifest.value, manifestBytes)
   assertCurrentFormalEntryClosure(manifest.value)
+  assertWranglerTargetBinding(manifest.value)
   const adapters = activeAdapterFactories()
   const attemptClock = createAttemptClock()
   const authorizationDigest = acceptAuthorization(sha256(manifestBytes), authorization)
+  const authorizationElapsed = attemptClock.elapsedMilliseconds()
   const identities = {
     manifest_sha256: sha256(manifestBytes),
     authorization_sha256: authorizationDigest,
@@ -1797,15 +1865,17 @@ function executeProduction(manifest, authorization) {
     attempt_id: attemptId,
     candidate_id: manifest.value.repository.commit,
   })
-  const authorizationFault = formalFaultResult('authorization_accept')
-  let smokeCredential
+  const authorizationFault = authorizationElapsed > DELIVERY_STAGE_POLICY[0].timeout_seconds * 1000
+    ? { outcome: 'TIMEOUT', classification: 'stage_timeout', duration_ms: authorizationElapsed }
+    : formalFaultResult('authorization_accept')
+  let credentials
   let liveResult
   if (authorizationFault) {
     liveResult = authorizationFault
   } else {
     try {
-      smokeCredential = adapters.resolveSmokeCredential(manifest.value)
-      liveResult = runLivePreconditions(manifest.value, d1, workerIdentity, smokeCredential)
+      credentials = adapters.resolveCredentials(manifest.value)
+      liveResult = runLivePreconditions(manifest.value, d1, workerIdentity, credentials)
     } catch {
       liveResult = { outcome: 'ERROR', classification: 'smoke_auth_unavailable', duration_ms: 1 }
     }
@@ -1815,7 +1885,7 @@ function executeProduction(manifest, authorization) {
   let d1Receipt
   const durableD1Failure = (classification) => {
     d1Receipt = adapters.d1Error(classification, d1)
-    return adapters.normalizeD1Result(d1Receipt)
+    return adapters.normalizeD1Result(d1Receipt, d1)
   }
   let cleanup = { created: false, cleaned: true, observed_absent: true }
   if (liveResult.outcome === 'PASS') {
@@ -1824,7 +1894,7 @@ function executeProduction(manifest, authorization) {
       const bindings = deriveProductionD1Bindings(d1, materialized.path)
       let transport
       try {
-        transport = adapters.createD1Transport(bindings)
+        transport = adapters.createD1Transport(bindings, credentials.environments)
       } catch {
         d1Result = durableD1Failure(formal ? 'formal_rehearsal_d1_setup_error' : 'production_d1_setup_error')
       }
@@ -1835,7 +1905,7 @@ function executeProduction(manifest, authorization) {
             transport,
             elapsed_ms: liveResult.duration_ms,
           })
-          d1Result = adapters.normalizeD1Result(d1Receipt)
+          d1Result = adapters.normalizeD1Result(d1Receipt, d1)
         } catch {
           d1Result = durableD1Failure(formal ? 'formal_rehearsal_d1_adapter_error' : 'production_d1_adapter_error')
         }
@@ -1852,7 +1922,7 @@ function executeProduction(manifest, authorization) {
       formal ? 'formal_rehearsal_d1_adapter_error' : 'production_d1_adapter_error',
       d1,
     )
-    d1Result = adapters.normalizeD1Result(receipt)
+    d1Result = adapters.normalizeD1Result(receipt, d1)
   }
   let workerResult
   let workerReceipt
@@ -1864,11 +1934,11 @@ function executeProduction(manifest, authorization) {
         manifest.value,
         workerExpected.path,
         workerIdentity,
-        smokeCredential,
+        credentials.smoke,
       )
       workerReceipt = runWorkerStages({
         bindings,
-        transport: adapters.createWorkerTransport(bindings),
+        transport: adapters.createWorkerTransport(bindings, credentials.environments),
         elapsed_ms: liveResult.duration_ms
           + Object.values(d1Result.stage_durations_ms).reduce((sum, duration) => sum + duration, 0),
       })
@@ -1879,9 +1949,9 @@ function executeProduction(manifest, authorization) {
   const trace = authorizationFault
     ? [{ stage: 'authorization_accept', ...authorizationFault }]
     : productionTrace(liveResult, d1Result, workerResult)
-  const d1MutationAttempted = (d1Result.stage_counts.clean_start_reset ?? 0) + (d1Result.stage_counts.migrations_001_006 ?? 0)
-  const d1TerminalIndex = PRODUCTION_D1_STAGES.indexOf(d1Result.first_terminal_stage)
-  const d1MutationConfirmed = d1Result.outcome === 'PASS'
+  const d1MutationAttempted = (d1Result?.stage_counts?.clean_start_reset ?? 0) + (d1Result?.stage_counts?.migrations_001_006 ?? 0)
+  const d1TerminalIndex = PRODUCTION_D1_STAGES.indexOf(d1Result?.first_terminal_stage)
+  const d1MutationConfirmed = d1Result?.outcome === 'PASS'
     ? 2
     : (d1TerminalIndex > PRODUCTION_D1_STAGES.indexOf('migrations_001_006') ? 2
       : d1TerminalIndex > PRODUCTION_D1_STAGES.indexOf('clean_start_reset') ? 1 : 0)
@@ -1933,7 +2003,16 @@ function executeProduction(manifest, authorization) {
     },
     finalized: true,
   }
-  const result = terminalResult(value)
+  let result = terminalResult(value)
+  const measuredBeforePersistence = attemptClock.elapsedMilliseconds()
+  if (measuredBeforePersistence > OVERALL_TIMEOUT_SECONDS * 1000) {
+    value.outcome = 'TIMEOUT'
+    value.first_terminal_stage = terminal.stage
+    value.failure = { classification: 'overall_timeout' }
+    value.evidence.promotable = false
+    value.ended_at = attemptClock.finish(measuredBeforePersistence)
+    result = terminalResult(value)
+  }
   activeDeliverySink().persistTerminalResult({
     terminal: result,
     manifest,
@@ -1998,7 +2077,8 @@ export function validateProductionTerminalEvidence(result) {
     || typeof value.attempt_id !== 'string' || !/^[a-f0-9]{64}$/u.test(value.attempt_id)
     || startedAtMilliseconds === null || endedAtMilliseconds === null
     || endedAtMilliseconds < startedAtMilliseconds
-    || endedAtMilliseconds - startedAtMilliseconds > OVERALL_TIMEOUT_SECONDS * 1000
+    || (endedAtMilliseconds - startedAtMilliseconds > OVERALL_TIMEOUT_SECONDS * 1000
+      && !(value.outcome === 'TIMEOUT' && value.failure?.classification === 'overall_timeout'))
     || !['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(value.outcome)
     || !isPlainRecord(value.stage_counts) || !exact(value.stage_counts, DELIVERY_STAGES)
     || !isPlainRecord(value.stage_durations_ms) || !exact(value.stage_durations_ms, DELIVERY_STAGES)
@@ -2077,7 +2157,7 @@ export function validateProductionTerminalEvidence(result) {
       fail('production terminal evidence is invalid')
     }
   } else {
-    const normalizedD1 = normalizeProductionD1Result(d1Receipt)
+    const normalizedD1 = normalizeProductionD1Result(d1Receipt, parsedManifest.d1)
     if (!isPlainRecord(d1Receipt?.value)
       || !Buffer.from(d1Receipt.bytes ?? []).equals(canonicalJsonBytes(d1Receipt.value))
       || normalizedD1.sha256 !== value.evidence.hashes.d1_stage_receipt_sha256
@@ -2090,7 +2170,7 @@ export function validateProductionTerminalEvidence(result) {
       || d1Receipt.value.evidence.config_sha256 !== parsedManifest.d1.config_sha256
       || d1Receipt.value.evidence.wrangler_sha256 !== parsedManifest.d1.wrangler_sha256
       || d1Receipt.value.evidence.expected_reconciliation_sha256 !== parsedManifest.d1.expected_reconciliation_sha256
-      || PRODUCTION_D1_STAGES.some((stage) => value.stage_counts[stage] !== d1Receipt.value.stage_counts[stage])
+      || PRODUCTION_D1_STAGES.some((stage) => value.stage_counts[stage] !== normalizedD1.stage_counts[stage])
       || D1_EVIDENCE_HASHES.some((name) => value.evidence.hashes[`d1_${name}`] !== d1Receipt.value.evidence[name])) {
       fail('production terminal evidence is invalid')
     }
@@ -2112,7 +2192,7 @@ export function validateProductionTerminalEvidence(result) {
       || workerReceipt.value.evidence.source !== 'production'
       || workerReceipt.value.evidence.production !== true
       || workerReceipt.value.evidence.promotable !== (workerReceipt.value.outcome === 'PASS')
-      || WORKER_RESULT_STAGES.some((stage) => value.stage_counts[stage] !== workerReceipt.value.stage_counts[stage])
+      || WORKER_RESULT_STAGES.some((stage) => value.stage_counts[stage] !== normalizedWorker.stage_counts[stage])
       || WORKER_EVIDENCE_HASHES.some((name) => value.evidence.hashes[`worker_${name}`] !== workerReceipt.value.evidence.hashes[name])) {
       fail('production terminal evidence is invalid')
     }

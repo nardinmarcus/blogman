@@ -85,7 +85,13 @@ const D1_OPERATIONS = [
   'reconciliation',
 ]
 const REPOSITORY_ROOT = process.cwd()
-const DURABLE_SINK_ROOT = join(REPOSITORY_ROOT, '.issue-23-delivery')
+const DURABLE_SINK_ROOT = join(
+  execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+    cwd: REPOSITORY_ROOT,
+    encoding: 'utf8',
+  }).trim(),
+  'blogman-issue-23-delivery',
+)
 const ENTRY_MODULE_URL = pathToFileURL(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-entry.mjs')).href
 const SINK_MODULE_URL = pathToFileURL(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-evidence-sink.mjs')).href
 const RUNTIME_RECEIPT = buildFormalRuntimeReceipt().value
@@ -177,7 +183,7 @@ function d1Binding(overrides: Record<string, unknown> = {}) {
     config_sha256: CONFIG_HASH,
     wrangler_sha256: RUNTIME_RECEIPT.wrangler.identity_sha256,
     account_id: 'account-id',
-    d1_database_id: 'd1-id',
+    d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
     reset_sql_path: 'db/issue-23-clean-start-reset.sql',
     reset_sql_sha256: RESET_SQL_HASH,
     migration_runner_path: 'scripts/migrations.mjs',
@@ -287,7 +293,7 @@ function manifest(overrides: Record<string, unknown> = {}) {
     d1,
     target: {
       account_id: 'account-id',
-      d1_database_id: 'd1-id',
+      d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
       worker_name: 'blogman',
       origin: 'https://blog.example.com',
       smoke: {
@@ -304,7 +310,7 @@ function manifest(overrides: Record<string, unknown> = {}) {
       baseline: {
         deployment_id: 'deployment-before',
         version_id: 'version-before',
-        d1_database_id: 'd1-id',
+        d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
         traffic: [{ version_id: 'version-before', percentage: 100 }],
       },
     },
@@ -423,7 +429,7 @@ function actualPreparedManifest() {
     },
     target: {
       account_id: 'account-id',
-      d1_database_id: 'd1-id',
+      d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
       worker_name: 'blogman',
       origin: 'https://blog.example.com',
       smoke: {
@@ -440,7 +446,7 @@ function actualPreparedManifest() {
       baseline: {
         deployment_id: 'deployment-before',
         version_id: 'version-before',
-        d1_database_id: 'd1-id',
+        d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
         traffic: [{ version_id: 'version-before', percentage: 100 }],
       },
     },
@@ -549,7 +555,7 @@ function d1Result(failedStage: string | null = null) {
       promotable: failedStage === null,
       ...Object.fromEntries(D1_EVIDENCE_HASHES.map((name) => [name, name === 'trace_sha256' ? D1_TRACE_HASH : HASH])),
       account_id: 'account-id',
-      d1_database_id: 'd1-id',
+      d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
       candidate_id: CANDIDATE,
     },
     finalized: true,
@@ -614,10 +620,10 @@ function configureD1(failedStage: string | null = null, receipt = d1Result(faile
 describe('Issue #90 formal entry fan-in', () => {
   beforeEach(() => {
     vi.stubEnv('DELIVERY_SMOKE_ADMIN', 'test-only-smoke-authority')
+    vi.stubEnv('CLOUDFLARE_API_TOKEN', 'test-only-cloudflare-authority')
+    vi.stubEnv('CLOUDFLARE_ACCOUNT_ID', 'account-id')
+    vi.stubEnv('CLOUDFLARE_DELIVERY_SCOPES', 'account:read,d1:write,workers:write')
     rmSync(DURABLE_SINK_ROOT, { recursive: true, force: true })
-    mkdirSync(join(DURABLE_SINK_ROOT, 'authorizations'), { recursive: true, mode: 0o700 })
-    mkdirSync(join(DURABLE_SINK_ROOT, 'records'), { recursive: true, mode: 0o700 })
-    mkdirSync(join(DURABLE_SINK_ROOT, 'terminals'), { recursive: true, mode: 0o700 })
     configureWorker()
   })
   afterAll(() => rmSync(DURABLE_SINK_ROOT, { recursive: true, force: true }))
@@ -630,7 +636,7 @@ describe('Issue #90 formal entry fan-in', () => {
     const d1Only = preparedFromValue({
       format: MANIFEST_FORMAT,
       repository: { commit: CANDIDATE, tree: 'd'.repeat(40) },
-      target: { account_id: 'account-id', d1_database_id: 'd1-id' },
+      target: { account_id: 'account-id', d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d' },
       policy: {
         stages: policy().stages,
         overall_timeout_seconds: 5400,
@@ -752,6 +758,28 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(createWorkerTransportMock).not.toHaveBeenCalled()
   })
 
+  it('rechecks exact Wrangler Worker target before Authorization or adapter selection', () => {
+    configureD1()
+    const prepared = manifest()
+    vi.mocked(readFileSync).mockImplementation(((path: Parameters<typeof readFileSync>[0], options?: Parameters<typeof readFileSync>[1]) => {
+      const value = fsActual.readFileSync!(path, options as never)
+      if (String(path) !== join(REPOSITORY_ROOT, 'wrangler.toml')) return value
+      return String(value).replace('name = "blogman"', 'name = "different-worker"')
+    }) as typeof readFileSync)
+    let authorizationRead = false
+    const authorization = new Proxy(authorizationFor(prepared, 'fan-in-wrangler-target-drift'), {
+      get() {
+        authorizationRead = true
+        throw new Error('Authorization must not be read for Wrangler target drift')
+      },
+    })
+
+    expect(() => execute(prepared, authorization)).toThrow(/d1\.config drifted|Wrangler config target identity drifted/u)
+    expect(authorizationRead).toBe(false)
+    expect(createWorkerTransportMock).not.toHaveBeenCalled()
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+  })
+
   it('allows @ only in artifact file-tree paths', () => {
     configureD1()
     const value = structuredClone(manifest().value) as ManifestValue
@@ -781,6 +809,23 @@ describe('Issue #90 formal entry fan-in', () => {
       if (original === undefined) delete process.env.DELIVERY_SMOKE_ADMIN
       else process.env.DELIVERY_SMOKE_ADMIN = original
     }
+  })
+
+  it('consumes and validates Cloudflare account/scopes before selecting any production adapter', () => {
+    configureD1()
+    vi.stubEnv('CLOUDFLARE_DELIVERY_SCOPES', 'account:read,workers:write')
+    const prepared = manifest()
+
+    const result = execute(prepared, authorizationFor(prepared, 'fan-in-insufficient-cloudflare-authority'))
+
+    expect(result.value).toMatchObject({
+      authorization_consumed: true,
+      outcome: 'ERROR',
+      first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'smoke_auth_unavailable' },
+    })
+    expect(createWorkerTransportMock).not.toHaveBeenCalled()
+    expect(createD1TransportMock).not.toHaveBeenCalled()
   })
 
   it('does not select an adapter until Authorization has been consumed', () => {
@@ -898,7 +943,7 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(result.value.failure.classification).toBe('worker_adapter_error')
   })
 
-  it('terminalizes a malformed worker receipt as ERROR and preserves its possible upload attempt', () => {
+  it('terminalizes a malformed worker receipt without inventing unprovable upload mutation history', () => {
     const prepared = actualPreparedManifest()
     const d1Receipt = d1Result()
     d1Receipt.value.evidence.account_id = prepared.value.target.account_id
@@ -919,7 +964,7 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(result.value).toMatchObject({
       outcome: 'ERROR', first_terminal_stage: 'worker_deploy',
       failure: { classification: 'worker_result_malformed' },
-      mutation_counts: { attempted: 3, confirmed: 2 },
+      mutation_counts: { attempted: 2, confirmed: 2 },
     })
     expect(result.value.evidence.promotable).toBe(false)
     expect(validateProductionTerminalEvidence(structuredClone(result))).toBe(true)

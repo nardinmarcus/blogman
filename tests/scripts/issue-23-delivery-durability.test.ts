@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createRepositoryDeliverySink } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
+import {
+  createRepositoryDeliverySink,
+  repositoryDeliverySinkRoot,
+} from '../../scripts/issue-23-delivery-evidence-sink.mjs'
 
 const temporaryDirectories: string[] = []
 const sinkModuleUrl = pathToFileURL(join(process.cwd(), 'scripts/issue-23-delivery-evidence-sink.mjs')).href
@@ -59,13 +62,48 @@ describe('Issue #23 durable delivery records', () => {
     expect(sink.consumeAuthorization(benign)).toBe(benign.sha256)
   })
 
-  it('atomically rejects the same serialized Authorization after a fresh process restart', () => {
+  it('uses one checkout-independent canonical sink root across linked worktrees', () => {
+    const commonRoot = repositoryDeliverySinkRoot(process.cwd())
+    const worktree = mkdtempSync(join(tmpdir(), 'blogman-issue-23-worktree-'))
+    temporaryDirectories.push(worktree)
+    spawnSync('git', ['worktree', 'add', '--detach', worktree, 'HEAD'], { encoding: 'utf8' })
+    try {
+      expect(repositoryDeliverySinkRoot(worktree)).toBe(commonRoot)
+    } finally {
+      spawnSync('git', ['worktree', 'remove', '--force', worktree], { encoding: 'utf8' })
+    }
+  })
+
+  it('rejects symlink, owner/mode, and root identity drift', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-integrity-'))
+    temporaryDirectories.push(parent)
+    const root = join(parent, 'sink')
+    const sink = createRepositoryDeliverySink(root)
+    chmodSync(root, 0o755)
+    expect(() => sink.consumeAuthorization(authorizationRecord())).toThrow(/mode|identity/u)
+    chmodSync(root, 0o700)
+
+    const authorizations = join(root, 'authorizations')
+    const displaced = join(root, 'authorizations-displaced')
+    spawnSync('mv', [authorizations, displaced])
+    symlinkSync(displaced, authorizations)
+    expect(() => sink.consumeAuthorization(authorizationRecord())).toThrow(/canonical|identity/u)
+  })
+
+  it('atomically rejects concurrent and fresh-process replay of the same serialized Authorization', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-sink-'))
     temporaryDirectories.push(root)
     const authorization = authorizationRecord()
     const sink = createRepositoryDeliverySink(root)
 
-    expect(sink.consumeAuthorization(authorization)).toBe(authorization.sha256)
+    const contender = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { createRepositoryDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
+      const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
+      const record = { bytes, sha256: ${JSON.stringify(authorization.sha256)} }
+      createRepositoryDeliverySink(${JSON.stringify(root)}).consumeAuthorization(record)
+    `], { encoding: 'utf8' })
+    expect(contender.status, contender.stderr).toBe(0)
+    expect(() => sink.consumeAuthorization(authorization)).toThrow(/consumed/u)
 
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
       import { createRepositoryDeliverySink } from ${JSON.stringify(sinkModuleUrl)}

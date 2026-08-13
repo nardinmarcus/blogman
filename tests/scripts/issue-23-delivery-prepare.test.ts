@@ -177,13 +177,13 @@ function baseConfig() {
     },
     target: {
       account_id: 'account-public-id',
-      d1_database_id: 'd1-public-id',
+      d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
       worker_name: 'blogman',
       origin: 'https://blog.example.com',
       baseline: {
         deployment_id: 'deployment-before',
         version_id: 'version-before',
-        d1_database_id: 'd1-public-id',
+        d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
         traffic: [{ version_id: 'version-before', percentage: 100 }],
       },
     },
@@ -1745,6 +1745,17 @@ describe('Issue #23 Delivery Preparation', () => {
       }
     })
     expect(thrown?.message).toMatch(/symbolic link/u)
+  })
+
+  it('fails closed when the exact Wrangler config Worker or D1 target differs', { timeout: 15_000 }, () => {
+    const wrongWorker = baseConfig()
+    wrongWorker.target.worker_name = 'different-worker'
+    expect(() => prepareFixture(wrongWorker)).toThrow(/Wrangler config Worker name.*target/u)
+
+    const wrongD1 = baseConfig()
+    wrongD1.target.d1_database_id = 'different-d1-id'
+    wrongD1.target.baseline.d1_database_id = 'different-d1-id'
+    expect(() => prepareFixture(wrongD1)).toThrow(/Wrangler config DB identity.*target/u)
   })
 
   it('binds generated deployable bytes and final config bytes, not the committed source tree', () => {

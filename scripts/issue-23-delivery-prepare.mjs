@@ -416,11 +416,18 @@ function canonicalExpectedReconciliationBytes(value) {
 function resolveCanonicalD1Facts(repositoryPath, target, toolchain, repository) {
   const canonicalConfig = resolveFile(repositoryPath, CANONICAL_D1_PATHS.config, 'canonical D1 config', true)
   const configText = readFileSync(resolve(repositoryPath, CANONICAL_D1_PATHS.config), 'utf8')
+  const topLevelConfig = configText.split(/^\s*\[/mu, 1)[0]
+  const configWorkerName = topLevelConfig.match(/^\s*name\s*=\s*["']([^"']+)["']\s*$/mu)?.[1]
+  if (configWorkerName !== target.worker_name) fail('canonical Wrangler config Worker name does not match target.worker_name')
   const d1Sections = [...configText.matchAll(/\[\[d1_databases\]\]([\s\S]*?)(?=\n\[|$)/gu)]
-  const database = d1Sections
-    .map(([, section]) => section.match(/^binding\s*=\s*["']([^"']+)["']/mu)?.[1])
-    .find((binding) => binding === 'DB')
-  if (!database) fail('canonical D1 config does not bind DB')
+  const databaseSection = d1Sections.find(([, section]) => (
+    section.match(/^binding\s*=\s*["']([^"']+)["']/mu)?.[1] === 'DB'
+  ))?.[1]
+  const database = databaseSection ? 'DB' : undefined
+  const configD1DatabaseId = databaseSection?.match(/^database_id\s*=\s*["']([^"']+)["']/mu)?.[1]
+  if (!database || configD1DatabaseId !== target.d1_database_id) {
+    fail('canonical Wrangler config DB identity does not match target.d1_database_id')
+  }
 
   const canonicalReset = resolveFile(repositoryPath, CANONICAL_D1_PATHS.reset, 'canonical D1 reset SQL')
   const canonicalRunner = resolveFile(repositoryPath, CANONICAL_D1_PATHS.runner, 'canonical D1 migration runner')

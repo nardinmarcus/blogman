@@ -396,9 +396,9 @@ function buildD1Command(config, request) {
   })
 }
 
-function runBounded(executable, args, timeoutMs) {
+function runBounded(executable, args, timeoutMs, environment = process.env) {
   try {
-    return runBoundedChild(executable, args, timeoutMs, D1_TRANSPORT_MAX_OUTPUT_BYTES, repoRoot)
+    return runBoundedChild(executable, args, timeoutMs, D1_TRANSPORT_MAX_OUTPUT_BYTES, repoRoot, environment)
   } catch (error) {
     if (error instanceof D1ChildError) {
       throw new D1TransportError(error.classification, error.durationMs)
@@ -521,8 +521,12 @@ function rolloutSafetyCommand(config) {
 
 export { hashD1ArtifactDirectory }
 
-export function createD1Transport(config) {
-  if (arguments.length !== 1) fail('createD1Transport accepts exactly one config argument')
+export function createD1Transport(config, childEnvironment) {
+  if (arguments.length < 1 || arguments.length > 2
+    || (childEnvironment !== undefined && Object.getPrototypeOf(childEnvironment) !== null)) {
+    fail('createD1Transport rejects unsupported public adapter overrides')
+  }
+  const privateEnvironment = childEnvironment ?? process.env
   const normalizedConfig = validateConfig(config)
   const persistIdentity = validateBoundArtifactsOrThrow(normalizedConfig)
   const bindingsSha256 = d1StageBindingsSha256(normalizedConfig)
@@ -537,9 +541,9 @@ export function createD1Transport(config) {
       || normalizedRequest.operation === 'empty_d1_proof') {
       const command = buildD1Command(normalizedConfig, normalizedRequest)
       if (normalizedRequest.operation !== 'd1_identity') {
-        return runBounded(command.executable, command.args, timeoutMs)
+        return runBounded(command.executable, command.args, timeoutMs, privateEnvironment)
       }
-      const infoCommand = runBounded(command.executable, command.args, timeoutMs)
+      const infoCommand = runBounded(command.executable, command.args, timeoutMs, privateEnvironment)
       if (infoCommand.stderr !== '') return identityResponse(normalizedConfig, infoCommand)
       if (normalizedConfig.mode === 'local') return identityResponse(normalizedConfig, infoCommand)
       let whoamiCommand
@@ -548,6 +552,7 @@ export function createD1Transport(config) {
           wranglerPath,
           buildRemoteWhoamiCommand(normalizedConfig),
           remainingTimeout(normalizedRequest, infoCommand.duration_ms),
+          privateEnvironment,
         )
       } catch (error) {
         if (error instanceof D1TransportError) {
@@ -561,19 +566,19 @@ export function createD1Transport(config) {
       return identityResponse(normalizedConfig, infoCommand, whoamiCommand)
     }
     if (normalizedRequest.operation === 'migration_catalog') {
-      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'catalog'), timeoutMs)
+      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'catalog'), timeoutMs, privateEnvironment)
     }
     if (normalizedRequest.operation === 'migration_plan') {
-      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'plan'), timeoutMs)
+      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'plan'), timeoutMs, privateEnvironment)
     }
     if (normalizedRequest.operation === 'migration_apply') {
-      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'apply'), timeoutMs)
+      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'apply'), timeoutMs, privateEnvironment)
     }
     if (normalizedRequest.operation === 'migration_verify') {
-      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'verify'), timeoutMs)
+      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'verify'), timeoutMs, privateEnvironment)
     }
     if (normalizedRequest.operation === 'reconciliation') {
-      return runBounded(process.execPath, rolloutSafetyCommand(normalizedConfig), timeoutMs)
+      return runBounded(process.execPath, rolloutSafetyCommand(normalizedConfig), timeoutMs, privateEnvironment)
     }
     fail('operation is not supported')
   }
@@ -677,7 +682,7 @@ export const FORMAL_REHEARSAL_D1_EVIDENCE_SOURCE = 'formal-rehearsal-test-eviden
  * It replaces command I/O only: it never starts a process, opens a network
  * connection, or writes outside the disposable local preparation rehearsal.
  */
-export function createRehearsalD1Transport(bindings, sink, fault = null) {
+export function createRehearsalD1Transport(bindings, sink, fault = null, childEnvironment = {}) {
   const normalizedBindings = validateConfig(bindings)
   const bindingsSha256 = d1StageBindingsSha256(normalizedBindings)
   function commandFor(request) {
@@ -699,7 +704,10 @@ export function createRehearsalD1Transport(bindings, sink, fault = null) {
   function execute(request) {
     const command = commandFor(request)
     const stage = REHEARSAL_D1_STAGE_BY_OPERATION[request.operation]
-    if (sink) sink.push({ adapter: 'd1', operation: request.operation, stage, command: command.args })
+    if (sink) sink.push({
+      adapter: 'd1', operation: request.operation, stage, command: command.args,
+      env_keys: Object.keys(childEnvironment).sort(),
+    })
     if (fault?.stage === stage) {
       if (fault.kind === 'failure') throw new D1TransportError('formal_failure', 1)
       if (fault.kind === 'drift') throw new D1TransportError('formal_drift', 1)

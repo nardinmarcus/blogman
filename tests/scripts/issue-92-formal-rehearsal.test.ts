@@ -114,13 +114,13 @@ function formalConfig() {
     },
     target: {
       account_id: 'formal-account',
-      d1_database_id: 'formal-d1',
-      worker_name: 'blogman-formal',
+      d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
+      worker_name: 'blogman',
       origin: 'https://formal.example.test',
       baseline: {
         deployment_id: 'formal-deployment',
         version_id: 'formal-version',
-        d1_database_id: 'formal-d1',
+        d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
         traffic: [{ version_id: 'formal-version', percentage: 100 }],
       },
     },
@@ -224,12 +224,17 @@ describe('Issue #92 formal rehearsal public path', () => {
     for (const stage of ALL_STAGES) expect(result.terminal.value.stage_counts[stage]).toBe(1)
     expect(result.operations).toContainEqual(expect.objectContaining({
       adapter: 'd1', operation: 'clean_start_reset', command: expect.arrayContaining(['d1', 'execute', 'DB', '--remote']),
+      env_keys: expect.arrayContaining(['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID']),
     }))
     expect(result.operations).toContainEqual(expect.objectContaining({
       adapter: 'worker', operation: 'version_traffic_verification.deploy', argv: expect.arrayContaining(['versions', 'deploy']),
+      env_keys: expect.arrayContaining(['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID']),
     }))
     expect(result.operations).toContainEqual(expect.objectContaining({
       adapter: 'worker', operation: 'smoke_control_t0.smoke', argv: expect.arrayContaining(['--request', 'GET']),
+      stdin_sha256: expect.stringMatching(SHA256),
+      stdin_bytes: expect.any(Number),
+      env_keys: expect.not.arrayContaining(['CLOUDFLARE_API_TOKEN', 'DELIVERY_SMOKE_ADMIN']),
     }))
     expect(() => deliveryEntry.validateProductionTerminalEvidence(result.terminal))
       .toThrow(/production terminal evidence/u)

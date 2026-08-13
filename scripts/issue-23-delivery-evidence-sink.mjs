@@ -1,16 +1,18 @@
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import {
   closeSync,
   fsyncSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
-  statSync,
+  realpathSync,
   unlinkSync,
   writeSync,
 } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -126,9 +128,34 @@ function writeAll(descriptor, bytes) {
   while (offset < bytes.length) offset += writeSync(descriptor, bytes, offset, bytes.length - offset)
 }
 
-function createDirectory(path) {
-  mkdirSync(path, { recursive: true, mode: 0o700 })
-  if (!statSync(path).isDirectory()) fail('sink directory is not a directory')
+function secureDirectoryIdentity(path, label) {
+  let stat
+  try { stat = lstatSync(path) } catch { fail(`${label} is unavailable`) }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) fail(`${label} is not a canonical directory`)
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) fail(`${label} owner drifted`)
+  if ((stat.mode & 0o777) !== 0o700) fail(`${label} mode drifted`)
+  return Object.freeze({ dev: stat.dev, ino: stat.ino, uid: stat.uid, mode: stat.mode & 0o777 })
+}
+
+function assertDirectoryIdentity(path, expected, label) {
+  const actual = secureDirectoryIdentity(path, label)
+  if (actual.dev !== expected.dev || actual.ino !== expected.ino || actual.uid !== expected.uid
+    || actual.mode !== expected.mode) fail(`${label} root identity drifted`)
+}
+
+function createDirectory(path, label) {
+  try { mkdirSync(path, { mode: 0o700 }) } catch (error) {
+    if (error?.code !== 'EEXIST') throw error
+  }
+  return secureDirectoryIdentity(path, label)
+}
+
+function assertSecureFile(path, label) {
+  let stat
+  try { stat = lstatSync(path) } catch { fail(`${label} is missing from the durable sink`) }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) fail(`${label} is not a canonical durable file`)
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) fail(`${label} owner drifted`)
+  if ((stat.mode & 0o777) !== 0o600) fail(`${label} mode drifted`)
 }
 
 function atomicWrite(path, bytes, directory) {
@@ -182,11 +209,9 @@ function readAuthorization(root, sha256Value) {
     fail('authorization identity is invalid')
   }
   let bytes
-  try {
-    bytes = readFileSync(join(root, 'authorizations', `${sha256Value}.json`))
-  } catch {
-    fail('authorization is missing from the durable sink')
-  }
+  const path = join(root, 'authorizations', `${sha256Value}.json`)
+  assertSecureFile(path, 'authorization')
+  try { bytes = readFileSync(path) } catch { fail('authorization is missing from the durable sink') }
   return canonicalAuthorization({ bytes, sha256: sha256Value })
 }
 
@@ -196,11 +221,8 @@ function readRecord(root, sha256Value, label) {
   }
   const path = join(root, 'records', `${sha256Value}.json`)
   let bytes
-  try {
-    bytes = readFileSync(path)
-  } catch {
-    fail(`${label} is missing from the durable sink`)
-  }
+  assertSecureFile(path, label)
+  try { bytes = readFileSync(path) } catch { fail(`${label} is missing from the durable sink`) }
   const record = canonicalRecord({ bytes, sha256: sha256Value }, label)
   if (!RECORD_FORMATS.has(record.value.format)) fail(`${label} format is invalid`)
   return record
@@ -261,11 +283,8 @@ function readTerminalEvidence(root, terminalSha256) {
   }
   const terminalPath = join(root, 'terminals', `${terminalSha256}.json`)
   let terminalBytes
-  try {
-    terminalBytes = readFileSync(terminalPath)
-  } catch {
-    fail('terminal result is missing from the durable sink')
-  }
+  assertSecureFile(terminalPath, 'terminal result')
+  try { terminalBytes = readFileSync(terminalPath) } catch { fail('terminal result is missing from the durable sink') }
   const terminal = canonicalRecord({ bytes: terminalBytes, sha256: terminalSha256 }, 'terminal result')
   if (terminal.value.format !== TERMINAL_RESULT_FORMAT) fail('terminal result format is invalid')
   const hashes = terminal.value.evidence?.hashes ?? {}
@@ -283,24 +302,47 @@ function readTerminalEvidence(root, terminalSha256) {
   })
 }
 
-export function createRepositoryDeliverySink(root = join(REPOSITORY_ROOT, '.issue-23-delivery')) {
-  const resolvedRoot = resolve(root)
-  createDirectory(resolvedRoot)
-  createDirectory(join(resolvedRoot, 'authorizations'))
-  createDirectory(join(resolvedRoot, 'records'))
-  createDirectory(join(resolvedRoot, 'terminals'))
+export function repositoryDeliverySinkRoot(repositoryRoot = REPOSITORY_ROOT) {
+  const output = execFileSync('git', ['-C', repositoryRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
+    encoding: 'utf8',
+  }).trim()
+  if (!isAbsolute(output) || realpathSync(output) !== resolve(output)) fail('repository common root is not canonical')
+  return join(output, 'blogman-issue-23-delivery')
+}
+
+export function createRepositoryDeliverySink(root = repositoryDeliverySinkRoot()) {
+  const requestedRoot = resolve(root)
+  createDirectory(requestedRoot, 'sink root')
+  const resolvedRoot = realpathSync(requestedRoot)
+  const rootIdentity = secureDirectoryIdentity(resolvedRoot, 'sink root')
+  const directories = Object.freeze(Object.fromEntries(['authorizations', 'records', 'terminals'].map((name) => {
+    const path = join(resolvedRoot, name)
+    return [name, Object.freeze({ path, identity: createDirectory(path, `${name} directory`) })]
+  })))
+  const assertSinkIdentity = () => {
+    assertDirectoryIdentity(resolvedRoot, rootIdentity, 'sink root')
+    for (const [name, entry] of Object.entries(directories)) {
+      assertDirectoryIdentity(entry.path, entry.identity, `${name} directory`)
+    }
+  }
   return Object.freeze({
-    consumeAuthorization: (record) => consumeAuthorization(resolvedRoot, record),
-    persistTerminalResult: (input) => persistTerminalResult(resolvedRoot, input),
-    readTerminalEvidence: (terminalSha256) => readTerminalEvidence(resolvedRoot, terminalSha256),
+    consumeAuthorization(record) {
+      assertSinkIdentity()
+      return consumeAuthorization(resolvedRoot, record)
+    },
+    persistTerminalResult(input) {
+      assertSinkIdentity()
+      return persistTerminalResult(resolvedRoot, input)
+    },
+    readTerminalEvidence(terminalSha256) {
+      assertSinkIdentity()
+      return readTerminalEvidence(resolvedRoot, terminalSha256)
+    },
   })
 }
 
-let defaultRepositoryDeliverySink
-
 function defaultSink() {
-  defaultRepositoryDeliverySink ??= createRepositoryDeliverySink()
-  return defaultRepositoryDeliverySink
+  return createRepositoryDeliverySink()
 }
 
 export const repositoryDeliverySink = Object.freeze({
