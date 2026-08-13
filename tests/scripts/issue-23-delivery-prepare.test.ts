@@ -23,6 +23,9 @@ import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-forma
 import nextConfig from '../../next.config'
 
 const projectRequire = createRequire(import.meta.url)
+const { parsePatchFile } = projectRequire('patch-package/dist/patch/parse.js') as {
+  parsePatchFile(file: string): unknown[]
+}
 
 function installedPackageRoot(packageName: string) {
   let directory = dirname(projectRequire.resolve(packageName))
@@ -1195,6 +1198,18 @@ function firstChangedByteContext(before: Buffer | string, after: Buffer | string
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 describe('Issue #23 Delivery Preparation', () => {
+  it('patch contract: every tracked patch parses with patch-package', () => {
+    const trackedPatches = execFileSync('git', ['ls-files', '--', 'patches/*.patch'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    }).trim().split('\n').filter(Boolean)
+
+    expect(trackedPatches.length).toBeGreaterThan(0)
+    for (const relativePath of trackedPatches) {
+      expect(() => parsePatchFile(readPatchContract(relativePath)), relativePath).not.toThrow()
+    }
+  })
+
   it('manifest-order contract: stabilizes Next CJS pages-manifest serialization', () => {
     const patch = readPatchContract('patches/next+16.2.6.patch')
 
