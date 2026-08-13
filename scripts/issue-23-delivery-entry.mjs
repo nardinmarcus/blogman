@@ -22,6 +22,7 @@ import {
 } from './issue-23-delivery-worker-transport.mjs'
 import { runWorkerStages } from './issue-23-delivery-worker-stages.mjs'
 import { repositoryDeliverySink } from './issue-23-delivery-evidence-sink.mjs'
+import { formalExecutionClosureSha256 } from './issue-23-delivery-execution-closure.mjs'
 
 export const LOCAL_ENTRY_FORMAT = 'blogman-issue-23-local-entry/v1'
 export const LOCAL_SUPERVISOR_FORMAT = 'blogman-issue-23-supervisor/v1'
@@ -967,7 +968,6 @@ function stageDurations(trace) {
 function assertCurrentFormalEntryClosure(manifestValue) {
   const files = [
     ['preparation.prepare_entry', manifestValue.preparation.prepare_entry],
-    ['preparation.execute_entry', manifestValue.preparation.execute_entry],
     ['preparation.worker_upload_entry', manifestValue.preparation.worker_upload_entry],
     ['preparation.manifest_schema', manifestValue.preparation.manifest_schema],
     ['d1.config', { path: manifestValue.d1.config_path, sha256: manifestValue.d1.config_sha256 }],
@@ -986,6 +986,10 @@ function assertCurrentFormalEntryClosure(manifestValue) {
     if (realpathSync(catalogPath) !== catalogPath
       || hashD1ArtifactDirectory(catalogPath) !== manifestValue.d1.migration_catalog_sha256) {
       throw new Error('d1 migration catalog drifted')
+    }
+    if (formalExecutionClosureSha256(ENTRY_REPO_ROOT)
+      !== manifestValue.preparation.execute_entry.sha256) {
+      throw new Error('formal execution module closure drifted')
     }
     if (manifestValue.rehearsal.runtime_receipt.entry.identity_sha256
       !== manifestValue.preparation.execute_entry.sha256) {
@@ -1722,6 +1726,14 @@ function executeProduction(manifest, authorization) {
   const evidencePromotable = adapters.evidence.promotable === null
     ? terminal.outcome === 'PASS'
     : adapters.evidence.promotable
+  const durableD1Receipt = d1Receipt !== undefined && d1Receipt !== null
+    && d1Result.sha256 === d1Receipt.sha256
+    ? d1Receipt
+    : null
+  const durableWorkerReceipt = workerReceipt !== undefined && workerReceipt !== null
+    && workerResult.sha256 === workerReceipt.sha256
+    ? workerReceipt
+    : null
   const value = {
     format: TERMINAL_RESULT_FORMAT,
     identities,
@@ -1740,8 +1752,8 @@ function executeProduction(manifest, authorization) {
       production: evidenceProduction,
       promotable: evidencePromotable,
       hashes: productionEvidenceHashes(
-        d1Receipt === undefined ? null : d1Result,
-        workerReceipt === undefined ? null : workerResult,
+        durableD1Receipt === null ? null : d1Result,
+        durableWorkerReceipt === null ? null : workerResult,
       ),
       cleanup,
     },
@@ -1751,8 +1763,8 @@ function executeProduction(manifest, authorization) {
   repositoryDeliverySink.persistTerminalResult({
     terminal: result,
     manifest,
-    d1: d1Receipt === undefined ? null : d1Receipt,
-    worker: workerReceipt === undefined ? null : workerReceipt,
+    d1: durableD1Receipt,
+    worker: durableWorkerReceipt,
   })
   return result
 }

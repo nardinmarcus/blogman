@@ -18,15 +18,18 @@ const { createD1TransportMock, runD1StagesMock, createWorkerTransportMock, runWo
   createWorkerTransportMock: vi.fn(),
   runWorkerStagesMock: vi.fn(),
   fsActual: {
+    readFileSync: undefined as typeof import('node:fs').readFileSync | undefined,
     realpathSync: undefined as typeof import('node:fs').realpathSync | undefined,
   },
 }))
 
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs')
+  fsActual.readFileSync = actual.readFileSync
   fsActual.realpathSync = actual.realpathSync
   return {
     ...actual,
+    readFileSync: vi.fn(actual.readFileSync),
     realpathSync: vi.fn(actual.realpathSync),
   }
 })
@@ -46,6 +49,7 @@ vi.mock('../../scripts/issue-23-delivery-worker-transport.mjs', () => ({
 vi.mock('../../scripts/issue-23-delivery-worker-stages.mjs', () => ({ runWorkerStages: runWorkerStagesMock }))
 
 afterEach(() => {
+  vi.mocked(readFileSync).mockImplementation(fsActual.readFileSync!)
   vi.mocked(realpathSync).mockImplementation(fsActual.realpathSync!)
 })
 
@@ -56,6 +60,7 @@ import {
 } from '../../scripts/issue-23-delivery-prepare.mjs'
 import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-formal-runtime.mjs'
 import { hashD1ArtifactDirectory } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
+import { formalExecutionClosureSha256 } from '../../scripts/issue-23-delivery-execution-closure.mjs'
 
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const MANIFEST_FORMAT = 'blogman-issue-23-canonical-frozen-manifest/v1'
@@ -84,7 +89,7 @@ const ENTRY_MODULE_URL = pathToFileURL(join(REPOSITORY_ROOT, 'scripts/issue-23-d
 const SINK_MODULE_URL = pathToFileURL(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-evidence-sink.mjs')).href
 const RUNTIME_RECEIPT = buildFormalRuntimeReceipt().value
 const PREPARE_ENTRY_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-prepare.mjs')))
-const EXECUTE_ENTRY_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-entry.mjs')))
+const EXECUTE_ENTRY_HASH = formalExecutionClosureSha256(REPOSITORY_ROOT)
 const WORKER_UPLOAD_ENTRY_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-worker-upload.mjs')))
 const MANIFEST_SCHEMA_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json')))
 const CONFIG_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'wrangler.toml')))
@@ -704,6 +709,30 @@ describe('Issue #90 formal entry fan-in', () => {
       get() {
         authorizationRead = true
         throw new Error('Authorization must not be read for formal entry drift')
+      },
+    })
+
+    expect(() => execute(prepared, authorization)).toThrow(/formal|entry|closure|drift/u)
+    expect(authorizationRead).toBe(false)
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+    expect(createWorkerTransportMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects post-prepare transport mutation before reading Authorization or selecting adapters', () => {
+    configureD1()
+    const prepared = manifest()
+    const transportPath = join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-worker-transport.mjs')
+    vi.mocked(readFileSync).mockImplementation(((path: Parameters<typeof readFileSync>[0], options?: Parameters<typeof readFileSync>[1]) => {
+      const value = fsActual.readFileSync!(path, options as never)
+      if (String(path) !== transportPath) return value
+      const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value)
+      return Buffer.concat([bytes, Buffer.from('\n// post-prepare transport mutation\n')])
+    }) as typeof readFileSync)
+    let authorizationRead = false
+    const authorization = new Proxy(authorizationFor(prepared, 'fan-in-post-prepare-transport-drift'), {
+      get() {
+        authorizationRead = true
+        throw new Error('Authorization must not be read for transport drift')
       },
     })
 

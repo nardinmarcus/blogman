@@ -104,10 +104,33 @@ function makeTransportTreeRemovable(path) {
   if (entry.isSymbolicLink()) return
   if (entry.isDirectory()) {
     chmodSync(path, 0o700)
-    for (const name of readdirSync(path)) makeTransportTreeRemovable(join(path, name))
+    let failure
+    for (const name of readdirSync(path)) {
+      try {
+        makeTransportTreeRemovable(join(path, name))
+      } catch (error) {
+        failure ??= error
+      }
+    }
+    if (failure) throw failure
     return
   }
+  if (!entry.isFile() || entry.nlink !== 1) throw new Error('transport cleanup encountered an unsafe file')
   chmodSync(path, 0o600)
+}
+function removeTransportTree(root) {
+  let failure
+  try {
+    makeTransportTreeRemovable(root)
+  } catch (error) {
+    failure = error
+  }
+  try {
+    rmSync(root, { recursive: true, force: true })
+  } catch (error) {
+    failure ??= error
+  }
+  if (failure) throw new WorkerTransportError('UNCERTAIN', 'worker_adapter_uncertain', 1)
 }
 function childFailure(error) {
   if (error instanceof D1ChildError) {
@@ -345,8 +368,7 @@ export function createWorkerTransport(bindings) {
         )
         return response(parseJson(result.stdout, 'upload_acceptance', result.duration_ms), result.duration_ms)
       } finally {
-        makeTransportTreeRemovable(root)
-        rmSync(root, { recursive: true, force: true })
+        removeTransportTree(root)
       }
     }
     if (request.operation === 'version_traffic_verification') {

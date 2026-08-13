@@ -197,8 +197,8 @@ function persistTerminalResult(root, input) {
   if (!isRecord(terminal.value.identities)
     || terminal.value.identities.manifest_sha256 !== manifest.sha256
     || !isRecord(hashes)
-    || (hashes.d1_stage_receipt_sha256 !== null && d1 === null)
-    || (hashes.worker_stage_receipt_sha256 !== null && worker === null)) {
+    || hashes.d1_stage_receipt_sha256 !== (d1?.sha256 ?? null)
+    || hashes.worker_stage_receipt_sha256 !== (worker?.sha256 ?? null)) {
     fail('terminal persistence identities do not match durable evidence')
   }
   const recordsDirectory = join(root, 'records')

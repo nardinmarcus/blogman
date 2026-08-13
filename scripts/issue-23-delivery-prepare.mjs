@@ -7,6 +7,7 @@ import { runLocalRehearsal } from './issue-23-delivery-rehearsal.mjs'
 import { hashD1ArtifactDirectory } from './issue-23-delivery-d1-contracts.mjs'
 import { buildFormalRuntimeReceipt } from './issue-23-delivery-formal-runtime.mjs'
 import { currentFormalRehearsalContext } from './issue-23-delivery-formal-context.mjs'
+import { formalExecutionClosureSha256 } from './issue-23-delivery-execution-closure.mjs'
 
 const MANIFEST_SCHEMA_URL = new URL(
   '../schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
@@ -1158,7 +1159,10 @@ function resolveFacts(config, {
   const preparation = {
     ...config.preparation,
     prepare_entry: resolveFile(repositoryPath, config.preparation.prepare_entry.path, 'prepare entry'),
-    execute_entry: resolveFile(repositoryPath, config.preparation.execute_entry.path, 'execute entry'),
+    execute_entry: {
+      path: config.preparation.execute_entry.path,
+      sha256: formalExecutionClosureSha256(repositoryPath),
+    },
     worker_upload_entry: resolveFile(
       repositoryPath,
       config.preparation.worker_upload_entry.path,

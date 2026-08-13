@@ -20,6 +20,10 @@ import {
 import { runLocalRehearsal, runLocalRehearsalForTestsOnly } from '../../scripts/issue-23-delivery-rehearsal.mjs'
 import { hashD1ArtifactDirectory as contractHashD1ArtifactDirectory } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
 import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-formal-runtime.mjs'
+import {
+  FORMAL_EXECUTION_CLOSURE_PATHS,
+  formalExecutionClosureSha256,
+} from '../../scripts/issue-23-delivery-execution-closure.mjs'
 import nextConfig from '../../next.config'
 
 const projectRequire = createRequire(import.meta.url)
@@ -368,6 +372,9 @@ function withIsolatedRepositoryFixture<T>(callback: (repositoryPath: string) => 
   return withTemporaryDirectory('blogman-issue-23-isolated-', (directory) => {
     const repositoryPath = join(directory, 'repository')
     execFileSync('git', ['clone', '--local', repoRoot, repositoryPath], { stdio: 'pipe' })
+    for (const path of FORMAL_EXECUTION_CLOSURE_PATHS) {
+      copyFileSync(join(repoRoot, path), join(repositoryPath, path))
+    }
     copyFileSync(
       join(repoRoot, 'scripts', 'issue-23-delivery-worker-upload.mjs'),
       join(repositoryPath, 'scripts', 'issue-23-delivery-worker-upload.mjs'),
@@ -422,7 +429,7 @@ describe('target macOS formal runtime receipt', () => {
     expect(receipt).toEqual(RUNTIME_RECEIPT)
     expect(receipt.entry).toEqual({
       path: 'scripts/issue-23-delivery-entry.mjs',
-      identity_sha256: sha256(readFileSync(join(repoRoot, 'scripts/issue-23-delivery-entry.mjs'))),
+      identity_sha256: formalExecutionClosureSha256(repoRoot),
     })
     for (const tool of ['node', 'npm', 'wrangler', 'opennextjs_cloudflare', 'curl'] as const) {
       expect(receipt[tool]).toEqual(prepared.value.toolchain[tool])
@@ -2316,17 +2323,7 @@ describe('Issue #23 Delivery Preparation', () => {
       execFileSync('git', ['clone', '--local', repoRoot, fixtureRepo])
       execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/nardinmarcus/blogman.git'], { cwd: fixtureRepo })
       const copiedPaths = [
-        'scripts/issue-23-delivery-prepare.mjs',
-        'scripts/issue-23-delivery-entry.mjs',
-        'scripts/issue-23-delivery-formal-fault-harness.mjs',
-        'scripts/issue-23-delivery-formal-context.mjs',
-        'scripts/issue-23-delivery-rehearsal.mjs',
-        'scripts/issue-23-delivery-d1-child.mjs',
-        'scripts/issue-23-delivery-d1-contracts.mjs',
-        'scripts/issue-23-delivery-d1-stages.mjs',
-        'scripts/issue-23-delivery-d1-transport.mjs',
-        'scripts/issue-23-delivery-worker-transport.mjs',
-        'scripts/issue-23-delivery-worker-stages.mjs',
+        ...FORMAL_EXECUTION_CLOSURE_PATHS,
         'scripts/issue-23-delivery-worker-upload.mjs',
         'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
       ]

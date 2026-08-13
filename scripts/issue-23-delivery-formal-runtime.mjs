@@ -4,6 +4,7 @@ import { readFileSync, realpathSync } from 'node:fs'
 import { arch } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { formalExecutionClosureSha256 } from './issue-23-delivery-execution-closure.mjs'
 
 export const FORMAL_RUNTIME_RECEIPT_FORMAT = 'blogman-issue-23-formal-rehearsal-runtime-receipt/v1'
 
@@ -35,7 +36,6 @@ export function buildFormalRuntimeReceipt() {
   const wranglerPath = realpathSync(resolve(REPOSITORY_ROOT, 'node_modules/.bin/wrangler'))
   const openNextPath = realpathSync(resolve(REPOSITORY_ROOT, 'node_modules/.bin/opennextjs-cloudflare'))
   const curlPath = realpathSync('/usr/bin/curl')
-  const entryPath = realpathSync(resolve(REPOSITORY_ROOT, 'scripts/issue-23-delivery-entry.mjs'))
   const lockfile = JSON.parse(readFileSync(resolve(REPOSITORY_ROOT, 'package-lock.json'), 'utf8'))
   const openNextVersion = lockfile.packages?.['node_modules/@opennextjs/cloudflare']?.version
   if (typeof openNextVersion !== 'string' || openNextVersion.length === 0) {
@@ -50,7 +50,10 @@ export function buildFormalRuntimeReceipt() {
     wrangler: { version: version(wranglerPath, ['--version'], /([0-9]+\.[0-9]+\.[0-9]+)/u, 'Wrangler'), identity_sha256: hashFile(wranglerPath) },
     opennextjs_cloudflare: { version: openNextVersion, identity_sha256: hashFile(openNextPath) },
     curl: { version: version(curlPath, ['--version'], /^curl ([0-9]+(?:\.[0-9]+){1,2})\b/mu, 'curl'), identity_sha256: hashFile(curlPath) },
-    entry: { path: 'scripts/issue-23-delivery-entry.mjs', identity_sha256: hashFile(entryPath) },
+    entry: {
+      path: 'scripts/issue-23-delivery-entry.mjs',
+      identity_sha256: formalExecutionClosureSha256(REPOSITORY_ROOT),
+    },
   }
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
   return Object.freeze({ value: Object.freeze(value), bytes, sha256: sha256(bytes) })

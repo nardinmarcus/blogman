@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -236,6 +236,36 @@ fs.writeFileSync(process.env.WORKER_OUTPUT_CONTENT_CAPTURE, output)
       else process.env.WORKER_OUTPUT_CONTENT_CAPTURE = originalContentCapture
     }
   }, 30_000)
+
+  it('fails closed without chmodding an external inode hardlinked into transport cleanup', () => {
+    const current = fixture()
+    const external = join(current.root, 'external-owned-evidence')
+    writeFileSync(external, 'external evidence\n', { mode: 0o400 })
+    writeFileSync(current.workerUploadEntry, `
+import fs from 'node:fs'
+const destination = process.argv[process.argv.indexOf('--destination') + 1]
+fs.mkdirSync(destination)
+fs.linkSync(${JSON.stringify(external)}, destination + '/external-hardlink')
+process.stdout.write('{}')
+`)
+    const value = bindings(current, 1)
+    value.worker_upload_entry_sha256 = hash(current.workerUploadEntry)
+    const before = statSync(external)
+
+    expect(() => createWorkerTransport(value).execute({
+      operation: 'worker_deploy',
+      stage: 'worker_deploy',
+      timeout_ms: 600000,
+      elapsed_ms: 0,
+      version_id: undefined,
+      deployment_id: undefined,
+    })).toThrow(/worker transport failed/u)
+
+    const after = statSync(external)
+    expect(after.mode & 0o777).toBe(before.mode & 0o777)
+    expect(after.nlink).toBe(1)
+    expect(readFileSync(external, 'utf8')).toBe('external evidence\n')
+  })
 
   it.each([
     ['config', (current: ReturnType<typeof fixture>) => writeFileSync(current.config, 'drift\n')],

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -102,6 +102,93 @@ describe('Issue #23 durable delivery records', () => {
     `], { encoding: 'utf8' })
 
     expect(child.status, child.stderr).toBe(0)
+  })
+
+  it('rejects alternate or asymmetric receipt sidecars before any durable record write', () => {
+    const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-binding-'))
+    temporaryDirectories.push(root)
+    const sink = createRepositoryDeliverySink(root)
+    const manifest = record({ format: 'blogman-issue-23-canonical-frozen-manifest/v1', marker: 'binding' })
+    const d1 = record({ format: 'blogman-issue-23-d1-stages/v1', marker: 'expected-d1' })
+    const alternateD1 = record({ format: 'blogman-issue-23-d1-stages/v1', marker: 'alternate-d1' })
+    const worker = record({ format: 'blogman-issue-23-worker-stages/v1', marker: 'worker' })
+    const alternateWorker = record({ format: 'blogman-issue-23-worker-stages/v1', marker: 'alternate-worker' })
+    const terminal = record({
+      format: 'blogman-issue-23-terminal-result/v1',
+      identities: { manifest_sha256: manifest.sha256 },
+      evidence: {
+        hashes: {
+          d1_stage_receipt_sha256: d1.sha256,
+          worker_stage_receipt_sha256: worker.sha256,
+        },
+      },
+    })
+
+    for (const input of [
+      { terminal, manifest, d1: alternateD1, worker },
+      { terminal, manifest, d1, worker: alternateWorker },
+      { terminal, manifest, d1: null, worker },
+      { terminal, manifest, d1, worker: null },
+    ]) {
+      expect(() => sink.persistTerminalResult(input))
+        .toThrow(/identities|evidence|receipt|hash/u)
+    }
+    expect(readdirSync(join(root, 'records'))).toEqual([])
+    expect(readdirSync(join(root, 'terminals'))).toEqual([])
+
+    const noD1Terminal = record({
+      ...terminal.value,
+      evidence: {
+        hashes: {
+          d1_stage_receipt_sha256: null,
+          worker_stage_receipt_sha256: worker.sha256,
+        },
+      },
+    })
+    const noWorkerTerminal = record({
+      ...terminal.value,
+      evidence: {
+        hashes: {
+          d1_stage_receipt_sha256: d1.sha256,
+          worker_stage_receipt_sha256: null,
+        },
+      },
+    })
+    for (const input of [
+      { terminal: noD1Terminal, manifest, d1, worker },
+      { terminal: noWorkerTerminal, manifest, d1, worker },
+    ]) {
+      expect(() => sink.persistTerminalResult(input))
+        .toThrow(/identities|evidence|receipt|hash/u)
+    }
+    expect(readdirSync(join(root, 'records'))).toEqual([])
+    expect(readdirSync(join(root, 'terminals'))).toEqual([])
+  })
+
+  it('rejects malformed private receipt evidence before any durable record write', () => {
+    const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-private-'))
+    temporaryDirectories.push(root)
+    const sink = createRepositoryDeliverySink(root)
+    const manifest = record({ format: 'blogman-issue-23-canonical-frozen-manifest/v1', marker: 'private' })
+    const worker = record({
+      format: 'blogman-issue-23-worker-stages/v1',
+      evidence: { response_body: 'must-not-persist' },
+    })
+    const terminal = record({
+      format: 'blogman-issue-23-terminal-result/v1',
+      identities: { manifest_sha256: manifest.sha256 },
+      evidence: {
+        hashes: {
+          d1_stage_receipt_sha256: null,
+          worker_stage_receipt_sha256: worker.sha256,
+        },
+      },
+    })
+
+    expect(() => sink.persistTerminalResult({ terminal, manifest, d1: null, worker }))
+      .toThrow(/private field/u)
+    expect(readdirSync(join(root, 'records'))).toEqual([])
+    expect(readdirSync(join(root, 'terminals'))).toEqual([])
   })
 
   it('rejects conflicting durable terminal bytes instead of replacing the first result', () => {
