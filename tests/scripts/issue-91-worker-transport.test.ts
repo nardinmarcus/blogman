@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
-import { spawn } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { spawn, spawnSync } from 'node:child_process'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWorkerTransport } from '../../scripts/issue-23-delivery-worker-transport.mjs'
@@ -13,6 +13,7 @@ const smoke = { requests: [
 ], admin_credential_slot: 'delivery_smoke_admin' }
 const candidate = 'a'.repeat(40)
 const hash = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex')
+const realWorkerUploadEntry = join(process.cwd(), 'scripts/issue-23-delivery-worker-upload.mjs')
 const roots: string[] = []
 const servers: ReturnType<typeof spawn>[] = []
 
@@ -21,8 +22,8 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
-function fixture() {
-  const root = mkdtempSync(join(tmpdir(), 'blogman-issue-91-worker-transport-'))
+function fixture(parent = tmpdir()) {
+  const root = realpathSync(mkdtempSync(join(parent, 'blogman-issue-91-worker-transport-')))
   roots.push(root)
   const config = join(root, 'wrangler.toml')
   const source = join(root, 'source')
@@ -157,31 +158,58 @@ describe('Issue #91 private smoke_control_t0 adapter', () => {
     }
   }, 30000)
 
-  it('passes the transport-created unique Wrangler output path into the integrated upload entry', () => {
-    const current = fixture()
-    const capturedPath = join(current.root, 'captured-output-path')
-    const capturedContent = join(current.root, 'captured-output-content')
-    writeFileSync(current.workerUploadEntry, `
-const fs = await import('node:fs')
+  it('passes the transport-created unique Wrangler output path into the real upload entry', () => {
+    const stableRoot = realpathSync(mkdtempSync(join(homedir(), '.blogman-issue-91-integration-')))
+    const current = fixture(stableRoot)
+    const captureRoot = realpathSync(mkdtempSync(join(stableRoot, 'output-capture-')))
+    const tmpAlias = join(stableRoot, 'tmp-alias')
+    symlinkSync(current.root, tmpAlias)
+    roots.push(stableRoot)
+    const capturedPath = join(captureRoot, 'captured-output-path')
+    const capturedContent = join(captureRoot, 'captured-output-content')
+    const assets = join(current.source, 'assets')
+    mkdirSync(assets)
+    writeFileSync(join(assets, 'asset.txt'), 'fixture asset\n')
+    writeFileSync(current.config, `[assets]\ndirectory = ${JSON.stringify(assets)}\n`)
+    rmSync(current.archive)
+    const zipped = spawnSync('/usr/bin/zip', [
+      '-X', '-q', current.archive, 'worker.js', 'assets/asset.txt',
+    ], { cwd: current.source, encoding: 'utf8' })
+    expect(zipped.status, zipped.stderr).toBe(0)
+    writeFileSync(current.openNext, `
+const fs = require('node:fs')
 const outputPath = process.env.WRANGLER_OUTPUT_FILE_PATH
 if (!outputPath) process.exit(17)
 fs.writeFileSync(process.env.WORKER_OUTPUT_PATH_CAPTURE, outputPath)
 const output = JSON.stringify({ type: 'version-upload', version: 1, version_id: 'fixture-version' }) + '\\n'
-fs.writeFileSync(outputPath, output)
+fs.appendFileSync(outputPath, output)
 fs.writeFileSync(process.env.WORKER_OUTPUT_CONTENT_CAPTURE, output)
-process.stdout.write(JSON.stringify({ accepted: true }))
 `)
+
     const value = bindings(current, 1)
-    value.worker_upload_entry_sha256 = hash(current.workerUploadEntry)
+    const artifactFiles = [
+      { path: '.open-next/assets/asset.txt', file: join(assets, 'asset.txt') },
+      { path: '.open-next/worker.js', file: join(current.source, 'worker.js') },
+    ].map(({ path, file }) => ({ path, sha256: hash(file), bytes: readFileSync(file).byteLength }))
+    value.config_sha256 = hash(current.config)
+    value.artifact_archive_sha256 = hash(current.archive)
+    value.artifact_file_tree_files = artifactFiles
+    value.artifact_file_tree_sha256 = createHash('sha256').update(JSON.stringify(artifactFiles)).digest('hex')
+    value.worker_upload_entry_path = realWorkerUploadEntry
+    value.worker_upload_entry_sha256 = hash(realWorkerUploadEntry)
+    value.open_next_sha256 = hash(current.openNext)
+
+    const originalTmpdir = process.env.TMPDIR
     const originalOutputPath = process.env.WRANGLER_OUTPUT_FILE_PATH
     const originalCapturePath = process.env.WORKER_OUTPUT_PATH_CAPTURE
     const originalContentCapture = process.env.WORKER_OUTPUT_CONTENT_CAPTURE
+    process.env.TMPDIR = tmpAlias
     delete process.env.WRANGLER_OUTPUT_FILE_PATH
     process.env.WORKER_OUTPUT_PATH_CAPTURE = capturedPath
     process.env.WORKER_OUTPUT_CONTENT_CAPTURE = capturedContent
     try {
       const transport = createWorkerTransport(value)
-      transport.execute({
+      const result = transport.execute({
         operation: 'worker_deploy',
         stage: 'worker_deploy',
         timeout_ms: 600000,
@@ -192,7 +220,14 @@ process.stdout.write(JSON.stringify({ accepted: true }))
       const outputPath = readFileSync(capturedPath, 'utf8')
       expect(outputPath).toMatch(/upload\.jsonl$/u)
       expect(readFileSync(capturedContent, 'utf8')).toContain('fixture-version')
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        format: 'blogman-upload-source-lifecycle-acceptance/v1',
+        state: 'accepted',
+        version_id: 'fixture-version',
+      })
     } finally {
+      if (originalTmpdir === undefined) delete process.env.TMPDIR
+      else process.env.TMPDIR = originalTmpdir
       if (originalOutputPath === undefined) delete process.env.WRANGLER_OUTPUT_FILE_PATH
       else process.env.WRANGLER_OUTPUT_FILE_PATH = originalOutputPath
       if (originalCapturePath === undefined) delete process.env.WORKER_OUTPUT_PATH_CAPTURE

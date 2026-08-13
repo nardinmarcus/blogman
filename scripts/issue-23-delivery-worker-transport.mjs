@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { readFileSync, chmodSync, lstatSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { readFileSync, chmodSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { D1ChildError, runBoundedChild } from './issue-23-delivery-d1-child.mjs'
@@ -98,6 +98,16 @@ function validateArtifactSource(bindings) {
 }
 function response(stdout, duration_ms) {
   return { status: 0, stdout: JSON.stringify(stdout), stderr: '', duration_ms }
+}
+function makeTransportTreeRemovable(path) {
+  const entry = lstatSync(path)
+  if (entry.isSymbolicLink()) return
+  if (entry.isDirectory()) {
+    chmodSync(path, 0o700)
+    for (const name of readdirSync(path)) makeTransportTreeRemovable(join(path, name))
+    return
+  }
+  chmodSync(path, 0o600)
 }
 function childFailure(error) {
   if (error instanceof D1ChildError) {
@@ -316,7 +326,7 @@ export function createWorkerTransport(bindings) {
       || request.timeout_ms <= 0 || request.elapsed_ms < 0) fail('request is invalid')
     validateLocalBindings()
     if (request.operation === 'worker_deploy') {
-      const root = mkdtempSync(join(tmpdir(), 'blogman-issue-91-upload-'))
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-91-upload-')))
       chmodSync(root, 0o700)
       try {
         const output = join(root, 'upload.jsonl')
@@ -334,7 +344,10 @@ export function createWorkerTransport(bindings) {
           { ...process.env, WRANGLER_OUTPUT_FILE_PATH: output },
         )
         return response(parseJson(result.stdout, 'upload_acceptance', result.duration_ms), result.duration_ms)
-      } finally { rmSync(root, { recursive: true, force: true }) }
+      } finally {
+        makeTransportTreeRemovable(root)
+        rmSync(root, { recursive: true, force: true })
+      }
     }
     if (request.operation === 'version_traffic_verification') {
       if (!safeId(request.version_id)) throw new WorkerTransportError('ERROR', 'worker_adapter_uncertain')

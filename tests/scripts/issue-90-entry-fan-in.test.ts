@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { createD1TransportMock, runD1StagesMock, createWorkerTransportMock, runWorkerStagesMock, fsActual } = vi.hoisted(() => ({
@@ -79,6 +80,8 @@ const D1_OPERATIONS = [
 ]
 const REPOSITORY_ROOT = process.cwd()
 const DURABLE_SINK_ROOT = join(REPOSITORY_ROOT, '.issue-23-delivery')
+const ENTRY_MODULE_URL = pathToFileURL(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-entry.mjs')).href
+const SINK_MODULE_URL = pathToFileURL(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-evidence-sink.mjs')).href
 const RUNTIME_RECEIPT = buildFormalRuntimeReceipt().value
 const PREPARE_ENTRY_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-prepare.mjs')))
 const EXECUTE_ENTRY_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-entry.mjs')))
@@ -885,6 +888,66 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(createD1TransportMock).not.toHaveBeenCalled()
   })
 
+  it('replays and validates execute-produced durable evidence after a fresh process without leaking adapter credentials', () => {
+    const credentialMarker = 'sk-test-only-durable-boundary'
+    const prepared = actualPreparedManifest()
+    const authorization = authorizationFor(prepared, 'fan-in-fresh-process-durable-boundary')
+    createWorkerTransportMock.mockImplementationOnce(() => {
+      throw new Error(credentialMarker)
+    })
+
+    const terminal = execute(prepared, authorization)
+    expect(terminal.value).toMatchObject({
+      outcome: 'ERROR',
+      first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'live_preconditions_error' },
+    })
+    expect(JSON.stringify(terminal.value)).not.toContain(credentialMarker)
+
+    const encodeRecord = (record: { value: unknown, bytes: Uint8Array, sha256: string }) => ({
+      value: record.value,
+      bytes: Buffer.from(record.bytes).toString('base64'),
+      sha256: record.sha256,
+    })
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { execute, validateProductionTerminalEvidence } from ${JSON.stringify(ENTRY_MODULE_URL)}
+      import { repositoryDeliverySink } from ${JSON.stringify(SINK_MODULE_URL)}
+      const decodeRecord = (record) => ({
+        value: record.value,
+        bytes: Buffer.from(record.bytes, 'base64'),
+        sha256: record.sha256,
+      })
+      const manifest = decodeRecord(${JSON.stringify(encodeRecord(prepared))})
+      const terminal = decodeRecord(${JSON.stringify(encodeRecord(terminal))})
+      const authorization = ${JSON.stringify(authorization)}
+      if (validateProductionTerminalEvidence(terminal) !== true) process.exitCode = 2
+      const durable = repositoryDeliverySink.readTerminalEvidence(terminal.sha256)
+      const durableValues = [durable.terminal, durable.manifest, durable.d1, durable.worker]
+        .filter(Boolean).map((record) => record.value)
+      if (JSON.stringify(durableValues).includes(${JSON.stringify(credentialMarker)})) process.exitCode = 3
+      const forged = structuredClone(terminal)
+      forged.value.identities.manifest_sha256 = 'f'.repeat(64)
+      try {
+        validateProductionTerminalEvidence(forged)
+        process.exitCode = 4
+      } catch (error) {
+        if (!/production terminal evidence/u.test(error instanceof Error ? error.message : String(error))) {
+          process.exitCode = 5
+        }
+      }
+      try {
+        execute(manifest, authorization)
+        process.exitCode = 6
+      } catch (error) {
+        if (!/consumed|replay|one-shot/u.test(error instanceof Error ? error.message : String(error))) {
+          process.exitCode = 7
+        }
+      }
+    `], { cwd: REPOSITORY_ROOT, encoding: 'utf8' })
+
+    expect(child.status, child.stderr).toBe(0)
+  })
+
   it('validates an execute-produced D1 terminal with its D1 receipt and no Worker receipt', () => {
     const prepared = actualPreparedManifest()
     const receipt = d1Result('d1_identity')
@@ -1073,6 +1136,19 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(() => execute(prepared, authorizationFor(prepared, 'fan-in-local-lane')))
       .toThrow(/remote production|d1 evidence/u)
     expect(createD1TransportMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects an embedded plan/callback override before selecting a production adapter', () => {
+    configureD1()
+    const prepared = manifest()
+    const authorization = {
+      ...authorizationFor(prepared, 'fan-in-embedded-plan-override'),
+      plan: { callback: 'alternate-production-path' },
+    }
+
+    expect(() => execute(prepared, authorization)).toThrow(/authorization.*unsupported fields/u)
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+    expect(createWorkerTransportMock).not.toHaveBeenCalled()
   })
 
   it('keeps the public execute arity at exactly two arguments', () => {

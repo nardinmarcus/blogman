@@ -23,6 +23,7 @@ vi.mock('@/lib/cloudflare', () => ({
   getAppCloudflareContext: mocks.getAppCloudflareContext,
 }))
 
+import { GET as getSearch } from '@/app/api/search/route'
 import { GET as getAppearance } from '@/app/api/settings/appearance/route'
 import { GET as getEditorActions } from '@/app/api/editor/ai-actions/route'
 import { ensureAuthenticatedRequest } from '@/lib/server/route-helpers'
@@ -85,6 +86,63 @@ describe('migration-required route responses', () => {
 
   it('returns a diagnostic 503 for public appearance reads', async () => {
     await expectMigrationRequired(await getAppearance())
+  })
+
+  it('executes the frozen smoke routes through the real cookie authentication contract', async () => {
+    vi.stubEnv('ADMIN_PASSWORD', 'test-only-route-password')
+    vi.stubEnv('ADMIN_TOKEN_SALT', 'test-only-route-salt')
+    try {
+      const statement = {
+        bind: vi.fn(),
+        first: vi.fn(async () => null),
+        all: vi.fn(async () => ({ results: [] })),
+        run: vi.fn(async () => ({ success: true })),
+      }
+      statement.bind.mockReturnValue(statement)
+      const db = { prepare: vi.fn(() => statement) } as unknown as D1Database
+      mocks.getAppCloudflareEnv.mockResolvedValue({ DB: db })
+      mocks.getAppCloudflareContext.mockResolvedValue({ env: { DB: db }, ctx: { waitUntil: vi.fn() } })
+
+      const auth = await vi.importActual<typeof import('@/lib/admin-auth')>('@/lib/admin-auth')
+      mocks.isAdminAuthenticated.mockImplementation(auth.isAdminAuthenticated)
+      mocks.authenticateRequest.mockImplementation(auth.authenticateRequest)
+      const session = await auth.getSessionToken()
+      expect(auth.COOKIE_NAME).toBe('blogman_admin')
+      expect(session).toMatch(/^[a-f0-9]{64}$/u)
+
+      const cookie = `${auth.COOKIE_NAME}=${session}`
+      const routeCases = [
+        ['/api/search', 200, () => getSearch(new NextRequest('http://test.local/api/search?q=frozen'))],
+        ['/api/settings/appearance', 200, () => getAppearance()],
+        ['/api/admin/tokens', 200, () => getTokens(new NextRequest('http://test.local/api/admin/tokens', { headers: { Cookie: cookie } }))],
+        ['/api/admin/ai-provider', 200, () => getTextProviders(new NextRequest('http://test.local/api/admin/ai-provider', { headers: { Cookie: cookie } }))],
+        ['/api/admin/ai-post-generators', 200, () => getPostGenerators(new NextRequest('http://test.local/api/admin/ai-post-generators', { headers: { Cookie: cookie } }))],
+        ['/api/admin/posts/__blogman_smoke_absent__', 404, () => getAdminPost(
+          new NextRequest('http://test.local/api/admin/posts/__blogman_smoke_absent__', { headers: { Cookie: cookie } }),
+          { params: Promise.resolve({ slug: '__blogman_smoke_absent__' }) },
+        )],
+      ] as const
+
+      const observed: Array<{ path: string, status: number }> = []
+      for (const [path, expectedStatus, invoke] of routeCases) {
+        const response = await invoke()
+        observed.push({ path, status: response.status })
+        expect(response.status).toBe(expectedStatus)
+      }
+      expect(observed).toEqual([
+        { path: '/api/search', status: 200 },
+        { path: '/api/settings/appearance', status: 200 },
+        { path: '/api/admin/tokens', status: 200 },
+        { path: '/api/admin/ai-provider', status: 200 },
+        { path: '/api/admin/ai-post-generators', status: 200 },
+        { path: '/api/admin/posts/__blogman_smoke_absent__', status: 404 },
+      ])
+
+      const unauthorized = await getTokens(new NextRequest('http://test.local/api/admin/tokens'))
+      expect(unauthorized.status).toBe(401)
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 
   it('returns a diagnostic 503 instead of an empty editor action fallback', async () => {
