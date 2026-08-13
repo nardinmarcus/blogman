@@ -30,6 +30,17 @@ function fail(message) {
   throw new Error(`Issue #23 durable delivery sink: ${message}`)
 }
 
+export class DeliverySinkDeadlineError extends Error {
+  constructor() {
+    super('Issue #23 durable delivery sink: hard deadline exceeded')
+    this.name = 'DeliverySinkDeadlineError'
+  }
+}
+
+function checkDeadline(deadline) {
+  if (deadline !== undefined && deadline() !== true) throw new DeliverySinkDeadlineError()
+}
+
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
 }
@@ -158,21 +169,24 @@ function assertSecureFile(path, label) {
   if ((stat.mode & 0o777) !== 0o600) fail(`${label} mode drifted`)
 }
 
-function atomicWrite(path, bytes, directory) {
+function atomicWrite(path, bytes, directory, deadline) {
   const temporary = join(
     directory,
     `.${path.split('/').at(-1)}.${process.pid}.${temporaryFileSequence += 1}.tmp`,
   )
   let descriptor
   try {
+    checkDeadline(deadline)
     descriptor = openSync(temporary, 'wx', 0o600)
     writeAll(descriptor, bytes)
     fsyncSync(descriptor)
+    checkDeadline(deadline)
     closeSync(descriptor)
     descriptor = undefined
     linkSync(temporary, path)
     unlinkSync(temporary)
     syncDirectory(directory)
+    checkDeadline(deadline)
   } catch (error) {
     if (descriptor !== undefined) closeSync(descriptor)
     try { unlinkSync(temporary) } catch {}
@@ -180,9 +194,9 @@ function atomicWrite(path, bytes, directory) {
   }
 }
 
-function writeIfAbsent(path, bytes, directory, label) {
+function writeIfAbsent(path, bytes, directory, label, deadline) {
   try {
-    atomicWrite(path, bytes, directory)
+    atomicWrite(path, bytes, directory, deadline)
   } catch (error) {
     if (error?.code !== 'EEXIST') throw error
     let existing
@@ -191,12 +205,12 @@ function writeIfAbsent(path, bytes, directory, label) {
   }
 }
 
-function consumeAuthorization(root, record) {
+function consumeAuthorization(root, record, deadline) {
   const canonical = canonicalAuthorization(record)
   const directory = join(root, 'authorizations')
   const destination = join(directory, `${canonical.sha256}.json`)
   try {
-    atomicWrite(destination, canonical.bytes, directory)
+    atomicWrite(destination, canonical.bytes, directory, deadline)
   } catch (error) {
     if (error?.code === 'EEXIST') fail('authorization has already been consumed')
     throw error
@@ -228,7 +242,7 @@ function readRecord(root, sha256Value, label) {
   return record
 }
 
-function persistTerminalResult(root, input) {
+function persistTerminalResult(root, input, deadline) {
   if (!isRecord(input)
     || Object.keys(input).length !== 4
     || !['terminal', 'manifest', 'd1', 'worker'].every((key) => Object.hasOwn(input, key))) {
@@ -270,10 +284,10 @@ function persistTerminalResult(root, input) {
   }
   const recordsDirectory = join(root, 'records')
   for (const [record, label] of [[manifest, 'manifest'], [d1, 'D1 evidence'], [worker, 'Worker evidence']]) {
-    if (record !== null) writeIfAbsent(join(recordsDirectory, `${record.sha256}.json`), record.bytes, recordsDirectory, label)
+    if (record !== null) writeIfAbsent(join(recordsDirectory, `${record.sha256}.json`), record.bytes, recordsDirectory, label, deadline)
   }
   const terminalDirectory = join(root, 'terminals')
-  writeIfAbsent(join(terminalDirectory, `${terminal.sha256}.json`), terminal.bytes, terminalDirectory, 'terminal result')
+  writeIfAbsent(join(terminalDirectory, `${terminal.sha256}.json`), terminal.bytes, terminalDirectory, 'terminal result', deadline)
   return terminal.sha256
 }
 
@@ -326,13 +340,13 @@ export function createRepositoryDeliverySink(root = repositoryDeliverySinkRoot()
     }
   }
   return Object.freeze({
-    consumeAuthorization(record) {
+    consumeAuthorization(record, deadline) {
       assertSinkIdentity()
-      return consumeAuthorization(resolvedRoot, record)
+      return consumeAuthorization(resolvedRoot, record, deadline)
     },
-    persistTerminalResult(input) {
+    persistTerminalResult(input, deadline) {
       assertSinkIdentity()
-      return persistTerminalResult(resolvedRoot, input)
+      return persistTerminalResult(resolvedRoot, input, deadline)
     },
     readTerminalEvidence(terminalSha256) {
       assertSinkIdentity()

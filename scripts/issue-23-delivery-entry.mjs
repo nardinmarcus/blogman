@@ -21,7 +21,11 @@ import {
   createWorkerTransport,
 } from './issue-23-delivery-worker-transport.mjs'
 import { runWorkerStages } from './issue-23-delivery-worker-stages.mjs'
-import { createRepositoryDeliverySink, repositoryDeliverySink } from './issue-23-delivery-evidence-sink.mjs'
+import {
+  createRepositoryDeliverySink,
+  DeliverySinkDeadlineError,
+  repositoryDeliverySink,
+} from './issue-23-delivery-evidence-sink.mjs'
 import { formalExecutionClosureSha256 } from './issue-23-delivery-execution-closure.mjs'
 
 export const LOCAL_ENTRY_FORMAT = 'blogman-issue-23-local-entry/v1'
@@ -1098,7 +1102,7 @@ function activeDeliverySink() {
   return currentFormalContext()?.deliverySink ?? repositoryDeliverySink
 }
 
-function acceptAuthorization(manifestSha256, authorization) {
+function acceptAuthorization(manifestSha256, authorization, deadline) {
   if (!isPlainRecord(authorization)) fail('authorization must be a plain record')
   assertExactKeys(
     authorization,
@@ -1118,7 +1122,7 @@ function acceptAuthorization(manifestSha256, authorization) {
   }
   const authorizationBytes = canonicalJsonBytes(canonicalAuthorization)
   const authorizationDigest = sha256(authorizationBytes)
-  activeDeliverySink().consumeAuthorization({ bytes: authorizationBytes, sha256: authorizationDigest })
+  activeDeliverySink().consumeAuthorization({ bytes: authorizationBytes, sha256: authorizationDigest }, deadline)
   return authorizationDigest
 }
 
@@ -1855,7 +1859,8 @@ function executeProduction(manifest, authorization) {
   assertWranglerTargetBinding(manifest.value)
   const adapters = activeAdapterFactories()
   const attemptClock = createAttemptClock()
-  const authorizationDigest = acceptAuthorization(sha256(manifestBytes), authorization)
+  const withinOverallDeadline = () => attemptClock.elapsedMilliseconds() <= OVERALL_TIMEOUT_SECONDS * 1000
+  const authorizationDigest = acceptAuthorization(sha256(manifestBytes), authorization, withinOverallDeadline)
   const authorizationElapsed = attemptClock.elapsedMilliseconds()
   const identities = {
     manifest_sha256: sha256(manifestBytes),
@@ -2018,12 +2023,28 @@ function executeProduction(manifest, authorization) {
     value.ended_at = attemptClock.finish(measuredBeforePersistence)
     result = terminalResult(value)
   }
-  activeDeliverySink().persistTerminalResult({
-    terminal: result,
-    manifest,
-    d1: durableD1Receipt,
-    worker: durableWorkerReceipt,
-  })
+  try {
+    activeDeliverySink().persistTerminalResult({
+      terminal: result,
+      manifest,
+      d1: durableD1Receipt,
+      worker: durableWorkerReceipt,
+    }, withinOverallDeadline)
+  } catch (error) {
+    if (!(error instanceof DeliverySinkDeadlineError)) throw error
+    value.outcome = 'TIMEOUT'
+    value.first_terminal_stage = terminal.stage
+    value.failure = { classification: 'overall_timeout' }
+    value.evidence.promotable = false
+    value.ended_at = attemptClock.finish(attemptClock.elapsedMilliseconds())
+    result = terminalResult(value)
+    activeDeliverySink().persistTerminalResult({
+      terminal: result,
+      manifest,
+      d1: durableD1Receipt,
+      worker: durableWorkerReceipt,
+    })
+  }
   return result
 }
 
