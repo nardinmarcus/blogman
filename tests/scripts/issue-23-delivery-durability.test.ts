@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -90,20 +90,23 @@ describe('Issue #23 durable delivery records', () => {
     expect(() => sink.consumeAuthorization(authorizationRecord())).toThrow(/canonical|identity/u)
   })
 
-  it('atomically rejects concurrent and fresh-process replay of the same serialized Authorization', () => {
+  it('atomically permits exactly one concurrent process and rejects fresh-process replay', async () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-sink-'))
     temporaryDirectories.push(root)
     const authorization = authorizationRecord()
-    const sink = createRepositoryDeliverySink(root)
-
-    const contender = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    createRepositoryDeliverySink(root)
+    const contenderSource = `
       import { createRepositoryDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
       const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
       const record = { bytes, sha256: ${JSON.stringify(authorization.sha256)} }
-      createRepositoryDeliverySink(${JSON.stringify(root)}).consumeAuthorization(record)
-    `], { encoding: 'utf8' })
-    expect(contender.status, contender.stderr).toBe(0)
-    expect(() => sink.consumeAuthorization(authorization)).toThrow(/consumed/u)
+      try { createRepositoryDeliverySink(${JSON.stringify(root)}).consumeAuthorization(record) }
+      catch (error) { if (/consumed/u.test(error.message)) process.exitCode = 10; else throw error }
+    `
+    const run = () => new Promise<number | null>((resolve) => {
+      const child = spawn(process.execPath, ['--input-type=module', '-e', contenderSource], { stdio: 'ignore' })
+      child.once('exit', resolve)
+    })
+    expect((await Promise.all([run(), run()])).sort()).toEqual([0, 10])
 
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
       import { createRepositoryDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
@@ -118,6 +121,31 @@ describe('Issue #23 durable delivery records', () => {
     `], { encoding: 'utf8' })
 
     expect(child.status, child.stderr).toBe(0)
+  })
+
+  it('rejects one Authorization replayed from a fresh linked worktree', () => {
+    const repository = mkdtempSync(join(tmpdir(), 'blogman-issue-23-replay-repository-'))
+    const worktree = mkdtempSync(join(tmpdir(), 'blogman-issue-23-replay-worktree-'))
+    temporaryDirectories.push(repository, worktree)
+    spawnSync('git', ['init', repository])
+    writeFileSync(join(repository, 'tracked'), 'tracked\n')
+    spawnSync('git', ['-C', repository, 'add', 'tracked'])
+    spawnSync('git', ['-C', repository, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'fixture'])
+    spawnSync('git', ['-C', repository, 'worktree', 'add', '--detach', worktree, 'HEAD'])
+    const authorization = authorizationRecord()
+    const source = `
+      import { createRepositoryDeliverySink, repositoryDeliverySinkRoot } from ${JSON.stringify(sinkModuleUrl)}
+      const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
+      const record = { bytes, sha256: ${JSON.stringify(authorization.sha256)} }
+      try { createRepositoryDeliverySink(repositoryDeliverySinkRoot(process.cwd())).consumeAuthorization(record) }
+      catch (error) { if (/consumed/u.test(error.message)) process.exitCode = 10; else throw error }
+    `
+    try {
+      expect(spawnSync(process.execPath, ['--input-type=module', '-e', source], { cwd: repository }).status).toBe(0)
+      expect(spawnSync(process.execPath, ['--input-type=module', '-e', source], { cwd: worktree }).status).toBe(10)
+    } finally {
+      spawnSync('git', ['-C', repository, 'worktree', 'remove', '--force', worktree])
+    }
   })
 
   it('round-trips Terminal Result, Manifest, consumed Authorization, and evidence as one identity set after a fresh process restart', () => {
