@@ -48,9 +48,10 @@ function fixture(parent = tmpdir()) {
   writeFileSync(npm, '#!/bin/sh\nexit 0\n')
   writeFileSync(openNext, '#!/usr/bin/env node\n')
   writeFileSync(curl, `#!/usr/bin/env node
+const fs = require('node:fs')
 const args = process.argv.slice(2)
-const headerIndex = args.indexOf('--header')
-if (args[headerIndex + 1] !== 'Cookie: blogman_admin=smoke-cookie') process.exit(19)
+if (args.some((arg) => arg.includes('smoke-cookie'))) process.exit(18)
+if (fs.readFileSync(0, 'utf8') !== 'header = "Cookie: blogman_admin=smoke-cookie"\\n') process.exit(19)
 const url = args.at(-1)
 process.stdout.write(url.includes('/api/admin/posts/') ? '404' : '200')
 `)
@@ -104,6 +105,10 @@ function bindings(fixture: ReturnType<typeof fixture>, port: number) {
     bytes: readFileSync(join(fixture.source, 'worker.js')).byteLength,
   }]
   return {
+    manifest_sha256: '1'.repeat(64),
+    authorization_sha256: '2'.repeat(64),
+    attempt_id: '3'.repeat(64),
+    smoke_admin_credential: 'smoke-cookie',
     config_path: fixture.config, config_sha256: hash(fixture.config),
     artifact_archive_path: fixture.archive, artifact_archive_sha256: hash(fixture.archive),
     artifact_source_path: fixture.source,
@@ -132,9 +137,7 @@ describe('Issue #91 private smoke_control_t0 adapter', () => {
     const current = fixture()
     const port = await localServer(current.root)
     const originalLog = process.env.WORKER_FAKE_LOG
-    const originalSmokeCredential = process.env.DELIVERY_SMOKE_ADMIN
     process.env.WORKER_FAKE_LOG = current.log
-    process.env.DELIVERY_SMOKE_ADMIN = 'smoke-cookie'
     try {
       const transport = createWorkerTransport(bindings(current, port))
       const result = transport.execute({ operation: 'smoke_control_t0', stage: 'smoke_control_t0', timeout_ms: 300000, elapsed_ms: 0, version_id: 'version-new', deployment_id: 'deployment-new' })
@@ -153,8 +156,6 @@ describe('Issue #91 private smoke_control_t0 adapter', () => {
     } finally {
       if (originalLog === undefined) delete process.env.WORKER_FAKE_LOG
       else process.env.WORKER_FAKE_LOG = originalLog
-      if (originalSmokeCredential === undefined) delete process.env.DELIVERY_SMOKE_ADMIN
-      else process.env.DELIVERY_SMOKE_ADMIN = originalSmokeCredential
     }
   }, 30000)
 

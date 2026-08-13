@@ -100,6 +100,10 @@ const CONFIG_CI_SCHEMA = Object.freeze({
     expected_head_sha: MANIFEST_SCHEMA.properties.ci.properties.head_sha,
   },
 })
+const REQUIRED_CREDENTIAL_SLOTS = Object.freeze([
+  Object.freeze({ name: 'cloudflare_delivery', scopes: Object.freeze(['account:read', 'd1:write', 'workers:write']) }),
+  Object.freeze({ name: 'delivery_smoke_admin', scopes: Object.freeze(['admin:smoke']) }),
+])
 const FIXED_SMOKE_CONTRACT = Object.freeze({
   requests: Object.freeze([
     Object.freeze({ path: '/api/search', status: 200 }),
@@ -1428,6 +1432,14 @@ function assertManifestRelationships(manifest, policy = PRODUCTION_MANIFEST_POLI
     || manifest.target.baseline.traffic[0].version_id !== manifest.target.baseline.version_id
     || manifest.target.baseline.traffic[0].percentage !== 100) {
     fail('target.baseline.traffic must bind one 100% baseline version')
+  }
+
+  const credentialSlots = manifest.policy.authorization.credential_slots.map((slot) => ({
+    name: slot.name,
+    scopes: [...slot.scopes].sort(),
+  }))
+  if (!jsonEqual(credentialSlots, REQUIRED_CREDENTIAL_SLOTS)) {
+    fail('policy.authorization credential slots are not canonical; delivery_smoke_admin requires admin:smoke')
   }
 
   if (!jsonEqual(manifest.policy.stages, DEFAULT_STAGE_POLICY)) {

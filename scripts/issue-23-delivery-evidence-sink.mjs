@@ -92,7 +92,23 @@ function canonicalRecord(record, label) {
 
 function canonicalAuthorization(record) {
   const canonical = canonicalRecord(record, 'authorization')
+  const keys = ['format', 'authorization_id', 'manifest_sha256', 'decision']
+  if (Object.keys(canonical.value).length !== keys.length
+    || keys.some((key) => !Object.hasOwn(canonical.value, key))) {
+    fail('authorization contains unsupported fields')
+  }
   if (canonical.value.format !== AUTHORIZATION_FORMAT) fail('authorization format is invalid')
+  if (typeof canonical.value.authorization_id !== 'string'
+    || canonical.value.authorization_id.length === 0
+    || canonical.value.authorization_id.length > 256
+    || /[\u0000\r\n]/u.test(canonical.value.authorization_id)) {
+    fail('authorization authorization_id is invalid')
+  }
+  if (typeof canonical.value.manifest_sha256 !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(canonical.value.manifest_sha256)) {
+    fail('authorization manifest identity is invalid')
+  }
+  if (canonical.value.decision !== 'approve') fail('authorization decision is invalid')
   return canonical
 }
 
@@ -161,6 +177,19 @@ function consumeAuthorization(root, record) {
   return canonical.sha256
 }
 
+function readAuthorization(root, sha256Value) {
+  if (typeof sha256Value !== 'string' || !/^[a-f0-9]{64}$/u.test(sha256Value)) {
+    fail('authorization identity is invalid')
+  }
+  let bytes
+  try {
+    bytes = readFileSync(join(root, 'authorizations', `${sha256Value}.json`))
+  } catch {
+    fail('authorization is missing from the durable sink')
+  }
+  return canonicalAuthorization({ bytes, sha256: sha256Value })
+}
+
 function readRecord(root, sha256Value, label) {
   if (typeof sha256Value !== 'string' || !/^[a-f0-9]{64}$/u.test(sha256Value)) {
     fail(`${label} identity is invalid`)
@@ -196,10 +225,26 @@ function persistTerminalResult(root, input) {
   const hashes = terminal.value.evidence?.hashes
   if (!isRecord(terminal.value.identities)
     || terminal.value.identities.manifest_sha256 !== manifest.sha256
+    || typeof terminal.value.identities.authorization_sha256 !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(terminal.value.identities.authorization_sha256)
     || !isRecord(hashes)
     || hashes.d1_stage_receipt_sha256 !== (d1?.sha256 ?? null)
     || hashes.worker_stage_receipt_sha256 !== (worker?.sha256 ?? null)) {
     fail('terminal persistence identities do not match durable evidence')
+  }
+  const authorization = readAuthorization(root, terminal.value.identities.authorization_sha256)
+  if (authorization.value.manifest_sha256 !== manifest.sha256) {
+    fail('terminal persistence authorization does not match manifest')
+  }
+  if (worker !== null) {
+    const evidence = worker.value.evidence
+    if (!isRecord(evidence)
+      || evidence.manifest_sha256 !== manifest.sha256
+      || evidence.authorization_sha256 !== authorization.sha256
+      || evidence.attempt_id !== terminal.value.attempt_id
+      || evidence.candidate_id !== manifest.value.repository?.commit) {
+      fail('Worker evidence identity does not match Terminal Result')
+    }
   }
   const recordsDirectory = join(root, 'records')
   for (const [record, label] of [[manifest, 'manifest'], [d1, 'D1 evidence'], [worker, 'Worker evidence']]) {
@@ -224,9 +269,15 @@ function readTerminalEvidence(root, terminalSha256) {
   const terminal = canonicalRecord({ bytes: terminalBytes, sha256: terminalSha256 }, 'terminal result')
   if (terminal.value.format !== TERMINAL_RESULT_FORMAT) fail('terminal result format is invalid')
   const hashes = terminal.value.evidence?.hashes ?? {}
+  const manifest = readRecord(root, terminal.value.identities.manifest_sha256, 'manifest')
+  const authorization = readAuthorization(root, terminal.value.identities.authorization_sha256)
+  if (authorization.value.manifest_sha256 !== manifest.sha256) {
+    fail('terminal result identity set is inconsistent')
+  }
   return Object.freeze({
     terminal,
-    manifest: readRecord(root, terminal.value.identities.manifest_sha256, 'manifest'),
+    manifest,
+    authorization,
     d1: hashes.d1_stage_receipt_sha256 === null ? null : readRecord(root, hashes.d1_stage_receipt_sha256, 'D1 evidence'),
     worker: hashes.worker_stage_receipt_sha256 === null ? null : readRecord(root, hashes.worker_stage_receipt_sha256, 'Worker evidence'),
   })
@@ -245,4 +296,15 @@ export function createRepositoryDeliverySink(root = join(REPOSITORY_ROOT, '.issu
   })
 }
 
-export const repositoryDeliverySink = createRepositoryDeliverySink()
+let defaultRepositoryDeliverySink
+
+function defaultSink() {
+  defaultRepositoryDeliverySink ??= createRepositoryDeliverySink()
+  return defaultRepositoryDeliverySink
+}
+
+export const repositoryDeliverySink = Object.freeze({
+  consumeAuthorization: (record) => defaultSink().consumeAuthorization(record),
+  persistTerminalResult: (input) => defaultSink().persistTerminalResult(input),
+  readTerminalEvidence: (terminalSha256) => defaultSink().readTerminalEvidence(terminalSha256),
+})

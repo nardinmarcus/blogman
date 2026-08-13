@@ -956,7 +956,13 @@ describe('Issue #23 D1 delivery stages', () => {
     const d1ElapsedMs = Object.values(d1.value.stage_durations_ms).reduce((sum, duration) => sum + duration, 0)
     const workerCalls: unknown[] = []
     const worker = runWorkerStages({
-      bindings: { smoke: { requests: [] } },
+      bindings: {
+        manifest_sha256: '1'.repeat(64),
+        authorization_sha256: '2'.repeat(64),
+        attempt_id: '3'.repeat(64),
+        candidate_id: '4'.repeat(40),
+        smoke: { requests: [] },
+      },
       transport: { execute(request: unknown) { workerCalls.push(request); throw new Error('must not run') } },
       elapsed_ms: livePreconditionsElapsedMs + d1ElapsedMs,
     })

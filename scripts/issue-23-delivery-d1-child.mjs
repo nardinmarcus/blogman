@@ -33,8 +33,8 @@ const SUPERVISOR_SOURCE = [
   'const append = (target, chunk) => { const bytes = Buffer.byteLength(chunk); if (target === stdout) stdoutBytes += bytes; else stderrBytes += bytes; if ((target === stdout ? stdoutBytes : stderrBytes) > maxOutputBytes) { outputOverflow = true; killGroup() } else target.push(Buffer.from(chunk)) }',
   "const emit = (status, code = null, signal = null, residual = false) => { if (emitted) return; emitted = true; const value = { child_error: childError?.code || null, child_signal: signal, child_status: code, duration_ms: duration(), residual_process_group: residual, status, stderr_b64: Buffer.concat(stderr).toString('base64'), stdout_b64: Buffer.concat(stdout).toString('base64') }; process.stdout.write(JSON.stringify(value), () => process.exit(0)) }",
   'const finish = (code, signal) => { if (hardTimer) clearTimeout(hardTimer); const residualBefore = hasResidual(); if (timedOut || outputOverflow || residualBefore || code !== 0 || signal || childError) killGroup(); setTimeout(() => { const residualAfter = hasResidual(); if (residualAfter || residualBefore) emit(\'uncertain\', code, signal, true); else if (timedOut) emit(\'timed_out\', code, signal); else if (outputOverflow) emit(\'output_overflow\', code, signal); else if (childError || signal) emit(\'uncertain\', code, signal); else if (code !== 0) emit(\'nonzero\', code, signal); else emit(\'completed\', code, signal) }, residualBefore || timedOut || outputOverflow ? 50 : 0) }',
-  'try { child = spawn(executable, args, { cwd: process.cwd(), detached: true, stdio: [\'ignore\', \'pipe\', \'pipe\'] }) } catch (error) { childError = error; emit(\'uncertain\') }',
-  "if (child) { child.stdout.on('data', (chunk) => append(stdout, chunk)); child.stderr.on('data', (chunk) => append(stderr, chunk)); child.on('error', (error) => { childError = error; killGroup() }); child.on('close', finish); setTimeout(() => { timedOut = true; killGroup() }, timeoutMs); hardTimer = setTimeout(() => { killGroup(); emit('uncertain', null, null, true) }, timeoutMs + 1000) }",
+  'try { child = spawn(executable, args, { cwd: process.cwd(), detached: true, stdio: [\'pipe\', \'pipe\', \'pipe\'] }) } catch (error) { childError = error; emit(\'uncertain\') }',
+  "if (child) { process.stdin.pipe(child.stdin); child.stdout.on('data', (chunk) => append(stdout, chunk)); child.stderr.on('data', (chunk) => append(stderr, chunk)); child.on('error', (error) => { childError = error; killGroup() }); child.on('close', finish); setTimeout(() => { timedOut = true; killGroup() }, timeoutMs); hardTimer = setTimeout(() => { killGroup(); emit('uncertain', null, null, true) }, timeoutMs + 1000) }",
   "process.once('SIGTERM', () => { timedOut = true; killGroup() })",
   "process.once('SIGINT', () => { timedOut = true; killGroup() })",
 ].join('\n')
@@ -87,7 +87,10 @@ function parseSupervisorOutput(output) {
   }
 }
 
-export function runBoundedChild(executable, args, timeoutMs, maxOutputBytes, cwd = process.cwd(), env = process.env) {
+export function runBoundedChild(executable, args, timeoutMs, maxOutputBytes, cwd = process.cwd(), env = process.env, stdin = null) {
+  if (stdin !== null && !(stdin instanceof Uint8Array)) {
+    throw new D1ChildError(D1_CHILD_FAILURE_CLASSIFICATIONS.UNCERTAIN)
+  }
   const result = spawnSync(
     process.execPath,
     [
@@ -101,12 +104,13 @@ export function runBoundedChild(executable, args, timeoutMs, maxOutputBytes, cwd
     {
       cwd,
       env,
+      input: stdin === null ? undefined : Buffer.from(stdin),
       encoding: 'utf8',
       maxBuffer: maxOutputBytes * 2 + 64 * 1024,
       timeout: timeoutMs + SUPERVISOR_GRACE_MS,
       killSignal: 'SIGTERM',
       shell: false,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     },
   )
   if (result.error?.code === 'ETIMEDOUT') {

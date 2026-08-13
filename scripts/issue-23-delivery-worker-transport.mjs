@@ -15,7 +15,6 @@ const SMOKE_PATHS = Object.freeze([
   ['/api/admin/ai-post-generators', 200],
   ['/api/admin/posts/__blogman_smoke_absent__', 404],
 ])
-const SMOKE_CREDENTIAL_ENV = 'DELIVERY_SMOKE_ADMIN'
 const RECONCILIATION_DIMENSIONS = Object.freeze(['schema', 'migration_ledger', 'post_count', 'post_status', 'post_content'])
 const ARTIFACT_FILE_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9@._/-]+$/u
 
@@ -98,6 +97,18 @@ function validateArtifactSource(bindings) {
 }
 function response(stdout, duration_ms) {
   return { status: 0, stdout: JSON.stringify(stdout), stderr: '', duration_ms }
+}
+function formalFaultResultForLivePreconditions(fault) {
+  if (fault?.stage !== 'live_preconditions') return null
+  if (fault.kind === 'failure') {
+    return { outcome: 'NON_PASS', classification: 'formal_rehearsal_forced_failure', duration_ms: 1 }
+  }
+  if (fault.kind === 'timeout') {
+    return { outcome: 'TIMEOUT', classification: 'stage_timeout', duration_ms: 1 }
+  }
+  if (fault.kind === 'malformed') return { outcome: 'MALFORMED', duration_ms: 1 }
+  if (fault.kind === 'drift') return { outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }
+  return { outcome: 'UNCERTAIN', classification: 'formal_rehearsal_uncertain', duration_ms: 1 }
 }
 function makeTransportTreeRemovable(path) {
   const entry = lstatSync(path)
@@ -198,21 +209,14 @@ function versionDeployCommand(bindings, versionId) {
     'versions', 'deploy', `${versionId}@100%`, '-y', '--config', bindings.config_path,
   ]) })
 }
-function smokeCommand(bindings, url, cookie) {
+function smokeCommand(bindings, url) {
   return Object.freeze({ executable: bindings.curl_path, args: Object.freeze([
-    '--request', 'GET', '--silent', '--show-error', '--header', `Cookie: blogman_admin=${cookie}`,
+    '--config', '-', '--request', 'GET', '--silent', '--show-error',
     '--output', '/dev/null', '--write-out', '%{http_code}', url,
   ]) })
 }
-function resolveSmokeCredential(bindings) {
-  if (bindings.smoke.admin_credential_slot !== 'delivery_smoke_admin') {
-    throw new WorkerTransportError('NON_PASS', 'smoke_control_contract_invalid')
-  }
-  const credential = process.env[SMOKE_CREDENTIAL_ENV]
-  if (typeof credential !== 'string' || !/^[A-Za-z0-9._~-]+$/u.test(credential)) {
-    throw new WorkerTransportError('ERROR', 'smoke_auth_unavailable')
-  }
-  return credential
+function smokeStdin(credential) {
+  return Buffer.from(`header = "Cookie: blogman_admin=${credential}"\n`, 'utf8')
 }
 function controlsCommand(bindings) {
   return Object.freeze({ executable: bindings.node_path, args: Object.freeze([
@@ -244,6 +248,7 @@ function uploadCommand(bindings, paths) {
 export function createWorkerTransport(bindings) {
   if (!bindings || typeof bindings !== 'object') fail('bindings are required')
   for (const key of [
+    'manifest_sha256', 'authorization_sha256', 'attempt_id', 'smoke_admin_credential',
     'config_path', 'config_sha256', 'artifact_archive_path', 'artifact_archive_sha256',
     'artifact_source_path', 'artifact_file_tree_sha256', 'artifact_file_tree_files', 'artifact_sha256',
     'candidate_id', 'worker_name', 'd1_database_id', 'rollout_safety_path', 'rollout_safety_sha256',
@@ -258,11 +263,14 @@ export function createWorkerTransport(bindings) {
     'open_next_path', 'curl_path', 'package_json_path', 'lockfile_path',
   ]) assertPath(bindings[key], key)
   for (const key of [
+    'manifest_sha256', 'authorization_sha256', 'attempt_id',
     'config_sha256', 'artifact_archive_sha256', 'artifact_file_tree_sha256', 'artifact_sha256',
     'rollout_safety_sha256', 'expected_reconciliation_sha256', 'worker_upload_entry_sha256', 'wrangler_sha256',
     'node_sha256', 'npm_sha256', 'open_next_sha256', 'curl_sha256', 'package_json_sha256', 'lockfile_sha256',
   ]) assertHash(bindings[key], key)
-  if (!safeId(bindings.candidate_id) || !safeId(bindings.worker_name) || !safeId(bindings.d1_database_id)
+  if (!/^[a-f0-9]{40}$/u.test(bindings.candidate_id) || !safeId(bindings.worker_name) || !safeId(bindings.d1_database_id)
+    || typeof bindings.smoke_admin_credential !== 'string'
+    || !/^[A-Za-z0-9._~-]+$/u.test(bindings.smoke_admin_credential)
     || !safeId(bindings.database) || typeof bindings.origin !== 'string' || !Array.isArray(bindings.smoke?.requests)
     || !exact(bindings.baseline, ['deployment_id', 'version_id', 'd1_database_id', 'traffic'])
     || !safeId(bindings.baseline.deployment_id) || !safeId(bindings.baseline.version_id)
@@ -293,14 +301,14 @@ export function createWorkerTransport(bindings) {
     assertBoundFile(bindings.lockfile_path, bindings.lockfile_sha256)
   }
 
-  function invoke(executable, args, request, spent, env = process.env) {
+  function invoke(executable, args, request, spent, env = process.env, stdin = null) {
     validateLocalBindings()
     const remaining = Math.min(request.timeout_ms - spent, OVERALL_TIMEOUT_MS - request.elapsed_ms - spent)
     if (!Number.isSafeInteger(remaining) || remaining <= 0) {
       throw new WorkerTransportError('TIMEOUT', 'overall_timeout', 1)
     }
     try {
-      const result = runBoundedChild(executable, args, remaining, MAX_OUTPUT_BYTES, process.cwd(), env)
+      const result = runBoundedChild(executable, args, remaining, MAX_OUTPUT_BYTES, process.cwd(), env, stdin)
       if (result.stderr !== '') throw new WorkerTransportError('UNCERTAIN', 'worker_adapter_uncertain', result.duration_ms)
       return result
     } catch (error) {
@@ -392,11 +400,17 @@ export function createWorkerTransport(bindings) {
     if (before.value.deployment_id !== request.deployment_id) throw new WorkerTransportError('NON_PASS', 'version_traffic_mismatch', spent)
     spent += d1Identity(request, spent)
     const checks = {}
-    const smokeCredential = resolveSmokeCredential(bindings)
     for (const { path, status } of bindings.smoke.requests) {
       const url = new URL(path, origin).toString()
-      const command = smokeCommand(bindings, url, smokeCredential)
-      const requestResult = invoke(command.executable, command.args, request, spent)
+      const command = smokeCommand(bindings, url)
+      const requestResult = invoke(
+        command.executable,
+        command.args,
+        request,
+        spent,
+        process.env,
+        smokeStdin(bindings.smoke_admin_credential),
+      )
       spent += requestResult.duration_ms
       if (requestResult.stdout !== String(status)) {
         throw new WorkerTransportError('NON_PASS', 'smoke_control_contract_invalid', spent)
@@ -429,11 +443,8 @@ export function createWorkerTransport(bindings) {
  * records that argv and returns a bounded recorded response; it never invokes
  * a command and rejects anything outside the fixed formal command plan.
  */
-export function createRehearsalWorkerTransport(bindings, sink, failureStage = null) {
+export function createRehearsalWorkerTransport(bindings, sink, fault = null) {
   if (!bindings || typeof bindings !== 'object') fail('bindings are required')
-  if (failureStage !== null && failureStage !== 'live_preconditions') {
-    fail('formal rehearsal failure stage is invalid')
-  }
   const origin = new URL(bindings.origin)
   if (!['http:', 'https:'].includes(origin.protocol)) fail('origin is invalid')
   const record = (operation, command, stdout) => {
@@ -451,14 +462,28 @@ export function createRehearsalWorkerTransport(bindings, sink, failureStage = nu
   const controlsRaw = { state: 'captured', controls: { producer: 'disabled', authority: 'disabled', executors: { scheduler: 'disabled' } } }
   const reconciliationRaw = { state: 'matched', checks: Object.fromEntries(RECONCILIATION_DIMENSIONS.map((key) => [key, 'matched'])) }
 
+  function forcedResponse(request) {
+    if (fault?.stage !== request.stage) return null
+    if (fault.kind === 'failure') {
+      throw new WorkerTransportError('NON_PASS', 'formal_rehearsal_forced_failure', 1)
+    }
+    if (fault.kind === 'drift') throw new WorkerTransportError('NON_PASS', 'Manifest Drift', 1)
+    if (fault.kind === 'timeout') {
+      return { status: 0, stdout: '{}', stderr: '', duration_ms: request.timeout_ms + 1 }
+    }
+    if (fault.kind === 'malformed') {
+      return { status: 0, stdout: '{', stderr: '', duration_ms: 1 }
+    }
+    throw new WorkerTransportError('UNCERTAIN', 'formal_rehearsal_uncertain', 1)
+  }
+
   function livePreconditions(elapsed_ms = 0) {
     if (!Number.isSafeInteger(elapsed_ms) || elapsed_ms < 0 || elapsed_ms >= OVERALL_TIMEOUT_MS) {
       return { outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: 1 }
     }
     const baseline = record('live_preconditions.deployment_status', deploymentStatusCommand(bindings), deploymentRaw(bindings.baseline.version_id))
-    if (failureStage === 'live_preconditions') {
-      return { outcome: 'NON_PASS', classification: 'formal_rehearsal_forced_live_precondition_failure', duration_ms: baseline.duration_ms }
-    }
+    const liveFault = formalFaultResultForLivePreconditions(fault)
+    if (liveFault) return liveFault
     const deployment = parseDeployment(baseline.stdout, bindings.baseline.version_id, bindings.d1_database_id, baseline.duration_ms)
     if (deployment.deployment_id !== bindings.baseline.deployment_id) return { outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }
     const identity = record('live_preconditions.d1_identity', d1IdentityCommand(bindings), d1Raw)
@@ -473,17 +498,20 @@ export function createRehearsalWorkerTransport(bindings, sink, failureStage = nu
       || request.timeout_ms <= 0 || request.elapsed_ms < 0) fail('request is invalid')
     if (request.operation === 'worker_deploy') {
       const command = uploadCommand(bindings, { destination: '<formal-no-network>', before: '<formal-no-network>', after: '<formal-no-network>', proof: '<formal-no-network>' })
-      return record(request.operation, command, {
+      const recorded = record(request.operation, command, {
         format: 'blogman-upload-source-lifecycle-acceptance/v1', state: 'accepted',
         upload_operation_id: `issue-23-${bindings.candidate_id}-upload-1`, version_id: `rehearsal-version-${bindings.candidate_id.slice(0, 12)}`,
         config_sha256: bindings.config_sha256, snapshot_tree_sha256: bindings.artifact_sha256,
         snapshot_identity_sha256: 'a'.repeat(64), snapshot_proof_before_sha256: 'b'.repeat(64), snapshot_proof_after_sha256: 'c'.repeat(64),
         build_directory_proof_sha256: 'd'.repeat(64), wrangler_output_sha256: 'e'.repeat(64),
       })
+      return forcedResponse(request) ?? recorded
     }
     if (!safeId(request.version_id)) throw new WorkerTransportError('ERROR', 'worker_adapter_uncertain')
     if (request.operation === 'version_traffic_verification') {
       record(`${request.operation}.deploy`, versionDeployCommand(bindings, request.version_id), {})
+      const forced = forcedResponse(request)
+      if (forced) return forced
       const status = record(`${request.operation}.deployment_status`, deploymentStatusCommand(bindings), deploymentRaw(request.version_id))
       const deployment = parseDeployment(status.stdout, request.version_id, bindings.d1_database_id, status.duration_ms)
       const identity = record(`${request.operation}.d1_identity`, d1IdentityCommand(bindings), d1Raw)
@@ -491,14 +519,17 @@ export function createRehearsalWorkerTransport(bindings, sink, failureStage = nu
       return response(deployment, status.duration_ms + identity.duration_ms + 1)
     }
     if (!safeId(request.deployment_id)) throw new WorkerTransportError('ERROR', 'worker_adapter_uncertain')
-    const before = parseDeployment(record(`${request.operation}.before`, deploymentStatusCommand(bindings), deploymentRaw(request.version_id)).stdout, request.version_id, bindings.d1_database_id)
+    const beforeResponse = record(`${request.operation}.before`, deploymentStatusCommand(bindings), deploymentRaw(request.version_id))
+    const forced = forcedResponse(request)
+    if (forced) return forced
+    const before = parseDeployment(beforeResponse.stdout, request.version_id, bindings.d1_database_id)
     const identity = record(`${request.operation}.d1_identity`, d1IdentityCommand(bindings), d1Raw)
     parseD1Identity(identity.stdout, bindings.d1_database_id, identity.duration_ms)
     const checks = {}
     for (const { path, status } of bindings.smoke.requests) {
       const result = record(
         `${request.operation}.smoke`,
-        smokeCommand(bindings, new URL(path, origin).toString(), '<formal-rehearsal-smoke-credential>'),
+        smokeCommand(bindings, new URL(path, origin).toString()),
         status,
       )
       if (result.stdout !== JSON.stringify(status)) throw new WorkerTransportError('NON_PASS', 'smoke_control_contract_invalid')

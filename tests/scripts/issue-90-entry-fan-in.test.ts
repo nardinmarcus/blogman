@@ -51,6 +51,7 @@ vi.mock('../../scripts/issue-23-delivery-worker-stages.mjs', () => ({ runWorkerS
 afterEach(() => {
   vi.mocked(readFileSync).mockImplementation(fsActual.readFileSync!)
   vi.mocked(realpathSync).mockImplementation(fsActual.realpathSync!)
+  vi.unstubAllEnvs()
 })
 
 import { execute, validateProductionTerminalEvidence } from '../../scripts/issue-23-delivery-entry.mjs'
@@ -109,6 +110,7 @@ function policy() {
       one_shot: true,
       credential_slots: [
         { name: 'cloudflare_delivery', scopes: ['account:read', 'workers:write', 'd1:write'] },
+        { name: 'delivery_smoke_admin', scopes: ['admin:smoke'] },
       ],
     },
     stages: [
@@ -556,13 +558,13 @@ function d1Result(failedStage: string | null = null) {
   return { value, bytes, sha256: hash(bytes) }
 }
 
-function workerResult() {
-  const value = { format: 'blogman-issue-23-worker-stages/v1', outcome: 'ERROR', first_terminal_stage: 'worker_deploy', failure: { classification: 'worker_adapter_error' }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, mutation_counts: { attempted: 1, confirmed: 0 }, evidence: { source: 'production', production: true, promotable: false, hashes: { upload_acceptance_sha256: null, version_traffic_sha256: null, smoke_control_t0_sha256: null } }, finalized: true }
+function workerResult(identity: Record<string, string>) {
+  const value = { format: 'blogman-issue-23-worker-stages/v1', outcome: 'ERROR', first_terminal_stage: 'worker_deploy', failure: { classification: 'worker_adapter_error' }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, mutation_counts: { attempted: 1, confirmed: 0 }, evidence: { source: 'production', production: true, promotable: false, manifest_sha256: identity.manifest_sha256, authorization_sha256: identity.authorization_sha256, attempt_id: identity.attempt_id, candidate_id: identity.candidate_id, hashes: { upload_acceptance_sha256: null, version_traffic_sha256: null, smoke_control_t0_sha256: null } }, finalized: true }
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
   return { value, bytes, sha256: hash(bytes) }
 }
 
-function passingWorkerResult() {
+function passingWorkerResult(identity: Record<string, string>) {
   const value = {
     format: 'blogman-issue-23-worker-stages/v1', outcome: 'PASS', first_terminal_stage: null, failure: null,
     stage_counts: { worker_deploy: 1, version_traffic_verification: 1, smoke_control_t0: 1 },
@@ -570,6 +572,10 @@ function passingWorkerResult() {
     mutation_counts: { attempted: 2, confirmed: 2 },
     evidence: {
       source: 'production', production: true, promotable: true,
+      manifest_sha256: identity.manifest_sha256,
+      authorization_sha256: identity.authorization_sha256,
+      attempt_id: identity.attempt_id,
+      candidate_id: identity.candidate_id,
       hashes: {
         upload_acceptance_sha256: '1'.repeat(64), version_traffic_sha256: '2'.repeat(64),
         smoke_control_t0_sha256: '3'.repeat(64),
@@ -583,7 +589,7 @@ function passingWorkerResult() {
 
 function configureWorker() {
   createWorkerTransportMock.mockReturnValue({ livePreconditions: () => ({ outcome: 'PASS', duration_ms: 1 }), execute() {} })
-  runWorkerStagesMock.mockReturnValue(workerResult())
+  runWorkerStagesMock.mockImplementation(({ bindings }) => workerResult(bindings))
 }
 
 function configureD1(failedStage: string | null = null, receipt = d1Result(failedStage)) {
@@ -607,6 +613,7 @@ function configureD1(failedStage: string | null = null, receipt = d1Result(faile
 
 describe('Issue #90 formal entry fan-in', () => {
   beforeEach(() => {
+    vi.stubEnv('DELIVERY_SMOKE_ADMIN', 'test-only-smoke-authority')
     rmSync(DURABLE_SINK_ROOT, { recursive: true, force: true })
     mkdirSync(join(DURABLE_SINK_ROOT, 'authorizations'), { recursive: true, mode: 0o700 })
     mkdirSync(join(DURABLE_SINK_ROOT, 'records'), { recursive: true, mode: 0o700 })
@@ -718,21 +725,24 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(createWorkerTransportMock).not.toHaveBeenCalled()
   })
 
-  it('rejects post-prepare transport mutation before reading Authorization or selecting adapters', () => {
+  it.each([
+    'scripts/issue-23-delivery-worker-transport.mjs',
+    'scripts/issue-23-build-proof.mjs',
+  ])('rejects post-prepare mutation of %s before reading Authorization or selecting adapters', (relativePath) => {
     configureD1()
     const prepared = manifest()
-    const transportPath = join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-worker-transport.mjs')
+    const mutatedPath = join(REPOSITORY_ROOT, relativePath)
     vi.mocked(readFileSync).mockImplementation(((path: Parameters<typeof readFileSync>[0], options?: Parameters<typeof readFileSync>[1]) => {
       const value = fsActual.readFileSync!(path, options as never)
-      if (String(path) !== transportPath) return value
+      if (String(path) !== mutatedPath) return value
       const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value)
-      return Buffer.concat([bytes, Buffer.from('\n// post-prepare transport mutation\n')])
+      return Buffer.concat([bytes, Buffer.from('\n// post-prepare closure mutation\n')])
     }) as typeof readFileSync)
     let authorizationRead = false
-    const authorization = new Proxy(authorizationFor(prepared, 'fan-in-post-prepare-transport-drift'), {
+    const authorization = new Proxy(authorizationFor(prepared, `fan-in-post-prepare-drift-${relativePath}`), {
       get() {
         authorizationRead = true
-        throw new Error('Authorization must not be read for transport drift')
+        throw new Error('Authorization must not be read for closure drift')
       },
     })
 
@@ -749,6 +759,28 @@ describe('Issue #90 formal entry fan-in', () => {
     const prepared = preparedFromValue(value)
 
     expect(() => execute(prepared, authorizationFor(prepared, 'artifact-file-tree-at-sign'))).not.toThrow()
+  })
+
+  it('consumes Authorization but stops before every production adapter when smoke authority is missing', () => {
+    const original = process.env.DELIVERY_SMOKE_ADMIN
+    delete process.env.DELIVERY_SMOKE_ADMIN
+    const prepared = manifest()
+    const authorization = authorizationFor(prepared, 'fan-in-missing-smoke-authority')
+    try {
+      const result = execute(prepared, authorization)
+      expect(result.value).toMatchObject({
+        authorization_consumed: true,
+        outcome: 'ERROR',
+        first_terminal_stage: 'live_preconditions',
+        failure: { classification: 'smoke_auth_unavailable' },
+      })
+      expect(createWorkerTransportMock).not.toHaveBeenCalled()
+      expect(createD1TransportMock).not.toHaveBeenCalled()
+      expect(() => execute(prepared, authorization)).toThrow(/consumed/u)
+    } finally {
+      if (original === undefined) delete process.env.DELIVERY_SMOKE_ADMIN
+      else process.env.DELIVERY_SMOKE_ADMIN = original
+    }
   })
 
   it('does not select an adapter until Authorization has been consumed', () => {
@@ -867,8 +899,17 @@ describe('Issue #90 formal entry fan-in', () => {
   })
 
   it('terminalizes a malformed worker receipt as ERROR and preserves its possible upload attempt', () => {
-    configureD1()
-    const prepared = manifest()
+    const prepared = actualPreparedManifest()
+    const d1Receipt = d1Result()
+    d1Receipt.value.evidence.account_id = prepared.value.target.account_id
+    d1Receipt.value.evidence.d1_database_id = prepared.value.target.d1_database_id
+    d1Receipt.value.evidence.candidate_id = prepared.value.repository.commit
+    d1Receipt.value.evidence.config_sha256 = prepared.value.d1.config_sha256
+    d1Receipt.value.evidence.wrangler_sha256 = prepared.value.d1.wrangler_sha256
+    d1Receipt.value.evidence.expected_reconciliation_sha256 = prepared.value.d1.expected_reconciliation_sha256
+    d1Receipt.bytes = Buffer.from(`${JSON.stringify(d1Receipt.value, null, 2)}\n`, 'utf8')
+    d1Receipt.sha256 = hash(d1Receipt.bytes)
+    configureD1(null, d1Receipt)
     const malformed = { format: 'blogman-issue-23-worker-stages/v1', outcome: 'PASS' }
     const bytes = Buffer.from(`${JSON.stringify(malformed, null, 2)}\n`, 'utf8')
     runWorkerStagesMock.mockReturnValue({ value: malformed, bytes, sha256: hash(bytes) })
@@ -881,6 +922,20 @@ describe('Issue #90 formal entry fan-in', () => {
       mutation_counts: { attempted: 3, confirmed: 2 },
     })
     expect(result.value.evidence.promotable).toBe(false)
+    expect(validateProductionTerminalEvidence(structuredClone(result))).toBe(true)
+
+    const encoded = {
+      value: result.value,
+      bytes: Buffer.from(result.bytes).toString('base64'),
+      sha256: result.sha256,
+    }
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { validateProductionTerminalEvidence } from ${JSON.stringify(ENTRY_MODULE_URL)}
+      const record = ${JSON.stringify(encoded)}
+      const terminal = { value: record.value, bytes: Buffer.from(record.bytes, 'base64'), sha256: record.sha256 }
+      if (validateProductionTerminalEvidence(terminal) !== true) process.exitCode = 2
+    `], { cwd: REPOSITORY_ROOT, encoding: 'utf8' })
+    expect(child.status, child.stderr).toBe(0)
   })
 
   it('stops at live_preconditions on drift without selecting a D1 adapter', () => {
@@ -912,7 +967,13 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(terminal.value).toMatchObject({
       outcome: 'NON_PASS', first_terminal_stage: 'live_preconditions',
       failure: { classification: 'Manifest Drift' },
+      started_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/u),
+      ended_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/u),
     })
+    const started = Date.parse(terminal.value.started_at)
+    const ended = Date.parse(terminal.value.ended_at)
+    expect(ended).toBeGreaterThanOrEqual(started)
+    expect(ended - started).toBeLessThanOrEqual(5_400_000)
     expect(validateProductionTerminalEvidence(structuredClone(terminal))).toBe(true)
     expect(createD1TransportMock).not.toHaveBeenCalled()
   })
@@ -1072,6 +1133,7 @@ describe('Issue #90 formal entry fan-in', () => {
       },
     })
     expect(JSON.stringify(result.value)).not.toMatch(/binding setup failed/u)
+    expect(validateProductionTerminalEvidence(structuredClone(result))).toBe(true)
     expect(materializedDirectory).not.toBe('')
     expect(existsSync(materializedDirectory)).toBe(false)
     expect(createD1TransportMock).not.toHaveBeenCalled()
@@ -1095,6 +1157,20 @@ describe('Issue #90 formal entry fan-in', () => {
       },
     })
     expect(JSON.stringify(result.value)).not.toMatch(/transport setup failed/u)
+    expect(validateProductionTerminalEvidence(structuredClone(result))).toBe(true)
+
+    const encoded = {
+      value: result.value,
+      bytes: Buffer.from(result.bytes).toString('base64'),
+      sha256: result.sha256,
+    }
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { validateProductionTerminalEvidence } from ${JSON.stringify(ENTRY_MODULE_URL)}
+      const record = ${JSON.stringify(encoded)}
+      const terminal = { value: record.value, bytes: Buffer.from(record.bytes, 'base64'), sha256: record.sha256 }
+      if (validateProductionTerminalEvidence(terminal) !== true) process.exitCode = 2
+    `], { cwd: REPOSITORY_ROOT, encoding: 'utf8' })
+    expect(child.status, child.stderr).toBe(0)
   })
 
   it('binds terminal production evidence to durable canonical records', () => {
@@ -1121,6 +1197,39 @@ describe('Issue #90 formal entry fan-in', () => {
       .toThrow(/production terminal evidence/u)
   })
 
+  it('preserves two confirmed Worker mutations when smoke is the first terminal Stage', () => {
+    const prepared = actualPreparedManifest()
+    const d1Receipt = d1Result()
+    d1Receipt.value.evidence.account_id = prepared.value.target.account_id
+    d1Receipt.value.evidence.d1_database_id = prepared.value.target.d1_database_id
+    d1Receipt.value.evidence.candidate_id = prepared.value.repository.commit
+    d1Receipt.value.evidence.config_sha256 = prepared.value.d1.config_sha256
+    d1Receipt.value.evidence.wrangler_sha256 = prepared.value.d1.wrangler_sha256
+    d1Receipt.value.evidence.expected_reconciliation_sha256 = prepared.value.d1.expected_reconciliation_sha256
+    d1Receipt.bytes = Buffer.from(`${JSON.stringify(d1Receipt.value, null, 2)}\n`, 'utf8')
+    d1Receipt.sha256 = hash(d1Receipt.bytes)
+    configureD1(null, d1Receipt)
+    runWorkerStagesMock.mockImplementation(({ bindings }) => {
+      const value = passingWorkerResult(bindings).value
+      value.outcome = 'NON_PASS'
+      value.first_terminal_stage = 'smoke_control_t0'
+      value.failure = { classification: 'smoke_control_contract_invalid' }
+      value.evidence.promotable = false
+      value.evidence.hashes.smoke_control_t0_sha256 = null
+      const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
+      return { value, bytes, sha256: hash(bytes) }
+    })
+
+    const terminal = execute(prepared, authorizationFor(prepared, 'fan-in-smoke-terminal-evidence'))
+
+    expect(terminal.value).toMatchObject({
+      outcome: 'NON_PASS',
+      first_terminal_stage: 'smoke_control_t0',
+      mutation_counts: { attempted: 4, confirmed: 4 },
+    })
+    expect(validateProductionTerminalEvidence(structuredClone(terminal))).toBe(true)
+  })
+
   it('keeps PASS valid when execute produces every receipt sidecar', () => {
     const prepared = actualPreparedManifest()
     const d1Receipt = d1Result()
@@ -1133,8 +1242,7 @@ describe('Issue #90 formal entry fan-in', () => {
     d1Receipt.bytes = Buffer.from(`${JSON.stringify(d1Receipt.value, null, 2)}\n`, 'utf8')
     d1Receipt.sha256 = hash(d1Receipt.bytes)
     configureD1(null, d1Receipt)
-    const workerReceipt = passingWorkerResult()
-    runWorkerStagesMock.mockReturnValue(workerReceipt)
+    runWorkerStagesMock.mockImplementation(({ bindings }) => passingWorkerResult(bindings))
 
     const terminal = execute(prepared, authorizationFor(prepared, 'fan-in-passing-terminal-evidence'))
 

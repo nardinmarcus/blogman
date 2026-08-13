@@ -3,6 +3,7 @@ import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 export const FORMAL_EXECUTION_CLOSURE_PATHS = Object.freeze([
+  'scripts/issue-23-build-proof.mjs',
   'scripts/issue-23-delivery-d1-child.mjs',
   'scripts/issue-23-delivery-d1-contracts.mjs',
   'scripts/issue-23-delivery-d1-stages.mjs',
@@ -17,6 +18,7 @@ export const FORMAL_EXECUTION_CLOSURE_PATHS = Object.freeze([
   'scripts/issue-23-delivery-rehearsal.mjs',
   'scripts/issue-23-delivery-worker-stages.mjs',
   'scripts/issue-23-delivery-worker-transport.mjs',
+  'scripts/issue-23-delivery-worker-upload.mjs',
 ])
 
 function sha256(bytes) {

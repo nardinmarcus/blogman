@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { platform } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import * as deliveryEntry from '../../scripts/issue-23-delivery-entry.mjs'
 import { runFormalRehearsal } from '../../scripts/issue-23-delivery-formal-rehearsal.mjs'
 import { runInFormalRehearsalContext } from '../../scripts/issue-23-delivery-formal-context.mjs'
+import { createRepositoryDeliverySink } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
 
 const REPOSITORY_ROOT = process.cwd()
 const IS_MACOS = platform() === 'darwin'
@@ -36,6 +37,13 @@ function repositoryFact(args: string[]) {
 
 function declaredFile(path: string) {
   return { path, sha256: sha256(readFileSync(join(REPOSITORY_ROOT, path))) }
+}
+
+function stableFormalOperations(operations: Array<Record<string, unknown>>) {
+  return JSON.parse(JSON.stringify(operations).replace(
+    /\/[^"\s]*blogman-issue-23-execute-expected-[^"\s]*\/expected-reconciliation\.json/gu,
+    '<disposable-expected-reconciliation>',
+  ))
 }
 
 function formalConfig() {
@@ -120,7 +128,10 @@ function formalConfig() {
       authorization: {
         manifest_binding: 'manifest_sha256',
         one_shot: true,
-        credential_slots: [{ name: 'cloudflare_delivery', scopes: ['account:read', 'workers:write', 'd1:write'] }],
+        credential_slots: [
+          { name: 'cloudflare_delivery', scopes: ['account:read', 'workers:write', 'd1:write'] },
+          { name: 'delivery_smoke_admin', scopes: ['admin:smoke'] },
+        ],
       },
       stages: [
         { name: 'authorization_accept', timeout_seconds: 30 },
@@ -158,14 +169,29 @@ function formalConfig() {
 }
 
 describe('Issue #92 formal rehearsal public path', () => {
+  let repeatedFormalRuns: ReturnType<typeof runFormalRehearsal>[] = []
+
+  beforeAll(() => {
+    if (!IS_MACOS_CI_GATE) return
+    expect(existsSync(join(REPOSITORY_ROOT, '.issue-23-delivery'))).toBe(false)
+    repeatedFormalRuns = [runFormalRehearsal(formalConfig()), runFormalRehearsal(formalConfig())]
+  }, BOUNDED_FORMAL_PATH_TIMEOUT_MS * 2)
+
   it('exposes no public attempt/options wrapper or adapter injection surface', () => {
     expect(runFormalRehearsal.length).toBe(1)
     expect(deliveryEntry).not.toHaveProperty('runFormalRehearsalAttempt')
     expect(() => runFormalRehearsal({} as never, {} as never)).toThrow(/exactly one config/u)
   })
 
-  it.skipIf(!IS_MACOS_CI_GATE)('runs public prepare(config) then public execute(manifest, authorization) through the exact no-network formal gate', { timeout: BOUNDED_FORMAL_PATH_TIMEOUT_MS }, () => {
-    const result = runFormalRehearsal(formalConfig())
+  it.skipIf(!IS_MACOS_CI_GATE)('runs two identical public rehearsals through isolated durable sinks and leaves no sink residue', () => {
+    const [first, result] = repeatedFormalRuns
+
+    expect(first.terminal.value.outcome).toBe('PASS')
+    expect(result.terminal.value.outcome).toBe('PASS')
+    expect(first.terminal.value.evidence).toMatchObject({ production: false, promotable: false })
+    expect(result.terminal.value.evidence).toMatchObject({ production: false, promotable: false })
+    expect(existsSync(join(REPOSITORY_ROOT, '.issue-23-delivery'))).toBe(false)
+    expect(readdirSync(REPOSITORY_ROOT).filter((name) => name.startsWith('.issue-23-formal-sink-'))).toEqual([])
 
     expect(result.manifest.bytes).toEqual(expect.any(Uint8Array))
     expect(result.manifest.sha256).toMatch(SHA256)
@@ -238,31 +264,81 @@ describe('Issue #92 formal rehearsal public path', () => {
     }
   })
 
-  it.skipIf(!IS_MACOS_CI_GATE)('covers a module-owned fail-closed live-precondition fault through the same public call graph', { timeout: BOUNDED_FORMAL_PATH_TIMEOUT_MS }, async () => {
-    const { runFormalFaultHarnessForTestsOnly } = await import('../../scripts/issue-23-delivery-formal-fault-harness.mjs')
-    const result = runFormalFaultHarnessForTestsOnly('live_preconditions', () => runFormalRehearsal(formalConfig()))
+  describe.runIf(IS_MACOS_CI_GATE)('formal public fault matrix', () => {
+    const cases = ALL_STAGES.flatMap((stage) => (
+      ['failure', 'timeout', 'malformed', 'drift', 'uncertainty'] as const
+    ).map((kind) => ({ stage, kind })))
+    const expectedOutcome = {
+      failure: 'NON_PASS',
+      timeout: 'TIMEOUT',
+      malformed: 'ERROR',
+      drift: 'NON_PASS',
+      uncertainty: 'UNCERTAIN',
+    } as const
 
-    expect(result.terminal.value).toMatchObject({
-      outcome: 'NON_PASS',
-      first_terminal_stage: 'live_preconditions',
-      failure: { classification: 'formal_rehearsal_forced_live_precondition_failure' },
-      mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
+    it.each(cases)('$stage terminalizes $kind once through public prepare/execute', async (fault) => {
+      const { runFormalFaultHarnessForTestsOnly } = await import('../../scripts/issue-23-delivery-formal-fault-harness.mjs')
+      const manifest = repeatedFormalRuns[0].manifest
+      const run = () => {
+        const sinkRoot = mkdtempSync(join(REPOSITORY_ROOT, '.issue-23-formal-sink-'))
+        const operations: Array<Record<string, unknown>> = []
+        try {
+          const context = Object.freeze({
+            sink: operations,
+            deliverySink: createRepositoryDeliverySink(sinkRoot),
+            clock: Object.freeze({
+              wallTimeMilliseconds: () => 0,
+              monotonicNanoseconds: () => 0n,
+            }),
+          })
+          const terminal = runFormalFaultHarnessForTestsOnly(fault, () => (
+            runInFormalRehearsalContext(context, () => deliveryEntry.execute(manifest, {
+              format: 'blogman-issue-23-authorization/v1',
+              authorization_id: `formal-matrix-${fault.stage}-${fault.kind}`,
+              manifest_sha256: manifest.sha256,
+              decision: 'approve',
+            }))
+          ))
+          return { terminal, operations }
+        } finally {
+          rmSync(sinkRoot, { recursive: true, force: true })
+        }
+      }
+      const first = run()
+      const repeated = run()
+      const terminalIndex = ALL_STAGES.indexOf(fault.stage)
+
+      expect(stableFormalOperations(repeated.operations)).toEqual(stableFormalOperations(first.operations))
+      expect(repeated.terminal.value).toMatchObject({
+        outcome: first.terminal.value.outcome,
+        first_terminal_stage: first.terminal.value.first_terminal_stage,
+        failure: first.terminal.value.failure,
+        stage_counts: first.terminal.value.stage_counts,
+        mutation_counts: first.terminal.value.mutation_counts,
+        evidence: {
+          source: first.terminal.value.evidence.source,
+          production: first.terminal.value.evidence.production,
+          promotable: first.terminal.value.evidence.promotable,
+        },
+      })
+      expect(first.terminal.value).toMatchObject({
+        outcome: expectedOutcome[fault.kind],
+        first_terminal_stage: fault.stage,
+        mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
+        evidence: {
+          source: 'formal-rehearsal-test-evidence',
+          production: false,
+          promotable: false,
+        },
+      })
+      if (fault.kind === 'drift') {
+        expect(first.terminal.value.failure).toEqual({ classification: 'Manifest Drift' })
+      }
+      for (const [index, stage] of ALL_STAGES.entries()) {
+        expect(first.terminal.value.stage_counts[stage]).toBe(index <= terminalIndex ? 1 : 0)
+      }
+      expect(JSON.stringify(first)).not.toMatch(/DELIVERY_SMOKE_ADMIN|blogman_admin=/u)
     })
-    expect(result.terminal.value.stage_counts).toEqual({
-      authorization_accept: 1,
-      live_preconditions: 1,
-      d1_identity: 0,
-      clean_start_reset: 0,
-      empty_d1_proof: 0,
-      migrations_001_006: 0,
-      reconciliation: 0,
-      worker_deploy: 0,
-      version_traffic_verification: 0,
-      smoke_control_t0: 0,
-    })
-    expect(result.operations).toEqual([
-      expect.objectContaining({ adapter: 'worker', operation: 'live_preconditions.deployment_status' }),
-    ])
   })
 
   it.skipIf(IS_MACOS)('does not substitute Linux ordinary verification for the macOS exact gate', () => {

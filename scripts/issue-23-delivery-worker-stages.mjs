@@ -13,6 +13,9 @@ const UPLOAD_KEYS = Object.freeze([
 const EVIDENCE_HASHES = Object.freeze([
   'upload_acceptance_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256',
 ])
+const EVIDENCE_IDENTITY_FIELDS = Object.freeze([
+  'manifest_sha256', 'authorization_sha256', 'attempt_id', 'candidate_id',
+])
 
 function hash(value) { return createHash('sha256').update(value).digest('hex') }
 function bytes(value) { return Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8') }
@@ -34,7 +37,7 @@ function emptyEvidenceHashes() {
   return Object.fromEntries(EVIDENCE_HASHES.map((name) => [name, null]))
 }
 
-function terminal(trace, evidenceHashes, mutation_counts, provenance) {
+function terminal(trace, evidenceHashes, mutation_counts, provenance, identity) {
   const last = trace.at(-1)
   // Unbranded transports never gain production evidence rights.
   const evidenceProvenance = provenance ?? Object.freeze({
@@ -59,6 +62,7 @@ function terminal(trace, evidenceHashes, mutation_counts, provenance) {
       source: evidenceProvenance.source,
       production,
       promotable: production && last.outcome === 'PASS',
+      ...identity,
       hashes: evidenceHashes,
     },
     finalized: true,
@@ -74,12 +78,19 @@ function response(value) {
     return null
   }
   if (value.status !== 0 || value.stderr !== '') return { error: true, duration_ms: value.duration_ms }
-  try { return { value: JSON.parse(value.stdout), duration_ms: value.duration_ms } } catch { return null }
+  try {
+    return { value: JSON.parse(value.stdout), duration_ms: value.duration_ms }
+  } catch {
+    return { malformed: true, duration_ms: value.duration_ms }
+  }
 }
 
 function transportResult(transport, request) {
   try {
     const parsed = response(transport.execute(request))
+    if (parsed?.malformed) {
+      return { failure: { outcome: 'ERROR', classification: 'worker_response_malformed' }, duration_ms: parsed.duration_ms }
+    }
     if (parsed) return parsed
   } catch (error) {
     if (error instanceof WorkerTransportError) {
@@ -103,6 +114,11 @@ function deploymentMatches(value, version, d1DatabaseId) {
 
 /** Private suffix seam. A response has only public facts; raw adapter output never escapes. */
 export function runWorkerStages({ bindings, transport, elapsed_ms = 0 }) {
+  const identity = Object.fromEntries(EVIDENCE_IDENTITY_FIELDS.map((field) => [field, bindings?.[field]]))
+  if (!EVIDENCE_IDENTITY_FIELDS.slice(0, 3).every((field) => sha256(identity[field]))
+    || typeof identity.candidate_id !== 'string' || !/^[a-f0-9]{40}$/u.test(identity.candidate_id)) {
+    throw new Error('worker evidence identity is invalid')
+  }
   const provenance = getWorkerTransportProvenance(transport)
   const trace = []
   const evidenceHashes = emptyEvidenceHashes()
@@ -191,5 +207,5 @@ export function runWorkerStages({ bindings, transport, elapsed_ms = 0 }) {
     }
     trace.push({ stage, outcome: 'PASS', duration_ms: parsed.duration_ms })
   }
-  return terminal(trace, evidenceHashes, mutation_counts, provenance)
+  return terminal(trace, evidenceHashes, mutation_counts, provenance, identity)
 }

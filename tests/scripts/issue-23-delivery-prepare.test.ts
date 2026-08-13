@@ -193,6 +193,7 @@ function baseConfig() {
         one_shot: true,
         credential_slots: [
           { name: 'cloudflare_delivery', scopes: ['account:read', 'workers:write', 'd1:write'] },
+          { name: 'delivery_smoke_admin', scopes: ['admin:smoke'] },
         ],
       },
       stages: DEFAULT_STAGE_POLICY,
@@ -375,10 +376,6 @@ function withIsolatedRepositoryFixture<T>(callback: (repositoryPath: string) => 
     for (const path of FORMAL_EXECUTION_CLOSURE_PATHS) {
       copyFileSync(join(repoRoot, path), join(repositoryPath, path))
     }
-    copyFileSync(
-      join(repoRoot, 'scripts', 'issue-23-delivery-worker-upload.mjs'),
-      join(repositoryPath, 'scripts', 'issue-23-delivery-worker-upload.mjs'),
-    )
     const fixtureBinDirectory = join(repositoryPath, 'node_modules', '.bin')
     mkdirSync(fixtureBinDirectory, { recursive: true })
     for (const executable of ['wrangler', 'opennextjs-cloudflare']) {
@@ -417,6 +414,13 @@ describe('repository remote canonicalization', () => {
 })
 
 describe('target macOS formal runtime receipt', () => {
+  it('includes the private Worker upload execution and its build-proof dependency in the formal closure', () => {
+    expect(FORMAL_EXECUTION_CLOSURE_PATHS).toEqual(expect.arrayContaining([
+      'scripts/issue-23-delivery-worker-upload.mjs',
+      'scripts/issue-23-build-proof.mjs',
+    ]))
+  })
+
   it('binds the target receipt, runtime, toolchain, and formal entry independently of the host OS', () => {
     const prepared = prepareFixture(baseConfig())
     const { runtime, runtime_receipt: receipt } = prepared.value.rehearsal
@@ -1936,6 +1940,17 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(result.value.policy.overall_timeout_seconds).toBe(5400)
   })
 
+  it('requires the delivery smoke credential slot and exact smoke scope', () => {
+    const missing = baseConfig()
+    missing.policy.authorization.credential_slots = missing.policy.authorization.credential_slots
+      .filter((slot) => slot.name !== 'delivery_smoke_admin')
+    expect(() => prepareFixture(missing)).toThrow(/delivery_smoke_admin|credential.*canonical|required/u)
+
+    const wrongScope = baseConfig()
+    wrongScope.policy.authorization.credential_slots[1].scopes = ['admin:write']
+    expect(() => prepareFixture(wrongScope)).toThrow(/admin:smoke|credential.*canonical|required/u)
+  })
+
   it('fails closed when a fixed stage policy is mutated', () => {
     const mutated = baseConfig()
     const stages: Array<{ name: string; timeout_seconds: number }> = mutated.policy.stages.map(
@@ -2324,7 +2339,6 @@ describe('Issue #23 Delivery Preparation', () => {
       execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/nardinmarcus/blogman.git'], { cwd: fixtureRepo })
       const copiedPaths = [
         ...FORMAL_EXECUTION_CLOSURE_PATHS,
-        'scripts/issue-23-delivery-worker-upload.mjs',
         'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
       ]
       for (const path of copiedPaths) copyFileSync(join(repoRoot, path), join(fixtureRepo, path))

@@ -677,7 +677,7 @@ export const FORMAL_REHEARSAL_D1_EVIDENCE_SOURCE = 'formal-rehearsal-test-eviden
  * It replaces command I/O only: it never starts a process, opens a network
  * connection, or writes outside the disposable local preparation rehearsal.
  */
-export function createRehearsalD1Transport(bindings, sink) {
+export function createRehearsalD1Transport(bindings, sink, fault = null) {
   const normalizedBindings = validateConfig(bindings)
   const bindingsSha256 = d1StageBindingsSha256(normalizedBindings)
   function commandFor(request) {
@@ -700,6 +700,17 @@ export function createRehearsalD1Transport(bindings, sink) {
     const command = commandFor(request)
     const stage = REHEARSAL_D1_STAGE_BY_OPERATION[request.operation]
     if (sink) sink.push({ adapter: 'd1', operation: request.operation, stage, command: command.args })
+    if (fault?.stage === stage) {
+      if (fault.kind === 'failure') throw new D1TransportError('formal_failure', 1)
+      if (fault.kind === 'drift') throw new D1TransportError('formal_drift', 1)
+      if (fault.kind === 'timeout') {
+        return { status: 0, stdout: '', stderr: '', duration_ms: 1, timed_out: true }
+      }
+      if (fault.kind === 'malformed') {
+        return { status: 0, stdout: '{', stderr: '', duration_ms: 1 }
+      }
+      return { status: 0, stdout: '', stderr: '', duration_ms: 1, signal: 'SIGKILL' }
+    }
     return { status: 0, stdout: rehearsalD1Stdout(request.operation, normalizedBindings), stderr: '', duration_ms: 1 }
   }
   const transport = Object.freeze({ execute })
