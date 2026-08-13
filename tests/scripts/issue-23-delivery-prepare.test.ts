@@ -36,6 +36,7 @@ const ZERO_ACTIONS_TEST_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
 const SERVER_REFERENCE_TEST_PLACEHOLDER = 'process.env.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY'
 const FORMAL_CLI_CHILD_TIMEOUT_MS = 180_000
 const FORMAL_CLI_TEST_TIMEOUT_MS = FORMAL_CLI_CHILD_TIMEOUT_MS
+const PATCHED_NEXT_FIXTURE_TEST_TIMEOUT_MS = 30_000
 const RUNTIME_RECEIPT = buildFormalRuntimeReceipt().value
 
 function hash(character: string) {
@@ -1156,7 +1157,7 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(readFlightManifestEntryCssFiles(first)).toEqual(expectedCssFiles)
   })
 
-  it('manifest-order contract: selects the same shared ID for same-path Flight references in either traversal order', async () => {
+  it('manifest-order contract: selects the same shared ID for same-path Flight references in either traversal order', { timeout: PATCHED_NEXT_FIXTURE_TEST_TIMEOUT_MS }, async () => {
     const fixture = createPatchedNextFixture()
     try {
       const plugins = await loadPatchedFlightManifestPlugins(fixture)
