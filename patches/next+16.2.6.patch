@@ -332,7 +332,26 @@ diff --git a/node_modules/next/dist/build/webpack/plugins/flight-manifest-plugin
                  const source = compilation.getAsset(file).source.source();
                  if (this.experimentalInlineCss && // Inline CSS currently does not work properly with HMR, so we only
                  // inline CSS in production.
-@@ -422,7 +434,7 @@
+@@ -337,8 +349,17 @@
+                         const request = mod.request;
+                         if (!request || !request.includes('next-flight-client-entry-loader.js?')) {
+                             continue;
+                         }
+-                        const connections = (0, _utils.getModuleReferencesInOrder)(mod, compilation.moduleGraph);
++                        const moduleReferenceSortKey = (connection)=>{
++                            if (!connection.dependency) return '';
++                            const referencedModule = compilation.moduleGraph.getResolvedModule(connection.dependency);
++                            return (referencedModule == null ? void 0 : referencedModule.resourceResolveData) ? referencedModule.resourceResolveData.path : referencedModule == null ? void 0 : referencedModule.resource || referencedModule.identifier();
++                        };
++                        const connections = (0, _utils.getModuleReferencesInOrder)(mod, compilation.moduleGraph).sort((left, right)=>{
++                            const leftKey = moduleReferenceSortKey(left) || '';
++                            const rightKey = moduleReferenceSortKey(right) || '';
++                            return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
++                        });
+                         for (const connection of connections){
+                             const dependency = connection.dependency;
+                             if (!dependency) continue;
+@@ -422,7 +445,7 @@
                      group += (group ? '/' : '') + segment;
                  }
              }
@@ -390,7 +409,26 @@ diff --git a/node_modules/next/dist/esm/build/webpack/plugins/flight-manifest-pl
                  const source = compilation.getAsset(file).source.source();
                  if (this.experimentalInlineCss && // Inline CSS currently does not work properly with HMR, so we only
                  // inline CSS in production.
-@@ -373,7 +385,7 @@
+@@ -288,8 +300,17 @@
+                         const request = mod.request;
+                         if (!request || !request.includes('next-flight-client-entry-loader.js?')) {
+                             continue;
+                         }
+-                        const connections = getModuleReferencesInOrder(mod, compilation.moduleGraph);
++                        const moduleReferenceSortKey = (connection)=>{
++                            if (!connection.dependency) return '';
++                            const referencedModule = compilation.moduleGraph.getResolvedModule(connection.dependency);
++                            return (referencedModule == null ? void 0 : referencedModule.resourceResolveData) ? referencedModule.resourceResolveData.path : referencedModule == null ? void 0 : referencedModule.resource || referencedModule.identifier();
++                        };
++                        const connections = getModuleReferencesInOrder(mod, compilation.moduleGraph).sort((left, right)=>{
++                            const leftKey = moduleReferenceSortKey(left) || '';
++                            const rightKey = moduleReferenceSortKey(right) || '';
++                            return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
++                        });
+                         for (const connection of connections){
+                             const dependency = connection.dependency;
+                             if (!dependency) continue;
+@@ -373,7 +396,7 @@
                      group += (group ? '/' : '') + segment;
                  }
              }

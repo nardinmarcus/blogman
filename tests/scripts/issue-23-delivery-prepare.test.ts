@@ -1451,6 +1451,14 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(configured?.optimization?.moduleIds).toBe('named')
   })
 
+  it('sorts concatenated Flight manifest references before their shared ID can be overwritten', () => {
+    const patch = readPatchContract('patches/next+16.2.6.patch')
+
+    expect(patch.match(/const moduleReferenceSortKey = \(connection\)=>\{/gu)).toHaveLength(2)
+    expect(patch.match(/connections = .*\.sort\(\(left, right\)=>\{/gu)).toHaveLength(2)
+    expect(patch.match(/leftKey < rightKey \? -1 : leftKey > rightKey \? 1 : 0/gu)).toHaveLength(2)
+  })
+
   it('rejects a node action before archive identity', () => {
     const action = { 'action-id': { workers: {}, layer: {} } }
     expectPreArchiveFailure(() => prepareFixture(baseConfig(), {
