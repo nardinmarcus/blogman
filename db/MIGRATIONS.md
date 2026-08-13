@@ -60,9 +60,9 @@ Legacy baseline 不把 `categories`、`site_settings`、`ai_actions`、`ai_post_
 
 `005_fix_posts_fts_sync` 前向替换 canonical `posts_au` / `posts_ad` trigger。更新时先用 FTS5 external-content 的特殊 `delete` 行移除旧 token，再写入新 token；删除时只移除旧 token。文章行不重建、不覆盖，完整 canonical ledger schema 因而支持真实文章 CRUD 并保持搜索索引一致。
 
-`006_add_rollout_safety_controls` 新增 `rollout_controls` 当前控制事实与 `rollout_control_events` 不可变审计事件。它不 seed producer、authority 或 executor 的开启状态；缺少控制行时一律视为关闭。控制变化只能通过 `scripts/rollout-safety.mjs rollout set` 绑定候选证据和幂等 operation ID；启用要求候选与迁移都 verified，停用在证据失效时仍写入 `invalid` / `unavailable` 证据状态的审计事件。环境变量只能在运行时紧急关闭，不能写入或强制开启 authority。
+`006_add_rollout_safety_controls` 新增 `rollout_controls` 当前控制事实与 `rollout_control_events` 不可变审计事件。它不 seed producer、authority 或 executor 的开启状态；缺少控制行时一律视为关闭。Issue #93 已退役旧 candidate-bound control mutation/status 接口；当前 delivery 只通过 `rollout controls-status` 读取现有事实，环境变量也只能在运行时紧急关闭，不能写入或强制开启 authority。未来若需要新的控制写入口，必须由独立规格和 manifest-owned interface 授权，不能恢复旧 compatibility path。
 
-备份验证、隔离恢复、schema/ledger/文章对账、候选证据和 rollout status 的完整操作合同见 [`docs/rollout-safety.md`](../docs/rollout-safety.md)。
+备份验证、隔离恢复、schema/ledger/文章对账、restored-D1 smoke 和 rollout control 只读状态的完整操作合同见 [`docs/rollout-safety.md`](../docs/rollout-safety.md)。历史候选与 v1–v7 证据只通过 [`docs/issue-23-history-audit.md`](../docs/issue-23-history-audit.md) 审计。
 
 应用账本后，真实请求路径不得执行 DDL、schema ensure、默认 seed 或 migration runner。缺表/缺列统一归类为 `DATABASE_MIGRATION_REQUIRED`，API 返回固定 503；修复只能新增下一条前向 migration。
 

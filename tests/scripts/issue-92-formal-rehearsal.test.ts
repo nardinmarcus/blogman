@@ -51,7 +51,8 @@ function formalConfig() {
   return {
     preparation: {
       prepare_entry: declaredFile('scripts/issue-23-delivery-prepare.mjs'),
-      execute_entry: declaredFile('scripts/phase-b-sequence.mjs'),
+      execute_entry: declaredFile('scripts/issue-23-delivery-entry.mjs'),
+      worker_upload_entry: declaredFile('scripts/issue-23-delivery-worker-upload.mjs'),
       manifest_schema: declaredFile('schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json'),
     },
     repository: {

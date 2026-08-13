@@ -14,6 +14,31 @@ function transport(responses: unknown[]) {
 }
 function response(value: unknown, duration_ms = 1) { return { status: 0, stderr: '', stdout: JSON.stringify(value), duration_ms } }
 
+function acceptedUpload(version = 'version-new') {
+  return response({
+    format: 'blogman-upload-source-lifecycle-acceptance/v1',
+    state: 'accepted',
+    upload_operation_id: `issue-23-${'a'.repeat(64)}-upload-1`,
+    version_id: version,
+    config_sha256: 'c'.repeat(64),
+    snapshot_tree_sha256: 'a'.repeat(64),
+    snapshot_identity_sha256: 'd'.repeat(64),
+    snapshot_proof_before_sha256: 'e'.repeat(64),
+    snapshot_proof_after_sha256: 'f'.repeat(64),
+    build_directory_proof_sha256: '0'.repeat(64),
+    wrangler_output_sha256: 'b'.repeat(64),
+  })
+}
+
+function acceptedTraffic(version = 'version-new') {
+  return response({
+    deployment_id: 'deployment-new',
+    version_id: version,
+    d1_database_id: 'd1-id',
+    traffic: [{ version_id: version, percentage: 100 }],
+  })
+}
+
 describe('Issue #91 worker suffix', () => {
   it('binds uploaded version, 100% traffic, smoke, controls, and all five reconciliation dimensions', () => {
     const version = 'version-new'; const deployment = 'deployment-new'
@@ -43,5 +68,32 @@ describe('Issue #91 worker suffix', () => {
   ])('terminalizes %s with no suffix retry', (_name, first, classification) => {
     const result = runWorkerStages({ bindings, transport: transport([first]) })
     expect(result.value).toMatchObject({ first_terminal_stage: 'worker_deploy', failure: { classification }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 } })
+  })
+
+  it.each([
+    {
+      name: 'version/traffic verification',
+      responses: [acceptedUpload(), response({ state: 'wrong' })],
+      terminal: 'version_traffic_verification',
+      counts: { worker_deploy: 1, version_traffic_verification: 1, smoke_control_t0: 0 },
+    },
+    {
+      name: 'smoke/control/T0',
+      responses: [acceptedUpload(), acceptedTraffic(), response({ state: 'wrong' })],
+      terminal: 'smoke_control_t0',
+      counts: { worker_deploy: 1, version_traffic_verification: 1, smoke_control_t0: 1 },
+    },
+  ])('enters $name once and never retries its failed suffix', ({ responses, terminal, counts }) => {
+    let calls = 0
+    const result = runWorkerStages({
+      bindings,
+      transport: { execute: () => responses[calls++] },
+    })
+
+    expect(result.value).toMatchObject({
+      first_terminal_stage: terminal,
+      stage_counts: counts,
+    })
+    expect(calls).toBe(responses.length)
   })
 })

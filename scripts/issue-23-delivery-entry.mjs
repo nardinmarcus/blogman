@@ -382,9 +382,14 @@ function validateCanonicalManifestSchema(value, policy = PRODUCTION_MANIFEST_POL
   schemaRecord(value, CANONICAL_MANIFEST_ROOT_KEYS, 'canonical manifest')
   if (value.format !== CANONICAL_MANIFEST_FORMAT) fail('manifest format is invalid')
 
-  schemaRecord(value.preparation, ['prepare_entry', 'execute_entry', 'manifest_schema'], 'manifest preparation')
+  schemaRecord(
+    value.preparation,
+    ['prepare_entry', 'execute_entry', 'worker_upload_entry', 'manifest_schema'],
+    'manifest preparation',
+  )
   validateManifestReference(value.preparation.prepare_entry, 'manifest preparation.prepare_entry')
   validateManifestReference(value.preparation.execute_entry, 'manifest preparation.execute_entry')
+  validateManifestReference(value.preparation.worker_upload_entry, 'manifest preparation.worker_upload_entry')
   validateManifestReference(value.preparation.manifest_schema, 'manifest preparation.manifest_schema')
 
   schemaRecord(value.repository, ['canonical', 'remote', 'commit', 'tree', 'clean'], 'manifest repository')
@@ -678,13 +683,17 @@ function assertCanonicalManifestRelationships(manifest, policy = PRODUCTION_MANI
     || manifest.ci.evidence_class !== policy.ciEvidenceClass) {
     fail('manifest ci evidence classification is invalid')
   }
-  if (manifest.preparation.execute_entry.path !== 'scripts/phase-b-sequence.mjs') {
-    fail('manifest preparation.execute_entry must bind the canonical upload lifecycle')
+  if (manifest.preparation.execute_entry.path !== 'scripts/issue-23-delivery-entry.mjs') {
+    fail('manifest preparation.execute_entry must bind the formal delivery entry')
+  }
+  if (manifest.preparation.worker_upload_entry.path !== 'scripts/issue-23-delivery-worker-upload.mjs') {
+    fail('manifest preparation.worker_upload_entry must bind the private Worker upload entry')
   }
 
   const publicPaths = [
     ['preparation.prepare_entry.path', manifest.preparation.prepare_entry.path],
     ['preparation.execute_entry.path', manifest.preparation.execute_entry.path],
+    ['preparation.worker_upload_entry.path', manifest.preparation.worker_upload_entry.path],
     ['preparation.manifest_schema.path', manifest.preparation.manifest_schema.path],
     ['ci.workflow', manifest.ci.workflow],
     ['artifact.archive.path', manifest.artifact.archive.path],
@@ -787,6 +796,7 @@ const CANONICAL_MANIFEST_ORDER = {
   preparation: {
     prepare_entry: { path: null, sha256: null },
     execute_entry: { path: null, sha256: null },
+    worker_upload_entry: { path: null, sha256: null },
     manifest_schema: { path: null, sha256: null },
   },
   repository: { canonical: null, remote: null, commit: null, tree: null, clean: null },
@@ -1676,8 +1686,11 @@ function workerBindings(manifest, expectedReconciliationPath) {
     rollout_safety_path: resolve(ENTRY_REPO_ROOT, manifest.d1.rollout_safety_path), rollout_safety_sha256: manifest.d1.rollout_safety_sha256,
     expected_reconciliation_path: expectedReconciliationPath,
     expected_reconciliation_sha256: manifest.d1.expected_reconciliation_sha256,
-    phase_b_sequence_path: resolve(ENTRY_REPO_ROOT, manifest.preparation.execute_entry.path),
-    phase_b_sequence_sha256: manifest.preparation.execute_entry.sha256,
+    worker_upload_entry_path: resolve(
+      ENTRY_REPO_ROOT,
+      manifest.preparation.worker_upload_entry.path,
+    ),
+    worker_upload_entry_sha256: manifest.preparation.worker_upload_entry.sha256,
     wrangler_path: realpathSync(resolve(ENTRY_REPO_ROOT, 'node_modules/.bin/wrangler')), wrangler_sha256: manifest.d1.wrangler_sha256,
     node_path: nodePath, node_sha256: manifest.toolchain.node.identity_sha256,
     npm_path: npmPath, npm_sha256: manifest.toolchain.npm.identity_sha256,

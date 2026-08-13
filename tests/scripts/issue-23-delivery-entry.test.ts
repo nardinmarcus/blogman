@@ -270,6 +270,16 @@ describe('Issue #23 pure local entry seam', () => {
     expect(result.value).not.toHaveProperty('production_evidence')
   })
 
+  it('never promotes a synthetic Terminal Result into Production Evidence', () => {
+    const manifest = preparedManifest('synthetic-terminal-is-not-production')
+    const auth = authorization(manifest, 'authorization-synthetic-terminal-is-not-production')
+    const terminal = executeSyntheticForTest(manifest, auth)
+
+    expect(terminal.value.evidence.source).toBe('synthetic')
+    expect(() => validateProductionTerminalEvidence(terminal))
+      .toThrow(/production terminal evidence/u)
+  })
+
   it('returns a consumed terminal Manifest Drift result when public execute observes repository commit drift', () => {
     const manifest = preparedManifest('live-precondition-manifest-drift', '2'.repeat(40))
     const auth = authorization(manifest, 'authorization-live-precondition-drift')

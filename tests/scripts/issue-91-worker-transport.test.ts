@@ -31,7 +31,7 @@ function fixture() {
   const log = join(root, 'calls.log')
   const wrangler = join(root, 'wrangler')
   const rollout = join(root, 'rollout.mjs')
-  const phaseB = join(root, 'phase-b-sequence.mjs')
+  const workerUploadEntry = join(root, 'issue-23-delivery-worker-upload.mjs')
   const npm = join(root, 'npm')
   const openNext = join(root, 'opennextjs-cloudflare')
   const curl = join(root, 'curl')
@@ -43,7 +43,7 @@ function fixture() {
   mkdirSync(source)
   writeFileSync(archive, 'fake archive\n')
   writeFileSync(join(source, 'worker.js'), 'fake worker\n')
-  writeFileSync(phaseB, 'process.stdout.write("{}")\n')
+  writeFileSync(workerUploadEntry, 'process.stdout.write("{}")\n')
   writeFileSync(npm, '#!/bin/sh\nexit 0\n')
   writeFileSync(openNext, '#!/usr/bin/env node\n')
   writeFileSync(curl, `#!/usr/bin/env node
@@ -71,7 +71,7 @@ else console.log(JSON.stringify({ state: 'matched', checks: { schema: 'matched',
   chmodSync(openNext, 0o755)
   chmodSync(curl, 0o755)
   return {
-    root, config, archive, source, expected, log, wrangler, rollout, phaseB, npm, openNext, curl,
+    root, config, archive, source, expected, log, wrangler, rollout, workerUploadEntry, npm, openNext, curl,
     packageJson, lockfile,
   }
 }
@@ -109,7 +109,8 @@ function bindings(fixture: ReturnType<typeof fixture>, port: number) {
     candidate_id: candidate, worker_name: 'worker-name', d1_database_id: 'd1-id', database: 'DB',
     rollout_safety_path: fixture.rollout, rollout_safety_sha256: hash(fixture.rollout),
     expected_reconciliation_path: fixture.expected, expected_reconciliation_sha256: hash(fixture.expected),
-    phase_b_sequence_path: fixture.phaseB, phase_b_sequence_sha256: hash(fixture.phaseB),
+    worker_upload_entry_path: fixture.workerUploadEntry,
+    worker_upload_entry_sha256: hash(fixture.workerUploadEntry),
     wrangler_path: fixture.wrangler, wrangler_sha256: hash(fixture.wrangler),
     node_path: process.execPath, node_sha256: hash(process.execPath),
     npm_path: fixture.npm, npm_sha256: hash(fixture.npm),
@@ -153,7 +154,9 @@ describe('Issue #91 private smoke_control_t0 adapter', () => {
     ['config', (current: ReturnType<typeof fixture>) => writeFileSync(current.config, 'drift\n')],
     ['artifact archive', (current: ReturnType<typeof fixture>) => writeFileSync(current.archive, 'drift\n')],
     ['complete artifact source', (current: ReturnType<typeof fixture>) => writeFileSync(join(current.source, 'worker.js'), 'drift\n')],
-    ['upload lifecycle script', (current: ReturnType<typeof fixture>) => writeFileSync(current.phaseB, 'drift\n')],
+    ['upload lifecycle script', (current: ReturnType<typeof fixture>) => {
+      writeFileSync(current.workerUploadEntry, 'drift\n')
+    }],
   ])('returns manifest drift for %s before D1 selection or any fake production command', async (_name, drift) => {
     const current = fixture()
     const port = await localServer(current.root)

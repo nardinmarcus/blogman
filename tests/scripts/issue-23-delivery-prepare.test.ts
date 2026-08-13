@@ -97,8 +97,12 @@ function baseConfig() {
         sha256: hash('c'),
       },
       execute_entry: {
-        path: 'scripts/phase-b-sequence.mjs',
+        path: 'scripts/issue-23-delivery-entry.mjs',
         sha256: hash('d'),
+      },
+      worker_upload_entry: {
+        path: 'scripts/issue-23-delivery-worker-upload.mjs',
+        sha256: hash('1'),
       },
       manifest_schema: {
         path: 'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
@@ -361,6 +365,10 @@ function withIsolatedRepositoryFixture<T>(callback: (repositoryPath: string) => 
   return withTemporaryDirectory('blogman-issue-23-isolated-', (directory) => {
     const repositoryPath = join(directory, 'repository')
     execFileSync('git', ['clone', '--local', repoRoot, repositoryPath], { stdio: 'pipe' })
+    copyFileSync(
+      join(repoRoot, 'scripts', 'issue-23-delivery-worker-upload.mjs'),
+      join(repositoryPath, 'scripts', 'issue-23-delivery-worker-upload.mjs'),
+    )
     const fixtureBinDirectory = join(repositoryPath, 'node_modules', '.bin')
     mkdirSync(fixtureBinDirectory, { recursive: true })
     for (const executable of ['wrangler', 'opennextjs-cloudflare']) {
@@ -1779,6 +1787,20 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(() => prepareFixture(mutated)).toThrow(/fixed Issue #23 order and timeouts/u)
   })
 
+  it('rejects retired or missing entry bindings before producing a manifest', () => {
+    const retiredExecute = baseConfig()
+    retiredExecute.preparation.execute_entry.path = 'scripts/issue-23-delivery-prepare.mjs'
+    expect(() => prepareFixture(retiredExecute)).toThrow(/formal delivery entry/u)
+
+    const alternateUpload = baseConfig()
+    alternateUpload.preparation.worker_upload_entry.path = 'scripts/issue-23-delivery-prepare.mjs'
+    expect(() => prepareFixture(alternateUpload)).toThrow(/private Worker upload entry/u)
+
+    const missingUpload = baseConfig()
+    Reflect.deleteProperty(missingUpload.preparation, 'worker_upload_entry')
+    expect(() => prepareFixture(missingUpload)).toThrow(/worker_upload_entry.*required/u)
+  })
+
   it('rejects unknown fields and material secret, SQL, or private-path input', () => {
     const unknown = baseConfig()
     Reflect.set(unknown.policy.authorization.credential_slots[0], 'value', 'secret-value')
@@ -2152,6 +2174,7 @@ describe('Issue #23 Delivery Preparation', () => {
         'scripts/issue-23-delivery-d1-transport.mjs',
         'scripts/issue-23-delivery-worker-transport.mjs',
         'scripts/issue-23-delivery-worker-stages.mjs',
+        'scripts/issue-23-delivery-worker-upload.mjs',
         'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
       ]
       for (const path of copiedPaths) copyFileSync(join(repoRoot, path), join(fixtureRepo, path))

@@ -1159,6 +1159,11 @@ function resolveFacts(config, {
     ...config.preparation,
     prepare_entry: resolveFile(repositoryPath, config.preparation.prepare_entry.path, 'prepare entry'),
     execute_entry: resolveFile(repositoryPath, config.preparation.execute_entry.path, 'execute entry'),
+    worker_upload_entry: resolveFile(
+      repositoryPath,
+      config.preparation.worker_upload_entry.path,
+      'Worker upload entry',
+    ),
     manifest_schema: resolveFile(repositoryPath, config.preparation.manifest_schema.path, 'manifest schema'),
   }
   const ci = {
@@ -1334,13 +1339,17 @@ function assertManifestRelationships(manifest, policy = PRODUCTION_MANIFEST_POLI
     || manifest.ci.evidence_class !== policy.ciEvidenceClass) {
     fail('ci evidence classification is invalid')
   }
-  if (manifest.preparation.execute_entry.path !== 'scripts/phase-b-sequence.mjs') {
-    fail('preparation.execute_entry must bind the canonical upload lifecycle')
+  if (manifest.preparation.execute_entry.path !== 'scripts/issue-23-delivery-entry.mjs') {
+    fail('preparation.execute_entry must bind the formal delivery entry')
+  }
+  if (manifest.preparation.worker_upload_entry.path !== 'scripts/issue-23-delivery-worker-upload.mjs') {
+    fail('preparation.worker_upload_entry must bind the private Worker upload entry')
   }
 
   const publicPaths = [
     ['preparation.prepare_entry.path', manifest.preparation.prepare_entry.path],
     ['preparation.execute_entry.path', manifest.preparation.execute_entry.path],
+    ['preparation.worker_upload_entry.path', manifest.preparation.worker_upload_entry.path],
     ['preparation.manifest_schema.path', manifest.preparation.manifest_schema.path],
     ['ci.workflow', manifest.ci.workflow],
     ['artifact.archive.path', manifest.artifact.archive.path],

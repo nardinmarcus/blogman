@@ -194,7 +194,8 @@ function manifest(overrides: Record<string, unknown> = {}) {
     format: MANIFEST_FORMAT,
     preparation: {
       prepare_entry: { path: 'scripts/issue-23-delivery-prepare.mjs', sha256: HASH },
-      execute_entry: { path: 'scripts/phase-b-sequence.mjs', sha256: HASH },
+      execute_entry: { path: 'scripts/issue-23-delivery-entry.mjs', sha256: HASH },
+      worker_upload_entry: { path: 'scripts/issue-23-delivery-worker-upload.mjs', sha256: HASH },
       manifest_schema: {
         path: 'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
         sha256: HASH,
@@ -340,7 +341,8 @@ function actualPreparedManifest() {
   const config = {
     preparation: {
       prepare_entry: { path: 'scripts/issue-23-delivery-prepare.mjs', sha256: HASH },
-      execute_entry: { path: 'scripts/phase-b-sequence.mjs', sha256: HASH },
+      execute_entry: { path: 'scripts/issue-23-delivery-entry.mjs', sha256: HASH },
+      worker_upload_entry: { path: 'scripts/issue-23-delivery-worker-upload.mjs', sha256: HASH },
       manifest_schema: {
         path: 'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
         sha256: HASH,
