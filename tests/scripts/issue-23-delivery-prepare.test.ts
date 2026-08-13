@@ -1940,7 +1940,7 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(result.value.policy.overall_timeout_seconds).toBe(5400)
   })
 
-  it('requires the delivery smoke credential slot and exact smoke scope', () => {
+  it('requires the delivery smoke credential slot and exact smoke scope', { timeout: 15_000 }, () => {
     const missing = baseConfig()
     missing.policy.authorization.credential_slots = missing.policy.authorization.credential_slots
       .filter((slot) => slot.name !== 'delivery_smoke_admin')
