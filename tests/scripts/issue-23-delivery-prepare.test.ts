@@ -327,17 +327,19 @@ function runBoundedChild(
   })
 }
 
-function prepareFixture(config: ReturnType<typeof baseConfig>, options: Record<string, unknown> = {}) {
-  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim()
-  const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoRoot, encoding: 'utf8' }).trim()
+function prepareFixture(
+  config: ReturnType<typeof baseConfig>,
+  { repositoryPath = repoRoot, ...fixtureOptions }: Record<string, unknown> & { repositoryPath?: string } = {},
+) {
+  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repositoryPath, encoding: 'utf8' }).trim()
+  const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repositoryPath, encoding: 'utf8' }).trim()
   const fixture = structuredClone(config)
   fixture.repository.commit = commit
   fixture.repository.tree = tree
   fixture.ci.expected_head_sha = commit
-  const fixtureOptions = { ...options }
   if (!Object.hasOwn(fixtureOptions, 'buildRunner')) fixtureOptions.buildRunner = fixtureBuild
   return prepareForTestsOnly(fixture, {
-    repositoryPath: repoRoot,
+    repositoryPath,
     repositoryResolver: () => ({ commit, tree, clean: true }),
     ciResolver: (_path, source, repository) => ({
       provider: source.ci.provider,
@@ -351,6 +353,15 @@ function prepareFixture(config: ReturnType<typeof baseConfig>, options: Record<s
     }),
     rehearsalRunner: () => testRehearsalResult(),
     ...fixtureOptions,
+  })
+}
+
+function withIsolatedRepositoryFixture<T>(callback: (repositoryPath: string) => T): T {
+  return withTemporaryDirectory('blogman-issue-23-isolated-', (directory) => {
+    const repositoryPath = join(directory, 'repository')
+    execFileSync('git', ['clone', '--local', repoRoot, repositoryPath], { stdio: 'pipe' })
+    symlinkSync(join(repoRoot, 'node_modules'), join(repositoryPath, 'node_modules'), 'dir')
+    return callback(repositoryPath)
   })
 }
 
@@ -1920,18 +1931,27 @@ describe('Issue #23 Delivery Preparation', () => {
       .toThrow(/duplicate/u)
   })
 
-  it('keeps the production-write adapter untouched during read-only preparation', () => {
-    const adapter = {
-      calls: 0,
-      write() {
-        this.calls += 1
-      },
-    }
+  it('keeps the production-write adapter untouched during isolated read-only preparation', () => {
+    withIsolatedRepositoryFixture((repositoryPath) => {
+      const adapter = {
+        calls: 0,
+        write() {
+          this.calls += 1
+        },
+      }
 
-    const result = prepareFixture(baseConfig(), { productionWriteAdapter: adapter })
+      const result = prepareFixture(baseConfig(), {
+        repositoryPath,
+        productionWriteAdapter: adapter,
+        buildRunner: (fixtureRepositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
+          fixtureBuild(fixtureRepositoryPath, options)
+          rmSync(join(repoRoot, '.next'), { recursive: true, force: true })
+        },
+      })
 
-    expect(adapter.calls).toBe(0)
-    expect(result.value.rehearsal.production_write_adapter_calls).toBe(0)
+      expect(adapter.calls).toBe(0)
+      expect(result.value.rehearsal.production_write_adapter_calls).toBe(0)
+    })
   })
 
   it('fails closed when canonical expected reconciliation evidence is missing', () => {
