@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -1932,6 +1932,21 @@ describe('Issue #23 Delivery Preparation', () => {
   })
 
   it('keeps the production-write adapter untouched during isolated read-only preparation', () => {
+    const snapshotPath = (path: string): unknown => {
+      if (!existsSync(path)) return { exists: false }
+      const state = lstatSync(path)
+      if (state.isDirectory()) {
+        return {
+          exists: true,
+          type: 'directory',
+          entries: readdirSync(path).sort().map((entry) => [entry, snapshotPath(join(path, entry))]),
+        }
+      }
+      if (state.isSymbolicLink()) return { exists: true, type: 'symlink', target: readlinkSync(path) }
+      return { exists: true, type: 'file', bytes: readFileSync(path) }
+    }
+
+    const sourceNextState = snapshotPath(join(repoRoot, '.next'))
     withIsolatedRepositoryFixture((repositoryPath) => {
       const adapter = {
         calls: 0,
@@ -1939,19 +1954,32 @@ describe('Issue #23 Delivery Preparation', () => {
           this.calls += 1
         },
       }
+      const cloneNextEvidence = [
+        '.next/routes-manifest.json',
+        '.next/server/app-paths-manifest.json',
+        '.next/server/pages-manifest.json',
+        '.next/server/middleware-manifest.json',
+        '.next/server/server-reference-manifest.json',
+        '.next/server/server-reference-manifest.js',
+      ]
+      let buildRunnerCalls = 0
 
       const result = prepareFixture(baseConfig(), {
         repositoryPath,
         productionWriteAdapter: adapter,
         buildRunner: (fixtureRepositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
+          expect(fixtureRepositoryPath).toBe(repositoryPath)
           fixtureBuild(fixtureRepositoryPath, options)
-          rmSync(join(repoRoot, '.next'), { recursive: true, force: true })
+          buildRunnerCalls += 1
+          for (const path of cloneNextEvidence) expect(existsSync(join(repositoryPath, path))).toBe(true)
         },
       })
 
+      expect(buildRunnerCalls).toBe(1)
       expect(adapter.calls).toBe(0)
       expect(result.value.rehearsal.production_write_adapter_calls).toBe(0)
     })
+    expect(snapshotPath(join(repoRoot, '.next'))).toEqual(sourceNextState)
   })
 
   it('fails closed when canonical expected reconciliation evidence is missing', () => {
