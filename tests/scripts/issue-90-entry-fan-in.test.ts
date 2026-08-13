@@ -62,6 +62,7 @@ import {
 import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-formal-runtime.mjs'
 import { hashD1ArtifactDirectory } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
 import { formalExecutionClosureSha256 } from '../../scripts/issue-23-delivery-execution-closure.mjs'
+import { repositoryDeliverySinkRoot } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
 
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const MANIFEST_FORMAT = 'blogman-issue-23-canonical-frozen-manifest/v1'
@@ -85,13 +86,7 @@ const D1_OPERATIONS = [
   'reconciliation',
 ]
 const REPOSITORY_ROOT = process.cwd()
-const DURABLE_SINK_ROOT = join(
-  execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
-    cwd: REPOSITORY_ROOT,
-    encoding: 'utf8',
-  }).trim(),
-  'blogman-issue-23-delivery',
-)
+const DURABLE_SINK_ROOT = repositoryDeliverySinkRoot()
 const ENTRY_MODULE_URL = pathToFileURL(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-entry.mjs')).href
 const SINK_MODULE_URL = pathToFileURL(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-evidence-sink.mjs')).href
 const RUNTIME_RECEIPT = buildFormalRuntimeReceipt().value
@@ -622,7 +617,6 @@ describe('Issue #90 formal entry fan-in', () => {
     vi.stubEnv('DELIVERY_SMOKE_ADMIN', 'test-only-smoke-authority')
     vi.stubEnv('CLOUDFLARE_API_TOKEN', 'test-only-cloudflare-authority')
     vi.stubEnv('CLOUDFLARE_ACCOUNT_ID', 'account-id')
-    vi.stubEnv('CLOUDFLARE_DELIVERY_SCOPES', 'account:read,d1:write,workers:write')
     rmSync(DURABLE_SINK_ROOT, { recursive: true, force: true })
     configureWorker()
   })
@@ -811,9 +805,9 @@ describe('Issue #90 formal entry fan-in', () => {
     }
   })
 
-  it('consumes and validates Cloudflare account/scopes before selecting any production adapter', () => {
+  it('consumes and validates the Cloudflare account before selecting any production adapter', () => {
     configureD1()
-    vi.stubEnv('CLOUDFLARE_DELIVERY_SCOPES', 'account:read,workers:write')
+    vi.stubEnv('CLOUDFLARE_ACCOUNT_ID', 'wrong-account')
     const prepared = manifest()
 
     const result = execute(prepared, authorizationFor(prepared, 'fan-in-insufficient-cloudflare-authority'))
@@ -822,7 +816,7 @@ describe('Issue #90 formal entry fan-in', () => {
       authorization_consumed: true,
       outcome: 'ERROR',
       first_terminal_stage: 'live_preconditions',
-      failure: { classification: 'smoke_auth_unavailable' },
+      failure: { classification: 'cloudflare_auth_unavailable' },
     })
     expect(createWorkerTransportMock).not.toHaveBeenCalled()
     expect(createD1TransportMock).not.toHaveBeenCalled()

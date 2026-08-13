@@ -62,13 +62,45 @@ describe('Issue #23 durable delivery records', () => {
     expect(sink.consumeAuthorization(benign)).toBe(benign.sha256)
   })
 
-  it('uses one checkout-independent canonical sink root across linked worktrees', () => {
-    const commonRoot = repositoryDeliverySinkRoot(process.cwd())
+  it('does not let PATH or Git environment redirect the canonical production sink root', () => {
+    const expected = repositoryDeliverySinkRoot()
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { repositoryDeliverySinkRoot } from ${JSON.stringify(sinkModuleUrl)}
+      process.stdout.write(repositoryDeliverySinkRoot())
+    `], {
+      encoding: 'utf8',
+      env: { PATH: '/definitely-not-a-bin', GIT_DIR: '/tmp/redirected', GIT_COMMON_DIR: '/tmp/redirected-common' },
+    })
+    expect(child.status, child.stderr).toBe(0)
+    expect(child.stdout).toBe(expected)
+  })
+
+  it('rejects the same production Authorization from independent clone roots', () => {
+    const firstClone = mkdtempSync(join(tmpdir(), 'blogman-issue-23-clone-a-'))
+    const secondClone = mkdtempSync(join(tmpdir(), 'blogman-issue-23-clone-b-'))
+    temporaryDirectories.push(firstClone, secondClone)
+    const authorization = record({
+      ...authorizationRecord().value,
+      authorization_id: `clone-independent-${process.pid}`,
+    })
+    const source = `
+      import { repositoryDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
+      const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
+      try { repositoryDeliverySink.consumeAuthorization({ bytes, sha256: ${JSON.stringify(authorization.sha256)} }) }
+      catch (error) { if (/consumed/u.test(error.message)) process.exitCode = 10; else throw error }
+    `
+    expect(spawnSync(process.execPath, ['--input-type=module', '-e', source], { cwd: firstClone }).status).toBe(0)
+    expect(spawnSync(process.execPath, ['--input-type=module', '-e', source], { cwd: secondClone }).status).toBe(10)
+    rmSync(join(repositoryDeliverySinkRoot(), 'authorizations', `${authorization.sha256}.json`), { force: true })
+  })
+
+  it('uses one clone-independent canonical production sink root', () => {
+    const commonRoot = repositoryDeliverySinkRoot()
     const worktree = mkdtempSync(join(tmpdir(), 'blogman-issue-23-worktree-'))
     temporaryDirectories.push(worktree)
     spawnSync('git', ['worktree', 'add', '--detach', worktree, 'HEAD'], { encoding: 'utf8' })
     try {
-      expect(repositoryDeliverySinkRoot(worktree)).toBe(commonRoot)
+      expect(repositoryDeliverySinkRoot()).toBe(commonRoot)
     } finally {
       spawnSync('git', ['worktree', 'remove', '--force', worktree], { encoding: 'utf8' })
     }
@@ -134,10 +166,10 @@ describe('Issue #23 durable delivery records', () => {
     spawnSync('git', ['-C', repository, 'worktree', 'add', '--detach', worktree, 'HEAD'])
     const authorization = authorizationRecord()
     const source = `
-      import { createRepositoryDeliverySink, repositoryDeliverySinkRoot } from ${JSON.stringify(sinkModuleUrl)}
+      import { createRepositoryDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
       const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
       const record = { bytes, sha256: ${JSON.stringify(authorization.sha256)} }
-      try { createRepositoryDeliverySink(repositoryDeliverySinkRoot(process.cwd())).consumeAuthorization(record) }
+      try { createRepositoryDeliverySink(${JSON.stringify(repository)}).consumeAuthorization(record) }
       catch (error) { if (/consumed/u.test(error.message)) process.exitCode = 10; else throw error }
     `
     try {
@@ -372,6 +404,29 @@ describe('Issue #23 durable delivery records', () => {
     expect(readdirSync(join(root, 'terminals'))).toEqual([])
   })
 
+  it('keeps exactly one attempt slot when a conflicting terminal follows persistence', () => {
+    const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-terminal-cas-'))
+    temporaryDirectories.push(root)
+    const sink = createRepositoryDeliverySink(root)
+    const manifest = record({ format: 'blogman-issue-23-canonical-frozen-manifest/v1', marker: 'terminal-cas' })
+    const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
+    const attemptId = 'f'.repeat(64)
+    const terminal = record({
+      format: 'blogman-issue-23-terminal-result/v1',
+      identities: { manifest_sha256: manifest.sha256, authorization_sha256: authorization.sha256 },
+      attempt_id: attemptId,
+      evidence: { hashes: { d1_stage_receipt_sha256: null, worker_stage_receipt_sha256: null } },
+    })
+    const timeoutTerminal = record({ ...terminal.value, outcome: 'TIMEOUT' })
+    sink.consumeAuthorization(authorization)
+    sink.persistTerminalResult({ terminal, manifest, d1: null, worker: null })
+
+    expect(() => sink.persistTerminalResult({ terminal: timeoutTerminal, manifest, d1: null, worker: null }))
+      .toThrow(/conflicting durable bytes/u)
+    expect(readdirSync(join(root, 'terminals'))).toEqual([`${attemptId}.json`])
+    expect(readFileSync(join(root, 'terminals', `${attemptId}.json`))).toEqual(terminal.bytes)
+  })
+
   it('rejects conflicting durable terminal bytes instead of replacing the first result', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-conflict-'))
     temporaryDirectories.push(root)
@@ -386,10 +441,11 @@ describe('Issue #23 durable delivery records', () => {
     sink.consumeAuthorization(authorization)
     sink.persistTerminalResult({ terminal, manifest, d1: null, worker: null })
     const forged = record({ ...terminal.value, marker: 'forged' })
-    writeFileSync(join(root, 'terminals', `${terminal.sha256}.json`), forged.bytes)
+    const terminalPath = join(root, 'terminals', `${terminal.value.attempt_id}.json`)
+    writeFileSync(terminalPath, forged.bytes)
 
     expect(() => sink.persistTerminalResult({ terminal, manifest, d1: null, worker: null }))
       .toThrow(/conflicting durable bytes/u)
-    expect(readFileSync(join(root, 'terminals', `${terminal.sha256}.json`))).toEqual(forged.bytes)
+    expect(readFileSync(terminalPath)).toEqual(forged.bytes)
   })
 })

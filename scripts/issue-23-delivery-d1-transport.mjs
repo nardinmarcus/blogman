@@ -38,6 +38,7 @@ export const D1_TRANSPORT_FAILURE_CLASSIFICATIONS = Object.freeze({
   TIMEOUT: 'timeout',
   NONZERO: 'nonzero',
   MALFORMED: 'malformed',
+  PERMISSION: 'permission_insufficient',
   UNCERTAIN: 'uncertain',
 })
 
@@ -440,8 +441,10 @@ function parseRemoteIdentity(stdout, expectedDatabaseId) {
 function parseRemoteWhoami(stdout, expectedAccountId) {
   try {
     parseWranglerWhoamiResponse(stdout, expectedAccountId)
-  } catch {
-    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED)
+  } catch (error) {
+    throw new D1TransportError(error?.code === 'DELIVERY_PERMISSION_INSUFFICIENT'
+      ? D1_TRANSPORT_FAILURE_CLASSIFICATIONS.PERMISSION
+      : D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED)
   }
 }
 

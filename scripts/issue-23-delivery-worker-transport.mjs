@@ -211,7 +211,7 @@ function versionDeployCommand(bindings, versionId) {
 }
 function smokeCommand(bindings, url) {
   return Object.freeze({ executable: bindings.curl_path, args: Object.freeze([
-    '--config', '-', '--request', 'GET', '--silent', '--show-error',
+    '--disable', '--config', '-', '--request', 'GET', '--silent', '--show-error',
     '--output', '/dev/null', '--write-out', '%{http_code}', url,
   ]) })
 }

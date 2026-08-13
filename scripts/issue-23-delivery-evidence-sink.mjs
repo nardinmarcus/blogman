@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
 import {
   closeSync,
   fsyncSync,
@@ -8,14 +7,20 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   unlinkSync,
   writeSync,
 } from 'node:fs'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-
-const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+import { dirname, join, resolve } from 'node:path'
+import { userInfo } from 'node:os'
+const PRODUCTION_AUTHORITY_ROOT = join(
+  userInfo().homedir,
+  '.local',
+  'state',
+  'blogman',
+  'issue-23-production-authority-v1',
+)
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const TERMINAL_RESULT_FORMAT = 'blogman-issue-23-terminal-result/v1'
 const RECORD_FORMATS = new Set([
@@ -186,7 +191,6 @@ function atomicWrite(path, bytes, directory, deadline) {
     linkSync(temporary, path)
     unlinkSync(temporary)
     syncDirectory(directory)
-    checkDeadline(deadline)
   } catch (error) {
     if (descriptor !== undefined) closeSync(descriptor)
     try { unlinkSync(temporary) } catch {}
@@ -287,7 +291,8 @@ function persistTerminalResult(root, input, deadline) {
     if (record !== null) writeIfAbsent(join(recordsDirectory, `${record.sha256}.json`), record.bytes, recordsDirectory, label, deadline)
   }
   const terminalDirectory = join(root, 'terminals')
-  writeIfAbsent(join(terminalDirectory, `${terminal.sha256}.json`), terminal.bytes, terminalDirectory, 'terminal result', deadline)
+  const terminalSlot = join(terminalDirectory, `${terminal.value.attempt_id}.json`)
+  writeIfAbsent(terminalSlot, terminal.bytes, terminalDirectory, 'terminal result', deadline)
   return terminal.sha256
 }
 
@@ -295,7 +300,18 @@ function readTerminalEvidence(root, terminalSha256) {
   if (typeof terminalSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(terminalSha256)) {
     fail('terminal result identity is invalid')
   }
-  const terminalPath = join(root, 'terminals', `${terminalSha256}.json`)
+  const terminalDirectory = join(root, 'terminals')
+  let terminalPath
+  for (const name of readdirSync(terminalDirectory).sort()) {
+    const candidate = join(terminalDirectory, name)
+    assertSecureFile(candidate, 'terminal result')
+    const bytes = readFileSync(candidate)
+    if (sha256(bytes) === terminalSha256) {
+      terminalPath = candidate
+      break
+    }
+  }
+  if (!terminalPath) fail('terminal result is missing from the durable sink')
   let terminalBytes
   assertSecureFile(terminalPath, 'terminal result')
   try { terminalBytes = readFileSync(terminalPath) } catch { fail('terminal result is missing from the durable sink') }
@@ -316,16 +332,14 @@ function readTerminalEvidence(root, terminalSha256) {
   })
 }
 
-export function repositoryDeliverySinkRoot(repositoryRoot = REPOSITORY_ROOT) {
-  const output = execFileSync('git', ['-C', repositoryRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
-    encoding: 'utf8',
-  }).trim()
-  if (!isAbsolute(output) || realpathSync(output) !== resolve(output)) fail('repository common root is not canonical')
-  return join(output, 'blogman-issue-23-delivery')
+export function repositoryDeliverySinkRoot() {
+  return PRODUCTION_AUTHORITY_ROOT
 }
 
-export function createRepositoryDeliverySink(root = repositoryDeliverySinkRoot()) {
+export function createRepositoryDeliverySink(root) {
+  if (typeof root !== 'string') fail('explicit test-only sink root is required')
   const requestedRoot = resolve(root)
+  mkdirSync(dirname(requestedRoot), { recursive: true, mode: 0o700 })
   createDirectory(requestedRoot, 'sink root')
   const resolvedRoot = realpathSync(requestedRoot)
   const rootIdentity = secureDirectoryIdentity(resolvedRoot, 'sink root')
@@ -356,11 +370,12 @@ export function createRepositoryDeliverySink(root = repositoryDeliverySinkRoot()
 }
 
 function defaultSink() {
-  return createRepositoryDeliverySink()
+  return createRepositoryDeliverySink(PRODUCTION_AUTHORITY_ROOT)
 }
 
+/** Canonical production authority. Test/formal sinks cannot replace this facade. */
 export const repositoryDeliverySink = Object.freeze({
-  consumeAuthorization: (record) => defaultSink().consumeAuthorization(record),
-  persistTerminalResult: (input) => defaultSink().persistTerminalResult(input),
+  consumeAuthorization: (record, deadline) => defaultSink().consumeAuthorization(record, deadline),
+  persistTerminalResult: (input, deadline) => defaultSink().persistTerminalResult(input, deadline),
   readTerminalEvidence: (terminalSha256) => defaultSink().readTerminalEvidence(terminalSha256),
 })

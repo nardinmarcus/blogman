@@ -346,6 +346,12 @@ export function parseRemoteD1InfoResponse(stdout, expectedDatabaseId) {
   }
 }
 
+const REQUIRED_DELIVERY_TOKEN_PERMISSIONS = Object.freeze([
+  'account:Account Settings:read',
+  'account:D1:write',
+  'account:Workers Scripts:write',
+])
+
 export function parseWranglerWhoamiResponse(stdout, expectedAccountId) {
   try {
     const response = parseStrictJson(stdout)
@@ -383,8 +389,14 @@ export function parseWranglerWhoamiResponse(stdout, expectedAccountId) {
     if (response.accounts.filter((account) => account.id === expectedAccountId).length !== 1) {
       throw new Error('account identity drift')
     }
+    if (!REQUIRED_DELIVERY_TOKEN_PERMISSIONS.every((permission) => response.tokenPermissions.includes(permission))) {
+      const error = new Error('delivery token permissions are insufficient')
+      error.code = 'DELIVERY_PERMISSION_INSUFFICIENT'
+      throw error
+    }
     return response
-  } catch {
+  } catch (error) {
+    if (error?.code === 'DELIVERY_PERMISSION_INSUFFICIENT') throw error
     throw new Error('invalid Wrangler identity response')
   }
 }

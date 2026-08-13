@@ -389,6 +389,10 @@ describe('Issue #90 D1 transport', () => {
       loggedIn: true,
     })
     expect(() => parseWranglerWhoamiResponse(
+      whoami.replace('"account:Workers Scripts:write"', '"account:Workers Scripts:read"'),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    )).toThrow(/permissions are insufficient/u)
+    expect(() => parseWranglerWhoamiResponse(
       whoami.replace('"api_access_enabled": true', '"api_access_enabled": "true"'),
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     )).toThrow()

@@ -258,7 +258,6 @@ const SYSTEM_CURL_PATH = '/usr/bin/curl'
 const SMOKE_CREDENTIAL_ENV = 'DELIVERY_SMOKE_ADMIN'
 const CLOUDFLARE_TOKEN_ENV = 'CLOUDFLARE_API_TOKEN'
 const CLOUDFLARE_ACCOUNT_ENV = 'CLOUDFLARE_ACCOUNT_ID'
-const CLOUDFLARE_SCOPES_ENV = 'CLOUDFLARE_DELIVERY_SCOPES'
 const CLOUDFLARE_TOKEN_PATTERN = /^[A-Za-z0-9._~-]{8,512}$/u
 const CLOUDFLARE_SCOPES = Object.freeze(['account:read', 'd1:write', 'workers:write'])
 const CHILD_ENV_ALLOWLIST = Object.freeze(['HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR'])
@@ -1098,7 +1097,7 @@ function validatePreparedManifest(manifest) {
   return bytes
 }
 
-function activeDeliverySink() {
+function executionDeliverySink() {
   return currentFormalContext()?.deliverySink ?? repositoryDeliverySink
 }
 
@@ -1122,7 +1121,7 @@ function acceptAuthorization(manifestSha256, authorization, deadline) {
   }
   const authorizationBytes = canonicalJsonBytes(canonicalAuthorization)
   const authorizationDigest = sha256(authorizationBytes)
-  activeDeliverySink().consumeAuthorization({ bytes: authorizationBytes, sha256: authorizationDigest }, deadline)
+  executionDeliverySink().consumeAuthorization({ bytes: authorizationBytes, sha256: authorizationDigest }, deadline)
   return authorizationDigest
 }
 
@@ -1684,7 +1683,7 @@ function formalAdapterFactories(context) {
             [CLOUDFLARE_TOKEN_ENV]: 'formal-cloudflare-placeholder',
             [CLOUDFLARE_ACCOUNT_ENV]: manifest.target.account_id,
           })),
-          smoke: Object.freeze(projectedEnvironment()),
+          smoke: Object.freeze(Object.create(null)),
         }),
       })
     },
@@ -1715,22 +1714,26 @@ function productionAdapterFactories() {
         name === manifest.target.smoke.admin_credential_slot
       ))
       if (!slot || !sameJsonValue([...slot.scopes].sort(), ['admin:smoke'])) {
-        throw new Error('smoke authority policy is invalid')
+        const error = new Error('smoke authority policy is invalid')
+        error.classification = 'smoke_auth_policy_invalid'
+        throw error
       }
       const credential = process.env[SMOKE_CREDENTIAL_ENV]
       if (typeof credential !== 'string' || !SMOKE_CREDENTIAL_PATTERN.test(credential)) {
-        throw new Error('smoke authority is unavailable')
+        const error = new Error('smoke authority is unavailable')
+        error.classification = 'smoke_auth_unavailable'
+        throw error
       }
       const cloudflareSlot = manifest.policy.authorization.credential_slots.find(({ name }) => (
         name === 'cloudflare_delivery'
       ))
       const token = process.env[CLOUDFLARE_TOKEN_ENV]
       const account = process.env[CLOUDFLARE_ACCOUNT_ENV]
-      const scopes = process.env[CLOUDFLARE_SCOPES_ENV]?.split(',').map((scope) => scope.trim()).sort()
       if (!cloudflareSlot || !sameJsonValue([...cloudflareSlot.scopes].sort(), CLOUDFLARE_SCOPES)
-        || !CLOUDFLARE_TOKEN_PATTERN.test(token ?? '') || account !== manifest.target.account_id
-        || !sameJsonValue(scopes, CLOUDFLARE_SCOPES)) {
-        throw new Error('Cloudflare delivery authority is unavailable')
+        || !CLOUDFLARE_TOKEN_PATTERN.test(token ?? '') || account !== manifest.target.account_id) {
+        const error = new Error('Cloudflare delivery authority is unavailable')
+        error.classification = 'cloudflare_auth_unavailable'
+        throw error
       }
       return Object.freeze({
         smoke: credential,
@@ -1739,7 +1742,7 @@ function productionAdapterFactories() {
             [CLOUDFLARE_TOKEN_ENV]: token,
             [CLOUDFLARE_ACCOUNT_ENV]: account,
           })),
-          smoke: Object.freeze(projectedEnvironment()),
+          smoke: Object.freeze(Object.create(null)),
         }),
       })
     },
@@ -1880,14 +1883,26 @@ function executeProduction(manifest, authorization) {
     : formalFaultResult('authorization_accept')
   let credentials
   let liveResult
+  const liveStarted = attemptClock.elapsedMilliseconds()
   if (authorizationFault) {
     liveResult = authorizationFault
   } else {
     try {
       credentials = adapters.resolveCredentials(manifest.value)
-      liveResult = runLivePreconditions(manifest.value, d1, workerIdentity, credentials)
-    } catch {
-      liveResult = { outcome: 'ERROR', classification: 'smoke_auth_unavailable', duration_ms: 1 }
+      liveResult = runLivePreconditions(manifest.value, d1, workerIdentity, credentials, liveStarted)
+      const liveMeasured = attemptClock.elapsedMilliseconds() - liveStarted
+      liveResult.duration_ms = Math.max(liveResult.duration_ms, liveMeasured)
+      if (liveMeasured > DELIVERY_STAGE_POLICY[1].timeout_seconds * 1000) {
+        liveResult = { outcome: 'TIMEOUT', classification: 'stage_timeout', duration_ms: liveMeasured }
+      } else if (!withinOverallDeadline()) {
+        liveResult = { outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: liveMeasured }
+      }
+    } catch (error) {
+      liveResult = {
+        outcome: 'ERROR',
+        classification: error?.classification ?? 'credential_authority_unavailable',
+        duration_ms: 1,
+      }
     }
   }
   let materialized
@@ -1900,7 +1915,9 @@ function executeProduction(manifest, authorization) {
   let cleanup = { created: false, cleaned: true, observed_absent: true }
   if (liveResult.outcome === 'PASS') {
     try {
+      if (!withinOverallDeadline()) throw new DeliverySinkDeadlineError()
       materialized = materializeExpectedReconciliation(d1)
+      if (!withinOverallDeadline()) throw new DeliverySinkDeadlineError()
       const bindings = deriveProductionD1Bindings(d1, materialized.path)
       let transport
       try {
@@ -1913,7 +1930,7 @@ function executeProduction(manifest, authorization) {
           d1Receipt = runD1Stages({
             bindings,
             transport,
-            elapsed_ms: liveResult.duration_ms,
+            elapsed_ms: attemptClock.elapsedMilliseconds(),
           })
           d1Result = adapters.normalizeD1Result(d1Receipt, d1)
         } catch {
@@ -1922,7 +1939,9 @@ function executeProduction(manifest, authorization) {
       }
     } catch (error) {
       materialized ??= error?.materialized
-      d1Result = durableD1Failure(formal ? 'formal_rehearsal_d1_setup_error' : 'production_d1_setup_error')
+      d1Result = durableD1Failure(error instanceof DeliverySinkDeadlineError
+        ? 'overall_timeout'
+        : formal ? 'formal_rehearsal_d1_setup_error' : 'production_d1_setup_error')
     } finally {
       cleanup = disposeExpectedReconciliation(materialized)
     }
@@ -1939,7 +1958,9 @@ function executeProduction(manifest, authorization) {
   if (d1Result.outcome === 'PASS') {
     let workerExpected
     try {
+      if (!withinOverallDeadline()) throw new DeliverySinkDeadlineError()
       workerExpected = materializeExpectedReconciliation(d1)
+      if (!withinOverallDeadline()) throw new DeliverySinkDeadlineError()
       const bindings = workerBindings(
         manifest.value,
         workerExpected.path,
@@ -1949,11 +1970,16 @@ function executeProduction(manifest, authorization) {
       workerReceipt = runWorkerStages({
         bindings,
         transport: adapters.createWorkerTransport(bindings, credentials.environments),
-        elapsed_ms: liveResult.duration_ms
-          + Object.values(d1Result.stage_durations_ms).reduce((sum, duration) => sum + duration, 0),
+        elapsed_ms: attemptClock.elapsedMilliseconds(),
       })
       workerResult = adapters.normalizeWorkerResult(workerReceipt, workerIdentity)
-    } catch { workerResult = adapters.normalizeWorkerResult(null, workerIdentity) }
+    } catch (error) {
+      workerResult = error instanceof DeliverySinkDeadlineError
+        ? malformedWorkerResult(adapters.evidence.production
+          ? PRODUCTION_WORKER_EVIDENCE_POLICY
+          : FORMAL_REHEARSAL_WORKER_EVIDENCE_POLICY, workerIdentity)
+        : adapters.normalizeWorkerResult(null, workerIdentity)
+    }
     finally { disposeExpectedReconciliation(workerExpected) }
   }
   const trace = authorizationFault
@@ -2024,7 +2050,7 @@ function executeProduction(manifest, authorization) {
     result = terminalResult(value)
   }
   try {
-    activeDeliverySink().persistTerminalResult({
+    executionDeliverySink().persistTerminalResult({
       terminal: result,
       manifest,
       d1: durableD1Receipt,
@@ -2038,7 +2064,7 @@ function executeProduction(manifest, authorization) {
     value.evidence.promotable = false
     value.ended_at = attemptClock.finish(attemptClock.elapsedMilliseconds())
     result = terminalResult(value)
-    activeDeliverySink().persistTerminalResult({
+    executionDeliverySink().persistTerminalResult({
       terminal: result,
       manifest,
       d1: durableD1Receipt,
@@ -2067,7 +2093,7 @@ export function validateProductionTerminalEvidence(result) {
   }
   let receipts
   try {
-    receipts = activeDeliverySink().readTerminalEvidence(result.sha256)
+    receipts = repositoryDeliverySink.readTerminalEvidence(result.sha256)
   } catch {
     fail('production terminal evidence is malformed')
   }
@@ -2122,7 +2148,7 @@ export function validateProductionTerminalEvidence(result) {
   }))
   const terminalIndex = DELIVERY_STAGES.indexOf(value.first_terminal_stage)
   if (value.attempt_id !== expectedAttemptId
-    || terminalIndex < 1
+    || terminalIndex < 0
     || DELIVERY_STAGES.some((stage, index) => (
       !Number.isSafeInteger(value.stage_counts[stage]) || ![0, 1].includes(value.stage_counts[stage])
       || !Number.isSafeInteger(value.stage_durations_ms[stage]) || value.stage_durations_ms[stage] < 0

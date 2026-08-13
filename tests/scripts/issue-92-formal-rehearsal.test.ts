@@ -231,11 +231,17 @@ describe('Issue #92 formal rehearsal public path', () => {
       env_keys: expect.arrayContaining(['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID']),
     }))
     expect(result.operations).toContainEqual(expect.objectContaining({
-      adapter: 'worker', operation: 'smoke_control_t0.smoke', argv: expect.arrayContaining(['--request', 'GET']),
+      adapter: 'worker', operation: 'smoke_control_t0.smoke',
+      argv: expect.arrayContaining(['--disable', '--config', '-', '--request', 'GET']),
       stdin_sha256: expect.stringMatching(SHA256),
       stdin_bytes: expect.any(Number),
       env_keys: expect.not.arrayContaining(['CLOUDFLARE_API_TOKEN', 'DELIVERY_SMOKE_ADMIN']),
     }))
+    const smokeOperation = result.operations.find((operation) => (
+      operation.adapter === 'worker' && operation.operation === 'smoke_control_t0.smoke'
+    ))
+    expect(smokeOperation?.argv?.slice(0, 4)).toEqual(['/usr/bin/curl', '--disable', '--config', '-'])
+    expect(smokeOperation?.env_keys).not.toContain('HOME')
     expect(() => deliveryEntry.validateProductionTerminalEvidence(result.terminal))
       .toThrow(/production terminal evidence/u)
 

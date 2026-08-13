@@ -25,7 +25,9 @@
   "email": "offline-fixture@example.invalid",
   "loggedIn": true,
   "tokenPermissions": [
+    "account:Account Settings:read",
     "account:D1:read",
-    "account:D1:write"
+    "account:D1:write",
+    "account:Workers Scripts:write"
   ]
 }
