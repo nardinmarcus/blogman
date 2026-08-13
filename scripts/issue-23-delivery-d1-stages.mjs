@@ -641,10 +641,11 @@ const STAGE_RUNNERS = Object.freeze({
   reconciliation: runReconciliation,
 })
 
-export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0 }) {
+export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, monotonic_ms }) {
   if (!Number.isSafeInteger(elapsed_ms) || elapsed_ms < 0 || elapsed_ms > D1_OVERALL_TIMEOUT_MS) {
     fail('elapsed_ms is invalid')
   }
+  if (monotonic_ms !== undefined && typeof monotonic_ms !== 'function') fail('monotonic_ms is invalid')
   const bindings = normalizeBindings(rawBindings)
   validateTransport(transport)
   const provenance = getD1TransportProvenance(transport)
@@ -657,6 +658,12 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0 }
   let elapsedMs = elapsed_ms
 
   for (const stage of D1_STAGE_ORDER) {
+    const stageStarted = monotonic_ms?.() ?? elapsedMs
+    if (stageStarted >= D1_OVERALL_TIMEOUT_MS) {
+      stageCounts[stage] += 1
+      trace.push({ stage, outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: 1 })
+      break
+    }
     stageCounts[stage] += 1
     let outcome = 'PASS'
     let classification
@@ -666,12 +673,14 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0 }
       if (elapsedMs >= D1_OVERALL_TIMEOUT_MS) {
         throw stageFailure('TIMEOUT', 'overall_timeout')
       }
-      durationMs = STAGE_RUNNERS[stage](bindings, transport, elapsedMs)
+      durationMs = STAGE_RUNNERS[stage](bindings, transport, stageStarted)
+      const measuredDuration = monotonic_ms === undefined ? durationMs : monotonic_ms() - stageStarted
+      durationMs = Math.max(durationMs, measuredDuration)
       assertNonNegativeInteger(durationMs, `${stage} duration`)
       if (durationMs > D1_STAGE_TIMEOUT_MS[stage]) {
         throw stageFailure('TIMEOUT', 'timeout', durationMs)
       }
-      if (elapsedMs + durationMs > D1_OVERALL_TIMEOUT_MS) {
+      if ((monotonic_ms?.() ?? elapsedMs + durationMs) > D1_OVERALL_TIMEOUT_MS) {
         throw stageFailure('TIMEOUT', 'overall_timeout', durationMs)
       }
       elapsedMs += durationMs

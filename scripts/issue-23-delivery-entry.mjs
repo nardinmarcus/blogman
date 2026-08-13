@@ -1931,6 +1931,7 @@ function executeProduction(manifest, authorization) {
             bindings,
             transport,
             elapsed_ms: attemptClock.elapsedMilliseconds(),
+            monotonic_ms: attemptClock.elapsedMilliseconds,
           })
           d1Result = adapters.normalizeD1Result(d1Receipt, d1)
         } catch {
@@ -1971,6 +1972,7 @@ function executeProduction(manifest, authorization) {
         bindings,
         transport: adapters.createWorkerTransport(bindings, credentials.environments),
         elapsed_ms: attemptClock.elapsedMilliseconds(),
+        monotonic_ms: attemptClock.elapsedMilliseconds,
       })
       workerResult = adapters.normalizeWorkerResult(workerReceipt, workerIdentity)
     } catch (error) {

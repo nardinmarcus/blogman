@@ -113,7 +113,8 @@ function deploymentMatches(value, version, d1DatabaseId) {
 }
 
 /** Private suffix seam. A response has only public facts; raw adapter output never escapes. */
-export function runWorkerStages({ bindings, transport, elapsed_ms = 0 }) {
+export function runWorkerStages({ bindings, transport, elapsed_ms = 0, monotonic_ms }) {
+  if (monotonic_ms !== undefined && typeof monotonic_ms !== 'function') throw new Error('monotonic_ms is invalid')
   const identity = Object.fromEntries(EVIDENCE_IDENTITY_FIELDS.map((field) => [field, bindings?.[field]]))
   if (!EVIDENCE_IDENTITY_FIELDS.slice(0, 3).every((field) => sha256(identity[field]))
     || typeof identity.candidate_id !== 'string' || !/^[a-f0-9]{40}$/u.test(identity.candidate_id)) {
@@ -127,7 +128,8 @@ export function runWorkerStages({ bindings, transport, elapsed_ms = 0 }) {
   let version
   let deployment
   for (const stage of WORKER_STAGE_ORDER) {
-    if (!Number.isSafeInteger(elapsed) || elapsed < 0 || elapsed >= OVERALL_TIMEOUT_MS) {
+    const stageStarted = monotonic_ms?.() ?? elapsed
+    if (!Number.isSafeInteger(elapsed) || elapsed < 0 || stageStarted >= OVERALL_TIMEOUT_MS) {
       trace.push({ stage, outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: 1 })
       break
     }
@@ -141,6 +143,8 @@ export function runWorkerStages({ bindings, transport, elapsed_ms = 0 }) {
       version_id: version,
       deployment_id: deployment,
     })
+    const measuredDuration = monotonic_ms === undefined ? parsed.duration_ms : monotonic_ms() - stageStarted
+    parsed.duration_ms = Math.max(parsed.duration_ms, measuredDuration)
     elapsed += parsed.duration_ms
     if (parsed.failure) {
       trace.push({ stage, ...parsed.failure, duration_ms: parsed.duration_ms })
