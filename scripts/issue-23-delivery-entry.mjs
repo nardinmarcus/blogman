@@ -1660,7 +1660,12 @@ function projectedEnvironment(values = {}) {
 function formalAdapterFactories(context) {
   return Object.freeze({
     createD1Transport(bindings, environments) {
-      return createRehearsalD1Transport(bindings, context.sink, currentFormalFaultForTestsOnly(), environments)
+      return createRehearsalD1Transport(
+        bindings,
+        context.sink,
+        currentFormalFaultForTestsOnly(),
+        environments.cloudflare,
+      )
     },
     createWorkerTransport(bindings, environments) {
       return createRehearsalWorkerTransport(bindings, context.sink, currentFormalFaultForTestsOnly(), environments)
