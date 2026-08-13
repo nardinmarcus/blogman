@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { buildSync } from 'esbuild'
 import { describe, expect, it } from 'vitest'
 import {
   CANONICAL_MANIFEST_FORMAT,
@@ -19,6 +21,14 @@ import { runLocalRehearsal, runLocalRehearsalForTestsOnly } from '../../scripts/
 import { hashD1ArtifactDirectory as contractHashD1ArtifactDirectory } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
 import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-formal-runtime.mjs'
 import nextConfig from '../../next.config'
+
+const projectRequire = createRequire(import.meta.url)
+
+function installedPackageRoot(packageName: string) {
+  let directory = dirname(projectRequire.resolve(packageName))
+  while (!existsSync(join(directory, 'package.json'))) directory = dirname(directory)
+  return directory
+}
 
 const SHA40 = 'a'.repeat(40)
 const SHA40_B = 'b'.repeat(40)
@@ -815,15 +825,43 @@ function readPatchContract(relativePath: string) {
   return existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : ''
 }
 
-async function emitCjsFlightManifest(
+type FlightManifestPlugin = new (options: {
+  appDir: string
+  dev: boolean
+  experimentalInlineCss: boolean
+}) => { apply(compiler: unknown): void }
+
+type FlightReferenceSpec = {
+  identifier: string
+  query: string
+  layer: string
+  async: boolean
+}
+
+async function emitFlightManifest(
+  ClientReferenceManifestPlugin: FlightManifestPlugin,
   chunkSpecs: Array<{ id: string; files: string[] }>,
   cssFiles: string[] = [],
+  referenceSpecs: FlightReferenceSpec[] = [],
 ) {
-  const { ClientReferenceManifestPlugin } = await import(
-    'next/dist/build/webpack/plugins/flight-manifest-plugin.js'
-  )
-  const dependency = {}
-  const clientModule = { resource: join(repoRoot, 'app', 'client.tsx'), type: 'javascript/auto' }
+  class ConcatenatedModule {}
+
+  const sharedPath = join(repoRoot, 'app', 'client.tsx')
+  const clientModule = { resource: sharedPath, type: 'javascript/auto' }
+  const references = referenceSpecs.length === 0
+    ? [{ dependency: {}, module: clientModule, clientModule }]
+    : referenceSpecs.map((spec) => {
+      const dependency = {}
+      const referencedModule = {
+        resource: sharedPath,
+        resourceResolveData: { path: sharedPath, query: spec.query },
+        layer: spec.layer,
+        type: 'javascript/auto',
+        identifier: () => spec.identifier,
+        isAsync: spec.async,
+      }
+      return { dependency, module: new ConcatenatedModule(), clientModule: referencedModule }
+    })
   const entryModule = {
     layer: 'app-pages-browser',
     request: 'next-flight-client-entry-loader.js?test',
@@ -837,7 +875,10 @@ async function emitCjsFlightManifest(
   const compilation = {
     chunkGraph: {
       getChunkEntryModulesIterable: () => [entryModule],
-      getModuleId: () => 'client-module',
+      getModuleId: (module: object) => {
+        if (module instanceof ConcatenatedModule) return 'shared-id'
+        return referenceSpecs.length === 0 ? 'client-module' : null
+      },
     },
     emitAsset: (_path: string, source: { source: () => string | Uint8Array }) => {
       emitted = source.source().toString()
@@ -850,9 +891,10 @@ async function emitCjsFlightManifest(
       },
     },
     moduleGraph: {
-      getOutgoingConnectionsInOrder: () => [{ dependency, module: clientModule }],
-      getResolvedModule: () => clientModule,
-      isAsync: () => false,
+      getOutgoingConnectionsInOrder: () => references.map(({ dependency, module }) => ({ dependency, module })),
+      getResolvedModule: (dependency: object) => references.find((reference) => reference.dependency === dependency)?.clientModule,
+      isAsync: (module: object) => references.find((reference) => reference.clientModule === module)
+        ?.clientModule.isAsync ?? false,
     },
     outputOptions: { crossOriginLoading: false, publicPath: '' },
   }
@@ -873,6 +915,95 @@ async function emitCjsFlightManifest(
   return emitted
 }
 
+async function emitCjsFlightManifest(
+  chunkSpecs: Array<{ id: string; files: string[] }>,
+  cssFiles: string[] = [],
+) {
+  const { ClientReferenceManifestPlugin } = await import(
+    'next/dist/build/webpack/plugins/flight-manifest-plugin.js'
+  )
+  return emitFlightManifest(ClientReferenceManifestPlugin, chunkSpecs, cssFiles)
+}
+
+function createPatchedNextFixture() {
+  const directory = mkdtempSync(join(tmpdir(), 'blogman-next-patch-'))
+  try {
+    mkdirSync(join(directory, 'node_modules', 'next'), { recursive: true })
+    for (const packageName of [
+      '@next/env',
+      '@swc/helpers',
+      'baseline-browser-mapping',
+      'caniuse-lite',
+      'postcss',
+      'react',
+      'react-dom',
+      'styled-jsx',
+    ]) {
+      const target = join(directory, 'node_modules', packageName)
+      mkdirSync(dirname(target), { recursive: true })
+      symlinkSync(installedPackageRoot(packageName), target, 'dir')
+    }
+    writeFileSync(join(directory, 'package.json'), '{"name":"blogman-next-patch-test","private":true}\n')
+    execFileSync('npm', ['pack', '--offline', '--pack-destination', directory, 'next@16.2.6'], {
+      cwd: directory,
+      stdio: 'pipe',
+    })
+    execFileSync('tar', ['-xzf', join(directory, 'next-16.2.6.tgz'), '--strip-components=1', '-C', join(directory, 'node_modules', 'next')], {
+      cwd: directory,
+      stdio: 'pipe',
+    })
+    execFileSync('patch', ['--batch', '--forward', '-p1', '-i', join(repoRoot, 'patches', 'next+16.2.6.patch')], {
+      cwd: directory,
+      stdio: 'pipe',
+    })
+    return directory
+  } catch (error) {
+    rmSync(directory, { recursive: true, force: true })
+    throw error
+  }
+}
+
+async function loadPatchedFlightManifestPlugins(directory: string) {
+  const nextRoot = join(directory, 'node_modules', 'next')
+  const rscModules = { 'app/client.tsx': { moduleId: 'rsc-shared-id', async: false } }
+  const cjsBuildContext = await import(pathToFileURL(join(nextRoot, 'dist', 'build', 'build-context.js')).href)
+  cjsBuildContext.resumePluginState({ rscModules })
+  const cjs = await import(pathToFileURL(join(nextRoot, 'dist', 'build', 'webpack', 'plugins', 'flight-manifest-plugin.js')).href)
+  const esmPluginPath = join(nextRoot, 'dist', 'esm', 'build', 'webpack', 'plugins', 'flight-manifest-plugin.js')
+  const esmEntryPath = join(directory, 'flight-manifest-plugin.esm-entry.mjs')
+  const esmBundlePath = join(directory, 'flight-manifest-plugin.esm.cjs')
+  const esmImports = /import path from 'path';[\s\S]*?import \{ encodeURIPath \} from '\.\.\/\.\.\/\.\.\/shared\/lib\/encode-uri-path';\n/u
+  const cjsImportPreamble = `
+const path = require('path')
+const { webpack, sources } = require(${JSON.stringify(join(nextRoot, 'dist', 'compiled', 'webpack', 'webpack.js'))})
+const { APP_CLIENT_INTERNALS, BARREL_OPTIMIZATION_PREFIX, CLIENT_REFERENCE_MANIFEST, SYSTEM_ENTRYPOINTS, CLIENT_STATIC_FILES_RUNTIME_MAIN_APP } = require(${JSON.stringify(join(nextRoot, 'dist', 'shared', 'lib', 'constants.js'))})
+const { relative } = require('path')
+const { getProxiedPluginState, resumePluginState } = require(${JSON.stringify(join(nextRoot, 'dist', 'build', 'build-context.js'))})
+const { WEBPACK_LAYERS } = require(${JSON.stringify(join(nextRoot, 'dist', 'lib', 'constants.js'))})
+const { normalizePagePath } = require(${JSON.stringify(join(nextRoot, 'dist', 'shared', 'lib', 'page-path', 'normalize-page-path.js'))})
+const { getAssetTokenQuery } = require(${JSON.stringify(join(nextRoot, 'dist', 'shared', 'lib', 'deployment-id.js'))})
+const { formatBarrelOptimizedResource, getModuleReferencesInOrder } = require(${JSON.stringify(join(nextRoot, 'dist', 'build', 'webpack', 'utils.js'))})
+const { encodeURIPath } = require(${JSON.stringify(join(nextRoot, 'dist', 'shared', 'lib', 'encode-uri-path.js'))})
+resumePluginState({ rscModules: ${JSON.stringify(rscModules)} })
+`
+  const esmSource = readFileSync(esmPluginPath, 'utf8').replace(esmImports, cjsImportPreamble)
+  expect(esmSource).not.toBe(readFileSync(esmPluginPath, 'utf8'))
+  writeFileSync(esmEntryPath, esmSource)
+  buildSync({
+    bundle: false,
+    entryPoints: [esmEntryPath],
+    format: 'cjs',
+    outfile: esmBundlePath,
+    platform: 'node',
+    logLevel: 'silent',
+  })
+  const esm = await import(pathToFileURL(esmBundlePath).href)
+  return {
+    cjs: cjs.ClientReferenceManifestPlugin as FlightManifestPlugin,
+    esm: esm.ClientReferenceManifestPlugin as FlightManifestPlugin,
+  }
+}
+
 function readFlightManifestChunkPairs(bytes: string) {
   const manifest = JSON.parse(bytes.slice(bytes.indexOf(']=') + 2, -1))
   const chunks = Object.values(manifest.clientModules)[0] as { chunks: string[] }
@@ -884,6 +1015,11 @@ function readFlightManifestChunkPairs(bytes: string) {
 function readFlightManifestEntryCssFiles(bytes: string) {
   const manifest = JSON.parse(bytes.slice(bytes.indexOf(']=') + 2, -1))
   return Object.values(manifest.entryCSSFiles)[0] as Array<{ inlined: boolean; path: string }>
+}
+
+function readFlightManifestSharedIdOutcome(bytes: string) {
+  const manifest = JSON.parse(bytes.slice(bytes.indexOf(']=') + 2, -1))
+  return Object.values(manifest.clientModules)[0] as { async: boolean; id: string }
 }
 
 function buildFileMap(result: ReturnType<typeof prepareFixture>) {
@@ -999,6 +1135,39 @@ describe('Issue #23 Delivery Preparation', () => {
 
     expect(first).toBe(second)
     expect(readFlightManifestEntryCssFiles(first)).toEqual(expectedCssFiles)
+  })
+
+  it('manifest-order contract: selects the same shared ID for same-path Flight references in either traversal order', async () => {
+    const fixture = createPatchedNextFixture()
+    try {
+      const plugins = await loadPatchedFlightManifestPlugins(fixture)
+      const alpha: FlightReferenceSpec = {
+        identifier: `${join(repoRoot, 'app', 'client.tsx')}?alpha`,
+        query: '?alpha',
+        layer: 'app-pages-browser',
+        async: false,
+      }
+      const zeta: FlightReferenceSpec = {
+        identifier: `${join(repoRoot, 'app', 'client.tsx')}?zeta`,
+        query: '?zeta',
+        layer: 'app-pages-browser',
+        async: true,
+      }
+
+      for (const plugin of [plugins.cjs, plugins.esm]) {
+        const chunks = [{ id: 'flight', files: [] }]
+        const first = await emitFlightManifest(plugin, chunks, [], [zeta, alpha])
+        const second = await emitFlightManifest(plugin, chunks, [], [alpha, zeta])
+
+        expect(first).toBe(second)
+        expect(readFlightManifestSharedIdOutcome(first)).toMatchObject({
+          async: true,
+          id: 'shared-id',
+        })
+      }
+    } finally {
+      rmSync(fixture, { recursive: true, force: true })
+    }
   })
 
   it('manifest-order contract: tie-breaks OpenNext manifest glob ordering lexically', () => {
@@ -1457,6 +1626,9 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(patch.match(/const moduleReferenceSortKey = \(connection\)=>\{/gu)).toHaveLength(2)
     expect(patch.match(/connections = .*\.sort\(\(left, right\)=>\{/gu)).toHaveLength(2)
     expect(patch.match(/leftKey < rightKey \? -1 : leftKey > rightKey \? 1 : 0/gu)).toHaveLength(2)
+    expect(patch.match(/resourceResolveData\.query/gu)).toHaveLength(2)
+    expect(patch.match(/referencedModule\.layer/gu)).toHaveLength(2)
+    expect(patch.match(/referencedModule\.identifier\(\)/gu)).toHaveLength(2)
   })
 
   it('rejects a node action before archive identity', () => {
