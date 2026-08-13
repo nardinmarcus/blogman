@@ -1704,8 +1704,8 @@ function productionAdapterFactories() {
     createD1Transport(bindings, environments) {
       return createD1Transport(bindings, environments.cloudflare)
     },
-    createWorkerTransport(bindings, environments) {
-      return createWorkerTransport(bindings, environments)
+    createWorkerTransport(bindings, environments, monotonicMs) {
+      return createWorkerTransport(bindings, environments, monotonicMs)
     },
     normalizeD1Result: normalizeProductionD1Result,
     normalizeWorkerResult: normalizeWorkerResultForTestsOnly,
@@ -1970,7 +1970,11 @@ function executeProduction(manifest, authorization) {
       )
       workerReceipt = runWorkerStages({
         bindings,
-        transport: adapters.createWorkerTransport(bindings, credentials.environments),
+        transport: adapters.createWorkerTransport(
+          bindings,
+          credentials.environments,
+          attemptClock.elapsedMilliseconds,
+        ),
         elapsed_ms: attemptClock.elapsedMilliseconds(),
         monotonic_ms: attemptClock.elapsedMilliseconds,
       })

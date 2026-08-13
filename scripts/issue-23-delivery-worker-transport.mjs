@@ -245,7 +245,7 @@ function uploadCommand(bindings, paths) {
 }
 
 /** Private adapter. It emits only bounded, public terminal facts. */
-export function createWorkerTransport(bindings, environments = { cloudflare: process.env, smoke: process.env }) {
+export function createWorkerTransport(bindings, environments = { cloudflare: process.env, smoke: process.env }, monotonicMs = () => 0) {
   if (!bindings || typeof bindings !== 'object') fail('bindings are required')
   for (const key of [
     'manifest_sha256', 'authorization_sha256', 'attempt_id', 'smoke_admin_credential',
@@ -303,7 +303,11 @@ export function createWorkerTransport(bindings, environments = { cloudflare: pro
 
   function invoke(executable, args, request, spent, env = environments.cloudflare, stdin = null) {
     validateLocalBindings()
-    const remaining = Math.min(request.timeout_ms - spent, OVERALL_TIMEOUT_MS - request.elapsed_ms - spent)
+    const actualSpent = Math.max(spent, monotonicMs() - request.elapsed_ms)
+    const remaining = Math.min(
+      request.timeout_ms - actualSpent,
+      OVERALL_TIMEOUT_MS - request.elapsed_ms - actualSpent,
+    )
     if (!Number.isSafeInteger(remaining) || remaining <= 0) {
       throw new WorkerTransportError('TIMEOUT', 'overall_timeout', 1)
     }

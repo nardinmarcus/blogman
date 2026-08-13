@@ -290,20 +290,37 @@ function readTransportResponse(response, stage, elapsedMs) {
   return { stdout: response.stdout, durationMs: operationDurationMs }
 }
 
+function actualElapsed(state) {
+  if (state.monotonicMs === undefined) return {
+    stage: state.durationMs,
+    overall: state.overallElapsedMs,
+  }
+  const overall = state.monotonicMs()
+  return { stage: overall - state.stageStartedMs, overall }
+}
+
+function assertActualDeadline(state, timeoutMs, completion = false) {
+  const actual = actualElapsed(state)
+  if (completion ? actual.overall > D1_OVERALL_TIMEOUT_MS : actual.overall >= D1_OVERALL_TIMEOUT_MS) {
+    throw stageFailure('TIMEOUT', 'overall_timeout', Math.max(1, actual.stage))
+  }
+  if (completion ? actual.stage > timeoutMs : actual.stage >= timeoutMs) {
+    throw stageFailure('TIMEOUT', 'timeout', Math.max(1, actual.stage))
+  }
+  return actual
+}
+
 function callOperation({ bindings, transport, stage, operation }, state) {
   const timeoutMs = D1_STAGE_TIMEOUT_MS[stage]
-  if (state.durationMs >= timeoutMs) throw stageFailure('TIMEOUT', 'timeout', state.durationMs)
-  if (state.overallElapsedMs >= D1_OVERALL_TIMEOUT_MS) {
-    throw stageFailure('TIMEOUT', 'overall_timeout', state.durationMs)
-  }
+  const actual = assertActualDeadline(state, timeoutMs)
   let response
   try {
     response = transport.execute(requestFor(
       bindings,
       stage,
       operation,
-      state.durationMs,
-      state.overallElapsedMs,
+      actual.stage,
+      actual.overall,
     ))
   } catch (error) {
     if (error instanceof StageFailure) throw error
@@ -319,15 +336,18 @@ function callOperation({ bindings, transport, stage, operation }, state) {
   }
   state.durationMs += result.durationMs
   state.overallElapsedMs += result.durationMs
-  if (state.overallElapsedMs > D1_OVERALL_TIMEOUT_MS) {
-    throw stageFailure('TIMEOUT', 'overall_timeout', state.durationMs)
-  }
+  const after = actualElapsed(state)
+  state.durationMs = Math.max(state.durationMs, after.stage)
+  state.overallElapsedMs = Math.max(state.overallElapsedMs, after.overall)
+  assertActualDeadline(state, timeoutMs, true)
   return result.stdout
 }
 
 function parseOperationOutput(stdout, state, parser, classification) {
   try {
-    return parser(stdout)
+    const value = parser(stdout)
+    assertActualDeadline(state, state.timeoutMs, true)
+    return value
   } catch (error) {
     if (error instanceof StageFailure) {
       error.durationMs = state.durationMs
@@ -542,8 +562,8 @@ function parseReconciliation(stdout) {
   throw stageFailure('NON_PASS', 'reconciliation_drift')
 }
 
-function runD1Identity(bindings, transport, overallElapsedMs) {
-  const state = { durationMs: 0, overallElapsedMs }
+function runD1Identity(bindings, transport, overallElapsedMs, clock = {}) {
+  const state = { durationMs: 0, overallElapsedMs, ...clock }
   const stdout = callOperation({
     bindings,
     transport,
@@ -554,8 +574,8 @@ function runD1Identity(bindings, transport, overallElapsedMs) {
   return state.durationMs
 }
 
-function runReset(bindings, transport, overallElapsedMs) {
-  const state = { durationMs: 0, overallElapsedMs }
+function runReset(bindings, transport, overallElapsedMs, clock = {}) {
+  const state = { durationMs: 0, overallElapsedMs, ...clock }
   const stdout = callOperation({
     bindings,
     transport,
@@ -566,8 +586,8 @@ function runReset(bindings, transport, overallElapsedMs) {
   return state.durationMs
 }
 
-function runEmptyProof(bindings, transport, overallElapsedMs) {
-  const state = { durationMs: 0, overallElapsedMs }
+function runEmptyProof(bindings, transport, overallElapsedMs, clock = {}) {
+  const state = { durationMs: 0, overallElapsedMs, ...clock }
   const stdout = callOperation({
     bindings,
     transport,
@@ -578,8 +598,8 @@ function runEmptyProof(bindings, transport, overallElapsedMs) {
   return state.durationMs
 }
 
-function runMigrations(bindings, transport, overallElapsedMs) {
-  const state = { durationMs: 0, overallElapsedMs }
+function runMigrations(bindings, transport, overallElapsedMs, clock = {}) {
+  const state = { durationMs: 0, overallElapsedMs, ...clock }
   const catalog = callOperation({
     bindings,
     transport,
@@ -621,8 +641,8 @@ function runMigrations(bindings, transport, overallElapsedMs) {
   return state.durationMs
 }
 
-function runReconciliation(bindings, transport, overallElapsedMs) {
-  const state = { durationMs: 0, overallElapsedMs }
+function runReconciliation(bindings, transport, overallElapsedMs, clock = {}) {
+  const state = { durationMs: 0, overallElapsedMs, ...clock }
   const stdout = callOperation({
     bindings,
     transport,
@@ -673,7 +693,11 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, 
       if (elapsedMs >= D1_OVERALL_TIMEOUT_MS) {
         throw stageFailure('TIMEOUT', 'overall_timeout')
       }
-      durationMs = STAGE_RUNNERS[stage](bindings, transport, stageStarted)
+      durationMs = STAGE_RUNNERS[stage](bindings, transport, stageStarted, {
+        monotonicMs: monotonic_ms,
+        stageStartedMs: stageStarted,
+        timeoutMs: D1_STAGE_TIMEOUT_MS[stage],
+      })
       const measuredDuration = monotonic_ms === undefined ? durationMs : monotonic_ms() - stageStarted
       durationMs = Math.max(durationMs, measuredDuration)
       assertNonNegativeInteger(durationMs, `${stage} duration`)
