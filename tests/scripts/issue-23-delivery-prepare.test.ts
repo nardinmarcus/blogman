@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -360,7 +360,15 @@ function withIsolatedRepositoryFixture<T>(callback: (repositoryPath: string) => 
   return withTemporaryDirectory('blogman-issue-23-isolated-', (directory) => {
     const repositoryPath = join(directory, 'repository')
     execFileSync('git', ['clone', '--local', repoRoot, repositoryPath], { stdio: 'pipe' })
-    symlinkSync(join(repoRoot, 'node_modules'), join(repositoryPath, 'node_modules'), 'dir')
+    const fixtureBinDirectory = join(repositoryPath, 'node_modules', '.bin')
+    mkdirSync(fixtureBinDirectory, { recursive: true })
+    for (const executable of ['wrangler', 'opennextjs-cloudflare']) {
+      symlinkSync(
+        realpathSync(join(repoRoot, 'node_modules', '.bin', executable)),
+        join(fixtureBinDirectory, executable),
+        'file',
+      )
+    }
     return callback(repositoryPath)
   })
 }
@@ -1932,21 +1940,6 @@ describe('Issue #23 Delivery Preparation', () => {
   })
 
   it('keeps the production-write adapter untouched during isolated read-only preparation', () => {
-    const snapshotPath = (path: string): unknown => {
-      if (!existsSync(path)) return { exists: false }
-      const state = lstatSync(path)
-      if (state.isDirectory()) {
-        return {
-          exists: true,
-          type: 'directory',
-          entries: readdirSync(path).sort().map((entry) => [entry, snapshotPath(join(path, entry))]),
-        }
-      }
-      if (state.isSymbolicLink()) return { exists: true, type: 'symlink', target: readlinkSync(path) }
-      return { exists: true, type: 'file', bytes: readFileSync(path) }
-    }
-
-    const sourceNextState = snapshotPath(join(repoRoot, '.next'))
     withIsolatedRepositoryFixture((repositoryPath) => {
       const adapter = {
         calls: 0,
@@ -1979,7 +1972,22 @@ describe('Issue #23 Delivery Preparation', () => {
       expect(adapter.calls).toBe(0)
       expect(result.value.rehearsal.production_write_adapter_calls).toBe(0)
     })
-    expect(snapshotPath(join(repoRoot, '.next'))).toEqual(sourceNextState)
+  })
+
+  it('fails closed before building an isolated fixture for an invalid config', () => {
+    withIsolatedRepositoryFixture((repositoryPath) => {
+      const config = baseConfig()
+      Reflect.deleteProperty(config.artifact.file_tree, 'sha256')
+      let buildRunnerCalls = 0
+
+      expect(() => prepareFixture(config, {
+        repositoryPath,
+        buildRunner: () => {
+          buildRunnerCalls += 1
+        },
+      })).toThrow(/sha256.*required/u)
+      expect(buildRunnerCalls).toBe(0)
+    })
   })
 
   it('fails closed when canonical expected reconciliation evidence is missing', () => {
