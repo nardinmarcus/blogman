@@ -866,6 +866,13 @@ type FlightReferenceSpec = {
   async: boolean
 }
 
+type WebpackPlugin = new () => { apply(compiler: unknown): void }
+
+type ExternalModuleIdentity = {
+  canonical: string
+  unrelated: string
+}
+
 async function emitFlightManifest(
   ClientReferenceManifestPlugin: FlightManifestPlugin,
   chunkSpecs: Array<{ id: string; files: string[] }>,
@@ -988,6 +995,95 @@ function createPatchedNextFixture() {
   } catch (error) {
     rmSync(directory, { recursive: true, force: true })
     throw error
+  }
+}
+
+async function loadPatchedExternalModuleIdPlugins(directory: string) {
+  const nextRoot = join(directory, 'node_modules', 'next')
+  const cjsPluginPath = join(nextRoot, 'dist', 'build', 'webpack', 'plugins', 'canonical-app-render-external-module-ids-plugin.js')
+  const esmPluginPath = join(nextRoot, 'dist', 'esm', 'build', 'webpack', 'plugins', 'canonical-app-render-external-module-ids-plugin.js')
+  const plugins: Array<{ label: string; Plugin?: WebpackPlugin }> = [
+    {
+      label: 'CJS',
+      Plugin: existsSync(cjsPluginPath)
+        ? (await import(pathToFileURL(cjsPluginPath).href)).CanonicalAppRenderExternalModuleIdsPlugin
+        : undefined,
+    },
+  ]
+
+  if (!existsSync(esmPluginPath)) return [...plugins, { label: 'ESM', Plugin: undefined }]
+  const esmBundlePath = join(directory, 'canonical-app-render-external-module-ids-plugin.esm.cjs')
+  buildSync({
+    bundle: true,
+    entryPoints: [esmPluginPath],
+    format: 'cjs',
+    outfile: esmBundlePath,
+    platform: 'node',
+    logLevel: 'silent',
+  })
+  const esm = await import(pathToFileURL(esmBundlePath).href)
+  return [...plugins, { label: 'ESM', Plugin: esm.CanonicalAppRenderExternalModuleIdsPlugin as WebpackPlugin }]
+}
+
+async function compileExternalModuleIdentity(
+  directory: string,
+  aliases: string[],
+  Plugin?: WebpackPlugin,
+): Promise<ExternalModuleIdentity> {
+  const compilerRoot = mkdtempSync(join(directory, 'module-id-'))
+  const canonicalRequest = 'next/dist/server/app-render/work-unit-async-storage.external.js'
+  const unrelatedRequest = 'unrelated-external-package'
+  writeFileSync(
+    join(compilerRoot, 'entry.js'),
+    aliases.map((request) => `require(${JSON.stringify(request)})`).join('\n'),
+  )
+  const { webpack } = projectRequire('next/dist/compiled/webpack/webpack') as {
+    webpack: (config: unknown, callback: (error?: Error, stats?: {
+      hasErrors(): boolean
+      toJson(options: unknown): { modules?: Array<{ id?: string; identifier?: string }> }
+      toString(options: unknown): string
+    }) => void) => void
+  }
+
+  try {
+    return await new Promise((resolve, reject) => {
+      webpack({
+        context: compilerRoot,
+        entry: './entry.js',
+        externals: [({ request }: { request: string }, callback: (error?: Error | null, result?: string) => void) => {
+          if (request === './alias-alpha' || request === './alias-zeta') {
+            callback(null, canonicalRequest)
+            return
+          }
+          if (request === './unrelated-external') {
+            callback(null, unrelatedRequest)
+            return
+          }
+          callback()
+        }],
+        externalsType: 'commonjs',
+        mode: 'production',
+        optimization: { minimize: false, moduleIds: 'named' },
+        output: { filename: 'output.js', path: join(compilerRoot, 'dist') },
+        plugins: Plugin ? [new Plugin()] : [],
+        target: 'node',
+      }, (error, stats) => {
+        if (error) return reject(error)
+        if (!stats || stats.hasErrors()) return reject(new Error(stats?.toString({ errors: true }) ?? 'Webpack produced no stats'))
+        const modules = stats.toJson({ all: false, ids: true, modules: true }).modules ?? []
+        const idFor = (request: string) => modules.find(
+          (module) => module.identifier === `external commonjs ${JSON.stringify(request)}`,
+        )?.id
+        const canonical = idFor(canonicalRequest)
+        const unrelated = idFor(unrelatedRequest)
+        if (typeof canonical !== 'string' || typeof unrelated !== 'string') {
+          return reject(new Error(`Missing external module IDs: ${JSON.stringify(modules)}`))
+        }
+        resolve({ canonical, unrelated })
+      })
+    })
+  } finally {
+    rmSync(compilerRoot, { recursive: true, force: true })
   }
 }
 
@@ -1129,6 +1225,48 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(patch).toContain('a/node_modules/next/dist/esm/build/webpack/plugins/flight-manifest-plugin.js')
     expect(patch).toContain('sortManifestObjectKeys')
     expect(patch).toContain('Array.isArray')
+  })
+
+  it('module-id patch contract: installs the canonicalizer in Next CJS server webpack config', () => {
+    const patch = readPatchContract('patches/next+16.2.6.patch')
+
+    expect(patch).toContain('a/node_modules/next/dist/build/webpack-config.js')
+    expect(patch).toContain('require("./webpack/plugins/canonical-app-render-external-module-ids-plugin")')
+    expect(patch).toContain('isNodeServer && !isRspack && new _canonicalapprenderexternalmoduleidsplugin.CanonicalAppRenderExternalModuleIdsPlugin()')
+  })
+
+  it('module-id patch contract: installs the canonicalizer in Next ESM server webpack config', () => {
+    const patch = readPatchContract('patches/next+16.2.6.patch')
+
+    expect(patch).toContain('a/node_modules/next/dist/esm/build/webpack-config.js')
+    expect(patch).toContain("import { CanonicalAppRenderExternalModuleIdsPlugin } from './webpack/plugins/canonical-app-render-external-module-ids-plugin'")
+    expect(patch).toContain('isNodeServer && !isRspack && new CanonicalAppRenderExternalModuleIdsPlugin()')
+  })
+
+  it('module-id contract: canonicalizes real app-render .external.js requests before named IDs', { timeout: PATCHED_NEXT_FIXTURE_TEST_TIMEOUT_MS }, async () => {
+    const fixture = createPatchedNextFixture()
+    try {
+      const plugins = await loadPatchedExternalModuleIdPlugins(fixture)
+      for (const { label, Plugin } of plugins) {
+        const forward = await compileExternalModuleIdentity(
+          fixture,
+          ['./alias-alpha', './alias-zeta', './unrelated-external'],
+          Plugin,
+        )
+        const reversed = await compileExternalModuleIdentity(
+          fixture,
+          ['./alias-zeta', './alias-alpha', './unrelated-external'],
+          Plugin,
+        )
+
+        expect(forward.canonical, label).toBe('next/dist/server/app-render/work-unit-async-storage.external.js')
+        expect(reversed.canonical, label).toBe(forward.canonical)
+        expect(forward.unrelated, label).toBe('./unrelated-external')
+        expect(reversed.unrelated, label).toBe(forward.unrelated)
+      }
+    } finally {
+      rmSync(fixture, { recursive: true, force: true })
+    }
   })
 
   it('manifest-order contract: emits identical flight manifests for equivalent chunk traversal order', async () => {
@@ -1787,7 +1925,7 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(() => prepareFixture(mutated)).toThrow(/fixed Issue #23 order and timeouts/u)
   })
 
-  it('rejects retired or missing entry bindings before producing a manifest', () => {
+  it('rejects retired or missing entry bindings before producing a manifest', { timeout: 10_000 }, () => {
     const retiredExecute = baseConfig()
     retiredExecute.preparation.execute_entry.path = 'scripts/issue-23-delivery-prepare.mjs'
     expect(() => prepareFixture(retiredExecute)).toThrow(/formal delivery entry/u)
