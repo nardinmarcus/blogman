@@ -46,7 +46,7 @@ function assertNoPrivateEvidence(value) {
     return
   }
   if (typeof value === 'string') {
-    if (/(?:sk-|nm_)[A-Za-z0-9_-]{4,}/u.test(value)) fail('evidence contains a secret value')
+    if (/(?<![A-Za-z0-9_-])(?:sk-|nm_)[A-Za-z0-9_-]{4,}/u.test(value)) fail('evidence contains a secret value')
     return
   }
   if (!isRecord(value)) return

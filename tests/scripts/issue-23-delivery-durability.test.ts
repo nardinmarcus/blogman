@@ -29,6 +29,26 @@ afterEach(() => {
 })
 
 describe('Issue #23 durable delivery records', () => {
+  it('accepts a benign embedded task path while rejecting credential tokens', () => {
+    const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-boundary-'))
+    temporaryDirectories.push(root)
+    const sink = createRepositoryDeliverySink(root)
+
+    for (const prefix of ['sk-', 'nm_']) {
+      const secretShapedValue = `${prefix}test-only-credential`
+      expect(() => sink.consumeAuthorization(record({
+        ...authorizationRecord().value,
+        marker: secretShapedValue,
+      }))).toThrow(/secret value/u)
+    }
+
+    const benign = record({
+      ...authorizationRecord().value,
+      marker: 'after-task-async-storage.external.js',
+    })
+    expect(sink.consumeAuthorization(benign)).toBe(benign.sha256)
+  })
+
   it('atomically rejects the same serialized Authorization after a fresh process restart', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-sink-'))
     temporaryDirectories.push(root)
