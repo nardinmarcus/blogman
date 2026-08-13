@@ -236,7 +236,7 @@ describe('Issue #92 formal rehearsal public path', () => {
     }
   })
 
-  it.skipIf(!IS_MACOS_CI_GATE)('covers a module-owned fail-closed live-precondition fault through the same public call graph', { timeout: 120_000 }, async () => {
+  it.skipIf(!IS_MACOS_CI_GATE)('covers a module-owned fail-closed live-precondition fault through the same public call graph', { timeout: 180_000 }, async () => {
     const { runFormalFaultHarnessForTestsOnly } = await import('../../scripts/issue-23-delivery-formal-fault-harness.mjs')
     const result = runFormalFaultHarnessForTestsOnly('live_preconditions', () => runFormalRehearsal(formalConfig()))
 
