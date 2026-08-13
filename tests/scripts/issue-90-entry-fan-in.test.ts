@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { createD1TransportMock, runD1StagesMock, createWorkerTransportMock, runWorkerStagesMock, fsActual } = vi.hoisted(() => ({
   createD1TransportMock: vi.fn(),
@@ -54,6 +54,7 @@ import {
   prepareForTestsOnly,
 } from '../../scripts/issue-23-delivery-prepare.mjs'
 import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-formal-runtime.mjs'
+import { hashD1ArtifactDirectory } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
 
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const MANIFEST_FORMAT = 'blogman-issue-23-canonical-frozen-manifest/v1'
@@ -77,7 +78,17 @@ const D1_OPERATIONS = [
   'reconciliation',
 ]
 const REPOSITORY_ROOT = process.cwd()
+const DURABLE_SINK_ROOT = join(REPOSITORY_ROOT, '.issue-23-delivery')
 const RUNTIME_RECEIPT = buildFormalRuntimeReceipt().value
+const PREPARE_ENTRY_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-prepare.mjs')))
+const EXECUTE_ENTRY_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-entry.mjs')))
+const WORKER_UPLOAD_ENTRY_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-worker-upload.mjs')))
+const MANIFEST_SCHEMA_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json')))
+const CONFIG_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'wrangler.toml')))
+const RESET_SQL_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'db/issue-23-clean-start-reset.sql')))
+const MIGRATION_RUNNER_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'scripts/migrations.mjs')))
+const MIGRATION_CATALOG_HASH = hashD1ArtifactDirectory(realpathSync(join(REPOSITORY_ROOT, 'db/ledger-migrations')))
+const ROLLOUT_SAFETY_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'scripts/rollout-safety.mjs')))
 
 function hash(bytes: Buffer) {
   return createHash('sha256').update(bytes).digest('hex')
@@ -153,18 +164,18 @@ function d1Binding(overrides: Record<string, unknown> = {}) {
     mode: 'remote',
     database: 'DB',
     config_path: 'wrangler.toml',
-    config_sha256: HASH,
+    config_sha256: CONFIG_HASH,
     wrangler_sha256: RUNTIME_RECEIPT.wrangler.identity_sha256,
     account_id: 'account-id',
     d1_database_id: 'd1-id',
     reset_sql_path: 'db/issue-23-clean-start-reset.sql',
-    reset_sql_sha256: HASH,
+    reset_sql_sha256: RESET_SQL_HASH,
     migration_runner_path: 'scripts/migrations.mjs',
-    migration_runner_sha256: HASH,
+    migration_runner_sha256: MIGRATION_RUNNER_HASH,
     migration_catalog_path: 'db/ledger-migrations',
-    migration_catalog_sha256: HASH,
+    migration_catalog_sha256: MIGRATION_CATALOG_HASH,
     rollout_safety_path: 'scripts/rollout-safety.mjs',
-    rollout_safety_sha256: HASH,
+    rollout_safety_sha256: ROLLOUT_SAFETY_HASH,
     expected_reconciliation_format: expected.format,
     expected_reconciliation_sha256: hash(expectedBytes),
     expected_reconciliation: expected,
@@ -193,12 +204,12 @@ function manifest(overrides: Record<string, unknown> = {}) {
   const value = {
     format: MANIFEST_FORMAT,
     preparation: {
-      prepare_entry: { path: 'scripts/issue-23-delivery-prepare.mjs', sha256: HASH },
-      execute_entry: { path: 'scripts/issue-23-delivery-entry.mjs', sha256: HASH },
-      worker_upload_entry: { path: 'scripts/issue-23-delivery-worker-upload.mjs', sha256: HASH },
+      prepare_entry: { path: 'scripts/issue-23-delivery-prepare.mjs', sha256: PREPARE_ENTRY_HASH },
+      execute_entry: { path: 'scripts/issue-23-delivery-entry.mjs', sha256: EXECUTE_ENTRY_HASH },
+      worker_upload_entry: { path: 'scripts/issue-23-delivery-worker-upload.mjs', sha256: WORKER_UPLOAD_ENTRY_HASH },
       manifest_schema: {
         path: 'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
-        sha256: HASH,
+        sha256: MANIFEST_SCHEMA_HASH,
       },
     },
     repository: {
@@ -273,10 +284,10 @@ function manifest(overrides: Record<string, unknown> = {}) {
         requests: [
           { path: '/api/search', status: 200 },
           { path: '/api/settings/appearance', status: 200 },
-          { path: '/api/settings/tokens', status: 200 },
-          { path: '/api/settings/ai-provider', status: 200 },
-          { path: '/api/settings/ai-generators', status: 200 },
-          { path: '/api/admin/articles/__blogman_smoke_absent__', status: 404 },
+          { path: '/api/admin/tokens', status: 200 },
+          { path: '/api/admin/ai-provider', status: 200 },
+          { path: '/api/admin/ai-post-generators', status: 200 },
+          { path: '/api/admin/posts/__blogman_smoke_absent__', status: 404 },
         ],
         admin_credential_slot: 'delivery_smoke_admin',
       },
@@ -340,12 +351,12 @@ function actualPreparedManifest() {
   const expectedSha256 = hash(Buffer.from(`${JSON.stringify(expected, null, 2)}\n`, 'utf8'))
   const config = {
     preparation: {
-      prepare_entry: { path: 'scripts/issue-23-delivery-prepare.mjs', sha256: HASH },
-      execute_entry: { path: 'scripts/issue-23-delivery-entry.mjs', sha256: HASH },
-      worker_upload_entry: { path: 'scripts/issue-23-delivery-worker-upload.mjs', sha256: HASH },
+      prepare_entry: { path: 'scripts/issue-23-delivery-prepare.mjs', sha256: PREPARE_ENTRY_HASH },
+      execute_entry: { path: 'scripts/issue-23-delivery-entry.mjs', sha256: EXECUTE_ENTRY_HASH },
+      worker_upload_entry: { path: 'scripts/issue-23-delivery-worker-upload.mjs', sha256: WORKER_UPLOAD_ENTRY_HASH },
       manifest_schema: {
         path: 'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
-        sha256: HASH,
+        sha256: MANIFEST_SCHEMA_HASH,
       },
     },
     repository: {
@@ -409,10 +420,10 @@ function actualPreparedManifest() {
         requests: [
           { path: '/api/search', status: 200 },
           { path: '/api/settings/appearance', status: 200 },
-          { path: '/api/settings/tokens', status: 200 },
-          { path: '/api/settings/ai-provider', status: 200 },
-          { path: '/api/settings/ai-generators', status: 200 },
-          { path: '/api/admin/articles/__blogman_smoke_absent__', status: 404 },
+          { path: '/api/admin/tokens', status: 200 },
+          { path: '/api/admin/ai-provider', status: 200 },
+          { path: '/api/admin/ai-post-generators', status: 200 },
+          { path: '/api/admin/posts/__blogman_smoke_absent__', status: 404 },
         ],
         admin_credential_slot: 'delivery_smoke_admin',
       },
@@ -587,7 +598,14 @@ function configureD1(failedStage: string | null = null, receipt = d1Result(faile
 }
 
 describe('Issue #90 formal entry fan-in', () => {
-  beforeEach(() => configureWorker())
+  beforeEach(() => {
+    rmSync(DURABLE_SINK_ROOT, { recursive: true, force: true })
+    mkdirSync(join(DURABLE_SINK_ROOT, 'authorizations'), { recursive: true, mode: 0o700 })
+    mkdirSync(join(DURABLE_SINK_ROOT, 'records'), { recursive: true, mode: 0o700 })
+    mkdirSync(join(DURABLE_SINK_ROOT, 'terminals'), { recursive: true, mode: 0o700 })
+    configureWorker()
+  })
+  afterAll(() => rmSync(DURABLE_SINK_ROOT, { recursive: true, force: true }))
   it('rejects missing-d1 and d1-only wrappers before Authorization or adapter selection', () => {
     configureD1()
     const complete = manifest()
@@ -667,6 +685,29 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(authorizationRead).toBe(false)
     expect(createD1TransportMock).not.toHaveBeenCalled()
     expect(runD1StagesMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['formal entry', (value: ManifestValue) => { value.preparation.execute_entry.sha256 = 'a'.repeat(64) }],
+    ['Worker upload entry', (value: ManifestValue) => { value.preparation.worker_upload_entry.sha256 = 'a'.repeat(64) }],
+    ['rollout control entry', (value: ManifestValue) => { value.d1.rollout_safety_sha256 = 'a'.repeat(64) }],
+  ])('rejects %s closure drift before reading Authorization or selecting an adapter', (_name, mutate) => {
+    configureD1()
+    const value = structuredClone(manifest().value) as ManifestValue
+    mutate(value)
+    const prepared = preparedFromValue(value)
+    let authorizationRead = false
+    const authorization = new Proxy(authorizationFor(prepared, `fan-in-entry-drift-${_name}`), {
+      get() {
+        authorizationRead = true
+        throw new Error('Authorization must not be read for formal entry drift')
+      },
+    })
+
+    expect(() => execute(prepared, authorization)).toThrow(/formal|entry|closure|drift/u)
+    expect(authorizationRead).toBe(false)
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+    expect(createWorkerTransportMock).not.toHaveBeenCalled()
   })
 
   it('allows @ only in artifact file-tree paths', () => {
@@ -840,10 +881,7 @@ describe('Issue #90 formal entry fan-in', () => {
       outcome: 'NON_PASS', first_terminal_stage: 'live_preconditions',
       failure: { classification: 'Manifest Drift' },
     })
-    expect(terminal.receipts).toEqual(expect.objectContaining({
-      manifest: expect.objectContaining({ sha256: prepared.sha256 }), d1: null, worker: null,
-    }))
-    expect(validateProductionTerminalEvidence(terminal)).toBe(true)
+    expect(validateProductionTerminalEvidence(structuredClone(terminal))).toBe(true)
     expect(createD1TransportMock).not.toHaveBeenCalled()
   })
 
@@ -863,10 +901,7 @@ describe('Issue #90 formal entry fan-in', () => {
     const terminal = execute(prepared, authorizationFor(prepared, 'fan-in-d1-production-terminal'))
 
     expect(terminal.value).toMatchObject({ outcome: 'NON_PASS', first_terminal_stage: 'd1_identity' })
-    expect(terminal.receipts).toEqual(expect.objectContaining({
-      d1: expect.objectContaining({ sha256: receipt.sha256 }), worker: null,
-    }))
-    expect(validateProductionTerminalEvidence(terminal)).toBe(true)
+    expect(validateProductionTerminalEvidence(structuredClone(terminal))).toBe(true)
   })
 
   it('rejects rehearsal schema drift and an unbound expected reconciliation hash before selecting a production adapter', () => {
@@ -922,14 +957,15 @@ describe('Issue #90 formal entry fan-in', () => {
 
   it('returns a sanitized terminal D1 error and cleans materialized state when binding setup fails', () => {
     configureD1()
-    const prepared = manifest()
+    const prepared = actualPreparedManifest()
     const originalRealpathSync = fsActual.realpathSync!
     let materializedDirectory = ''
     vi.mocked(realpathSync).mockImplementation((path, options) => {
       if (String(path).includes('blogman-issue-23-execute-expected-')) {
         materializedDirectory = String(path)
       }
-      if (String(path).endsWith('/scripts/migrations.mjs')) throw new Error('binding setup failed')
+      if (String(path).endsWith('/scripts/migrations.mjs')
+        && materializedDirectory !== '') throw new Error('binding setup failed')
       return originalRealpathSync(path, options)
     })
 
@@ -969,7 +1005,7 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(JSON.stringify(result.value)).not.toMatch(/transport setup failed/u)
   })
 
-  it('binds terminal production evidence to execute-returned canonical receipt sidecars', () => {
+  it('binds terminal production evidence to durable canonical records', () => {
     const prepared = actualPreparedManifest()
     const d1Receipt = d1Result()
     d1Receipt.value.evidence.account_id = prepared.value.target.account_id
@@ -983,37 +1019,13 @@ describe('Issue #90 formal entry fan-in', () => {
     configureD1(null, d1Receipt)
     configureWorker()
     const terminal = execute(prepared, authorizationFor(prepared, 'fan-in-terminal-evidence'))
-    const workerReceipt = workerResult()
-
     expect(Object.keys(terminal)).toEqual(['value', 'bytes', 'sha256'])
-    expect(terminal.receipts).toEqual(expect.objectContaining({
-      manifest: expect.objectContaining({ sha256: prepared.sha256 }),
-      d1: expect.objectContaining({ sha256: d1Receipt.sha256 }),
-      worker: expect.objectContaining({ sha256: workerReceipt.sha256 }),
-    }))
-    expect(Object.isFrozen(terminal.receipts)).toBe(true)
     expect(validateProductionTerminalEvidence(terminal)).toBe(true)
+    expect(validateProductionTerminalEvidence(structuredClone(terminal))).toBe(true)
 
-    const copiedReceipts = terminal.receipts
-    const spreadTerminal = { ...terminal }
-    Object.defineProperty(spreadTerminal, 'receipts', {
-      value: copiedReceipts, enumerable: false, writable: false, configurable: false,
-    })
-    expect(() => validateProductionTerminalEvidence(spreadTerminal))
-      .toThrow(/production terminal evidence/u)
-
-    const clonedTerminal = structuredClone(terminal)
-    Object.defineProperty(clonedTerminal, 'receipts', {
-      value: copiedReceipts, enumerable: false, writable: false, configurable: false,
-    })
-    expect(() => validateProductionTerminalEvidence(clonedTerminal))
-      .toThrow(/production terminal evidence/u)
-
-    const descriptorTamperedTerminal = { ...terminal }
-    Object.defineProperty(descriptorTamperedTerminal, 'receipts', {
-      value: copiedReceipts, enumerable: true, writable: false, configurable: false,
-    })
-    expect(() => validateProductionTerminalEvidence(descriptorTamperedTerminal))
+    const forged = structuredClone(terminal)
+    forged.value.identities.manifest_sha256 = 'f'.repeat(64)
+    expect(() => validateProductionTerminalEvidence(forged))
       .toThrow(/production terminal evidence/u)
   })
 
@@ -1035,12 +1047,7 @@ describe('Issue #90 formal entry fan-in', () => {
     const terminal = execute(prepared, authorizationFor(prepared, 'fan-in-passing-terminal-evidence'))
 
     expect(terminal.value.outcome).toBe('PASS')
-    expect(terminal.receipts).toEqual(expect.objectContaining({
-      manifest: expect.objectContaining({ sha256: prepared.sha256 }),
-      d1: expect.objectContaining({ sha256: d1Receipt.sha256 }),
-      worker: expect.objectContaining({ sha256: workerReceipt.sha256 }),
-    }))
-    expect(validateProductionTerminalEvidence(terminal)).toBe(true)
+    expect(validateProductionTerminalEvidence(structuredClone(terminal))).toBe(true)
   })
 
   it('accepts the canonical output produced by prepare at the execute seam', () => {

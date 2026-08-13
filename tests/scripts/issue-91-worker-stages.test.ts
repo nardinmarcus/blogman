@@ -3,9 +3,9 @@ import { runWorkerStages } from '../../scripts/issue-23-delivery-worker-stages.m
 
 const smoke = { requests: [
   { path: '/api/search', status: 200 }, { path: '/api/settings/appearance', status: 200 },
-  { path: '/api/settings/tokens', status: 200 }, { path: '/api/settings/ai-provider', status: 200 },
-  { path: '/api/settings/ai-generators', status: 200 }, { path: '/api/admin/articles/__blogman_smoke_absent__', status: 404 },
-] }
+  { path: '/api/admin/tokens', status: 200 }, { path: '/api/admin/ai-provider', status: 200 },
+  { path: '/api/admin/ai-post-generators', status: 200 }, { path: '/api/admin/posts/__blogman_smoke_absent__', status: 404 },
+], admin_credential_slot: 'delivery_smoke_admin' }
 const bindings = { artifact_sha256: 'a'.repeat(64), config_sha256: 'c'.repeat(64), candidate_id: 'a'.repeat(64), d1_database_id: 'd1-id', smoke }
 
 function transport(responses: unknown[]) {

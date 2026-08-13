@@ -8,9 +8,9 @@ import { createWorkerTransport } from '../../scripts/issue-23-delivery-worker-tr
 
 const smoke = { requests: [
   { path: '/api/search', status: 200 }, { path: '/api/settings/appearance', status: 200 },
-  { path: '/api/settings/tokens', status: 200 }, { path: '/api/settings/ai-provider', status: 200 },
-  { path: '/api/settings/ai-generators', status: 200 }, { path: '/api/admin/articles/__blogman_smoke_absent__', status: 404 },
-] }
+  { path: '/api/admin/tokens', status: 200 }, { path: '/api/admin/ai-provider', status: 200 },
+  { path: '/api/admin/ai-post-generators', status: 200 }, { path: '/api/admin/posts/__blogman_smoke_absent__', status: 404 },
+], admin_credential_slot: 'delivery_smoke_admin' }
 const candidate = 'a'.repeat(40)
 const hash = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex')
 const roots: string[] = []
@@ -47,8 +47,11 @@ function fixture() {
   writeFileSync(npm, '#!/bin/sh\nexit 0\n')
   writeFileSync(openNext, '#!/usr/bin/env node\n')
   writeFileSync(curl, `#!/usr/bin/env node
-const url = process.argv.at(-1)
-process.stdout.write(url.includes('/api/admin/articles/') ? '404' : '200')
+const args = process.argv.slice(2)
+const headerIndex = args.indexOf('--header')
+if (args[headerIndex + 1] !== 'Cookie: blogman_admin=smoke-cookie') process.exit(19)
+const url = args.at(-1)
+process.stdout.write(url.includes('/api/admin/posts/') ? '404' : '200')
 `)
   writeFileSync(packageJson, '{}\n')
   writeFileSync(lockfile, '{}\n')
@@ -82,7 +85,7 @@ async function localServer(root: string) {
 const http = require('node:http')
 const fs = require('node:fs')
 const server = http.createServer((request, response) => {
-  response.statusCode = request.url.startsWith('/api/admin/articles/') ? 404 : 200
+  response.statusCode = request.url.startsWith('/api/admin/posts/') ? 404 : 200
   response.end('body must not be retained')
 })
 server.listen(0, '127.0.0.1', () => fs.writeFileSync(process.argv[1], String(server.address().port)))
@@ -128,7 +131,9 @@ describe('Issue #91 private smoke_control_t0 adapter', () => {
     const current = fixture()
     const port = await localServer(current.root)
     const originalLog = process.env.WORKER_FAKE_LOG
+    const originalSmokeCredential = process.env.DELIVERY_SMOKE_ADMIN
     process.env.WORKER_FAKE_LOG = current.log
+    process.env.DELIVERY_SMOKE_ADMIN = 'smoke-cookie'
     try {
       const transport = createWorkerTransport(bindings(current, port))
       const result = transport.execute({ operation: 'smoke_control_t0', stage: 'smoke_control_t0', timeout_ms: 300000, elapsed_ms: 0, version_id: 'version-new', deployment_id: 'deployment-new' })
@@ -147,8 +152,55 @@ describe('Issue #91 private smoke_control_t0 adapter', () => {
     } finally {
       if (originalLog === undefined) delete process.env.WORKER_FAKE_LOG
       else process.env.WORKER_FAKE_LOG = originalLog
+      if (originalSmokeCredential === undefined) delete process.env.DELIVERY_SMOKE_ADMIN
+      else process.env.DELIVERY_SMOKE_ADMIN = originalSmokeCredential
     }
   }, 30000)
+
+  it('passes the transport-created unique Wrangler output path into the integrated upload entry', () => {
+    const current = fixture()
+    const capturedPath = join(current.root, 'captured-output-path')
+    const capturedContent = join(current.root, 'captured-output-content')
+    writeFileSync(current.workerUploadEntry, `
+const fs = await import('node:fs')
+const outputPath = process.env.WRANGLER_OUTPUT_FILE_PATH
+if (!outputPath) process.exit(17)
+fs.writeFileSync(process.env.WORKER_OUTPUT_PATH_CAPTURE, outputPath)
+const output = JSON.stringify({ type: 'version-upload', version: 1, version_id: 'fixture-version' }) + '\\n'
+fs.writeFileSync(outputPath, output)
+fs.writeFileSync(process.env.WORKER_OUTPUT_CONTENT_CAPTURE, output)
+process.stdout.write(JSON.stringify({ accepted: true }))
+`)
+    const value = bindings(current, 1)
+    value.worker_upload_entry_sha256 = hash(current.workerUploadEntry)
+    const originalOutputPath = process.env.WRANGLER_OUTPUT_FILE_PATH
+    const originalCapturePath = process.env.WORKER_OUTPUT_PATH_CAPTURE
+    const originalContentCapture = process.env.WORKER_OUTPUT_CONTENT_CAPTURE
+    delete process.env.WRANGLER_OUTPUT_FILE_PATH
+    process.env.WORKER_OUTPUT_PATH_CAPTURE = capturedPath
+    process.env.WORKER_OUTPUT_CONTENT_CAPTURE = capturedContent
+    try {
+      const transport = createWorkerTransport(value)
+      transport.execute({
+        operation: 'worker_deploy',
+        stage: 'worker_deploy',
+        timeout_ms: 600000,
+        elapsed_ms: 0,
+        version_id: undefined,
+        deployment_id: undefined,
+      })
+      const outputPath = readFileSync(capturedPath, 'utf8')
+      expect(outputPath).toMatch(/upload\.jsonl$/u)
+      expect(readFileSync(capturedContent, 'utf8')).toContain('fixture-version')
+    } finally {
+      if (originalOutputPath === undefined) delete process.env.WRANGLER_OUTPUT_FILE_PATH
+      else process.env.WRANGLER_OUTPUT_FILE_PATH = originalOutputPath
+      if (originalCapturePath === undefined) delete process.env.WORKER_OUTPUT_PATH_CAPTURE
+      else process.env.WORKER_OUTPUT_PATH_CAPTURE = originalCapturePath
+      if (originalContentCapture === undefined) delete process.env.WORKER_OUTPUT_CONTENT_CAPTURE
+      else process.env.WORKER_OUTPUT_CONTENT_CAPTURE = originalContentCapture
+    }
+  }, 30_000)
 
   it.each([
     ['config', (current: ReturnType<typeof fixture>) => writeFileSync(current.config, 'drift\n')],

@@ -87,7 +87,7 @@ function parseSupervisorOutput(output) {
   }
 }
 
-export function runBoundedChild(executable, args, timeoutMs, maxOutputBytes, cwd = process.cwd()) {
+export function runBoundedChild(executable, args, timeoutMs, maxOutputBytes, cwd = process.cwd(), env = process.env) {
   const result = spawnSync(
     process.execPath,
     [
@@ -100,6 +100,7 @@ export function runBoundedChild(executable, args, timeoutMs, maxOutputBytes, cwd
     ],
     {
       cwd,
+      env,
       encoding: 'utf8',
       maxBuffer: maxOutputBytes * 2 + 64 * 1024,
       timeout: timeoutMs + SUPERVISOR_GRACE_MS,

@@ -10,11 +10,12 @@ const MAX_OUTPUT_BYTES = 64 * 1024
 const SMOKE_PATHS = Object.freeze([
   ['/api/search', 200],
   ['/api/settings/appearance', 200],
-  ['/api/settings/tokens', 200],
-  ['/api/settings/ai-provider', 200],
-  ['/api/settings/ai-generators', 200],
-  ['/api/admin/articles/__blogman_smoke_absent__', 404],
+  ['/api/admin/tokens', 200],
+  ['/api/admin/ai-provider', 200],
+  ['/api/admin/ai-post-generators', 200],
+  ['/api/admin/posts/__blogman_smoke_absent__', 404],
 ])
+const SMOKE_CREDENTIAL_ENV = 'DELIVERY_SMOKE_ADMIN'
 const RECONCILIATION_DIMENSIONS = Object.freeze(['schema', 'migration_ledger', 'post_count', 'post_status', 'post_content'])
 const ARTIFACT_FILE_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9@._/-]+$/u
 
@@ -164,10 +165,21 @@ function versionDeployCommand(bindings, versionId) {
     'versions', 'deploy', `${versionId}@100%`, '-y', '--config', bindings.config_path,
   ]) })
 }
-function smokeCommand(bindings, url) {
+function smokeCommand(bindings, url, cookie) {
   return Object.freeze({ executable: bindings.curl_path, args: Object.freeze([
-    '--request', 'GET', '--silent', '--show-error', '--output', '/dev/null', '--write-out', '%{http_code}', url,
+    '--request', 'GET', '--silent', '--show-error', '--header', `Cookie: blogman_admin=${cookie}`,
+    '--output', '/dev/null', '--write-out', '%{http_code}', url,
   ]) })
+}
+function resolveSmokeCredential(bindings) {
+  if (bindings.smoke.admin_credential_slot !== 'delivery_smoke_admin') {
+    throw new WorkerTransportError('NON_PASS', 'smoke_control_contract_invalid')
+  }
+  const credential = process.env[SMOKE_CREDENTIAL_ENV]
+  if (typeof credential !== 'string' || !/^[A-Za-z0-9._~-]+$/u.test(credential)) {
+    throw new WorkerTransportError('ERROR', 'smoke_auth_unavailable')
+  }
+  return credential
 }
 function controlsCommand(bindings) {
   return Object.freeze({ executable: bindings.node_path, args: Object.freeze([
@@ -248,14 +260,14 @@ export function createWorkerTransport(bindings) {
     assertBoundFile(bindings.lockfile_path, bindings.lockfile_sha256)
   }
 
-  function invoke(executable, args, request, spent) {
+  function invoke(executable, args, request, spent, env = process.env) {
     validateLocalBindings()
     const remaining = Math.min(request.timeout_ms - spent, OVERALL_TIMEOUT_MS - request.elapsed_ms - spent)
     if (!Number.isSafeInteger(remaining) || remaining <= 0) {
       throw new WorkerTransportError('TIMEOUT', 'overall_timeout', 1)
     }
     try {
-      const result = runBoundedChild(executable, args, remaining, MAX_OUTPUT_BYTES, process.cwd())
+      const result = runBoundedChild(executable, args, remaining, MAX_OUTPUT_BYTES, process.cwd(), env)
       if (result.stderr !== '') throw new WorkerTransportError('UNCERTAIN', 'worker_adapter_uncertain', result.duration_ms)
       return result
     } catch (error) {
@@ -314,7 +326,13 @@ export function createWorkerTransport(bindings) {
         const destination = join(root, 'source')
         for (const path of [output, before, after, proof]) writeFileSync(path, '', { mode: 0o600 })
         const command = uploadCommand(bindings, { destination, before, after, proof })
-        const result = invoke(command.executable, command.args, request, 0)
+        const result = invoke(
+          command.executable,
+          command.args,
+          request,
+          0,
+          { ...process.env, WRANGLER_OUTPUT_FILE_PATH: output },
+        )
         return response(parseJson(result.stdout, 'upload_acceptance', result.duration_ms), result.duration_ms)
       } finally { rmSync(root, { recursive: true, force: true }) }
     }
@@ -339,9 +357,10 @@ export function createWorkerTransport(bindings) {
     if (before.value.deployment_id !== request.deployment_id) throw new WorkerTransportError('NON_PASS', 'version_traffic_mismatch', spent)
     spent += d1Identity(request, spent)
     const checks = {}
+    const smokeCredential = resolveSmokeCredential(bindings)
     for (const { path, status } of bindings.smoke.requests) {
       const url = new URL(path, origin).toString()
-      const command = smokeCommand(bindings, url)
+      const command = smokeCommand(bindings, url, smokeCredential)
       const requestResult = invoke(command.executable, command.args, request, spent)
       spent += requestResult.duration_ms
       if (requestResult.stdout !== String(status)) {
@@ -367,15 +386,6 @@ export function createWorkerTransport(bindings) {
     production: true,
   }))
   return transport
-}
-
-function rehearsalDeployment(bindings, versionId = bindings.baseline.version_id) {
-  return {
-    deployment_id: bindings.baseline.deployment_id,
-    version_id: versionId,
-    d1_database_id: bindings.d1_database_id,
-    traffic: [{ version_id: versionId, percentage: 100 }],
-  }
 }
 
 /**
@@ -410,7 +420,6 @@ export function createRehearsalWorkerTransport(bindings, sink, failureStage = nu
     if (!Number.isSafeInteger(elapsed_ms) || elapsed_ms < 0 || elapsed_ms >= OVERALL_TIMEOUT_MS) {
       return { outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: 1 }
     }
-    const request = { timeout_ms: 120000, elapsed_ms }
     const baseline = record('live_preconditions.deployment_status', deploymentStatusCommand(bindings), deploymentRaw(bindings.baseline.version_id))
     if (failureStage === 'live_preconditions') {
       return { outcome: 'NON_PASS', classification: 'formal_rehearsal_forced_live_precondition_failure', duration_ms: baseline.duration_ms }
@@ -452,7 +461,11 @@ export function createRehearsalWorkerTransport(bindings, sink, failureStage = nu
     parseD1Identity(identity.stdout, bindings.d1_database_id, identity.duration_ms)
     const checks = {}
     for (const { path, status } of bindings.smoke.requests) {
-      const result = record(`${request.operation}.smoke`, smokeCommand(bindings, new URL(path, origin).toString()), status)
+      const result = record(
+        `${request.operation}.smoke`,
+        smokeCommand(bindings, new URL(path, origin).toString(), '<formal-rehearsal-smoke-credential>'),
+        status,
+      )
       if (result.stdout !== JSON.stringify(status)) throw new WorkerTransportError('NON_PASS', 'smoke_control_contract_invalid')
       checks[path] = status
     }

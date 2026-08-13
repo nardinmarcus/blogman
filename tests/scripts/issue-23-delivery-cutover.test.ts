@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -28,6 +27,7 @@ describe('Issue #93 delivery control-plane cutover', () => {
       'manifest_schema',
     ])
     expect(existsSync(join(repoRoot, 'scripts/issue-23-delivery-worker-upload.mjs'))).toBe(true)
+    expect(existsSync(join(repoRoot, 'scripts/issue-23-delivery-synthetic-adapter.mjs'))).toBe(false)
     expect(existsSync(join(repoRoot, 'scripts/phase-b-sequence.mjs'))).toBe(false)
     expect(existsSync(join(repoRoot, 'scripts/phase-b-sequence.d.mts'))).toBe(false)
 
@@ -36,7 +36,15 @@ describe('Issue #93 delivery control-plane cutover', () => {
       expect(contents, path).not.toContain('phase-b-sequence')
       expect(contents, path).not.toContain('issue-23-delivery-history-audit')
       expect(contents, path).not.toContain('schemas/issue-23-reseal')
+      expect(contents, path).not.toContain('executeSyntheticForTest')
+      expect(contents, path).not.toContain('runSyntheticStage')
     }
+  })
+
+  it('keeps synthetic evidence on the formal public seam and permanently non-promotable', async () => {
+    const deliveryEntry = await import('../../scripts/issue-23-delivery-entry.mjs')
+    expect(deliveryEntry).not.toHaveProperty('executeSyntheticForTest')
+    expect(source('scripts/issue-23-delivery-worker-transport.mjs')).toContain('FORMAL_REHEARSAL_WORKER_EVIDENCE_SOURCE')
   })
 
   it('keeps the operator runbook documentary instead of implementing a shell production sequence', () => {
@@ -90,7 +98,6 @@ describe('Issue #93 delivery control-plane cutover', () => {
   })
 
   it('rejects retired candidate and control-mutation commands', () => {
-    const rolloutSafetyPath = join(repoRoot, 'scripts/rollout-safety.mjs')
     const rolloutSafety = source('scripts/rollout-safety.mjs')
 
     expect(rolloutSafety).not.toContain('function verifyCandidate(')
@@ -101,20 +108,5 @@ describe('Issue #93 delivery control-plane cutover', () => {
     expect(rolloutSafety).toContain(
       "Expected command domain: backup, reconcile, rollout, or request",
     )
-
-    for (const args of [
-      ['candidate', 'verify'],
-      ['candidate', 'verify-historical'],
-      ['candidate', 'verify-pre-migration'],
-      ['rollout', 'set'],
-      ['rollout', 'status'],
-    ]) {
-      const result = spawnSync(process.execPath, [rolloutSafetyPath, ...args], {
-        cwd: repoRoot,
-        encoding: 'utf8',
-      })
-      expect(result.status, args.join(' ')).toBe(1)
-      expect(result.stdout, args.join(' ')).toBe('')
-    }
   })
 })

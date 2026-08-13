@@ -825,10 +825,14 @@ function emergencySwitchFor(controlKey, environment) {
   return { disabled: true, valid: false }
 }
 
+function requireRemoteControlsStatus(options) {
+  if (options.get('remote') !== true) fail('Rollout controls-status requires --remote')
+}
+
 function rolloutControlsStatus(options) {
   const allowed = ['config', 'database', 'remote']
   for (const key of options.keys()) if (!allowed.includes(key)) fail('Unexpected rollout controls-status option')
-  if (options.get('remote') !== 'true') fail('Rollout controls-status requires --remote')
+  requireRemoteControlsStatus(options)
   return captureReadOnlyControls({ query: (sql, evidenceName) => queryD1(options, sql, evidenceName) })
 }
 

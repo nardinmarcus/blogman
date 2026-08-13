@@ -1,12 +1,16 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import {
-  filterReconciliationSchemaRows,
-  parseD1QueryResponse,
-} from '../../scripts/rollout-safety.mjs'
+import { filterReconciliationSchemaRows, parseD1QueryResponse } from '../../scripts/rollout-safety.mjs'
 
 const rows = [{ count: 14 }]
 
 describe('rollout safety D1 response parser', () => {
+  it('keeps the controls-status parser contract as a boolean remote flag', () => {
+    const source = readFileSync(new URL('../../scripts/rollout-safety.mjs', import.meta.url), 'utf8')
+    expect(source).toContain("if (options.get('remote') !== true) fail('Rollout controls-status requires --remote')")
+    expect(source).not.toContain("options.get('remote') !== 'true'")
+  })
+
   it('excludes only the two exact D1-internal tables from final reconciliation', () => {
     expect(filterReconciliationSchemaRows([
       { type: 'table', name: '_cf_KV', tbl_name: '_cf_KV', sql: 'internal' },
