@@ -1057,18 +1057,22 @@ describe('Issue #90 formal entry fan-in', () => {
   it('rejects the canonical production root and roots outside system tmp for formal execution', () => {
     const prepared = formalPreparedManifest()
     configureD1('d1_identity')
-    for (const deliverySinkRoot of [
-      DURABLE_SINK_ROOT,
-      realpathSync(mkdtempSync(join(tmpdir(), '..', 'blogman-issue-23-outside-system-tmp-'))),
-    ]) {
-      formalSinkRoots.push(deliverySinkRoot)
+    const repositoryEntries = readdirSync(REPOSITORY_ROOT).sort()
+    const sinkDirectories = ['authorizations', 'records', 'terminals']
+    expect(sinkDirectories.some((name) => existsSync(join(REPOSITORY_ROOT, name)))).toBe(false)
+
+    formalSinkRoots.push(DURABLE_SINK_ROOT)
+    for (const [index, deliverySinkRoot] of [DURABLE_SINK_ROOT, REPOSITORY_ROOT].entries()) {
       expect(() => runInFormalRehearsalContext({
         sink: [],
         deliverySinkRoot,
         clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
-      }, () => execute(prepared, authorizationFor(prepared, `formal-root-${formalSinkRoots.length}`))))
+      }, () => execute(prepared, authorizationFor(prepared, `formal-root-${index}`))))
         .toThrow(/test-owned ROOT.*system temporary/u)
     }
+
+    expect(readdirSync(REPOSITORY_ROOT).sort()).toEqual(repositoryEntries)
+    expect(sinkDirectories.some((name) => existsSync(join(REPOSITORY_ROOT, name)))).toBe(false)
   })
 
   it('constructs the formal sink from a test-owned ROOT with no caller write facade', () => {

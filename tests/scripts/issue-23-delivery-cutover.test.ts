@@ -51,6 +51,7 @@ describe('Issue #93 delivery control-plane cutover', () => {
       'scripts/issue-23-delivery-d1-transport.mjs',
       'scripts/issue-23-delivery-entry.mjs',
       'scripts/issue-23-delivery-evidence-sink.mjs',
+      'scripts/issue-23-delivery-evidence-sink-internal.mjs',
       'scripts/issue-23-delivery-execution-closure.mjs',
       'scripts/issue-23-delivery-formal-context.mjs',
       'scripts/issue-23-delivery-formal-fault-harness.mjs',
