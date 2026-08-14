@@ -1052,9 +1052,6 @@ function assertCurrentRepositoryIdentity(manifestValue) {
     || tree !== manifestValue.repository.tree
     || status !== ''
     || manifestValue.repository.clean !== true) {
-    if (process.env.BLOGMAN_DIAGNOSE_ENTRY_DRIFT === '1') {
-      process.stderr.write(`REPOSITORY_DRIFT_DIAGNOSTIC commit=${commit === manifestValue.repository.commit} tree=${tree === manifestValue.repository.tree} status=${status === ''} frozen_clean=${manifestValue.repository.clean === true}\n`)
-    }
     fail('live repository identity is Manifest Drift')
   }
 }
@@ -2107,10 +2104,7 @@ function executeProduction(manifest, authorization) {
     assertCurrentFormalEntryClosure(manifest.value)
     assertWranglerTargetBinding(manifest.value)
     assertCurrentRepositoryIdentity(manifest.value)
-  } catch (error) {
-    if (process.env.BLOGMAN_DIAGNOSE_ENTRY_DRIFT === '1') {
-      process.stderr.write(`ENTRY_DRIFT_DIAGNOSTIC ${error instanceof Error ? error.message : String(error)}\n`)
-    }
+  } catch {
     entryDrift = { outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }
   }
   const adapters = activeAdapterFactories()
@@ -2545,7 +2539,7 @@ export function runFormalRehearsal(config) {
   if (arguments.length !== 1) fail('runFormalRehearsal accepts exactly one config argument')
   if (platform() !== 'darwin') fail('runFormalRehearsal requires target macOS')
   const sink = []
-  const sinkRoot = mkdtempSync(join(ENTRY_REPO_ROOT, '.issue-23-formal-sink-'))
+  const sinkRoot = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-23-formal-sink-')))
   try {
     const context = Object.freeze({
       sink,
