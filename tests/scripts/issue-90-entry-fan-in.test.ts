@@ -94,6 +94,7 @@ const CANDIDATE = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' 
 const CANDIDATE_TREE = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim()
 const HASH = 'b'.repeat(64)
 const D1_TRACE_HASH = 'c'.repeat(64)
+const BOUNDED_PREPARE_PATH_TIMEOUT_MS = 240_000
 const D1_EVIDENCE_HASHES = [
   'bindings_sha256', 'wrangler_sha256', 'config_sha256', 'reset_sql_sha256',
   'migration_runner_sha256', 'migration_catalog_sha256', 'rollout_safety_sha256',
@@ -1263,7 +1264,7 @@ describe('Issue #90 formal entry fan-in', () => {
       outcome: 'ERROR', first_terminal_stage: 'worker_deploy',
       failure: { classification: 'worker_result_malformed' },
     })
-  })
+  }, BOUNDED_PREPARE_PATH_TIMEOUT_MS)
 
   it('terminalizes malformed D1 after Authorization consumption without throwing or inventing suffix history', () => {
     const prepared = actualPreparedManifest()
