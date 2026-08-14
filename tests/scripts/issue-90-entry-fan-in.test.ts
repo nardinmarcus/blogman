@@ -1040,6 +1040,34 @@ describe('Issue #90 formal entry fan-in', () => {
     })
   })
 
+  it('uses the explicit formal sink for Authorization and Terminal with no canonical fallback', () => {
+    const prepared = formalPreparedManifest()
+    const authorization = authorizationFor(prepared, 'fan-in-explicit-formal-sink')
+    let consumed = 0
+    let persisted = 0
+    const deliverySink = {
+      authority_class: 'explicit-test-only',
+      consumeAuthorization: () => { consumed += 1; return authorization.sha256 },
+      persistTerminalResult: (input: { terminal: { sha256: string } }) => {
+        persisted += 1
+        return input.terminal.sha256
+      },
+      readTerminalEvidence: () => { throw new Error('not used') },
+    }
+    configureD1('d1_identity')
+
+    const terminal = runInFormalRehearsalContext({
+      sink: [], deliverySink,
+      clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
+    }, () => execute(prepared, authorization))
+
+    expect(consumed).toBe(1)
+    expect(persisted).toBe(1)
+    expect(terminal.value.evidence).toMatchObject({
+      source: 'formal-rehearsal-test-evidence', production: false, promotable: false,
+    })
+  })
+
   it('preserves the first terminal cause when persistence crosses the overall deadline', () => {
     const prepared = manifest()
     prepared.value.ci.conclusion = 'in_progress-test-evidence'
