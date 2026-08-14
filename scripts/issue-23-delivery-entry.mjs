@@ -2028,9 +2028,6 @@ function runLivePreconditions(manifest, d1, identity, credentials, elapsed_ms = 
       : { outcome: result.outcome, classification: result.classification, duration_ms: result.duration_ms }
   } catch (error) {
     materialized ??= error?.materialized
-    if (process.env.BLOGMAN_DIAGNOSE_ENTRY_DRIFT === '1') {
-      process.stderr.write(`LIVE_PRECONDITIONS_DIAGNOSTIC name=${error instanceof Error ? error.name : typeof error} classification=${typeof error?.classification === 'string' ? error.classification : 'none'}\n`)
-    }
     return { outcome: 'ERROR', classification: 'live_preconditions_error', duration_ms: 1 }
   } finally { disposeExpectedReconciliation(materialized) }
 }
@@ -2107,10 +2104,7 @@ function executeProduction(manifest, authorization) {
     assertCurrentFormalEntryClosure(manifest.value)
     assertWranglerTargetBinding(manifest.value)
     assertCurrentRepositoryIdentity(manifest.value)
-  } catch (error) {
-    if (process.env.BLOGMAN_DIAGNOSE_ENTRY_DRIFT === '1') {
-      process.stderr.write(`ENTRY_PREFLIGHT_DIAGNOSTIC ${error instanceof Error ? error.message : String(error)}\n`)
-    }
+  } catch {
     entryDrift = { outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }
   }
   const adapters = activeAdapterFactories()
@@ -2568,9 +2562,6 @@ export function runFormalRehearsal(config) {
         sha256: sha256(authorizationBytes),
       })
       const terminal = execute(manifest, authorization)
-      if (process.env.BLOGMAN_DIAGNOSE_ENTRY_DRIFT === '1') {
-        process.stderr.write(`FORMAL_TERMINAL_DIAGNOSTIC outcome=${terminal.value.outcome} stage=${terminal.value.first_terminal_stage} classification=${terminal.value.failure?.classification ?? 'none'}\n`)
-      }
       if (terminal.value.evidence.production === true || terminal.value.evidence.source === 'production') {
         fail('formal rehearsal must not emit production evidence')
       }

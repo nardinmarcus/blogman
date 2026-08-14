@@ -214,6 +214,12 @@ describe('Issue #92 formal rehearsal public path', () => {
     }, () => null)).toThrow(/explicit test-owned sink|formal context/u)
   })
 
+  it('allocates the explicit formal sink outside the frozen repository', () => {
+    const source = readFileSync(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-entry.mjs'), 'utf8')
+    expect(source).toContain("mkdtempSync(join(tmpdir(), 'blogman-issue-23-formal-sink-'))")
+    expect(source).not.toContain("mkdtempSync(join(ENTRY_REPO_ROOT, '.issue-23-formal-sink-'))")
+  })
+
   it.skipIf(!IS_MACOS_CI_GATE)('runs two identical public rehearsals through isolated durable sinks and leaves no sink residue', () => {
     const [first, result] = repeatedFormalRuns
 
