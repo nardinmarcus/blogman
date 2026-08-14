@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, cpSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -340,9 +340,79 @@ function runBoundedChild(
   })
 }
 
-function prepareFixture(
+function runConcurrentChild(executable: string, args: string[], cwd: string) {
+  return new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+    const child = spawn(executable, args, { cwd, stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    child.once('error', reject)
+    child.once('close', (code) => resolve({ code, stderr }))
+  })
+}
+
+type PrepareFixtureOptions = Record<string, unknown> & {
+  repositoryPath?: string
+  inspectArtifactRepository?: (
+    artifactRepositoryPath: string,
+    prepared: ReturnType<typeof prepareForTestsOnly>,
+  ) => void
+}
+
+function copyConfiguredFakeFixtureInputs(config: ReturnType<typeof baseConfig>, artifactRepositoryPath: string) {
+  const paths = new Set([
+    config.migration.reset_sql.path,
+    config.migration.runner.path,
+    config.migration.catalog.path,
+    ...config.migration.catalog.migrations.map((entry) => entry.path),
+    config.artifact.worker.path,
+    ...config.artifact.file_tree.files.map((entry) => entry.path),
+  ].filter((path) => !path.startsWith('.open-next/') && path !== 'wrangler.toml'))
+  for (const relativePath of paths) {
+    const source = join(repoRoot, relativePath)
+    if (!existsSync(source)) continue
+    const destination = join(artifactRepositoryPath, relativePath)
+    rmSync(destination, { recursive: true, force: true })
+    mkdirSync(dirname(destination), { recursive: true })
+    cpSync(source, destination, { recursive: true, verbatimSymlinks: true })
+  }
+}
+
+function createFakePrepareArtifactRepository(config: ReturnType<typeof baseConfig>) {
+  const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-prepare-artifact-'))
+  const artifactRepositoryPath = join(directory, 'repository')
+  execFileSync('git', ['worktree', 'add', '--detach', artifactRepositoryPath, 'HEAD'], {
+    cwd: repoRoot,
+    stdio: 'pipe',
+  })
+  const fixtureBinDirectory = join(artifactRepositoryPath, 'node_modules', '.bin')
+  mkdirSync(fixtureBinDirectory, { recursive: true })
+  for (const executable of ['wrangler', 'opennextjs-cloudflare']) {
+    symlinkSync(
+      realpathSync(join(repoRoot, 'node_modules', '.bin', executable)),
+      join(fixtureBinDirectory, executable),
+      'file',
+    )
+  }
+  copyConfiguredFakeFixtureInputs(config, artifactRepositoryPath)
+  return { directory, artifactRepositoryPath }
+}
+
+function removeFakePrepareArtifactRepository(fixture: ReturnType<typeof createFakePrepareArtifactRepository>) {
+  try {
+    execFileSync('git', ['worktree', 'remove', '--force', fixture.artifactRepositoryPath], {
+      cwd: repoRoot,
+      stdio: 'pipe',
+    })
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true })
+  }
+}
+
+function runPrepareFixture(
   config: ReturnType<typeof baseConfig>,
-  { repositoryPath = repoRoot, ...fixtureOptions }: Record<string, unknown> & { repositoryPath?: string } = {},
+  repositoryPath: string,
+  fixtureOptions: Record<string, unknown>,
 ) {
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repositoryPath, encoding: 'utf8' }).trim()
   const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repositoryPath, encoding: 'utf8' }).trim()
@@ -367,6 +437,24 @@ function prepareFixture(
     rehearsalRunner: () => testRehearsalResult(),
     ...fixtureOptions,
   })
+}
+
+function prepareFixture(config: ReturnType<typeof baseConfig>, options: PrepareFixtureOptions = {}) {
+  const { repositoryPath, inspectArtifactRepository, ...fixtureOptions } = options
+  const fakeBuild = !Object.hasOwn(fixtureOptions, 'buildRunner') || fixtureOptions.buildRunner !== undefined
+  if (repositoryPath || !fakeBuild) {
+    const prepared = runPrepareFixture(config, repositoryPath ?? repoRoot, fixtureOptions)
+    inspectArtifactRepository?.(repositoryPath ?? repoRoot, prepared)
+    return prepared
+  }
+  const artifactFixture = createFakePrepareArtifactRepository(config)
+  try {
+    const prepared = runPrepareFixture(config, artifactFixture.artifactRepositoryPath, fixtureOptions)
+    inspectArtifactRepository?.(artifactFixture.artifactRepositoryPath, prepared)
+    return prepared
+  } finally {
+    removeFakePrepareArtifactRepository(artifactFixture)
+  }
 }
 
 function withIsolatedRepositoryFixture<T>(callback: (repositoryPath: string) => T): T {
@@ -1620,6 +1708,44 @@ describe('Issue #23 Delivery Preparation', () => {
     }
   }, 15_000)
 
+  it('isolates concurrent fake fixture cleanup from another fixture archive inputs', async () => {
+    const first = createFakePrepareArtifactRepository(baseConfig())
+    const second = createFakePrepareArtifactRepository(baseConfig())
+    expect(first.artifactRepositoryPath).not.toBe(second.artifactRepositoryPath)
+    const secondBuildRoot = join(second.artifactRepositoryPath, '.open-next')
+    const inputs = ['assets/index.html', 'runtime.js', 'worker.js']
+    try {
+      fixtureBuild(first.artifactRepositoryPath, { artifact: baseConfig().artifact })
+      fixtureBuild(second.artifactRepositoryPath, { artifact: baseConfig().artifact })
+      const identities = Object.fromEntries(inputs.map((path) => [
+        path,
+        sha256(readFileSync(join(secondBuildRoot, path))),
+      ]))
+
+      const [cleanup, archive] = await Promise.all([
+        runConcurrentChild(process.execPath, [
+          '-e',
+          "require('node:fs').rmSync(process.argv[1], { recursive: true, force: true })",
+          join(first.artifactRepositoryPath, '.open-next'),
+        ], repoRoot),
+        runConcurrentChild('zip', ['-X', '-q', 'open-next-build.zip', ...inputs], secondBuildRoot),
+      ])
+
+      expect(cleanup).toEqual({ code: 0, stderr: '' })
+      expect(archive).toEqual({ code: 0, stderr: '' })
+      expect(existsSync(join(first.artifactRepositoryPath, '.open-next'))).toBe(false)
+      expect(Object.fromEntries(inputs.map((path) => [
+        path,
+        sha256(readFileSync(join(secondBuildRoot, path))),
+      ]))).toEqual(identities)
+      expect(execFileSync('unzip', ['-Z1', join(secondBuildRoot, 'open-next-build.zip')], { encoding: 'utf8' })
+        .trim().split(/\r?\n/u).filter(Boolean)).toEqual(inputs)
+    } finally {
+      removeFakePrepareArtifactRepository(first)
+      removeFakePrepareArtifactRepository(second)
+    }
+  }, 15_000)
+
   it('enumerates the complete public artifact tree independently of caller-listed files', () => {
     const result = prepareFixture(baseConfig())
     const paths = result.value.artifact.file_tree.files.map((file) => file.path)
@@ -1630,6 +1756,8 @@ describe('Issue #23 Delivery Preparation', () => {
   })
 
   it('keeps only the configured direct archive out of file_tree while binding it separately', () => {
+    let archiveBytes = Buffer.alloc(0)
+    let archiveEntries: string[] = []
     const result = prepareFixture(baseConfig(), {
       buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
         fixtureBuild(repositoryPath, options)
@@ -1638,12 +1766,15 @@ describe('Issue #23 Delivery Preparation', () => {
         mkdirSync(dirname(nestedArchive), { recursive: true })
         writeFileSync(nestedArchive, 'nested deployable bytes\n')
       },
+      inspectArtifactRepository: (repositoryPath, prepared) => {
+        const path = join(repositoryPath, prepared.value.artifact.archive.path)
+        archiveBytes = readFileSync(path)
+        archiveEntries = execFileSync('unzip', ['-Z1', path], { encoding: 'utf8' })
+          .trim().split(/\r?\n/u).filter(Boolean)
+      },
     })
     const paths = result.value.artifact.file_tree.files.map((file) => file.path)
     const archivePath = result.value.artifact.archive.path
-    const archiveBytes = readFileSync(join(repoRoot, archivePath))
-    const archiveEntries = execFileSync('unzip', ['-Z1', join(repoRoot, archivePath)], { encoding: 'utf8' })
-      .trim().split(/\r?\n/u).filter(Boolean)
 
     expect(paths).not.toContain(archivePath)
     expect(paths).toContain('.open-next/nested/open-next-build.zip')
@@ -1655,6 +1786,7 @@ describe('Issue #23 Delivery Preparation', () => {
   })
 
   it('excludes generated private files from archive membership', () => {
+    let archiveEntries: string[] = []
     const result = prepareFixture(baseConfig(), {
       buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
         fixtureBuild(repositoryPath, options)
@@ -1662,13 +1794,15 @@ describe('Issue #23 Delivery Preparation', () => {
         mkdirSync(privateDirectory, { recursive: true })
         writeFileSync(join(privateDirectory, 'secret.txt'), 'private fixture\n')
       },
+      inspectArtifactRepository: (repositoryPath, prepared) => {
+        archiveEntries = execFileSync(
+          'unzip',
+          ['-Z1', join(repositoryPath, prepared.value.artifact.archive.path)],
+          { encoding: 'utf8' },
+        ).trim().split(/\r?\n/u).filter(Boolean)
+      },
     })
     const paths = result.value.artifact.file_tree.files.map((file) => file.path)
-    const archiveEntries = execFileSync(
-      'unzip',
-      ['-Z1', join(repoRoot, '.open-next/open-next-build.zip')],
-      { encoding: 'utf8' },
-    ).trim().split(/\r?\n/u).filter(Boolean)
 
     expect(paths).not.toContain('.open-next/private/secret.txt')
     expect(archiveEntries).not.toContain('private/secret.txt')
@@ -1759,9 +1893,14 @@ describe('Issue #23 Delivery Preparation', () => {
   })
 
   it('binds generated deployable bytes and final config bytes, not the committed source tree', () => {
-    const result = prepareFixture(baseConfig())
-    const archiveBytes = readFileSync(join(repoRoot, '.open-next/open-next-build.zip'))
-    const workerBytes = readFileSync(join(repoRoot, '.open-next/worker.js'))
+    let archiveBytes = Buffer.alloc(0)
+    let workerBytes = Buffer.alloc(0)
+    const result = prepareFixture(baseConfig(), {
+      inspectArtifactRepository: (repositoryPath, prepared) => {
+        archiveBytes = readFileSync(join(repositoryPath, prepared.value.artifact.archive.path))
+        workerBytes = readFileSync(join(repositoryPath, prepared.value.artifact.worker.path))
+      },
+    })
     const configBytes = readFileSync(join(repoRoot, 'wrangler.toml'))
     const paths = result.value.artifact.file_tree.files.map((file) => file.path)
 
