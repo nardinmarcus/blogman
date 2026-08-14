@@ -740,7 +740,9 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, 
   if (!terminal) fail('D1 stage contract did not execute')
   // Public/test-facing stage runners can only emit non-production evidence.
   // Production promotion belongs exclusively to execute's private real-adapter path.
-  const evidenceSource = 'stage-runner-non-production'
+  const evidenceSource = ['production', 'formal-rehearsal-test-evidence'].includes(bindings.evidence_class)
+    ? 'stage-runner-non-production'
+    : bindings.evidence_class
   const production = false
   const traceSha256 = sha256(canonicalBytes(trace))
   const value = {
