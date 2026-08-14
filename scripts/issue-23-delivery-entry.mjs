@@ -2028,6 +2028,9 @@ function runLivePreconditions(manifest, d1, identity, credentials, elapsed_ms = 
       : { outcome: result.outcome, classification: result.classification, duration_ms: result.duration_ms }
   } catch (error) {
     materialized ??= error?.materialized
+    if (process.env.BLOGMAN_DIAGNOSE_ENTRY_DRIFT === '1') {
+      process.stderr.write(`LIVE_PRECONDITIONS_DIAGNOSTIC name=${error instanceof Error ? error.name : typeof error} classification=${typeof error?.classification === 'string' ? error.classification : 'none'}\n`)
+    }
     return { outcome: 'ERROR', classification: 'live_preconditions_error', duration_ms: 1 }
   } finally { disposeExpectedReconciliation(materialized) }
 }
@@ -2104,7 +2107,10 @@ function executeProduction(manifest, authorization) {
     assertCurrentFormalEntryClosure(manifest.value)
     assertWranglerTargetBinding(manifest.value)
     assertCurrentRepositoryIdentity(manifest.value)
-  } catch {
+  } catch (error) {
+    if (process.env.BLOGMAN_DIAGNOSE_ENTRY_DRIFT === '1') {
+      process.stderr.write(`ENTRY_PREFLIGHT_DIAGNOSTIC ${error instanceof Error ? error.message : String(error)}\n`)
+    }
     entryDrift = { outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }
   }
   const adapters = activeAdapterFactories()
