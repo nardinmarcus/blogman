@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { platform, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -1032,6 +1033,29 @@ function assertWranglerTargetBinding(manifestValue) {
   }
 }
 
+function assertCurrentRepositoryIdentity(manifestValue) {
+  const runGit = (args) => {
+    try {
+      return execFileSync('/usr/bin/git', args, {
+        cwd: ENTRY_REPO_ROOT,
+        encoding: 'utf8',
+        env: Object.assign(Object.create(null), { LC_ALL: 'C', PATH: '/usr/bin:/bin' }),
+      }).trim()
+    } catch {
+      fail('live repository identity is unavailable')
+    }
+  }
+  const commit = runGit(['rev-parse', 'HEAD'])
+  const tree = runGit(['rev-parse', 'HEAD^{tree}'])
+  const status = runGit(['status', '--porcelain=v1', '--untracked-files=all'])
+  if (commit !== manifestValue.repository.commit
+    || tree !== manifestValue.repository.tree
+    || status !== ''
+    || manifestValue.repository.clean !== true) {
+    fail('live repository identity is Manifest Drift')
+  }
+}
+
 function assertCurrentFormalEntryClosure(manifestValue) {
   const files = [
     ['preparation.prepare_entry', manifestValue.preparation.prepare_entry],
@@ -1713,6 +1737,7 @@ function workerBindings(manifest, expectedReconciliationPath, identity, smokeCre
     npm_path: npmPath, npm_sha256: manifest.toolchain.npm.identity_sha256,
     open_next_path: realpathSync(resolve(ENTRY_REPO_ROOT, 'node_modules/.bin/opennextjs-cloudflare')),
     open_next_sha256: manifest.toolchain.opennextjs_cloudflare.identity_sha256,
+    working_directory: realpathSync(ENTRY_REPO_ROOT),
     curl_path: realpathSync(SYSTEM_CURL_PATH), curl_sha256: manifest.toolchain.curl.identity_sha256,
     package_json_path: resolve(ENTRY_REPO_ROOT, 'package.json'), package_json_sha256: manifest.toolchain.package_json_sha256,
     lockfile_path: resolve(ENTRY_REPO_ROOT, 'package-lock.json'), lockfile_sha256: manifest.toolchain.lockfile_sha256,
@@ -1854,7 +1879,7 @@ function formalFaultResult(stage) {
   return { outcome: 'UNCERTAIN', classification: 'formal_rehearsal_uncertain', duration_ms: 1 }
 }
 
-function runLivePreconditions(manifest, d1, identity, credentials, elapsed_ms = 0) {
+function runLivePreconditions(manifest, d1, identity, credentials, elapsed_ms = 0, monotonicMs) {
   const adapters = activeAdapterFactories()
   let materialized
   try {
@@ -1864,7 +1889,7 @@ function runLivePreconditions(manifest, d1, identity, credentials, elapsed_ms = 
       materialized.path,
       identity,
       credentials.smoke,
-    ), credentials.environments)
+    ), credentials.environments, monotonicMs)
       .livePreconditions(elapsed_ms)
     if (!isPlainRecord(result) || !['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(result.outcome)
       || !Number.isSafeInteger(result.duration_ms) || result.duration_ms <= 0
@@ -1933,6 +1958,7 @@ function executeProduction(manifest, authorization) {
     : validateCanonicalManifest(manifest.value, manifestBytes)
   assertCurrentFormalEntryClosure(manifest.value)
   assertWranglerTargetBinding(manifest.value)
+  assertCurrentRepositoryIdentity(manifest.value)
   const adapters = activeAdapterFactories()
   const attemptClock = createAttemptClock()
   const withinOverallDeadline = () => attemptClock.elapsedMilliseconds() <= OVERALL_TIMEOUT_SECONDS * 1000
@@ -1962,7 +1988,14 @@ function executeProduction(manifest, authorization) {
   } else {
     try {
       credentials = adapters.resolveCredentials(manifest.value)
-      liveResult = runLivePreconditions(manifest.value, d1, workerIdentity, credentials, liveStarted)
+      liveResult = runLivePreconditions(
+        manifest.value,
+        d1,
+        workerIdentity,
+        credentials,
+        liveStarted,
+        attemptClock.elapsedMilliseconds,
+      )
       const liveMeasured = attemptClock.elapsedMilliseconds() - liveStarted
       liveResult.duration_ms = Math.max(liveResult.duration_ms, liveMeasured)
       if (liveMeasured > DELIVERY_STAGE_POLICY[1].timeout_seconds * 1000) {

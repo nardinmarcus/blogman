@@ -172,7 +172,7 @@ fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
   chmodSync(join(fixture.fakeBin, 'npm'), 0o755)
 }
 
-function lifecycleToolchainArgs(fakeBin: string) {
+function lifecycleToolchainArgs(fakeBin: string, workingDirectory = process.cwd()) {
   const npmPath = join(fakeBin, 'npm')
   const hash = createHash('sha256').update(readFileSync(npmPath)).digest('hex')
   return [
@@ -180,6 +180,7 @@ function lifecycleToolchainArgs(fakeBin: string) {
     '--node-sha256', createHash('sha256').update(readFileSync(process.execPath)).digest('hex'),
     '--npm-path', npmPath, '--npm-sha256', hash,
     '--open-next-path', npmPath, '--open-next-sha256', hash,
+    '--working-directory', workingDirectory,
   ]
 }
 
@@ -604,7 +605,11 @@ fs.chmodSync(process.env.SNAPSHOT_ROOT, 0o500)
     writeFileSync(join(fakeBin, 'npm'), `#!/usr/bin/env node
 require('node:fs').writeFileSync(
   process.env.FORWARDED_ARGS,
-  JSON.stringify(process.argv.slice(2)),
+  JSON.stringify({
+    argv: process.argv.slice(2),
+    cwd: process.cwd(),
+    path: process.env.PATH,
+  }),
 )
 require('node:fs').appendFileSync(
   process.env.WRANGLER_OUTPUT_FILE_PATH,
@@ -629,6 +634,7 @@ process.stdout.write('OpenNext upload log\\n')
       '--build-proof', buildProof,
       '--expected-config-sha256', configSha256,
     ], {
+      cwd: snapshot.directory,
       encoding: 'utf8',
       env: {
         ...process.env,
@@ -637,17 +643,21 @@ process.stdout.write('OpenNext upload log\\n')
         FORWARDED_ARGS: forwardedArgs,
       },
     })
-    expect(lifecycle).toMatchObject({ status: 0, stderr: 'OpenNext upload log\n' })
+    expect(lifecycle).toMatchObject({ status: 0, stderr: '' })
     expect(JSON.parse(lifecycle.stdout)).toMatchObject({
       format: 'blogman-upload-source-lifecycle-acceptance/v1',
       state: 'accepted',
       version_id: 'fixture-version',
     })
-    expect(JSON.parse(readFileSync(forwardedArgs, 'utf8'))).toEqual([
-      'upload', '-c', config, '--', join(snapshot.destination, 'worker.js'),
-      '--message', `issue-23-${'a'.repeat(40)}-upload-1`,
-      '--assets', join(snapshot.destination, 'assets'),
-    ])
+    expect(JSON.parse(readFileSync(forwardedArgs, 'utf8'))).toEqual({
+      argv: [
+        'upload', '-c', config, '--', join(snapshot.destination, 'worker.js'),
+        '--message', `issue-23-${'a'.repeat(40)}-upload-1`,
+        '--assets', join(snapshot.destination, 'assets'),
+      ],
+      cwd: process.cwd(),
+      path: `${fakeBin}${delimiter}${dirname(process.execPath)}`,
+    })
     const before = JSON.parse(readFileSync(proofBefore, 'utf8')) as UploadSourceSnapshotProof
       & { state: string }
     const after = JSON.parse(readFileSync(proofAfter, 'utf8')) as UploadSourceSnapshotProof

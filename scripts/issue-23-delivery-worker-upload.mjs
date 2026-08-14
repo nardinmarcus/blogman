@@ -17,7 +17,7 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { verifyBuildDirectory } from './issue-23-build-proof.mjs'
 
@@ -711,6 +711,7 @@ async function runUploadSourceLifecycle({
   npmSha256,
   openNextPath,
   openNextSha256,
+  workingDirectory,
   source,
   destination,
   operationId,
@@ -730,9 +731,10 @@ async function runUploadSourceLifecycle({
     held.push(...configChain)
     held.push(...holdStablePathChain(source, 'directory'))
     held.push(...holdStablePathChain(archive, 'file'))
+    held.push(...holdStablePathChain(workingDirectory, 'directory'))
     const stabilityRoot = privateStabilityRoot(
       held,
-      commonAncestor([reportDirectory, config, source, archive]),
+      commonAncestor([reportDirectory, config, source, archive, workingDirectory]),
     )
     bindStrictPathMetadata(held, stabilityRoot)
     const beforeEvidence = holdEvidenceFile(proofBeforePath, reportDirectory)
@@ -777,6 +779,16 @@ async function runUploadSourceLifecycle({
     verifyBoundExecutable(nodePath, nodeSha256)
     verifyBoundExecutable(npmPath, npmSha256)
     verifyBoundExecutable(openNextPath, openNextSha256)
+    const npmBinDirectory = [dirname(npmPath), dirname(nodePath)].find((directory) => {
+      try { return realpathSync(join(directory, 'npm')) === npmPath } catch { return false }
+    })
+    if (!npmBinDirectory) throw new Error()
+    const uploadEnvironment = {
+      ...process.env,
+      PATH: [...new Set([npmBinDirectory, dirname(nodePath)])].join(delimiter),
+      npm_execpath: npmPath,
+      npm_node_execpath: nodePath,
+    }
 
     const upload = spawnSync(nodePath, [
       openNextPath, 'upload',
@@ -784,8 +796,9 @@ async function runUploadSourceLifecycle({
       '--message', operationId,
       '--assets', join(destination, 'assets'),
     ], {
-      env: process.env,
-      stdio: ['inherit', 2, 2],
+      cwd: workingDirectory,
+      env: uploadEnvironment,
+      stdio: ['ignore', 'ignore', 'ignore'],
     })
 
     captureHeldEvidence(uploadEvidence, true)
@@ -836,42 +849,44 @@ function isMainModule() {
 async function runCli() {
   if (process.argv[2] === 'run-upload-source-lifecycle') {
     try {
-      if (process.argv.length !== 35
+      if (process.argv.length !== 37
         || process.argv[3] !== '--node-path'
         || process.argv[5] !== '--node-sha256'
         || process.argv[7] !== '--npm-path'
         || process.argv[9] !== '--npm-sha256'
         || process.argv[11] !== '--open-next-path'
         || process.argv[13] !== '--open-next-sha256'
-        || process.argv[15] !== '--config'
-        || process.argv[17] !== '--source'
-        || process.argv[19] !== '--destination'
-        || process.argv[21] !== '--operation-id'
-        || process.argv[23] !== '--proof-before'
-        || process.argv[25] !== '--proof-after'
-        || process.argv[27] !== '--archive'
-        || process.argv[29] !== '--archive-sha256'
-        || process.argv[31] !== '--build-proof'
-        || process.argv[33] !== '--expected-config-sha256') {
+        || process.argv[15] !== '--working-directory'
+        || process.argv[17] !== '--config'
+        || process.argv[19] !== '--source'
+        || process.argv[21] !== '--destination'
+        || process.argv[23] !== '--operation-id'
+        || process.argv[25] !== '--proof-before'
+        || process.argv[27] !== '--proof-after'
+        || process.argv[29] !== '--archive'
+        || process.argv[31] !== '--archive-sha256'
+        || process.argv[33] !== '--build-proof'
+        || process.argv[35] !== '--expected-config-sha256') {
         throw new Error()
       }
       const acceptance = await runUploadSourceLifecycle({
-        archive: process.argv[28],
-        archiveSha256: process.argv[30],
-        buildProofPath: process.argv[32],
-        config: process.argv[16],
-        expectedConfigSha256: process.argv[34],
+        archive: process.argv[30],
+        archiveSha256: process.argv[32],
+        buildProofPath: process.argv[34],
+        config: process.argv[18],
+        expectedConfigSha256: process.argv[36],
         nodePath: process.argv[4],
         nodeSha256: process.argv[6],
         npmPath: process.argv[8],
         npmSha256: process.argv[10],
         openNextPath: process.argv[12],
         openNextSha256: process.argv[14],
-        source: process.argv[18],
-        destination: process.argv[20],
-        operationId: process.argv[22],
-        proofBeforePath: process.argv[24],
-        proofAfterPath: process.argv[26],
+        workingDirectory: process.argv[16],
+        source: process.argv[20],
+        destination: process.argv[22],
+        operationId: process.argv[24],
+        proofBeforePath: process.argv[26],
+        proofAfterPath: process.argv[28],
       })
       process.stdout.write(`${JSON.stringify(acceptance)}\n`)
     } catch {

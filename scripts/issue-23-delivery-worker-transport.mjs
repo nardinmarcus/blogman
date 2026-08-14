@@ -36,6 +36,15 @@ function assertPath(value, label) {
   if (typeof value !== 'string' || !isAbsolute(value) || resolve(value) !== value) fail(`${label} is invalid`)
 }
 function assertHash(value, label) { if (!sha256(value)) fail(`${label} is invalid`) }
+function assertBoundDirectory(path, label) {
+  try {
+    if (lstatSync(path).isSymbolicLink() || !statSync(path).isDirectory() || realpathSync(path) !== path) {
+      throw new Error('drift')
+    }
+  } catch {
+    throw new WorkerTransportError('NON_PASS', 'Manifest Drift')
+  }
+}
 function assertBoundFile(path, expectedHash) {
   try {
     if (lstatSync(path).isSymbolicLink() || !statSync(path).isFile() || hash(readFileSync(path)) !== expectedHash) {
@@ -233,6 +242,7 @@ function uploadCommand(bindings, paths) {
     '--node-path', bindings.node_path, '--node-sha256', bindings.node_sha256,
     '--npm-path', bindings.npm_path, '--npm-sha256', bindings.npm_sha256,
     '--open-next-path', bindings.open_next_path, '--open-next-sha256', bindings.open_next_sha256,
+    '--working-directory', bindings.working_directory,
     '--config', bindings.config_path, '--source', bindings.artifact_source_path,
     '--destination', paths.destination, '--operation-id', `issue-23-${bindings.candidate_id}-upload-1`,
     '--proof-before', paths.before, '--proof-after', paths.after, '--archive', bindings.artifact_archive_path,
@@ -251,13 +261,14 @@ export function createWorkerTransport(bindings, environments = { cloudflare: pro
     'candidate_id', 'worker_name', 'd1_database_id', 'rollout_safety_path', 'rollout_safety_sha256',
     'expected_reconciliation_path', 'expected_reconciliation_sha256', 'worker_upload_entry_path',
     'worker_upload_entry_sha256', 'wrangler_path', 'wrangler_sha256', 'node_path', 'node_sha256',
-    'npm_path', 'npm_sha256', 'open_next_path', 'open_next_sha256', 'curl_path', 'curl_sha256', 'package_json_path',
+    'npm_path', 'npm_sha256', 'open_next_path', 'open_next_sha256', 'working_directory',
+    'curl_path', 'curl_sha256', 'package_json_path',
     'package_json_sha256', 'lockfile_path', 'lockfile_sha256', 'database', 'origin', 'smoke', 'baseline',
   ]) if (!Object.hasOwn(bindings, key)) fail(`${key} is required`)
   for (const key of [
     'config_path', 'artifact_archive_path', 'artifact_source_path', 'rollout_safety_path',
     'expected_reconciliation_path', 'worker_upload_entry_path', 'wrangler_path', 'node_path', 'npm_path',
-    'open_next_path', 'curl_path', 'package_json_path', 'lockfile_path',
+    'open_next_path', 'working_directory', 'curl_path', 'package_json_path', 'lockfile_path',
   ]) assertPath(bindings[key], key)
   for (const key of [
     'manifest_sha256', 'authorization_sha256', 'attempt_id',
@@ -293,6 +304,7 @@ export function createWorkerTransport(bindings, environments = { cloudflare: pro
     assertBoundFile(bindings.node_path, bindings.node_sha256)
     assertBoundFile(bindings.npm_path, bindings.npm_sha256)
     assertBoundFile(bindings.open_next_path, bindings.open_next_sha256)
+    assertBoundDirectory(bindings.working_directory, 'working_directory')
     assertBoundFile(bindings.curl_path, bindings.curl_sha256)
     assertBoundFile(bindings.package_json_path, bindings.package_json_sha256)
     assertBoundFile(bindings.lockfile_path, bindings.lockfile_sha256)
@@ -318,7 +330,7 @@ export function createWorkerTransport(bindings, environments = { cloudflare: pro
         args,
         Math.min(stageRemaining, overallRemaining),
         MAX_OUTPUT_BYTES,
-        process.cwd(),
+        bindings.working_directory,
         env,
         stdin,
       )

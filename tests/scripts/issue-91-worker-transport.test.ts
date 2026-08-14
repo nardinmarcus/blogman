@@ -46,8 +46,8 @@ function fixture(parent = tmpdir()) {
   writeFileSync(join(source, 'worker.js'), 'fake worker\n')
   writeFileSync(workerUploadEntry, 'process.stdout.write("{}")\n')
   writeFileSync(npm, '#!/bin/sh\nexit 0\n')
-  writeFileSync(openNext, '#!/usr/bin/env node\n')
-  writeFileSync(curl, `#!/usr/bin/env node
+  writeFileSync(openNext, `#!${process.execPath}\n`)
+  writeFileSync(curl, `#!${process.execPath}
 const fs = require('node:fs')
 const args = process.argv.slice(2)
 if (args.some((arg) => arg.includes('smoke-cookie'))) process.exit(18)
@@ -57,7 +57,7 @@ process.stdout.write(url.includes('/api/admin/posts/') ? '404' : '200')
 `)
   writeFileSync(packageJson, '{}\n')
   writeFileSync(lockfile, '{}\n')
-  writeFileSync(wrangler, `#!/usr/bin/env node
+  writeFileSync(wrangler, `#!${process.execPath}
 const fs = require('node:fs')
 fs.appendFileSync(process.env.WORKER_FAKE_LOG, process.argv.slice(2).join(' ') + '\\n')
 if (process.argv.includes('deployments')) process.stdout.write(JSON.stringify({ id: 'deployment-new', versions: [{ version_id: 'version-new', percentage: 100 }] }))
@@ -124,6 +124,7 @@ function bindings(fixture: ReturnType<typeof fixture>, port: number) {
     node_path: process.execPath, node_sha256: hash(process.execPath),
     npm_path: fixture.npm, npm_sha256: hash(fixture.npm),
     open_next_path: fixture.openNext, open_next_sha256: hash(fixture.openNext),
+    working_directory: fixture.root,
     curl_path: fixture.curl, curl_sha256: hash(fixture.curl),
     package_json_path: fixture.packageJson, package_json_sha256: hash(fixture.packageJson),
     lockfile_path: fixture.lockfile, lockfile_sha256: hash(fixture.lockfile),
@@ -133,6 +134,26 @@ function bindings(fixture: ReturnType<typeof fixture>, port: number) {
 }
 
 describe('Issue #91 private smoke_control_t0 adapter', () => {
+  it('does not dispatch the second live-preconditions child after the Stage clock expires', () => {
+    const current = fixture()
+    const value = bindings(current, 1)
+    const environment = Object.assign(Object.create(null), { WORKER_FAKE_LOG: current.log })
+    const monotonicValues = [0, 120_000]
+    const transport = createWorkerTransport(
+      value,
+      { cloudflare: environment, smoke: Object.create(null) },
+      () => monotonicValues.shift() ?? 120_000,
+    )
+
+    expect(transport.livePreconditions(0)).toMatchObject({
+      outcome: 'TIMEOUT',
+      classification: 'stage_timeout',
+    })
+    expect(readFileSync(current.log, 'utf8').trim().split('\n')).toEqual([
+      `deployments status --name ${value.worker_name} --config ${value.config_path} --json`,
+    ])
+  })
+
   it.each([
     ['Stage', 0, 300_000, 'stage_timeout'],
     ['overall', 5_300_000, 5_400_000, 'overall_timeout'],

@@ -12,16 +12,32 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { createD1TransportMock, runD1StagesMock, createWorkerTransportMock, runWorkerStagesMock, fsActual } = vi.hoisted(() => ({
+const {
+  childProcessActual,
+  createD1TransportMock,
+  runD1StagesMock,
+  createWorkerTransportMock,
+  runWorkerStagesMock,
+  fsActual,
+} = vi.hoisted(() => ({
   createD1TransportMock: vi.fn(),
   runD1StagesMock: vi.fn(),
   createWorkerTransportMock: vi.fn(),
   runWorkerStagesMock: vi.fn(),
+  childProcessActual: {
+    execFileSync: undefined as typeof import('node:child_process').execFileSync | undefined,
+  },
   fsActual: {
     readFileSync: undefined as typeof import('node:fs').readFileSync | undefined,
     realpathSync: undefined as typeof import('node:fs').realpathSync | undefined,
   },
 }))
+
+vi.mock('node:child_process', async () => {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process')
+  childProcessActual.execFileSync = actual.execFileSync
+  return { ...actual, execFileSync: vi.fn(actual.execFileSync) }
+})
 
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs')
@@ -49,6 +65,7 @@ vi.mock('../../scripts/issue-23-delivery-worker-transport.mjs', () => ({
 vi.mock('../../scripts/issue-23-delivery-worker-stages.mjs', () => ({ runWorkerStages: runWorkerStagesMock }))
 
 afterEach(() => {
+  vi.mocked(execFileSync).mockImplementation(childProcessActual.execFileSync!)
   vi.mocked(readFileSync).mockImplementation(fsActual.readFileSync!)
   vi.mocked(realpathSync).mockImplementation(fsActual.realpathSync!)
   vi.unstubAllEnvs()
@@ -73,7 +90,8 @@ import { isolatedAuthorityChildEnvironment } from '../helpers/issue-23-authority
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const MANIFEST_FORMAT = 'blogman-issue-23-canonical-frozen-manifest/v1'
 const D1_RESULT_FORMAT = 'blogman-issue-23-d1-stages/v1'
-const CANDIDATE = 'a'.repeat(40)
+const CANDIDATE = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+const CANDIDATE_TREE = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim()
 const HASH = 'b'.repeat(64)
 const D1_TRACE_HASH = 'c'.repeat(64)
 const D1_EVIDENCE_HASHES = [
@@ -95,6 +113,10 @@ const REPOSITORY_ROOT = process.cwd()
 const DURABLE_SINK_ROOT = repositoryDeliverySinkRoot()
 const ENTRY_MODULE_URL = pathToFileURL(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-entry.mjs')).href
 const SINK_MODULE_URL = pathToFileURL(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-evidence-sink.mjs')).href
+const REPOSITORY_PRELOAD_URL = pathToFileURL(join(
+  REPOSITORY_ROOT,
+  'tests/helpers/issue-23-repository-preload.mjs',
+)).href
 const RUNTIME_RECEIPT = buildFormalRuntimeReceipt().value
 const PREPARE_ENTRY_HASH = hash(readFileSync(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-prepare.mjs')))
 const EXECUTE_ENTRY_HASH = formalExecutionClosureSha256(REPOSITORY_ROOT)
@@ -233,7 +255,7 @@ function manifest(overrides: Record<string, unknown> = {}) {
       canonical: 'nardinmarcus/blogman',
       remote: 'https://github.com/nardinmarcus/blogman.git',
       commit: CANDIDATE,
-      tree: 'd'.repeat(40),
+      tree: CANDIDATE_TREE,
       clean: true,
     },
     ci: {
@@ -243,7 +265,7 @@ function manifest(overrides: Record<string, unknown> = {}) {
       attempt: 1,
       event: 'push',
       head_sha: CANDIDATE,
-      tree: 'd'.repeat(40),
+      tree: CANDIDATE_TREE,
       conclusion: 'success',
       evidence_class: 'production-ci-evidence',
     },
@@ -333,6 +355,17 @@ function manifest(overrides: Record<string, unknown> = {}) {
 }
 
 type ManifestValue = ReturnType<typeof manifest>['value']
+
+function isolatedEntryChildEnvironment() {
+  const environment = isolatedAuthorityChildEnvironment({
+    BLOGMAN_TEST_REPOSITORY_COMMIT: CANDIDATE,
+    BLOGMAN_TEST_REPOSITORY_TREE: CANDIDATE_TREE,
+  })
+  return {
+    ...environment,
+    NODE_OPTIONS: `${environment.NODE_OPTIONS} --import=${REPOSITORY_PRELOAD_URL}`,
+  }
+}
 
 function authorizationValueFor(prepared: ReturnType<typeof manifest>, id: string) {
   return {
@@ -640,6 +673,14 @@ function configureD1(failedStage: string | null = null, receipt = d1Result(faile
 
 describe('Issue #90 formal entry fan-in', () => {
   beforeEach(() => {
+    vi.mocked(execFileSync).mockImplementation((file, args, options) => {
+      if (file === '/usr/bin/git') {
+        if (args?.[0] === 'rev-parse' && args?.[1] === 'HEAD') return `${CANDIDATE}\n` as never
+        if (args?.[0] === 'rev-parse' && args?.[1] === 'HEAD^{tree}') return `${CANDIDATE_TREE}\n` as never
+        if (args?.[0] === 'status') return '' as never
+      }
+      return childProcessActual.execFileSync!(file, args, options as never) as never
+    })
     vi.stubEnv('DELIVERY_SMOKE_ADMIN', 'test-only-smoke-authority')
     vi.stubEnv('CLOUDFLARE_API_TOKEN', 'test-only-cloudflare-authority')
     vi.stubEnv('CLOUDFLARE_ACCOUNT_ID', 'account-id')
@@ -655,7 +696,7 @@ describe('Issue #90 formal entry fan-in', () => {
     const missingD1 = preparedFromValue(missingD1Value)
     const d1Only = preparedFromValue({
       format: MANIFEST_FORMAT,
-      repository: { commit: CANDIDATE, tree: 'd'.repeat(40) },
+      repository: { commit: CANDIDATE, tree: CANDIDATE_TREE },
       target: { account_id: 'account-id', d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d' },
       policy: {
         stages: policy().stages,
@@ -809,6 +850,22 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(() => execute(prepared, authorizationFor(prepared, 'artifact-file-tree-at-sign'))).not.toThrow()
   })
 
+  it('rejects live repository identity drift before Authorization consumption', () => {
+    const prepared = manifest()
+    const authorization = authorizationFor(prepared, 'fan-in-repository-drift')
+    vi.mocked(execFileSync).mockImplementation((file, args, options) => {
+      if (file === '/usr/bin/git' && args?.[0] === 'rev-parse' && args?.[1] === 'HEAD') {
+        return `${'f'.repeat(40)}\n` as never
+      }
+      return childProcessActual.execFileSync!(file, args, options as never) as never
+    })
+
+    expect(() => execute(prepared, authorization)).toThrow(/repository.*(?:drift|identity)|Manifest Drift/u)
+    expect(existsSync(join(DURABLE_SINK_ROOT, 'authorizations', `${authorization.sha256}.json`))).toBe(false)
+    expect(createWorkerTransportMock).not.toHaveBeenCalled()
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+  })
+
   it('consumes the caller-provided schema-ordered Authorization bytes and exact identity', () => {
     configureD1('d1_identity')
     const prepared = manifest()
@@ -913,6 +970,18 @@ describe('Issue #90 formal entry fan-in', () => {
 
     expect(events.indexOf('adapter-selected')).toBeGreaterThan(events.lastIndexOf('authorization:sha256'))
     expect(events.indexOf('transport:d1_identity')).toBeGreaterThan(events.indexOf('adapter-selected'))
+  })
+
+  it('passes the attempt monotonic clock into live preconditions transport construction', () => {
+    const prepared = manifest()
+    createWorkerTransportMock.mockReturnValue({
+      livePreconditions: () => ({ outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }),
+      execute() {},
+    })
+
+    execute(prepared, authorizationFor(prepared, 'fan-in-live-monotonic-clock'))
+
+    expect(createWorkerTransportMock.mock.calls[0]?.[2]).toEqual(expect.any(Function))
   })
 
   it('consumes authorization before reads, preserves D1 operation order, and cleans materialized expected state', () => {
@@ -1285,7 +1354,7 @@ describe('Issue #90 formal entry fan-in', () => {
     `], {
       cwd: REPOSITORY_ROOT,
       encoding: 'utf8',
-      env: isolatedAuthorityChildEnvironment(),
+      env: isolatedEntryChildEnvironment(),
     })
 
     expect(child.status, child.stderr).toBe(0)
