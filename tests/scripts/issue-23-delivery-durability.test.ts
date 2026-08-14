@@ -677,7 +677,18 @@ describe('Issue #23 durable delivery records', () => {
     sink.consumeAuthorization(authorization)
     expect(sink.persistTerminalResult({ terminal, manifest, d1, worker: null })).toBe(terminal.sha256)
 
-    const alternateTerminal = record({ ...terminal.value, attempt_id: 'e'.repeat(64) })
+    const alternateAuthorization = record({
+      ...authorizationRecord().value,
+      authorization_id: 'alternate-d1-attempt-authorization',
+      manifest_sha256: manifest.sha256,
+    })
+    sink.consumeAuthorization(alternateAuthorization)
+    const alternateAttemptId = derivedAttemptId(manifest.sha256, alternateAuthorization.sha256)
+    const alternateTerminal = exactTerminalRecord(manifest, alternateAuthorization, {
+      attemptId: alternateAttemptId,
+      firstStage: 'd1_identity',
+      d1,
+    })
     expect(() => sink.persistTerminalResult({
       terminal: alternateTerminal,
       manifest,
