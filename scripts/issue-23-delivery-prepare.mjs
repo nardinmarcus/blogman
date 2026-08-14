@@ -1014,6 +1014,22 @@ function resolveCiFacts(repositoryPath, config, repository) {
 }
 
 function resolveFormalCiFacts(repositoryPath, config, repository) {
+  if (process.env.BLOGMAN_RUN_FORMAL_REHEARSAL === '1') {
+    if (process.env.BLOGMAN_FORMAL_REHEARSAL_EXPECTED_COMMIT !== repository.commit
+      || config.ci.expected_head_sha !== repository.commit) {
+      fail('formal rehearsal expected commit does not match the checked-out candidate')
+    }
+    return {
+      provider: 'github-actions',
+      workflow: config.ci.workflow,
+      run_id: 1,
+      attempt: 1,
+      event: 'push',
+      head_sha: repository.commit,
+      tree: repository.tree,
+      conclusion: 'in_progress-test-evidence',
+    }
+  }
   const runId = process.env.GITHUB_RUN_ID
   const attempt = process.env.GITHUB_RUN_ATTEMPT
   const event = process.env.GITHUB_EVENT_NAME
