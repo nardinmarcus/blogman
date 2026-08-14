@@ -19,6 +19,7 @@ import {
   runD1Stages,
 } from '../../scripts/issue-23-delivery-d1-stages.mjs'
 import {
+  D1TransportError,
   createD1Transport,
 } from '../../scripts/issue-23-delivery-d1-transport.mjs'
 import { runWorkerStages } from '../../scripts/issue-23-delivery-worker-stages.mjs'
@@ -293,6 +294,21 @@ describe('Issue #23 D1 delivery stages', () => {
       production: false,
       promotable: false,
     })
+  })
+
+  it('preserves a transport account mismatch as Manifest Drift with no suffix', () => {
+    const transport = overrideTransport({
+      d1_identity: () => { throw new D1TransportError('manifest_drift') },
+    })
+
+    const result = runD1Stages({ bindings: BINDINGS, transport })
+
+    expect(result.value).toMatchObject({
+      outcome: 'NON_PASS',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'Manifest Drift' },
+    })
+    expect(transport.calls.map(({ operation }) => operation)).toEqual(['d1_identity'])
   })
 
   it('never marks an unbranded terminal failure promotable', () => {
@@ -943,6 +959,28 @@ describe('Issue #23 D1 delivery stages', () => {
 
     expect(result.value.stage_durations_ms.migrations_001_006).toBe(expectedDuration)
     expect(result.value.stage_durations_ms.migrations_001_006).not.toBe(expectedDuration * 2)
+  })
+
+  it('stops a multi-operation Stage suffix when the actual monotonic Stage deadline expires', () => {
+    const transport = createSuccessTransport()
+    const successExecute = transport.execute.bind(transport)
+    let elapsedMs = 0
+    transport.execute = (request: Record<string, unknown>) => {
+      const response = successExecute(request)
+      if (request.operation === 'migration_catalog') elapsedMs = D1_STAGE_TIMEOUT_MS.migrations_001_006
+      return response
+    }
+
+    const result = runD1Stages({ bindings: BINDINGS, transport, monotonic_ms: () => elapsedMs })
+
+    expect(result.value).toMatchObject({
+      outcome: 'TIMEOUT',
+      first_terminal_stage: 'migrations_001_006',
+      failure: { classification: 'timeout' },
+    })
+    expect(transport.calls.map(({ operation }) => operation)).toEqual([
+      'd1_identity', 'clean_start_reset', 'empty_d1_proof', 'migration_catalog',
+    ])
   })
 
   it('shares one monotonic 5,400-second budget with preconditions and Worker stages, including equality', () => {

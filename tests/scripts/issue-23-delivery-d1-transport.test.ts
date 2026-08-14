@@ -196,6 +196,19 @@ describe('Issue #90 D1 transport', () => {
       .toThrow(/unsupported fields/u)
   })
 
+  it('recomputes actual Stage and overall deadlines after local validation before child dispatch', () => {
+    const { config } = createConfig()
+    const environment = Object.assign(Object.create(null), process.env)
+
+    const stageExpired = createD1Transport(config, environment, () => D1_STAGE_TIMEOUT_MS.migrations_001_006)
+    expect(() => stageExpired.execute(request('migration_catalog', 'migrations_001_006')))
+      .toThrowError(expect.objectContaining({ classification: 'timeout' }))
+
+    const overallExpired = createD1Transport(config, environment, () => 5_400_000)
+    expect(() => overallExpired.execute(request('d1_identity')))
+      .toThrowError(expect.objectContaining({ classification: 'overall_timeout' }))
+  })
+
   it('dispatches migration operations through the canonical runner instead of accepting SQL or file overrides', () => {
     const { config } = createConfig()
     const transport = createD1Transport(config)
@@ -391,7 +404,11 @@ describe('Issue #90 D1 transport', () => {
     expect(() => parseWranglerWhoamiResponse(
       whoami.replace('"account:Workers Scripts:write"', '"account:Workers Scripts:read"'),
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-    )).toThrow(/permissions are insufficient/u)
+    )).toThrowError(expect.objectContaining({ code: 'DELIVERY_PERMISSION_INSUFFICIENT' }))
+    expect(() => parseWranglerWhoamiResponse(
+      whoami.replace('"id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"', '"id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"'),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    )).toThrowError(expect.objectContaining({ code: 'DELIVERY_ACCOUNT_MISMATCH' }))
     expect(() => parseWranglerWhoamiResponse(
       whoami.replace('"api_access_enabled": true', '"api_access_enabled": "true"'),
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',

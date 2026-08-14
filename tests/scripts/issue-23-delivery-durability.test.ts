@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   createRepositoryDeliverySink,
+  repositoryDeliverySink,
   repositoryDeliverySinkRoot,
 } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
 
@@ -120,6 +121,63 @@ describe('Issue #23 durable delivery records', () => {
     spawnSync('mv', [authorizations, displaced])
     symlinkSync(displaced, authorizations)
     expect(() => sink.consumeAuthorization(authorizationRecord())).toThrow(/canonical|identity/u)
+  })
+
+  it('forwards a rejecting Authorization deadline through the canonical facade without publication', () => {
+    const authorization = record({
+      ...authorizationRecord().value,
+      authorization_id: `deadline-authorization-${process.pid}`,
+    })
+    const authorizationPath = join(
+      repositoryDeliverySinkRoot(),
+      'authorizations',
+      `${authorization.sha256}.json`,
+    )
+
+    try {
+      expect(() => repositoryDeliverySink.consumeAuthorization(authorization, () => false))
+        .toThrow(/deadline/u)
+      expect(() => readFileSync(authorizationPath)).toThrow()
+    } finally {
+      rmSync(authorizationPath, { force: true })
+    }
+  })
+
+  it('forwards a rejecting Terminal deadline through the canonical facade without publication', () => {
+    const root = repositoryDeliverySinkRoot()
+    const manifest = record({
+      format: 'blogman-issue-23-canonical-frozen-manifest/v1',
+      marker: `deadline-forwarding-${process.pid}`,
+    })
+    const authorization = record({
+      ...authorizationRecord().value,
+      authorization_id: `deadline-terminal-authorization-${process.pid}`,
+      manifest_sha256: manifest.sha256,
+    })
+    const attemptId = createHash('sha256').update(`deadline-attempt-${process.pid}`).digest('hex')
+    const terminal = record({
+      format: 'blogman-issue-23-terminal-result/v1',
+      identities: { manifest_sha256: manifest.sha256, authorization_sha256: authorization.sha256 },
+      attempt_id: attemptId,
+      evidence: { hashes: { d1_stage_receipt_sha256: null, worker_stage_receipt_sha256: null } },
+    })
+    const authorizationPath = join(root, 'authorizations', `${authorization.sha256}.json`)
+    const manifestPath = join(root, 'records', `${manifest.sha256}.json`)
+    const terminalPath = join(root, 'terminals', `${attemptId}.json`)
+
+    repositoryDeliverySink.consumeAuthorization(authorization)
+    try {
+      expect(() => repositoryDeliverySink.persistTerminalResult(
+        { terminal, manifest, d1: null, worker: null },
+        () => false,
+      )).toThrow(/deadline/u)
+      expect(() => readFileSync(manifestPath)).toThrow()
+      expect(() => readFileSync(terminalPath)).toThrow()
+    } finally {
+      rmSync(authorizationPath, { force: true })
+      rmSync(manifestPath, { force: true })
+      rmSync(terminalPath, { force: true })
+    }
   })
 
   it('atomically permits exactly one concurrent process and rejects fresh-process replay', async () => {

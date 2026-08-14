@@ -56,8 +56,10 @@ const TRANSPORT_FAILURE_OUTCOMES = Object.freeze({
   formal_failure: ['NON_PASS', 'formal_rehearsal_forced_failure'],
   formal_drift: ['NON_PASS', 'Manifest Drift'],
   timeout: ['TIMEOUT', 'timeout'],
+  overall_timeout: ['TIMEOUT', 'overall_timeout'],
   nonzero: ['ERROR', 'nonzero'],
   malformed: ['ERROR', 'malformed'],
+  manifest_drift: ['NON_PASS', 'Manifest Drift'],
   permission_insufficient: ['NON_PASS', 'cloudflare_permission_insufficient'],
   uncertain: ['UNCERTAIN', 'uncertain'],
 })

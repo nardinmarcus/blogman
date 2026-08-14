@@ -36,8 +36,10 @@ export const D1_TRANSPORT_TIMEOUT_MS = 300_000
 export const D1_TRANSPORT_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 export const D1_TRANSPORT_FAILURE_CLASSIFICATIONS = Object.freeze({
   TIMEOUT: 'timeout',
+  OVERALL_TIMEOUT: 'overall_timeout',
   NONZERO: 'nonzero',
   MALFORMED: 'malformed',
+  MANIFEST_DRIFT: 'manifest_drift',
   PERMISSION: 'permission_insufficient',
   UNCERTAIN: 'uncertain',
 })
@@ -352,13 +354,28 @@ function validateRequest(request) {
   })
 }
 
+function deadlineBudget(request, spentMs = 0, actualOverallElapsedMs = request.overall_elapsed_ms + spentMs) {
+  const overallElapsedMs = Math.max(request.overall_elapsed_ms + spentMs, actualOverallElapsedMs)
+  const stageStartedMs = request.overall_elapsed_ms - request.elapsed_ms
+  const stageElapsedMs = overallElapsedMs - stageStartedMs
+  const overallRemainingMs = 5_400_000 - overallElapsedMs
+  const stageRemainingMs = request.timeout_ms - stageElapsedMs
+  if (overallRemainingMs <= 0) {
+    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.OVERALL_TIMEOUT, stageElapsedMs)
+  }
+  if (stageRemainingMs <= 0) {
+    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT, stageElapsedMs)
+  }
+  return Object.freeze({
+    timeout_ms: Math.min(stageRemainingMs, overallRemainingMs),
+    timeout_classification: overallRemainingMs <= stageRemainingMs
+      ? D1_TRANSPORT_FAILURE_CLASSIFICATIONS.OVERALL_TIMEOUT
+      : D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT,
+  })
+}
+
 function remainingTimeout(request, spentMs = 0) {
-  const timeout = Math.min(
-    request.timeout_ms - request.elapsed_ms - spentMs,
-    5_400_000 - request.overall_elapsed_ms - spentMs,
-  )
-  if (timeout <= 0) throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT)
-  return timeout
+  return deadlineBudget(request, spentMs).timeout_ms
 }
 
 function d1Arguments(config, suffix) {
@@ -397,12 +414,23 @@ function buildD1Command(config, request) {
   })
 }
 
-function runBounded(executable, args, timeoutMs, environment = process.env) {
+function runBounded(
+  executable,
+  args,
+  timeoutMs,
+  environment = process.env,
+  timeoutClassification = D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT,
+) {
   try {
     return runBoundedChild(executable, args, timeoutMs, D1_TRANSPORT_MAX_OUTPUT_BYTES, repoRoot, environment)
   } catch (error) {
     if (error instanceof D1ChildError) {
-      throw new D1TransportError(error.classification, error.durationMs)
+      throw new D1TransportError(
+        error.classification === D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT
+          ? timeoutClassification
+          : error.classification,
+        error.durationMs,
+      )
     }
     throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.UNCERTAIN)
   }
@@ -442,9 +470,12 @@ function parseRemoteWhoami(stdout, expectedAccountId) {
   try {
     parseWranglerWhoamiResponse(stdout, expectedAccountId)
   } catch (error) {
-    throw new D1TransportError(error?.code === 'DELIVERY_PERMISSION_INSUFFICIENT'
+    const classification = error?.code === 'DELIVERY_PERMISSION_INSUFFICIENT'
       ? D1_TRANSPORT_FAILURE_CLASSIFICATIONS.PERMISSION
-      : D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED)
+      : error?.code === 'DELIVERY_ACCOUNT_MISMATCH'
+        ? D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MANIFEST_DRIFT
+        : D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED
+    throw new D1TransportError(classification)
   }
 }
 
@@ -524,9 +555,10 @@ function rolloutSafetyCommand(config) {
 
 export { hashD1ArtifactDirectory }
 
-export function createD1Transport(config, childEnvironment) {
-  if (arguments.length < 1 || arguments.length > 2
-    || (childEnvironment !== undefined && Object.getPrototypeOf(childEnvironment) !== null)) {
+export function createD1Transport(config, childEnvironment, monotonicMs) {
+  if (arguments.length < 1 || arguments.length > 3
+    || (childEnvironment !== undefined && Object.getPrototypeOf(childEnvironment) !== null)
+    || (monotonicMs !== undefined && typeof monotonicMs !== 'function')) {
     fail('createD1Transport rejects unsupported public adapter overrides')
   }
   const privateEnvironment = childEnvironment ?? process.env
@@ -534,28 +566,48 @@ export function createD1Transport(config, childEnvironment) {
   const persistIdentity = validateBoundArtifactsOrThrow(normalizedConfig)
   const bindingsSha256 = d1StageBindingsSha256(normalizedConfig)
 
+  function budgetFor(request, spentMs = 0) {
+    let actualOverallElapsedMs = request.overall_elapsed_ms + spentMs
+    if (monotonicMs !== undefined) {
+      const measured = monotonicMs()
+      if (!Number.isSafeInteger(measured) || measured < 0) fail('internal monotonic clock is invalid')
+      actualOverallElapsedMs = Math.max(actualOverallElapsedMs, measured)
+    }
+    return deadlineBudget(request, spentMs, actualOverallElapsedMs)
+  }
+
+  function runRequestBounded(executable, args, request, spentMs = 0) {
+    const budget = budgetFor(request, spentMs)
+    return runBounded(
+      executable,
+      args,
+      budget.timeout_ms,
+      privateEnvironment,
+      budget.timeout_classification,
+    )
+  }
+
   function execute(request) {
     if (arguments.length !== 1) fail('execute accepts exactly one request argument')
     const normalizedRequest = validateRequest(request)
     validateBoundArtifactsOrThrow(normalizedConfig, persistIdentity)
-    const timeoutMs = remainingTimeout(normalizedRequest)
     if (normalizedRequest.operation === 'd1_identity'
       || normalizedRequest.operation === 'clean_start_reset'
       || normalizedRequest.operation === 'empty_d1_proof') {
       const command = buildD1Command(normalizedConfig, normalizedRequest)
       if (normalizedRequest.operation !== 'd1_identity') {
-        return runBounded(command.executable, command.args, timeoutMs, privateEnvironment)
+        return runRequestBounded(command.executable, command.args, normalizedRequest)
       }
-      const infoCommand = runBounded(command.executable, command.args, timeoutMs, privateEnvironment)
+      const infoCommand = runRequestBounded(command.executable, command.args, normalizedRequest)
       if (infoCommand.stderr !== '') return identityResponse(normalizedConfig, infoCommand)
       if (normalizedConfig.mode === 'local') return identityResponse(normalizedConfig, infoCommand)
       let whoamiCommand
       try {
-        whoamiCommand = runBounded(
+        whoamiCommand = runRequestBounded(
           wranglerPath,
           buildRemoteWhoamiCommand(normalizedConfig),
-          remainingTimeout(normalizedRequest, infoCommand.duration_ms),
-          privateEnvironment,
+          normalizedRequest,
+          infoCommand.duration_ms,
         )
       } catch (error) {
         if (error instanceof D1TransportError) {
@@ -569,19 +621,19 @@ export function createD1Transport(config, childEnvironment) {
       return identityResponse(normalizedConfig, infoCommand, whoamiCommand)
     }
     if (normalizedRequest.operation === 'migration_catalog') {
-      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'catalog'), timeoutMs, privateEnvironment)
+      return runRequestBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'catalog'), normalizedRequest)
     }
     if (normalizedRequest.operation === 'migration_plan') {
-      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'plan'), timeoutMs, privateEnvironment)
+      return runRequestBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'plan'), normalizedRequest)
     }
     if (normalizedRequest.operation === 'migration_apply') {
-      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'apply'), timeoutMs, privateEnvironment)
+      return runRequestBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'apply'), normalizedRequest)
     }
     if (normalizedRequest.operation === 'migration_verify') {
-      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'verify'), timeoutMs, privateEnvironment)
+      return runRequestBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'verify'), normalizedRequest)
     }
     if (normalizedRequest.operation === 'reconciliation') {
-      return runBounded(process.execPath, rolloutSafetyCommand(normalizedConfig), timeoutMs, privateEnvironment)
+      return runRequestBounded(process.execPath, rolloutSafetyCommand(normalizedConfig), normalizedRequest)
     }
     fail('operation is not supported')
   }

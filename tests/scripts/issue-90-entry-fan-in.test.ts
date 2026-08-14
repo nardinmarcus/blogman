@@ -62,7 +62,7 @@ import {
 import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-formal-runtime.mjs'
 import { hashD1ArtifactDirectory } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
 import { formalExecutionClosureSha256 } from '../../scripts/issue-23-delivery-execution-closure.mjs'
-import { repositoryDeliverySinkRoot } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
+import { repositoryDeliverySink, repositoryDeliverySinkRoot } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
 
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const MANIFEST_FORMAT = 'blogman-issue-23-canonical-frozen-manifest/v1'
@@ -884,9 +884,12 @@ describe('Issue #90 formal entry fan-in', () => {
     }
 
     const result = execute(prepared, authorization)
-    const bindings = createD1TransportMock.mock.calls.at(-1)?.[0] as Record<string, unknown>
+    const d1TransportCall = createD1TransportMock.mock.calls.at(-1)
+    const bindings = d1TransportCall?.[0] as Record<string, unknown>
+    const stageCall = runD1StagesMock.mock.calls.at(-1)?.[0] as Record<string, unknown>
 
     expect(calls).toEqual(D1_OPERATIONS)
+    expect(d1TransportCall?.[2]).toBe(stageCall.monotonic_ms)
     expect(Object.keys(bindings)).not.toContain('expected_reconciliation')
     expect(bindings.expected_reconciliation_path).toEqual(expect.any(String))
     expect(existsSync(String(bindings.expected_reconciliation_path))).toBe(false)
@@ -992,6 +995,53 @@ describe('Issue #90 formal entry fan-in', () => {
       failure: { classification: 'Manifest Drift' }, mutation_counts: { attempted: 0, confirmed: 0 },
     })
     expect(createD1TransportMock).not.toHaveBeenCalled()
+  })
+
+  it('independently validates a durable production terminal ending at authorization_accept', () => {
+    const prepared = actualPreparedManifest()
+    const authorizationValue = authorizationFor(prepared, 'fan-in-authorization-terminal')
+    const authorizationBytes = Buffer.from(`${JSON.stringify(authorizationValue, null, 2)}\n`, 'utf8')
+    const authorization = { value: authorizationValue, bytes: authorizationBytes, sha256: hash(authorizationBytes) }
+    const identities = {
+      manifest_sha256: prepared.sha256,
+      authorization_sha256: authorization.sha256,
+    }
+    const attemptId = hash(Buffer.from(`${JSON.stringify({
+      format: 'blogman-issue-23-attempt/v1',
+      ...identities,
+    }, null, 2)}\n`, 'utf8'))
+    const stages = policy().stages.map(({ name }) => name)
+    const terminalValue = {
+      format: 'blogman-issue-23-terminal-result/v1',
+      identities,
+      attempt_id: attemptId,
+      started_at: '2026-08-11T00:00:00.000Z',
+      ended_at: '2026-08-11T00:00:00.001Z',
+      authorization_consumed: true,
+      outcome: 'ERROR',
+      first_terminal_stage: 'authorization_accept',
+      failure: { classification: 'credential_authority_unavailable' },
+      stage_counts: Object.fromEntries(stages.map((stage) => [stage, stage === 'authorization_accept' ? 1 : 0])),
+      stage_durations_ms: Object.fromEntries(stages.map((stage) => [stage, stage === 'authorization_accept' ? 1 : 0])),
+      mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
+      evidence: {
+        source: 'production', production: true, promotable: false,
+        hashes: Object.fromEntries([
+          'd1_stage_receipt_sha256', ...D1_EVIDENCE_HASHES.map((name) => `d1_${name}`),
+          'worker_stage_receipt_sha256',
+          'worker_upload_acceptance_sha256', 'worker_version_traffic_sha256', 'worker_smoke_control_t0_sha256',
+        ].map((name) => [name, null])),
+        cleanup: { created: false, cleaned: true, observed_absent: true },
+      },
+      finalized: true,
+    }
+    const terminalBytes = Buffer.from(`${JSON.stringify(terminalValue, null, 2)}\n`, 'utf8')
+    const terminal = { value: terminalValue, bytes: terminalBytes, sha256: hash(terminalBytes) }
+
+    repositoryDeliverySink.consumeAuthorization(authorization)
+    repositoryDeliverySink.persistTerminalResult({ terminal, manifest: prepared, d1: null, worker: null })
+
+    expect(validateProductionTerminalEvidence(structuredClone(terminal))).toBe(true)
   })
 
   it('validates an execute-produced early NON_PASS terminal with no D1 or Worker receipt', () => {

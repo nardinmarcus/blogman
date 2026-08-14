@@ -387,7 +387,9 @@ export function parseWranglerWhoamiResponse(stdout, expectedAccountId) {
       }
     }
     if (response.accounts.filter((account) => account.id === expectedAccountId).length !== 1) {
-      throw new Error('account identity drift')
+      const error = new Error('account identity drift')
+      error.code = 'DELIVERY_ACCOUNT_MISMATCH'
+      throw error
     }
     if (!REQUIRED_DELIVERY_TOKEN_PERMISSIONS.every((permission) => response.tokenPermissions.includes(permission))) {
       const error = new Error('delivery token permissions are insufficient')
@@ -396,7 +398,7 @@ export function parseWranglerWhoamiResponse(stdout, expectedAccountId) {
     }
     return response
   } catch (error) {
-    if (error?.code === 'DELIVERY_PERMISSION_INSUFFICIENT') throw error
+    if (['DELIVERY_ACCOUNT_MISMATCH', 'DELIVERY_PERMISSION_INSUFFICIENT'].includes(error?.code)) throw error
     throw new Error('invalid Wrangler identity response')
   }
 }

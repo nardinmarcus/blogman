@@ -1701,8 +1701,8 @@ function formalAdapterFactories(context) {
 
 function productionAdapterFactories() {
   return Object.freeze({
-    createD1Transport(bindings, environments) {
-      return createD1Transport(bindings, environments.cloudflare)
+    createD1Transport(bindings, environments, monotonicMs) {
+      return createD1Transport(bindings, environments.cloudflare, monotonicMs)
     },
     createWorkerTransport(bindings, environments, monotonicMs) {
       return createWorkerTransport(bindings, environments, monotonicMs)
@@ -1921,7 +1921,11 @@ function executeProduction(manifest, authorization) {
       const bindings = deriveProductionD1Bindings(d1, materialized.path)
       let transport
       try {
-        transport = adapters.createD1Transport(bindings, credentials.environments)
+        transport = adapters.createD1Transport(
+          bindings,
+          credentials.environments,
+          attemptClock.elapsedMilliseconds,
+        )
       } catch {
         d1Result = durableD1Failure(formal ? 'formal_rehearsal_d1_setup_error' : 'production_d1_setup_error')
       }
