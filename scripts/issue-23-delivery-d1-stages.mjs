@@ -676,10 +676,9 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, 
   if (monotonic_ms !== undefined && typeof monotonic_ms !== 'function') fail('monotonic_ms is invalid')
   const bindings = normalizeBindings(rawBindings)
   validateTransport(transport)
-  const provenance = isRecord(transport.evidence) ? transport.evidence : undefined
   const bindingSha256 = d1StageBindingsSha256(bindings)
-  const bindingMismatch = provenance !== undefined
-    && provenance.bindings_sha256 !== bindingSha256
+  const bindingMismatch = transport.bindings_sha256 !== undefined
+    && transport.bindings_sha256 !== bindingSha256
   const stageCounts = Object.fromEntries(D1_STAGE_ORDER.map((stage) => [stage, 0]))
   const stageDurations = Object.fromEntries(D1_STAGE_ORDER.map((stage) => [stage, 0]))
   const trace = []
@@ -739,19 +738,12 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, 
 
   const terminal = trace.at(-1)
   if (!terminal) fail('D1 stage contract did not execute')
-  const evidenceProvenance = provenance ?? Object.freeze({
-    source: 'untrusted-test-transport',
-    production: false,
-  })
-  // Production evidence may only come from a production-sourced transport.
-  // Non-production transports (including formal rehearsal) keep their source label.
-  if (evidenceProvenance.production === true && evidenceProvenance.source !== 'production') {
-    fail('production D1 transport provenance source is invalid')
-  }
-  if (evidenceProvenance.production !== true && evidenceProvenance.source === 'production') {
-    fail('non-production D1 transport must not claim production source')
-  }
-  const production = evidenceProvenance.production === true
+  // Public/test-facing stage runners can only emit non-production evidence.
+  // Production promotion belongs exclusively to execute's private real-adapter path.
+  const evidenceSource = bindings.evidence_class === 'production'
+    ? 'stage-runner-non-production'
+    : bindings.evidence_class
+  const production = false
   const traceSha256 = sha256(canonicalBytes(trace))
   const value = {
     format: 'blogman-issue-23-d1-stages/v1',
@@ -761,7 +753,7 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, 
     stage_counts: stageCounts,
     stage_durations_ms: stageDurations,
     evidence: {
-      source: evidenceProvenance.source,
+      source: evidenceSource,
       production,
       promotable: production && terminal.outcome === 'PASS',
       bindings_sha256: bindingSha256,

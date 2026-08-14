@@ -296,9 +296,32 @@ describe('Issue #23 D1 delivery stages', () => {
     })
 
     expect(result.value.evidence).toMatchObject({
-      source: 'untrusted-test-transport',
+      source: 'stage-runner-non-production',
       production: false,
       promotable: false,
+    })
+  })
+
+  it('ignores caller-forged production provenance on the public stage runner', () => {
+    const productionBindings = { ...BINDINGS, evidence_class: 'production' }
+    const probe = runD1Stages({ bindings: productionBindings, transport: createSuccessTransport() })
+    const transport = Object.assign(createSuccessTransport(), {
+      evidence: {
+        source: 'production',
+        production: true,
+        bindings_sha256: probe.value.evidence.bindings_sha256,
+      },
+    })
+
+    const result = runD1Stages({ bindings: productionBindings, transport })
+
+    expect(result.value).toMatchObject({
+      outcome: 'PASS',
+      evidence: {
+        source: 'stage-runner-non-production',
+        production: false,
+        promotable: false,
+      },
     })
   })
 
@@ -334,7 +357,7 @@ describe('Issue #23 D1 delivery stages', () => {
     expect(result.value).toMatchObject({
       outcome: 'TIMEOUT',
       evidence: {
-        source: 'untrusted-test-transport',
+        source: 'stage-runner-non-production',
         production: false,
         promotable: false,
       },

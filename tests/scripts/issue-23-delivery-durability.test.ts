@@ -34,6 +34,118 @@ function authorizationRecord() {
   })
 }
 
+function derivedAttemptId(manifestSha256: string, authorizationSha256: string) {
+  return record({
+    format: 'blogman-issue-23-attempt/v1',
+    manifest_sha256: manifestSha256,
+    authorization_sha256: authorizationSha256,
+  }).sha256
+}
+
+const deliveryStages = [
+  'authorization_accept', 'live_preconditions', 'd1_identity', 'clean_start_reset',
+  'empty_d1_proof', 'migrations_001_006', 'reconciliation', 'worker_deploy',
+  'version_traffic_verification', 'smoke_control_t0',
+]
+const d1Stages = ['d1_identity', 'clean_start_reset', 'empty_d1_proof', 'migrations_001_006', 'reconciliation']
+const workerStages = ['worker_deploy', 'version_traffic_verification', 'smoke_control_t0']
+const d1HashNames = [
+  'bindings_sha256', 'wrangler_sha256', 'config_sha256', 'reset_sql_sha256',
+  'migration_runner_sha256', 'migration_catalog_sha256', 'rollout_safety_sha256',
+  'expected_reconciliation_sha256', 'trace_sha256',
+]
+const workerHashNames = ['upload_acceptance_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256']
+
+function exactD1Record(manifest: ReturnType<typeof record>, authorization: ReturnType<typeof record>, attemptId: string, outcome = 'ERROR') {
+  const terminalIndex = outcome === 'PASS' ? d1Stages.length - 1 : 0
+  return record({
+    format: 'blogman-issue-23-d1-stages/v1',
+    outcome,
+    first_terminal_stage: outcome === 'PASS' ? null : 'd1_identity',
+    failure: outcome === 'PASS' ? null : { classification: 'stage_error' },
+    stage_counts: Object.fromEntries(d1Stages.map((stage, index) => [stage, index <= terminalIndex ? 1 : 0])),
+    stage_durations_ms: Object.fromEntries(d1Stages.map((stage, index) => [stage, index <= terminalIndex ? 1 : 0])),
+    evidence: {
+      source: 'production', production: true, promotable: outcome === 'PASS',
+      ...Object.fromEntries(d1HashNames.map((name) => [name, 'd'.repeat(64)])),
+      manifest_sha256: manifest.sha256,
+      authorization_sha256: authorization.sha256,
+      attempt_id: attemptId,
+      account_id: 'account-public-id',
+      d1_database_id: 'd1-public-id',
+      candidate_id: String((manifest.value.repository as { commit: string }).commit),
+    },
+    finalized: true,
+  })
+}
+
+function exactWorkerRecord(manifest: ReturnType<typeof record>, authorization: ReturnType<typeof record>, attemptId: string, extra: Record<string, unknown> = {}) {
+  return record({
+    format: 'blogman-issue-23-worker-stages/v1',
+    outcome: 'ERROR',
+    first_terminal_stage: 'worker_deploy',
+    failure: { classification: 'worker_adapter_error' },
+    stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 },
+    stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 },
+    mutation_counts: { attempted: 1, confirmed: 0 },
+    evidence: {
+      source: 'production', production: true, promotable: false,
+      manifest_sha256: manifest.sha256,
+      authorization_sha256: authorization.sha256,
+      attempt_id: attemptId,
+      candidate_id: String((manifest.value.repository as { commit: string }).commit),
+      hashes: Object.fromEntries(workerHashNames.map((name) => [name, null])),
+    },
+    finalized: true,
+    ...extra,
+  })
+}
+
+function exactTerminalRecord(
+  manifest: ReturnType<typeof record>,
+  authorization: ReturnType<typeof record>,
+  options: {
+    attemptId?: string
+    firstStage?: string
+    outcome?: string
+    classification?: string
+    d1?: ReturnType<typeof record> | null
+    worker?: ReturnType<typeof record> | null
+  } = {},
+) {
+  const attemptId = options.attemptId ?? derivedAttemptId(manifest.sha256, authorization.sha256)
+  const outcome = options.outcome ?? 'ERROR'
+  const firstStage = options.firstStage ?? 'authorization_accept'
+  const terminalIndex = deliveryStages.indexOf(firstStage)
+  const d1 = options.d1 ?? null
+  const worker = options.worker ?? null
+  const hashes = {
+    d1_stage_receipt_sha256: d1?.sha256 ?? null,
+    ...Object.fromEntries(d1HashNames.map((name) => [`d1_${name}`, d1 === null ? null : 'd'.repeat(64)])),
+    worker_stage_receipt_sha256: worker?.sha256 ?? null,
+    ...Object.fromEntries(workerHashNames.map((name) => [`worker_${name}`, worker === null ? null : worker.value.evidence.hashes[name]])),
+  }
+  return record({
+    format: 'blogman-issue-23-terminal-result/v1',
+    identities: { manifest_sha256: manifest.sha256, authorization_sha256: authorization.sha256 },
+    attempt_id: attemptId,
+    started_at: '1970-01-01T00:00:00.000Z',
+    ended_at: '1970-01-01T00:00:00.010Z',
+    authorization_consumed: true,
+    outcome,
+    first_terminal_stage: firstStage,
+    failure: outcome === 'PASS' ? null : { classification: options.classification ?? 'stage_error' },
+    stage_counts: Object.fromEntries(deliveryStages.map((stage, index) => [stage, index <= terminalIndex ? 1 : 0])),
+    stage_durations_ms: Object.fromEntries(deliveryStages.map((stage, index) => [stage, index <= terminalIndex ? 1 : 0])),
+    mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
+    evidence: {
+      source: 'production', production: true, promotable: outcome === 'PASS', hashes,
+      cleanup: { created: false, cleaned: true, observed_absent: true },
+    },
+    finalized: true,
+  })
+}
+
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
@@ -219,6 +331,66 @@ describe('Issue #23 durable delivery records', () => {
     expect(() => sink.consumeAuthorization(authorization)).toThrow(/canonical durable file/u)
   })
 
+  it('rejects an untrusted attempt identity before terminal path construction or escape', () => {
+    const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-attempt-traversal-'))
+    temporaryDirectories.push(root)
+    const sink = createRepositoryDeliverySink(root)
+    const manifest = record({
+      format: 'blogman-issue-23-canonical-frozen-manifest/v1',
+      repository: { commit: 'c'.repeat(40) },
+    })
+    const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
+    const terminal = record({
+      format: 'blogman-issue-23-terminal-result/v1',
+      identities: { manifest_sha256: manifest.sha256, authorization_sha256: authorization.sha256 },
+      attempt_id: '../escaped-terminal',
+      evidence: { hashes: { d1_stage_receipt_sha256: null, worker_stage_receipt_sha256: null } },
+    })
+    sink.consumeAuthorization(authorization)
+
+    expect(() => sink.persistTerminalResult({ terminal, manifest, d1: null, worker: null }))
+      .toThrow(/attempt|identity/u)
+    expect(() => readFileSync(join(root, 'escaped-terminal.json'))).toThrow()
+    expect(readdirSync(join(root, 'terminals'))).toEqual([])
+  })
+
+  it('rejects unsupported Worker fields and contradictory Terminal trajectory before persistence', () => {
+    const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-exact-durable-schema-'))
+    temporaryDirectories.push(root)
+    const sink = createRepositoryDeliverySink(root)
+    const manifest = record({
+      format: 'blogman-issue-23-canonical-frozen-manifest/v1',
+      repository: { commit: 'c'.repeat(40) },
+    })
+    const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
+    const attemptId = derivedAttemptId(manifest.sha256, authorization.sha256)
+    const worker = record({
+      format: 'blogman-issue-23-worker-stages/v1',
+      evidence: {
+        manifest_sha256: manifest.sha256,
+        authorization_sha256: authorization.sha256,
+        attempt_id: attemptId,
+        candidate_id: manifest.value.repository.commit,
+      },
+      diagnostic: 'ordinary private adapter detail',
+    })
+    const contradictory = record({
+      format: 'blogman-issue-23-terminal-result/v1',
+      identities: { manifest_sha256: manifest.sha256, authorization_sha256: authorization.sha256 },
+      attempt_id: attemptId,
+      outcome: 'PASS',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'stage_error' },
+      evidence: { hashes: { d1_stage_receipt_sha256: null, worker_stage_receipt_sha256: worker.sha256 } },
+    })
+    sink.consumeAuthorization(authorization)
+
+    expect(() => sink.persistTerminalResult({ terminal: contradictory, manifest, d1: null, worker }))
+      .toThrow(/unsupported|schema|trajectory|terminal|Worker/u)
+    expect(readdirSync(join(root, 'records'))).toEqual([])
+    expect(readdirSync(join(root, 'terminals'))).toEqual([])
+  })
+
   it('forwards a rejecting Authorization deadline through the canonical facade without publication', () => {
     const authorization = record({
       ...authorizationRecord().value,
@@ -355,40 +527,16 @@ describe('Issue #23 durable delivery records', () => {
       ...authorizationRecord().value,
       manifest_sha256: manifest.sha256,
     })
-    const attemptId = 'd'.repeat(64)
-    const d1 = record({
-      format: 'blogman-issue-23-d1-stages/v1',
-      evidence: {
-        manifest_sha256: manifest.sha256,
-        authorization_sha256: authorization.sha256,
-        attempt_id: attemptId,
-        candidate_id: manifest.value.repository.commit,
-      },
-      marker: 'd1',
-    })
-    const worker = record({
-      format: 'blogman-issue-23-worker-stages/v1',
-      evidence: {
-        manifest_sha256: manifest.sha256,
-        authorization_sha256: authorization.sha256,
-        attempt_id: attemptId,
-        candidate_id: manifest.value.repository.commit,
-      },
-      marker: 'worker',
-    })
-    const terminal = record({
-      format: 'blogman-issue-23-terminal-result/v1',
-      identities: {
-        manifest_sha256: manifest.sha256,
-        authorization_sha256: authorization.sha256,
-      },
-      attempt_id: attemptId,
-      evidence: {
-        hashes: {
-          d1_stage_receipt_sha256: d1.sha256,
-          worker_stage_receipt_sha256: worker.sha256,
-        },
-      },
+    const attemptId = derivedAttemptId(manifest.sha256, authorization.sha256)
+    const d1 = exactD1Record(manifest, authorization, attemptId, 'PASS')
+    const worker = exactWorkerRecord(manifest, authorization, attemptId)
+    const terminal = exactTerminalRecord(manifest, authorization, {
+      attemptId,
+      firstStage: 'worker_deploy',
+      outcome: 'ERROR',
+      classification: 'worker_adapter_error',
+      d1,
+      worker,
     })
     const sink = createRepositoryDeliverySink(root)
     sink.consumeAuthorization(authorization)
@@ -415,11 +563,7 @@ describe('Issue #23 durable delivery records', () => {
     const sink = createRepositoryDeliverySink(root)
     const manifest = record({ format: 'blogman-issue-23-canonical-frozen-manifest/v1', marker: 'missing-authorization' })
     const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
-    const terminal = record({
-      format: 'blogman-issue-23-terminal-result/v1',
-      identities: { manifest_sha256: manifest.sha256, authorization_sha256: authorization.sha256 },
-      evidence: { hashes: { d1_stage_receipt_sha256: null, worker_stage_receipt_sha256: null } },
-    })
+    const terminal = exactTerminalRecord(manifest, authorization)
 
     expect(() => sink.persistTerminalResult({ terminal, manifest, d1: null, worker: null }))
       .toThrow(/authorization.*missing/u)
@@ -436,27 +580,17 @@ describe('Issue #23 durable delivery records', () => {
       repository: { commit: 'c'.repeat(40) },
     })
     const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
-    const attemptId = 'd'.repeat(64)
-    const d1 = record({
-      format: 'blogman-issue-23-d1-stages/v1',
-      evidence: {
-        manifest_sha256: manifest.sha256,
-        authorization_sha256: authorization.sha256,
-        attempt_id: attemptId,
-        candidate_id: manifest.value.repository.commit,
-      },
+    const attemptId = derivedAttemptId(manifest.sha256, authorization.sha256)
+    const d1 = exactD1Record(manifest, authorization, attemptId)
+    const terminal = exactTerminalRecord(manifest, authorization, {
+      attemptId,
+      firstStage: 'd1_identity',
+      d1,
     })
-    const terminalValue = {
-      format: 'blogman-issue-23-terminal-result/v1',
-      identities: { manifest_sha256: manifest.sha256, authorization_sha256: authorization.sha256 },
-      attempt_id: attemptId,
-      evidence: { hashes: { d1_stage_receipt_sha256: d1.sha256, worker_stage_receipt_sha256: null } },
-    }
-    const terminal = record(terminalValue)
     sink.consumeAuthorization(authorization)
     expect(sink.persistTerminalResult({ terminal, manifest, d1, worker: null })).toBe(terminal.sha256)
 
-    const alternateTerminal = record({ ...terminalValue, attempt_id: 'e'.repeat(64) })
+    const alternateTerminal = record({ ...terminal.value, attempt_id: 'e'.repeat(64) })
     expect(() => sink.persistTerminalResult({
       terminal: alternateTerminal,
       manifest,
@@ -474,27 +608,18 @@ describe('Issue #23 durable delivery records', () => {
       repository: { commit: 'c'.repeat(40) },
     })
     const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
-    const attemptId = 'd'.repeat(64)
-    const worker = record({
-      format: 'blogman-issue-23-worker-stages/v1',
-      evidence: {
-        manifest_sha256: manifest.sha256,
-        authorization_sha256: authorization.sha256,
-        attempt_id: attemptId,
-        candidate_id: manifest.value.repository.commit,
-      },
+    const attemptId = derivedAttemptId(manifest.sha256, authorization.sha256)
+    const worker = exactWorkerRecord(manifest, authorization, attemptId)
+    const terminal = exactTerminalRecord(manifest, authorization, {
+      attemptId,
+      firstStage: 'worker_deploy',
+      classification: 'worker_adapter_error',
+      worker,
     })
-    const terminalValue = {
-      format: 'blogman-issue-23-terminal-result/v1',
-      identities: { manifest_sha256: manifest.sha256, authorization_sha256: authorization.sha256 },
-      attempt_id: attemptId,
-      evidence: { hashes: { d1_stage_receipt_sha256: null, worker_stage_receipt_sha256: worker.sha256 } },
-    }
-    const terminal = record(terminalValue)
     sink.consumeAuthorization(authorization)
     expect(sink.persistTerminalResult({ terminal, manifest, d1: null, worker })).toBe(terminal.sha256)
 
-    const alternateTerminal = record({ ...terminalValue, attempt_id: 'e'.repeat(64) })
+    const alternateTerminal = record({ ...terminal.value, attempt_id: 'e'.repeat(64) })
     expect(() => sink.persistTerminalResult({
       terminal: alternateTerminal,
       manifest,
@@ -513,7 +638,7 @@ describe('Issue #23 durable delivery records', () => {
     })
     sink.consumeAuthorization(alternateAuthorization)
     const alternateManifestTerminal = record({
-      ...terminalValue,
+      ...terminal.value,
       identities: {
         manifest_sha256: alternateManifest.sha256,
         authorization_sha256: alternateAuthorization.sha256,
@@ -592,38 +717,39 @@ describe('Issue #23 durable delivery records', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-private-'))
     temporaryDirectories.push(root)
     const sink = createRepositoryDeliverySink(root)
-    const manifest = record({ format: 'blogman-issue-23-canonical-frozen-manifest/v1', marker: 'private' })
+    const manifest = record({
+      format: 'blogman-issue-23-canonical-frozen-manifest/v1',
+      repository: { commit: 'c'.repeat(40) },
+      marker: 'private',
+    })
+    const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
+    const attemptId = derivedAttemptId(manifest.sha256, authorization.sha256)
+    const baseWorker = exactWorkerRecord(manifest, authorization, attemptId)
     const worker = record({
-      format: 'blogman-issue-23-worker-stages/v1',
-      evidence: { response_body: 'must-not-persist' },
+      ...baseWorker.value,
+      evidence: { ...baseWorker.value.evidence, response_body: 'must-not-persist' },
     })
-    const terminal = record({
-      format: 'blogman-issue-23-terminal-result/v1',
-      identities: { manifest_sha256: manifest.sha256 },
-      evidence: {
-        hashes: {
-          d1_stage_receipt_sha256: null,
-          worker_stage_receipt_sha256: worker.sha256,
-        },
-      },
+    const terminal = exactTerminalRecord(manifest, authorization, {
+      attemptId,
+      firstStage: 'worker_deploy',
+      classification: 'worker_adapter_error',
+      worker,
     })
+    sink.consumeAuthorization(authorization)
 
     expect(() => sink.persistTerminalResult({ terminal, manifest, d1: null, worker }))
       .toThrow(/private field/u)
 
     for (const key of ['api_key', 'credential', 'private_output', 'access_token']) {
       const unsafeWorker = record({
-        format: 'blogman-issue-23-worker-stages/v1',
-        evidence: { [key]: 'ordinary-cloudflare-value' },
+        ...baseWorker.value,
+        evidence: { ...baseWorker.value.evidence, [key]: 'ordinary-cloudflare-value' },
       })
-      const unsafeTerminal = record({
-        ...terminal.value,
-        evidence: {
-          hashes: {
-            d1_stage_receipt_sha256: null,
-            worker_stage_receipt_sha256: unsafeWorker.sha256,
-          },
-        },
+      const unsafeTerminal = exactTerminalRecord(manifest, authorization, {
+        attemptId,
+        firstStage: 'worker_deploy',
+        classification: 'worker_adapter_error',
+        worker: unsafeWorker,
       })
       expect(() => sink.persistTerminalResult({ terminal: unsafeTerminal, manifest, d1: null, worker: unsafeWorker }))
         .toThrow(/private field/u)
@@ -638,14 +764,13 @@ describe('Issue #23 durable delivery records', () => {
     const sink = createRepositoryDeliverySink(root)
     const manifest = record({ format: 'blogman-issue-23-canonical-frozen-manifest/v1', marker: 'terminal-cas' })
     const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
-    const attemptId = 'f'.repeat(64)
-    const terminal = record({
-      format: 'blogman-issue-23-terminal-result/v1',
-      identities: { manifest_sha256: manifest.sha256, authorization_sha256: authorization.sha256 },
-      attempt_id: attemptId,
-      evidence: { hashes: { d1_stage_receipt_sha256: null, worker_stage_receipt_sha256: null } },
+    const attemptId = derivedAttemptId(manifest.sha256, authorization.sha256)
+    const terminal = exactTerminalRecord(manifest, authorization, { attemptId })
+    const timeoutTerminal = record({
+      ...terminal.value,
+      outcome: 'TIMEOUT',
+      failure: { classification: 'overall_timeout' },
     })
-    const timeoutTerminal = record({ ...terminal.value, outcome: 'TIMEOUT' })
     sink.consumeAuthorization(authorization)
     sink.persistTerminalResult({ terminal, manifest, d1: null, worker: null })
 
@@ -660,11 +785,7 @@ describe('Issue #23 durable delivery records', () => {
     temporaryDirectories.push(root)
     const manifest = record({ format: 'blogman-issue-23-canonical-frozen-manifest/v1', marker: 'conflict' })
     const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
-    const terminal = record({
-      format: 'blogman-issue-23-terminal-result/v1',
-      identities: { manifest_sha256: manifest.sha256, authorization_sha256: authorization.sha256 },
-      evidence: { hashes: { d1_stage_receipt_sha256: null, worker_stage_receipt_sha256: null } },
-    })
+    const terminal = exactTerminalRecord(manifest, authorization)
     const sink = createRepositoryDeliverySink(root)
     sink.consumeAuthorization(authorization)
     sink.persistTerminalResult({ terminal, manifest, d1: null, worker: null })

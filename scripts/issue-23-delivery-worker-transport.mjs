@@ -458,7 +458,6 @@ export function createWorkerTransport(bindings, environments = { cloudflare: pro
   return Object.freeze({
     livePreconditions,
     execute,
-    evidence: Object.freeze({ source: 'production', production: true }),
   })
 }
 
@@ -579,6 +578,5 @@ export function createRehearsalWorkerTransport(bindings, sink, fault = null, env
   return Object.freeze({
     livePreconditions,
     execute,
-    evidence: Object.freeze({ source: FORMAL_REHEARSAL_WORKER_EVIDENCE_SOURCE, production: false }),
   })
 }

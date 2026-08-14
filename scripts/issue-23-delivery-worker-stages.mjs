@@ -37,20 +37,11 @@ function emptyEvidenceHashes() {
   return Object.fromEntries(EVIDENCE_HASHES.map((name) => [name, null]))
 }
 
-function terminal(trace, evidenceHashes, mutation_counts, provenance, identity) {
+function terminal(trace, evidenceHashes, mutation_counts, identity) {
   const last = trace.at(-1)
-  // Unbranded transports never gain production evidence rights.
-  const evidenceProvenance = provenance ?? Object.freeze({
-    source: 'untrusted-test-transport',
-    production: false,
-  })
-  if (evidenceProvenance.production === true && evidenceProvenance.source !== 'production') {
-    throw new Error('production worker transport provenance source is invalid')
-  }
-  if (evidenceProvenance.production !== true && evidenceProvenance.source === 'production') {
-    throw new Error('non-production worker transport must not claim production source')
-  }
-  const production = evidenceProvenance.production === true
+  // Public/test-facing stage runners can only emit non-production evidence.
+  // Production promotion belongs exclusively to execute's private real-adapter path.
+  const production = false
   const value = {
     format: 'blogman-issue-23-worker-stages/v1', outcome: last.outcome,
     first_terminal_stage: last.outcome === 'PASS' ? null : last.stage,
@@ -59,7 +50,7 @@ function terminal(trace, evidenceHashes, mutation_counts, provenance, identity) 
     stage_durations_ms: Object.fromEntries(WORKER_STAGE_ORDER.map((stage) => [stage, trace.filter((entry) => entry.stage === stage).reduce((sum, entry) => sum + entry.duration_ms, 0)])),
     mutation_counts,
     evidence: {
-      source: evidenceProvenance.source,
+      source: 'stage-runner-non-production',
       production,
       promotable: production && last.outcome === 'PASS',
       ...identity,
@@ -120,7 +111,6 @@ export function runWorkerStages({ bindings, transport, elapsed_ms = 0, monotonic
     || typeof identity.candidate_id !== 'string' || !/^[a-f0-9]{40}$/u.test(identity.candidate_id)) {
     throw new Error('worker evidence identity is invalid')
   }
-  const provenance = record(transport.evidence) ? transport.evidence : undefined
   const trace = []
   const evidenceHashes = emptyEvidenceHashes()
   const mutation_counts = { attempted: 0, confirmed: 0 }
@@ -211,5 +201,5 @@ export function runWorkerStages({ bindings, transport, elapsed_ms = 0, monotonic
     }
     trace.push({ stage, outcome: 'PASS', duration_ms: parsed.duration_ms })
   }
-  return terminal(trace, evidenceHashes, mutation_counts, provenance, identity)
+  return terminal(trace, evidenceHashes, mutation_counts, identity)
 }

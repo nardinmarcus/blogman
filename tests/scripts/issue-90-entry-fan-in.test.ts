@@ -589,9 +589,9 @@ function d1Result(failedStage: string | null = null) {
     stage_counts: counts,
     stage_durations_ms: durations,
     evidence: {
-      source: 'production',
-      production: true,
-      promotable: failedStage === null,
+      source: 'stage-runner-non-production',
+      production: false,
+      promotable: false,
       ...Object.fromEntries(D1_EVIDENCE_HASHES.map((name) => [name, name === 'trace_sha256' ? D1_TRACE_HASH : HASH])),
       manifest_sha256: '1'.repeat(64),
       authorization_sha256: '2'.repeat(64),
@@ -607,7 +607,7 @@ function d1Result(failedStage: string | null = null) {
 }
 
 function workerResult(identity: Record<string, string>) {
-  const value = { format: 'blogman-issue-23-worker-stages/v1', outcome: 'ERROR', first_terminal_stage: 'worker_deploy', failure: { classification: 'worker_adapter_error' }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, mutation_counts: { attempted: 1, confirmed: 0 }, evidence: { source: 'production', production: true, promotable: false, manifest_sha256: identity.manifest_sha256, authorization_sha256: identity.authorization_sha256, attempt_id: identity.attempt_id, candidate_id: identity.candidate_id, hashes: { upload_acceptance_sha256: null, version_traffic_sha256: null, smoke_control_t0_sha256: null } }, finalized: true }
+  const value = { format: 'blogman-issue-23-worker-stages/v1', outcome: 'ERROR', first_terminal_stage: 'worker_deploy', failure: { classification: 'worker_adapter_error' }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, mutation_counts: { attempted: 1, confirmed: 0 }, evidence: { source: 'stage-runner-non-production', production: false, promotable: false, manifest_sha256: identity.manifest_sha256, authorization_sha256: identity.authorization_sha256, attempt_id: identity.attempt_id, candidate_id: identity.candidate_id, hashes: { upload_acceptance_sha256: null, version_traffic_sha256: null, smoke_control_t0_sha256: null } }, finalized: true }
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
   return { value, bytes, sha256: hash(bytes) }
 }
@@ -619,7 +619,7 @@ function passingWorkerResult(identity: Record<string, string>) {
     stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 1, smoke_control_t0: 1 },
     mutation_counts: { attempted: 2, confirmed: 2 },
     evidence: {
-      source: 'production', production: true, promotable: true,
+      source: 'stage-runner-non-production', production: false, promotable: false,
       manifest_sha256: identity.manifest_sha256,
       authorization_sha256: identity.authorization_sha256,
       attempt_id: identity.attempt_id,
@@ -1106,6 +1106,48 @@ describe('Issue #90 formal entry fan-in', () => {
     })
     expect(result.value.outcome).not.toBe('PASS')
     expect(result.value.failure.classification).toBe('worker_adapter_error')
+  })
+
+  it('rejects caller-forged production stage receipts at the public execute seam', () => {
+    const prepared = actualPreparedManifest()
+    const forgedD1 = d1Result()
+    Object.assign(forgedD1.value.evidence, {
+      source: 'production', production: true, promotable: true,
+    })
+    forgedD1.bytes = Buffer.from(`${JSON.stringify(forgedD1.value, null, 2)}\n`, 'utf8')
+    forgedD1.sha256 = hash(forgedD1.bytes)
+    configureD1(null, forgedD1)
+    configureWorker()
+
+    const d1Terminal = execute(prepared, authorizationFor(prepared, 'forged-d1-provenance'))
+
+    expect(d1Terminal.value).toMatchObject({
+      outcome: 'ERROR', first_terminal_stage: 'd1_identity',
+      failure: { classification: 'production_d1_result_malformed' },
+    })
+    expect(runWorkerStagesMock).not.toHaveBeenCalled()
+
+    const secondPrepared = actualPreparedManifest()
+    configureD1()
+    createWorkerTransportMock.mockReturnValue({
+      livePreconditions: () => ({ outcome: 'PASS', duration_ms: 1 }), execute() {},
+    })
+    runWorkerStagesMock.mockImplementation(({ bindings }) => {
+      const forgedWorker = passingWorkerResult(bindings)
+      Object.assign(forgedWorker.value.evidence, {
+        source: 'production', production: true, promotable: true,
+      })
+      forgedWorker.bytes = Buffer.from(`${JSON.stringify(forgedWorker.value, null, 2)}\n`, 'utf8')
+      forgedWorker.sha256 = hash(forgedWorker.bytes)
+      return forgedWorker
+    })
+
+    const workerTerminal = execute(secondPrepared, authorizationFor(secondPrepared, 'forged-worker-provenance'))
+
+    expect(workerTerminal.value).toMatchObject({
+      outcome: 'ERROR', first_terminal_stage: 'worker_deploy',
+      failure: { classification: 'worker_result_malformed' },
+    })
   })
 
   it('terminalizes malformed D1 after Authorization consumption without throwing or inventing suffix history', () => {

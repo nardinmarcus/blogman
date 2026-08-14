@@ -648,12 +648,7 @@ export function createD1Transport(config, childEnvironment, monotonicMs) {
 
   return Object.freeze({
     execute,
-    evidence: Object.freeze({
-      source: normalizedConfig.mode === 'remote' ? 'production' : 'local-non-production',
-      production: normalizedConfig.mode === 'remote',
-      bindings_sha256: bindingsSha256,
-      wrangler_sha256: normalizedConfig.wrangler_sha256,
-    }),
+    bindings_sha256: bindingsSha256,
   })
 }
 
@@ -783,11 +778,6 @@ export function createRehearsalD1Transport(bindings, sink, fault = null, childEn
   }
   return Object.freeze({
     execute,
-    evidence: Object.freeze({
-      source: FORMAL_REHEARSAL_D1_EVIDENCE_SOURCE,
-      production: false,
-      bindings_sha256: bindingsSha256,
-      wrangler_sha256: bindings.wrangler_sha256,
-    }),
+    bindings_sha256: bindingsSha256,
   })
 }

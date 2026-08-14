@@ -31,6 +31,35 @@ const RECORD_FORMATS = new Set([
   'blogman-issue-23-worker-stages/v1',
   TERMINAL_RESULT_FORMAT,
 ])
+const DELIVERY_STAGES = Object.freeze([
+  'authorization_accept', 'live_preconditions', 'd1_identity', 'clean_start_reset',
+  'empty_d1_proof', 'migrations_001_006', 'reconciliation', 'worker_deploy',
+  'version_traffic_verification', 'smoke_control_t0',
+])
+const D1_STAGES = Object.freeze([
+  'd1_identity', 'clean_start_reset', 'empty_d1_proof', 'migrations_001_006', 'reconciliation',
+])
+const WORKER_STAGES = Object.freeze(['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'])
+const D1_EVIDENCE_FIELDS = Object.freeze([
+  'source', 'production', 'promotable', 'bindings_sha256', 'wrangler_sha256',
+  'manifest_sha256', 'authorization_sha256', 'attempt_id', 'account_id',
+  'd1_database_id', 'config_sha256', 'candidate_id', 'reset_sql_sha256',
+  'migration_runner_sha256', 'migration_catalog_sha256', 'rollout_safety_sha256',
+  'expected_reconciliation_sha256', 'trace_sha256',
+])
+const WORKER_EVIDENCE_HASHES = Object.freeze([
+  'upload_acceptance_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256',
+])
+const TERMINAL_EVIDENCE_HASHES = Object.freeze([
+  'd1_stage_receipt_sha256',
+  ...[
+    'bindings_sha256', 'wrangler_sha256', 'config_sha256', 'reset_sql_sha256',
+    'migration_runner_sha256', 'migration_catalog_sha256', 'rollout_safety_sha256',
+    'expected_reconciliation_sha256', 'trace_sha256',
+  ].map((name) => `d1_${name}`),
+  'worker_stage_receipt_sha256',
+  ...WORKER_EVIDENCE_HASHES.map((name) => `worker_${name}`),
+])
 let temporaryFileSequence = 0
 
 function fail(message) {
@@ -133,6 +162,121 @@ function canonicalAuthorization(record) {
   }
   if (canonical.value.decision !== 'approve') fail('authorization decision is invalid')
   return canonical
+}
+
+function exactKeys(value, keys) {
+  return isRecord(value)
+    && Reflect.ownKeys(value).length === keys.length
+    && keys.every((key) => Object.hasOwn(value, key))
+}
+
+function assertHash(value, label, nullable = false) {
+  if (nullable && value === null) return
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/u.test(value)) fail(`${label} identity is invalid`)
+}
+
+function assertStageMaps(counts, durations, stages, label) {
+  if (!exactKeys(counts, stages) || !exactKeys(durations, stages)) fail(`${label} Stage schema is invalid`)
+  for (const stage of stages) {
+    if (!Number.isSafeInteger(counts[stage]) || ![0, 1].includes(counts[stage])
+      || !Number.isSafeInteger(durations[stage]) || durations[stage] < 0
+      || (counts[stage] === 0 && durations[stage] !== 0)) {
+      fail(`${label} Stage trajectory is invalid`)
+    }
+  }
+}
+
+function assertTerminalAttemptIdentity(value) {
+  if (!exactKeys(value.identities, ['manifest_sha256', 'authorization_sha256'])) {
+    fail('terminal result identities are invalid')
+  }
+  assertHash(value.identities.manifest_sha256, 'terminal manifest')
+  assertHash(value.identities.authorization_sha256, 'terminal authorization')
+  const expected = sha256(Buffer.from(`${JSON.stringify({
+    format: 'blogman-issue-23-attempt/v1',
+    manifest_sha256: value.identities.manifest_sha256,
+    authorization_sha256: value.identities.authorization_sha256,
+  }, null, 2)}\n`, 'utf8'))
+  if (typeof value.attempt_id !== 'string' || !/^[a-f0-9]{64}$/u.test(value.attempt_id)
+    || value.attempt_id !== expected) {
+    fail('terminal result attempt identity is invalid')
+  }
+}
+
+function assertTerminalSchema(value) {
+  const keys = [
+    'format', 'identities', 'attempt_id', 'started_at', 'ended_at', 'authorization_consumed',
+    'outcome', 'first_terminal_stage', 'failure', 'stage_counts', 'stage_durations_ms',
+    'mutation_counts', 'evidence', 'finalized',
+  ]
+  if (!exactKeys(value, keys) || value.format !== TERMINAL_RESULT_FORMAT
+    || value.authorization_consumed !== true || value.finalized !== true
+    || !['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(value.outcome)
+    || typeof value.started_at !== 'string' || Number.isNaN(Date.parse(value.started_at))
+    || typeof value.ended_at !== 'string' || Number.isNaN(Date.parse(value.ended_at))) {
+    fail('terminal result schema is invalid')
+  }
+  assertTerminalAttemptIdentity(value)
+  assertStageMaps(value.stage_counts, value.stage_durations_ms, DELIVERY_STAGES, 'terminal result')
+  const terminalIndex = DELIVERY_STAGES.indexOf(value.first_terminal_stage)
+  if (terminalIndex < 0 || DELIVERY_STAGES.some((stage, index) => (
+    value.stage_counts[stage] !== (index <= terminalIndex ? 1 : 0)
+  ))) fail('terminal result trajectory is contradictory')
+  if (value.outcome === 'PASS') {
+    if (value.first_terminal_stage !== 'smoke_control_t0' || value.failure !== null) {
+      fail('terminal result trajectory is contradictory')
+    }
+  } else if (!exactKeys(value.failure, ['classification'])
+    || typeof value.failure.classification !== 'string' || value.failure.classification.length === 0) {
+    fail('terminal result failure is invalid')
+  }
+  if (!exactKeys(value.mutation_counts, ['production_writes', 'attempted', 'confirmed'])
+    || Object.values(value.mutation_counts).some((count) => !Number.isSafeInteger(count) || count < 0)
+    || value.mutation_counts.production_writes !== value.mutation_counts.confirmed
+    || value.mutation_counts.confirmed > value.mutation_counts.attempted) {
+    fail('terminal result mutation evidence is contradictory')
+  }
+  if (!exactKeys(value.evidence, ['source', 'production', 'promotable', 'hashes', 'cleanup'])
+    || typeof value.evidence.source !== 'string' || typeof value.evidence.production !== 'boolean'
+    || typeof value.evidence.promotable !== 'boolean'
+    || value.evidence.promotable !== (value.evidence.production && value.outcome === 'PASS')
+    || !exactKeys(value.evidence.hashes, TERMINAL_EVIDENCE_HASHES)
+    || Object.values(value.evidence.hashes).some((hash) => hash !== null && !/^[a-f0-9]{64}$/u.test(hash))
+    || !exactKeys(value.evidence.cleanup, ['created', 'cleaned', 'observed_absent'])
+    || Object.values(value.evidence.cleanup).some((flag) => typeof flag !== 'boolean')) {
+    fail('terminal result evidence schema is invalid')
+  }
+}
+
+function assertD1Schema(value) {
+  if (!exactKeys(value, [
+    'format', 'outcome', 'first_terminal_stage', 'failure', 'stage_counts',
+    'stage_durations_ms', 'evidence', 'finalized',
+  ]) || value.format !== 'blogman-issue-23-d1-stages/v1' || value.finalized !== true
+    || !['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(value.outcome)
+    || !exactKeys(value.evidence, D1_EVIDENCE_FIELDS)) {
+    fail('D1 evidence schema contains unsupported fields')
+  }
+  assertStageMaps(value.stage_counts, value.stage_durations_ms, D1_STAGES, 'D1 evidence')
+  for (const field of D1_EVIDENCE_FIELDS.filter((name) => name.endsWith('sha256'))) {
+    assertHash(value.evidence[field], `D1 evidence ${field}`)
+  }
+}
+
+function assertWorkerSchema(value) {
+  if (!exactKeys(value, [
+    'format', 'outcome', 'first_terminal_stage', 'failure', 'stage_counts',
+    'stage_durations_ms', 'mutation_counts', 'evidence', 'finalized',
+  ]) || value.format !== 'blogman-issue-23-worker-stages/v1' || value.finalized !== true
+    || !['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(value.outcome)
+    || !exactKeys(value.mutation_counts, ['attempted', 'confirmed'])
+    || !exactKeys(value.evidence, [
+      'source', 'production', 'promotable', 'manifest_sha256', 'authorization_sha256',
+      'attempt_id', 'candidate_id', 'hashes',
+    ]) || !exactKeys(value.evidence.hashes, WORKER_EVIDENCE_HASHES)) {
+    fail('Worker evidence schema contains unsupported fields')
+  }
+  assertStageMaps(value.stage_counts, value.stage_durations_ms, WORKER_STAGES, 'Worker evidence')
 }
 
 function syncDirectory(path) {
@@ -315,15 +459,20 @@ function readRecord(root, sha256Value, label) {
 }
 
 function persistTerminalResult(root, input, deadline) {
+  checkDeadline(deadline)
   if (!isRecord(input)
     || Object.keys(input).length !== 4
     || !['terminal', 'manifest', 'd1', 'worker'].every((key) => Object.hasOwn(input, key))) {
     fail('terminal persistence input is malformed')
   }
   const terminal = canonicalRecord(input.terminal, 'terminal result')
+  assertTerminalAttemptIdentity(terminal.value)
   const manifest = canonicalRecord(input.manifest, 'manifest')
   const d1 = input.d1 === null ? null : canonicalRecord(input.d1, 'D1 evidence')
   const worker = input.worker === null ? null : canonicalRecord(input.worker, 'Worker evidence')
+  assertTerminalSchema(terminal.value)
+  if (d1 !== null) assertD1Schema(d1.value)
+  if (worker !== null) assertWorkerSchema(worker.value)
   if (terminal.value.format !== TERMINAL_RESULT_FORMAT
     || manifest.value.format !== 'blogman-issue-23-canonical-frozen-manifest/v1'
     || (d1 !== null && d1.value.format !== 'blogman-issue-23-d1-stages/v1')

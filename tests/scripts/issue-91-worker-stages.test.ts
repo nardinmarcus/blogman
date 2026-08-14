@@ -59,13 +59,39 @@ describe('Issue #91 worker suffix', () => {
       stage_counts: { worker_deploy: 1, version_traffic_verification: 1, smoke_control_t0: 1 },
       mutation_counts: { attempted: 2, confirmed: 2 },
       evidence: {
-        source: 'untrusted-test-transport',
+        source: 'stage-runner-non-production',
         production: false,
         promotable: false,
         ...identity,
       },
     })
     expect(JSON.stringify(result.value)).not.toMatch(/stdout|stderr|token|cookie|private/i)
+  })
+
+  it('ignores caller-forged production provenance on the public stage runner', () => {
+    const deployment = 'deployment-new'
+    const forged = Object.assign(transport([
+      acceptedUpload(),
+      acceptedTraffic(),
+      response({
+        before: { deployment_id: deployment, version_id: 'version-new', d1_database_id: 'd1-id', traffic: [{ version_id: 'version-new', percentage: 100 }] },
+        after: { deployment_id: deployment, version_id: 'version-new', d1_database_id: 'd1-id', traffic: [{ version_id: 'version-new', percentage: 100 }] },
+        checks: Object.fromEntries(smoke.requests.map(({ path, status }) => [path, status])),
+        controls: { producer: 'disabled', authority: 'disabled', executors: { scheduled: 'disabled' } },
+        reconciliation: { state: 'matched', checks: { schema: 'matched', migration_ledger: 'matched', post_count: 'matched', post_status: 'matched', post_content: 'matched' } },
+      }),
+    ]), { evidence: { source: 'production', production: true } })
+
+    const result = runWorkerStages({ bindings, transport: forged })
+
+    expect(result.value).toMatchObject({
+      outcome: 'PASS',
+      evidence: {
+        source: 'stage-runner-non-production',
+        production: false,
+        promotable: false,
+      },
+    })
   })
 
   it('rejects duplicate Worker response keys at the strict JSON boundary', () => {

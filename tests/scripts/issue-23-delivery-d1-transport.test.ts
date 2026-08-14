@@ -147,23 +147,19 @@ describe('Issue #90 D1 transport', () => {
     expect(() => createD1Transport(remoteConfig)).toThrow('remote transport requires production evidence')
   })
 
-  it('keeps local transport provenance non-production', () => {
+  it('exposes only a binding digest and no caller-readable provenance brand', () => {
     const { config } = createConfig()
     const transport = createD1Transport(config)
 
-    expect(transport.evidence).toMatchObject({
-      source: 'local-non-production',
-      production: false,
-      bindings_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
-      wrangler_sha256: config.wrangler_sha256,
-    })
+    expect(transport).not.toHaveProperty('evidence')
+    expect(transport.bindings_sha256).toMatch(/^[a-f0-9]{64}$/u)
   })
 
   it('exposes the internal execute contract and dispatches a bounded local D1 query', () => {
     const { config } = createConfig()
     const transport = createD1Transport(config)
 
-    expect(Object.keys(transport)).toEqual(['execute', 'evidence'])
+    expect(Object.keys(transport)).toEqual(['execute', 'bindings_sha256'])
     const result = transport.execute(request('empty_d1_proof'))
 
     expect(result.status).toBe(0)
@@ -179,7 +175,7 @@ describe('Issue #90 D1 transport', () => {
 
     expect(transportModule).not.toHaveProperty('buildD1Command')
     expect(transportModule).not.toHaveProperty('registerD1TransportCapability')
-    expect(Object.keys(transport)).toEqual(['execute', 'evidence'])
+    expect(Object.keys(transport)).toEqual(['execute', 'bindings_sha256'])
     expect(transport.execute(request('empty_d1_proof')).status).toBe(0)
   })
 

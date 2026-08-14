@@ -1349,6 +1349,7 @@ function deriveProductionD1Bindings(d1, expectedPath, identity) {
 }
 
 const PRODUCTION_D1_EVIDENCE_POLICY = Object.freeze({
+  input_source: 'stage-runner-non-production',
   source: 'production',
   production: true,
   allow_promotable_pass: true,
@@ -1356,10 +1357,23 @@ const PRODUCTION_D1_EVIDENCE_POLICY = Object.freeze({
 })
 
 const FORMAL_REHEARSAL_D1_EVIDENCE_POLICY = Object.freeze({
+  input_source: 'stage-runner-non-production',
   source: FORMAL_REHEARSAL_EVIDENCE_SOURCE,
   production: false,
   allow_promotable_pass: false,
   malformed_classification: 'formal_rehearsal_d1_result_malformed',
+})
+
+const PRODUCTION_D1_RECEIPT_POLICY = Object.freeze({
+  ...PRODUCTION_D1_EVIDENCE_POLICY,
+  input_source: 'production',
+  input_production: true,
+})
+
+const FORMAL_REHEARSAL_D1_RECEIPT_POLICY = Object.freeze({
+  ...FORMAL_REHEARSAL_D1_EVIDENCE_POLICY,
+  input_source: FORMAL_REHEARSAL_EVIDENCE_SOURCE,
+  input_production: false,
 })
 
 function sanitizedD1Error(classification, d1, attemptIdentity, evidencePolicy = PRODUCTION_D1_EVIDENCE_POLICY) {
@@ -1422,6 +1436,17 @@ function normalizeD1Result(result, evidencePolicy, d1, identity) {
     return malformed()
   }
   const value = result.value
+  if (!Buffer.from(result.bytes).equals(canonicalJsonBytes(value))) return malformed()
+  const acceptedReceipt = () => {
+    const acceptedValue = structuredClone(value)
+    acceptedValue.evidence.source = evidencePolicy.source
+    acceptedValue.evidence.production = evidencePolicy.production
+    acceptedValue.evidence.promotable = (
+      evidencePolicy.allow_promotable_pass && evidencePolicy.production && acceptedValue.outcome === 'PASS'
+    )
+    const bytes = canonicalJsonBytes(acceptedValue)
+    return Object.freeze({ value: acceptedValue, bytes, sha256: sha256(bytes) })
+  }
   if (value.format !== 'blogman-issue-23-d1-stages/v1'
     || !['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(value.outcome)
     || !isPlainRecord(value.stage_counts)
@@ -1436,10 +1461,10 @@ function normalizeD1Result(result, evidencePolicy, d1, identity) {
       'manifest_sha256', 'authorization_sha256', 'attempt_id',
       'account_id', 'd1_database_id', 'candidate_id',
     ])
-    || value.evidence.source !== evidencePolicy.source
-    || value.evidence.production !== evidencePolicy.production
+    || value.evidence.source !== evidencePolicy.input_source
+    || value.evidence.production !== (evidencePolicy.input_production ?? false)
     || value.evidence.promotable !== (
-      evidencePolicy.allow_promotable_pass && evidencePolicy.production && value.outcome === 'PASS'
+      (evidencePolicy.input_production ?? false) && value.outcome === 'PASS'
     )
     || !D1_EVIDENCE_IDENTITIES.every((field) => value.evidence[field] === identity[field])
     || D1_EVIDENCE_HASHES.some((name) => !/^[a-f0-9]{64}$/u.test(value.evidence[name]))) {
@@ -1473,7 +1498,8 @@ function normalizeD1Result(result, evidencePolicy, d1, identity) {
       stage_counts: { ...value.stage_counts, d1_identity: 1 },
       stage_durations_ms: { ...value.stage_durations_ms, d1_identity: 1 },
       evidence_hashes: Object.fromEntries(D1_EVIDENCE_HASHES.map((name) => [name, value.evidence[name]])),
-      sha256: result.sha256,
+      sha256: acceptedReceipt().sha256,
+      receipt: acceptedReceipt(),
     }
   }
   if (value.outcome === 'PASS') {
@@ -1489,7 +1515,8 @@ function normalizeD1Result(result, evidencePolicy, d1, identity) {
       stage_counts: { ...value.stage_counts },
       stage_durations_ms: { ...value.stage_durations_ms },
       evidence_hashes: Object.fromEntries(D1_EVIDENCE_HASHES.map((name) => [name, value.evidence[name]])),
-      sha256: result.sha256,
+      sha256: acceptedReceipt().sha256,
+      receipt: acceptedReceipt(),
     }
   }
   if (typeof value.first_terminal_stage !== 'string'
@@ -1508,7 +1535,8 @@ function normalizeD1Result(result, evidencePolicy, d1, identity) {
     stage_counts: { ...value.stage_counts },
     stage_durations_ms: { ...value.stage_durations_ms },
     evidence_hashes: Object.fromEntries(D1_EVIDENCE_HASHES.map((name) => [name, value.evidence[name]])),
-    sha256: result.sha256,
+    sha256: acceptedReceipt().sha256,
+    receipt: acceptedReceipt(),
   }
 }
 
@@ -1516,9 +1544,17 @@ function normalizeProductionD1Result(result, d1, identity) {
   return normalizeD1Result(result, PRODUCTION_D1_EVIDENCE_POLICY, d1, identity)
 }
 
+function normalizeProductionD1Receipt(result, d1, identity) {
+  return normalizeD1Result(result, PRODUCTION_D1_RECEIPT_POLICY, d1, identity)
+}
+
 /** Private rehearsal path only. Never used by public production execute. */
 function normalizeFormalRehearsalD1Result(result, d1, identity) {
   return normalizeD1Result(result, FORMAL_REHEARSAL_D1_EVIDENCE_POLICY, d1, identity)
+}
+
+function normalizeFormalRehearsalD1Receipt(result, d1, identity) {
+  return normalizeD1Result(result, FORMAL_REHEARSAL_D1_RECEIPT_POLICY, d1, identity)
 }
 
 const WORKER_RESULT_STAGES = Object.freeze(['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'])
@@ -1616,15 +1652,23 @@ function malformedWorkerResult(evidencePolicy, identity) {
 }
 
 const PRODUCTION_WORKER_EVIDENCE_POLICY = Object.freeze({
+  input_source: 'stage-runner-non-production',
   source: 'production',
   production: true,
   allow_promotable_pass: true,
 })
 
 const FORMAL_REHEARSAL_WORKER_EVIDENCE_POLICY = Object.freeze({
+  input_source: 'stage-runner-non-production',
   source: FORMAL_REHEARSAL_EVIDENCE_SOURCE,
   production: false,
   allow_promotable_pass: false,
+})
+
+const PRODUCTION_WORKER_RECEIPT_POLICY = Object.freeze({
+  ...PRODUCTION_WORKER_EVIDENCE_POLICY,
+  input_source: 'production',
+  input_production: true,
 })
 
 function normalizeWorkerResult(result, evidencePolicy, identity) {
@@ -1645,10 +1689,10 @@ function normalizeWorkerResult(result, evidencePolicy, identity) {
     || !exact(value.stage_durations_ms, WORKER_RESULT_STAGES)
     || !exact(value.mutation_counts, ['attempted', 'confirmed'])
     || !exact(value.evidence, ['source', 'production', 'promotable', ...WORKER_EVIDENCE_IDENTITIES, 'hashes'])
-    || value.evidence.source !== evidencePolicy.source
-    || value.evidence.production !== evidencePolicy.production
+    || value.evidence.source !== evidencePolicy.input_source
+    || value.evidence.production !== (evidencePolicy.input_production ?? false)
     || value.evidence.promotable !== (
-      evidencePolicy.allow_promotable_pass && evidencePolicy.production && value.outcome === 'PASS'
+      (evidencePolicy.input_production ?? false) && value.outcome === 'PASS'
     )
     || !WORKER_EVIDENCE_IDENTITIES.every((field) => value.evidence[field] === identity[field])
     || !isPlainRecord(value.evidence.hashes) || !exact(value.evidence.hashes, WORKER_EVIDENCE_HASHES)) {
@@ -1687,6 +1731,14 @@ function normalizeWorkerResult(result, evidencePolicy, identity) {
     || value.mutation_counts.confirmed !== (terminalIndex >= 2 ? 2 : terminalIndex >= 1 ? 1 : 0)) {
     return malformed()
   }
+  const acceptedValue = structuredClone(value)
+  acceptedValue.evidence.source = evidencePolicy.source
+  acceptedValue.evidence.production = evidencePolicy.production
+  acceptedValue.evidence.promotable = (
+    evidencePolicy.allow_promotable_pass && evidencePolicy.production && acceptedValue.outcome === 'PASS'
+  )
+  const acceptedBytes = canonicalJsonBytes(acceptedValue)
+  const receipt = Object.freeze({ value: acceptedValue, bytes: acceptedBytes, sha256: sha256(acceptedBytes) })
   return {
     outcome: value.outcome,
     first_terminal_stage: value.first_terminal_stage,
@@ -1695,12 +1747,21 @@ function normalizeWorkerResult(result, evidencePolicy, identity) {
     stage_durations_ms: value.stage_durations_ms,
     mutation_counts: value.mutation_counts,
     evidence_hashes: Object.fromEntries(WORKER_EVIDENCE_HASHES.map((name) => [name, value.evidence.hashes[name]])),
-    sha256: result.sha256,
+    sha256: receipt.sha256,
+    receipt,
   }
 }
 
-export function normalizeWorkerResultForTestsOnly(result, identity) {
+function normalizeProductionWorkerResult(result, identity) {
   return normalizeWorkerResult(result, PRODUCTION_WORKER_EVIDENCE_POLICY, identity)
+}
+
+function normalizeProductionWorkerReceipt(result, identity) {
+  return normalizeWorkerResult(result, PRODUCTION_WORKER_RECEIPT_POLICY, identity)
+}
+
+export function normalizeWorkerResultForTestsOnly(result, identity) {
+  return normalizeFormalRehearsalWorkerResult(result, identity)
 }
 
 function normalizeFormalRehearsalWorkerResult(result, identity) {
@@ -1772,6 +1833,7 @@ function formalAdapterFactories(context) {
       return createRehearsalWorkerTransport(bindings, context.sink, currentFormalFaultForTestsOnly(), environments)
     },
     normalizeD1Result: normalizeFormalRehearsalD1Result,
+    normalizeD1Error: normalizeFormalRehearsalD1Receipt,
     normalizeWorkerResult: normalizeFormalRehearsalWorkerResult,
     resolveCredentials(manifest) {
       return Object.freeze({
@@ -1806,7 +1868,8 @@ function productionAdapterFactories() {
       return createWorkerTransport(bindings, environments, monotonicMs)
     },
     normalizeD1Result: normalizeProductionD1Result,
-    normalizeWorkerResult: normalizeWorkerResultForTestsOnly,
+    normalizeD1Error: normalizeProductionD1Receipt,
+    normalizeWorkerResult: normalizeProductionWorkerResult,
     resolveCredentials(manifest) {
       const slot = manifest.policy.authorization.credential_slots.find(({ name }) => (
         name === manifest.target.smoke.admin_credential_slot
@@ -2016,7 +2079,7 @@ function executeProduction(manifest, authorization) {
   let d1Receipt
   const durableD1Failure = (classification) => {
     d1Receipt = adapters.d1Error(classification, d1, workerIdentity)
-    return adapters.normalizeD1Result(d1Receipt, d1, workerIdentity)
+    return adapters.normalizeD1Error(d1Receipt, d1, workerIdentity)
   }
   let cleanup = { created: false, cleaned: true, observed_absent: true }
   if (liveResult.outcome === 'PASS') {
@@ -2337,7 +2400,7 @@ export function validateProductionTerminalEvidence(result) {
       fail('production terminal evidence is invalid')
     }
   } else {
-    const normalizedD1 = normalizeProductionD1Result(d1Receipt, parsedManifest.d1, {
+    const normalizedD1 = normalizeProductionD1Receipt(d1Receipt, parsedManifest.d1, {
       ...value.identities,
       attempt_id: value.attempt_id,
       candidate_id: parsedManifest.repository.commit,
@@ -2370,7 +2433,7 @@ export function validateProductionTerminalEvidence(result) {
     if (receipts.worker !== null) fail('production terminal evidence is invalid')
   } else {
     const workerReceipt = receipts.worker
-    const normalizedWorker = normalizeWorkerResultForTestsOnly(workerReceipt, {
+    const normalizedWorker = normalizeProductionWorkerReceipt(workerReceipt, {
       ...value.identities,
       attempt_id: value.attempt_id,
       candidate_id: parsedManifest.repository.commit,
