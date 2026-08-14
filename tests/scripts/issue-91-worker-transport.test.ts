@@ -184,8 +184,9 @@ describe('Issue #91 private smoke_control_t0 adapter', () => {
   })
 
   it.each([
-    ['Stage', 0, 299_000, 'stage_timeout'],
-    ['overall', 5_398_000, 5_399_000, 'overall_timeout'],
+    ['Stage', 0, 299_500, 'stage_timeout'],
+    ['overall', 5_399_000, 5_399_500, 'overall_timeout'],
+    ['equal', 5_100_000, 5_399_500, 'overall_timeout'],
   ] as const)('preserves the %s bound when the selected child budget times out', (
     _bound,
     elapsedMs,
@@ -193,16 +194,22 @@ describe('Issue #91 private smoke_control_t0 adapter', () => {
     classification,
   ) => {
     const current = fixture()
-    const timeoutBudgetMs = 1000
-    writeFileSync(current.wrangler, `#!${process.execPath}
-const fs = require('node:fs')
-fs.appendFileSync(process.env.WORKER_FAKE_LOG, 'timeout-fixture-started\\n')
-setInterval(() => {}, 1000)
+    const timeoutBudgetMs = 500
+    writeFileSync(current.wrangler, `#!/bin/sh
+if [ "$1" = "--startup-probe" ]; then
+  printf 'timeout-fixture-started\\n' >> "$WORKER_FAKE_LOG"
+  exit 0
+fi
+exec /bin/sleep 30
 `)
-    expect(readFileSync(current.wrangler, 'utf8').startsWith(`#!${process.execPath}\n`)).toBe(true)
+    expect(readFileSync(current.wrangler, 'utf8').startsWith('#!/bin/sh\n')).toBe(true)
     const value = bindings(current, 1)
     value.wrangler_sha256 = hash(current.wrangler)
     const environment = Object.assign(Object.create(null), { WORKER_FAKE_LOG: current.log })
+    const startup = spawnSync(current.wrangler, ['--startup-probe'], { env: environment })
+    expect(startup.status).toBe(0)
+    expect(readFileSync(current.log, 'utf8')).toBe('timeout-fixture-started\n')
+    writeFileSync(current.log, '')
     const transport = createWorkerTransport(
       value,
       { cloudflare: environment, smoke: Object.create(null) },
@@ -224,7 +231,7 @@ setInterval(() => {}, 1000)
     }
     expect(failure).toEqual(expect.objectContaining({ classification }))
     expect((failure as { duration_ms: number }).duration_ms).toBeGreaterThanOrEqual(timeoutBudgetMs)
-    expect(readFileSync(current.log, 'utf8')).toBe('timeout-fixture-started\n')
+    expect(readFileSync(current.log, 'utf8')).toBe('')
   })
 
   it('uses only fake executables and a loopback server for bounded pre/post, six GETs, controls, and reconciliation', async () => {

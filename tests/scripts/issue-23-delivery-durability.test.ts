@@ -185,6 +185,23 @@ describe('Issue #23 durable delivery records', () => {
     expect(() => sink.consumeAuthorization(authorizationRecord())).toThrow(/canonical|identity/u)
   })
 
+  it('publishes and fsyncs the destination name before removing and fsyncing the temporary name', () => {
+    const source = readFileSync(join(process.cwd(), 'scripts/issue-23-delivery-evidence-sink.mjs'), 'utf8')
+    const atomicWrite = source.slice(
+      source.indexOf('function atomicWrite('),
+      source.indexOf('function writeIfAbsent('),
+    )
+    const linked = atomicWrite.indexOf('linkSync(temporary, path)')
+    const destinationSynced = atomicWrite.indexOf('syncDirectory(directory)', linked)
+    const temporaryRemoved = atomicWrite.indexOf('unlinkSync(temporary)', destinationSynced)
+    const removalSynced = atomicWrite.indexOf('syncDirectory(directory)', temporaryRemoved)
+
+    expect(linked).toBeGreaterThanOrEqual(0)
+    expect(destinationSynced).toBeGreaterThan(linked)
+    expect(temporaryRemoved).toBeGreaterThan(destinationSynced)
+    expect(removalSynced).toBeGreaterThan(temporaryRemoved)
+  })
+
   it('rejects unsafe leaf entries on Authorization EEXIST instead of treating them as consumed records', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-leaf-'))
     temporaryDirectories.push(root)

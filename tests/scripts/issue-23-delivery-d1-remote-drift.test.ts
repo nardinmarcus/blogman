@@ -16,7 +16,7 @@ import {
 import {
   hashD1ArtifactDirectory,
 } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
-import { runD1Stages } from '../../scripts/issue-23-delivery-d1-stages.mjs'
+import { D1_STAGE_TIMEOUT_MS, runD1Stages } from '../../scripts/issue-23-delivery-d1-stages.mjs'
 
 const repoRoot = process.cwd()
 const temporaryDirectories: string[] = []
@@ -82,6 +82,27 @@ afterEach(() => {
 })
 
 describe('Issue #23 remote D1 identity drift', () => {
+  it('recomputes the remote whoami suffix deadline and dispatches no stale-clock child', () => {
+    const bindings = remoteBindings()
+    const info = readFileSync(join(repoRoot, 'tests', 'fixtures', 'issue-90', 'wrangler-4.86.0-d1-info.json'), 'utf8')
+    const monotonicValues = [0, D1_STAGE_TIMEOUT_MS.d1_identity]
+    child.run.mockReturnValueOnce({ status: 0, stdout: info, stderr: '', duration_ms: 1 })
+    const transport = createD1Transport(
+      bindings,
+      Object.assign(Object.create(null), { CLOUDFLARE_API_TOKEN: 'test-only-placeholder' }),
+      () => monotonicValues.shift() ?? D1_STAGE_TIMEOUT_MS.d1_identity,
+    )
+
+    expect(() => transport.execute({
+      operation: 'd1_identity',
+      stage: 'd1_identity',
+      timeout_ms: D1_STAGE_TIMEOUT_MS.d1_identity,
+      elapsed_ms: 0,
+      overall_elapsed_ms: 0,
+    })).toThrow(expect.objectContaining({ classification: 'timeout' }))
+    expect(child.run).toHaveBeenCalledTimes(1)
+  })
+
   it('terminalizes a live database UUID mismatch as Manifest Drift before reset or mutation suffix', () => {
     const bindings = remoteBindings()
     const info = readFileSync(join(repoRoot, 'tests', 'fixtures', 'issue-90', 'wrangler-4.86.0-d1-info.json'), 'utf8')

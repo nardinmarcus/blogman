@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { FORMAL_EXECUTION_CLOSURE_PATHS } from '../../scripts/issue-23-delivery-execution-closure.mjs'
 
 const repoRoot = process.cwd()
 const deliverySources = [
@@ -38,6 +39,35 @@ describe('Issue #93 delivery control-plane cutover', () => {
       expect(contents, path).not.toContain('schemas/issue-23-reseal')
       expect(contents, path).not.toContain('executeSyntheticForTest')
       expect(contents, path).not.toContain('runSyntheticStage')
+    }
+  })
+
+  it('pins every formal execution-closure member and removes runtime provenance caches', () => {
+    expect(FORMAL_EXECUTION_CLOSURE_PATHS).toEqual([
+      'scripts/issue-23-build-proof.mjs',
+      'scripts/issue-23-delivery-d1-child.mjs',
+      'scripts/issue-23-delivery-d1-contracts.mjs',
+      'scripts/issue-23-delivery-d1-stages.mjs',
+      'scripts/issue-23-delivery-d1-transport.mjs',
+      'scripts/issue-23-delivery-entry.mjs',
+      'scripts/issue-23-delivery-evidence-sink.mjs',
+      'scripts/issue-23-delivery-execution-closure.mjs',
+      'scripts/issue-23-delivery-formal-context.mjs',
+      'scripts/issue-23-delivery-formal-fault-harness.mjs',
+      'scripts/issue-23-delivery-formal-runtime.mjs',
+      'scripts/issue-23-delivery-prepare.mjs',
+      'scripts/issue-23-delivery-rehearsal.mjs',
+      'scripts/issue-23-delivery-worker-stages.mjs',
+      'scripts/issue-23-delivery-worker-transport.mjs',
+      'scripts/issue-23-delivery-worker-upload.mjs',
+    ])
+    for (const path of [
+      'scripts/issue-23-delivery-d1-stages.mjs',
+      'scripts/issue-23-delivery-d1-transport.mjs',
+      'scripts/issue-23-delivery-worker-stages.mjs',
+      'scripts/issue-23-delivery-worker-transport.mjs',
+    ]) {
+      expect(source(path), path).not.toMatch(/WeakMap|getD1TransportProvenance|getWorkerTransportProvenance/u)
     }
   })
 
