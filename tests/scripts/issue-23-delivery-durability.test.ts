@@ -422,6 +422,32 @@ describe('Issue #23 durable delivery records', () => {
     expect(readdirSync(join(root, 'terminals'))).toEqual([])
   })
 
+  it('rejects an arbitrary unsupported Worker field with an otherwise coherent terminal', () => {
+    const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-worker-unsupported-field-'))
+    temporaryDirectories.push(root)
+    const sink = createRepositoryDeliverySink(root)
+    const manifest = record({
+      format: 'blogman-issue-23-canonical-frozen-manifest/v1',
+      repository: { commit: 'c'.repeat(40) },
+    })
+    const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
+    const attemptId = derivedAttemptId(manifest.sha256, authorization.sha256)
+    const baseWorker = exactWorkerRecord(manifest, authorization, attemptId)
+    const worker = record({ ...baseWorker.value, diagnostic: 'ordinary private adapter detail' })
+    const terminal = exactTerminalRecord(manifest, authorization, {
+      attemptId,
+      firstStage: 'worker_deploy',
+      classification: 'worker_adapter_error',
+      worker,
+    })
+    sink.consumeAuthorization(authorization)
+
+    expect(() => sink.persistTerminalResult({ terminal, manifest, d1: null, worker }))
+      .toThrow(/Worker evidence schema contains unsupported fields/u)
+    expect(readdirSync(join(root, 'records'))).toEqual([])
+    expect(readdirSync(join(root, 'terminals'))).toEqual([])
+  })
+
   it('rejects exact-shape outcome/classification and mutation contradictions', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-terminal-coherence-'))
     temporaryDirectories.push(root)
