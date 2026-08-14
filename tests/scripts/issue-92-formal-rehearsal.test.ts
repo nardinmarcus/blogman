@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
-import { platform } from 'node:os'
+import { platform, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeAll, describe, expect, it } from 'vitest'
 import * as deliveryEntry from '../../scripts/issue-23-delivery-entry.mjs'
@@ -302,7 +302,7 @@ describe('Issue #92 formal rehearsal public path', () => {
         manifest.sha256,
         `formal-manifest-mutation-${manifest.sha256.slice(0, 12)}`,
       )
-      const sinkRoot = mkdtempSync(join(REPOSITORY_ROOT, '.issue-23-formal-sink-'))
+      const sinkRoot = mkdtempSync(join(tmpdir(), 'blogman-issue-23-formal-sink-'))
       try {
         expect(() => runInFormalRehearsalContext({
           sink: [],
@@ -328,7 +328,7 @@ describe('Issue #92 formal rehearsal public path', () => {
       promotedManifest.sha256,
       `formal-coordinated-promotion-${promotedManifest.sha256.slice(0, 12)}`,
     )
-    const promotionSinkRoot = mkdtempSync(join(REPOSITORY_ROOT, '.issue-23-formal-sink-'))
+    const promotionSinkRoot = mkdtempSync(join(tmpdir(), 'blogman-issue-23-formal-sink-'))
     try {
       expect(() => runInFormalRehearsalContext({
         sink: [],
@@ -359,7 +359,7 @@ describe('Issue #92 formal rehearsal public path', () => {
       const { runFormalFaultHarnessForTestsOnly } = await import('../../scripts/issue-23-delivery-formal-fault-harness.mjs')
       const manifest = repeatedFormalRuns[0].manifest
       const run = () => {
-        const sinkRoot = mkdtempSync(join(REPOSITORY_ROOT, '.issue-23-formal-sink-'))
+        const sinkRoot = mkdtempSync(join(tmpdir(), 'blogman-issue-23-formal-sink-'))
         const operations: Array<Record<string, unknown>> = []
         try {
           const context = Object.freeze({
