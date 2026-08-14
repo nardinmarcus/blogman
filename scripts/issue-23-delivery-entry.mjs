@@ -14,7 +14,7 @@ import {
   createD1Transport,
   createRehearsalD1Transport,
 } from './issue-23-delivery-d1-transport.mjs'
-import { hashD1ArtifactDirectory } from './issue-23-delivery-d1-contracts.mjs'
+import { hashD1ArtifactDirectory, parseStrictJson } from './issue-23-delivery-d1-contracts.mjs'
 import { runD1Stages } from './issue-23-delivery-d1-stages.mjs'
 import {
   createRehearsalWorkerTransport,
@@ -1102,27 +1102,44 @@ function executionDeliverySink() {
 }
 
 function acceptAuthorization(manifestSha256, authorization, deadline) {
-  if (!isPlainRecord(authorization)) fail('authorization must be a plain record')
-  assertExactKeys(
-    authorization,
-    ['format', 'authorization_id', 'manifest_sha256', 'decision'],
-    'authorization',
-  )
-  if (authorization.format !== AUTHORIZATION_FORMAT) fail('authorization format is invalid')
-  assertSafeString(authorization.authorization_id, 'authorization_id')
-  if (authorization.manifest_sha256 !== manifestSha256) fail('authorization manifest does not match')
-  if (authorization.decision !== 'approve') fail('authorization decision must be approve')
-
-  const canonicalAuthorization = {
-    format: authorization.format,
-    authorization_id: authorization.authorization_id,
-    manifest_sha256: authorization.manifest_sha256,
-    decision: authorization.decision,
+  if (!isPlainRecord(authorization)) fail('authorization must be a canonical record')
+  assertExactKeys(authorization, ['bytes', 'sha256'], 'authorization')
+  if (!(authorization.bytes instanceof Uint8Array)
+    || typeof authorization.sha256 !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(authorization.sha256)) {
+    fail('authorization record is malformed')
   }
-  const authorizationBytes = canonicalJsonBytes(canonicalAuthorization)
-  const authorizationDigest = sha256(authorizationBytes)
-  executionDeliverySink().consumeAuthorization({ bytes: authorizationBytes, sha256: authorizationDigest }, deadline)
-  return authorizationDigest
+  const authorizationBytes = Buffer.from(authorization.bytes)
+  const text = authorizationBytes.toString('utf8')
+  let value
+  try {
+    value = parseStrictJson(text.slice(0, -1))
+  } catch {
+    fail('authorization bytes are not valid strict JSON')
+  }
+  if (!Buffer.from(text, 'utf8').equals(authorizationBytes)
+    || !text.endsWith('\n') || text.endsWith('\n\n') || text.includes('\r')
+    || !isPlainRecord(value)) {
+    fail('authorization bytes are not canonical JSON')
+  }
+  assertExactKeys(value, ['format', 'authorization_id', 'manifest_sha256', 'decision'], 'authorization')
+  const canonicalValue = {
+    format: value.format,
+    authorization_id: value.authorization_id,
+    manifest_sha256: value.manifest_sha256,
+    decision: value.decision,
+  }
+  if (!authorizationBytes.equals(canonicalJsonBytes(canonicalValue))) {
+    fail('authorization bytes are not schema-canonical JSON')
+  }
+  if (sha256(authorizationBytes) !== authorization.sha256) fail('authorization identity does not match bytes')
+  if (value.format !== AUTHORIZATION_FORMAT) fail('authorization format is invalid')
+  assertSafeString(value.authorization_id, 'authorization_id')
+  if (value.manifest_sha256 !== manifestSha256) fail('authorization manifest does not match')
+  if (value.decision !== 'approve') fail('authorization decision must be approve')
+
+  executionDeliverySink().consumeAuthorization({ bytes: authorizationBytes, sha256: authorization.sha256 }, deadline)
+  return authorization.sha256
 }
 
 function canonicalD1ExpectedReconciliation(value) {
@@ -1294,8 +1311,8 @@ function disposeExpectedReconciliation(materialized) {
   return { created: true, cleaned, observed_absent: observedAbsent }
 }
 
-function deriveProductionD1Bindings(d1, expectedPath) {
-  const bindings = { ...d1 }
+function deriveProductionD1Bindings(d1, expectedPath, identity) {
+  const bindings = { ...d1, ...identity }
   delete bindings.expected_reconciliation_format
   delete bindings.expected_reconciliation
   bindings.config_path = realpathSync(resolve(ENTRY_REPO_ROOT, d1.config_path))
@@ -1321,10 +1338,13 @@ const FORMAL_REHEARSAL_D1_EVIDENCE_POLICY = Object.freeze({
   malformed_classification: 'formal_rehearsal_d1_result_malformed',
 })
 
-function sanitizedD1Error(classification, d1, evidencePolicy = PRODUCTION_D1_EVIDENCE_POLICY) {
+function sanitizedD1Error(classification, d1, attemptIdentity, evidencePolicy = PRODUCTION_D1_EVIDENCE_POLICY) {
   const stageCounts = Object.fromEntries(PRODUCTION_D1_STAGES.map((stage) => [stage, 0]))
   const stageDurations = Object.fromEntries(PRODUCTION_D1_STAGES.map((stage) => [stage, 0]))
   const identity = {
+    manifest_sha256: attemptIdentity.manifest_sha256,
+    authorization_sha256: attemptIdentity.authorization_sha256,
+    attempt_id: attemptIdentity.attempt_id,
     account_id: d1.account_id,
     d1_database_id: d1.d1_database_id,
     candidate_id: d1.candidate_id,
@@ -1357,8 +1377,20 @@ function sanitizedD1Error(classification, d1, evidencePolicy = PRODUCTION_D1_EVI
   return Object.freeze({ value, bytes, sha256: sha256(bytes) })
 }
 
-function normalizeD1Result(result, evidencePolicy, d1) {
-  const malformed = () => sanitizedD1Error(evidencePolicy.malformed_classification, d1, evidencePolicy)
+function normalizeD1Result(result, evidencePolicy, d1, identity) {
+  const malformed = () => {
+    const receipt = sanitizedD1Error(evidencePolicy.malformed_classification, d1, identity, evidencePolicy)
+    return {
+      outcome: 'ERROR',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: evidencePolicy.malformed_classification },
+      stage_counts: { ...receipt.value.stage_counts, d1_identity: 1 },
+      stage_durations_ms: { ...receipt.value.stage_durations_ms, d1_identity: 1 },
+      evidence_hashes: Object.fromEntries(D1_EVIDENCE_HASHES.map((name) => [name, receipt.value.evidence[name]])),
+      sha256: receipt.sha256,
+      receipt,
+    }
+  }
   if (!isPlainRecord(result) || !isPlainRecord(result.value)
     || !(result.bytes instanceof Uint8Array)
     || typeof result.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(result.sha256)
@@ -1371,8 +1403,13 @@ function normalizeD1Result(result, evidencePolicy, d1) {
     || !isPlainRecord(value.stage_counts)
     || !isPlainRecord(value.stage_durations_ms)
     || !isPlainRecord(value.evidence)
+    || !exact(value, [
+      'format', 'outcome', 'first_terminal_stage', 'failure', 'stage_counts',
+      'stage_durations_ms', 'evidence', 'finalized',
+    ]) || value.finalized !== true
     || !exact(value.evidence, [
       'source', 'production', 'promotable', ...D1_EVIDENCE_HASHES,
+      'manifest_sha256', 'authorization_sha256', 'attempt_id',
       'account_id', 'd1_database_id', 'candidate_id',
     ])
     || value.evidence.source !== evidencePolicy.source
@@ -1380,6 +1417,7 @@ function normalizeD1Result(result, evidencePolicy, d1) {
     || value.evidence.promotable !== (
       evidencePolicy.allow_promotable_pass && evidencePolicy.production && value.outcome === 'PASS'
     )
+    || !D1_EVIDENCE_IDENTITIES.every((field) => value.evidence[field] === identity[field])
     || D1_EVIDENCE_HASHES.some((name) => !/^[a-f0-9]{64}$/u.test(value.evidence[name]))) {
     return malformed()
   }
@@ -1394,12 +1432,14 @@ function normalizeD1Result(result, evidencePolicy, d1) {
     if (!Number.isSafeInteger(value.stage_counts[stage])
       || ![0, 1].includes(value.stage_counts[stage])
       || !Number.isSafeInteger(value.stage_durations_ms[stage])
-      || value.stage_durations_ms[stage] < 0) {
+      || value.stage_durations_ms[stage] < 0
+      || (value.stage_counts[stage] === 0 && value.stage_durations_ms[stage] !== 0)
+      || (value.stage_counts[stage] === 1 && value.stage_durations_ms[stage] <= 0)) {
       return malformed()
     }
   }
   if (value.outcome === 'ERROR' && value.first_terminal_stage === null
-    && isPlainRecord(value.failure) && typeof value.failure.classification === 'string'
+    && isPlainRecord(value.failure) && validFailureClassification(value.outcome, value.failure.classification)
     && PRODUCTION_D1_STAGES.every((stage) => value.stage_counts[stage] === 0
       && value.stage_durations_ms[stage] === 0)) {
     return {
@@ -1431,7 +1471,7 @@ function normalizeD1Result(result, evidencePolicy, d1) {
   if (typeof value.first_terminal_stage !== 'string'
     || !PRODUCTION_D1_STAGES.includes(value.first_terminal_stage)
     || !isPlainRecord(value.failure)
-    || typeof value.failure.classification !== 'string'
+    || !validFailureClassification(value.outcome, value.failure.classification)
     || !PRODUCTION_D1_STAGES.every((stage, index) => (
       value.stage_counts[stage] === (index <= PRODUCTION_D1_STAGES.indexOf(value.first_terminal_stage) ? 1 : 0)
     ))) {
@@ -1448,16 +1488,19 @@ function normalizeD1Result(result, evidencePolicy, d1) {
   }
 }
 
-function normalizeProductionD1Result(result, d1) {
-  return normalizeD1Result(result, PRODUCTION_D1_EVIDENCE_POLICY, d1)
+function normalizeProductionD1Result(result, d1, identity) {
+  return normalizeD1Result(result, PRODUCTION_D1_EVIDENCE_POLICY, d1, identity)
 }
 
 /** Private rehearsal path only. Never used by public production execute. */
-function normalizeFormalRehearsalD1Result(result, d1) {
-  return normalizeD1Result(result, FORMAL_REHEARSAL_D1_EVIDENCE_POLICY, d1)
+function normalizeFormalRehearsalD1Result(result, d1, identity) {
+  return normalizeD1Result(result, FORMAL_REHEARSAL_D1_EVIDENCE_POLICY, d1, identity)
 }
 
 const WORKER_RESULT_STAGES = Object.freeze(['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'])
+const D1_EVIDENCE_IDENTITIES = Object.freeze([
+  'manifest_sha256', 'authorization_sha256', 'attempt_id', 'candidate_id',
+])
 const D1_EVIDENCE_HASHES = Object.freeze([
   'bindings_sha256',
   'wrangler_sha256',
@@ -1475,6 +1518,35 @@ const WORKER_EVIDENCE_HASHES = Object.freeze([
 const WORKER_EVIDENCE_IDENTITIES = Object.freeze([
   'manifest_sha256', 'authorization_sha256', 'attempt_id', 'candidate_id',
 ])
+const FAILURE_CLASSIFICATIONS_BY_OUTCOME = Object.freeze({
+  TIMEOUT: new Set(['overall_timeout', 'stage_timeout', 'timeout']),
+  UNCERTAIN: new Set([
+    'uncertain', 'formal_rehearsal_uncertain', 'live_preconditions_uncertain',
+    'worker_adapter_uncertain',
+  ]),
+  NON_PASS: new Set([
+    'Manifest Drift', 'cloudflare_permission_insufficient', 'd1_not_empty',
+    'empty_only_plan_invalid', 'formal_rehearsal_forced_failure', 'migration_contract_invalid',
+    'migration_ledger_invalid', 'reconciliation_contract_invalid', 'reconciliation_drift',
+    'smoke_control_contract_invalid', 'upload_contract_invalid', 'version_traffic_mismatch',
+  ]),
+  ERROR: new Set([
+    'cloudflare_auth_unavailable', 'credential_authority_unavailable', 'd1_identity_malformed',
+    'd1_identity_response_invalid', 'deployment_status_malformed', 'empty_d1_proof_invalid', 'formal_rehearsal_d1_adapter_error', 'formal_rehearsal_d1_result_malformed',
+    'formal_rehearsal_d1_setup_error', 'formal_rehearsal_response_malformed',
+    'live_preconditions_error', 'live_preconditions_malformed', 'malformed', 'nonzero',
+    'production_d1_adapter_error', 'production_d1_result_malformed', 'production_d1_setup_error',
+    'reconciliation_malformed', 'reconciliation_response_invalid', 'reset_response_invalid',
+    'rollout_controls_malformed', 'smoke_auth_policy_invalid', 'smoke_auth_unavailable', 'stage_error',
+    'transport_binding_mismatch', 'transport_error', 'upload_acceptance_malformed',
+    'worker_adapter_error', 'worker_adapter_nonzero', 'worker_response_malformed', 'worker_result_malformed',
+  ]),
+})
+
+function validFailureClassification(outcome, classification) {
+  return typeof classification === 'string'
+    && FAILURE_CLASSIFICATIONS_BY_OUTCOME[outcome]?.has(classification) === true
+}
 const TERMINAL_EVIDENCE_HASHES = Object.freeze([
   'd1_stage_receipt_sha256',
   ...D1_EVIDENCE_HASHES.map((name) => `d1_${name}`),
@@ -1585,7 +1657,8 @@ function normalizeWorkerResult(result, evidencePolicy, identity) {
       || value.mutation_counts.attempted !== 2 || value.mutation_counts.confirmed !== 2) {
       return malformed()
     }
-  } else if (!exact(value.failure, ['classification']) || typeof value.failure.classification !== 'string'
+  } else if (!exact(value.failure, ['classification'])
+    || !validFailureClassification(value.outcome, value.failure.classification)
     || value.mutation_counts.attempted !== (terminalIndex >= 1 ? 2 : 1)
     || value.mutation_counts.confirmed !== (terminalIndex >= 2 ? 2 : terminalIndex >= 1 ? 1 : 0)) {
     return malformed()
@@ -1687,8 +1760,8 @@ function formalAdapterFactories(context) {
         }),
       })
     },
-    d1Error(classification, d1) {
-      return sanitizedD1Error(classification, d1, FORMAL_REHEARSAL_D1_EVIDENCE_POLICY)
+    d1Error(classification, d1, identity) {
+      return sanitizedD1Error(classification, d1, identity, FORMAL_REHEARSAL_D1_EVIDENCE_POLICY)
     },
     evidence: Object.freeze({
       source: FORMAL_REHEARSAL_EVIDENCE_SOURCE,
@@ -1746,8 +1819,8 @@ function productionAdapterFactories() {
         }),
       })
     },
-    d1Error(classification, d1) {
-      return sanitizedD1Error(classification, d1, PRODUCTION_D1_EVIDENCE_POLICY)
+    d1Error(classification, d1, identity) {
+      return sanitizedD1Error(classification, d1, identity, PRODUCTION_D1_EVIDENCE_POLICY)
     },
     evidence: Object.freeze({
       source: 'production',
@@ -1909,8 +1982,8 @@ function executeProduction(manifest, authorization) {
   let d1Result
   let d1Receipt
   const durableD1Failure = (classification) => {
-    d1Receipt = adapters.d1Error(classification, d1)
-    return adapters.normalizeD1Result(d1Receipt, d1)
+    d1Receipt = adapters.d1Error(classification, d1, workerIdentity)
+    return adapters.normalizeD1Result(d1Receipt, d1, workerIdentity)
   }
   let cleanup = { created: false, cleaned: true, observed_absent: true }
   if (liveResult.outcome === 'PASS') {
@@ -1918,7 +1991,7 @@ function executeProduction(manifest, authorization) {
       if (!withinOverallDeadline()) throw new DeliverySinkDeadlineError()
       materialized = materializeExpectedReconciliation(d1)
       if (!withinOverallDeadline()) throw new DeliverySinkDeadlineError()
-      const bindings = deriveProductionD1Bindings(d1, materialized.path)
+      const bindings = deriveProductionD1Bindings(d1, materialized.path, workerIdentity)
       let transport
       try {
         transport = adapters.createD1Transport(
@@ -1937,7 +2010,8 @@ function executeProduction(manifest, authorization) {
             elapsed_ms: attemptClock.elapsedMilliseconds(),
             monotonic_ms: attemptClock.elapsedMilliseconds,
           })
-          d1Result = adapters.normalizeD1Result(d1Receipt, d1)
+          d1Result = adapters.normalizeD1Result(d1Receipt, d1, workerIdentity)
+          d1Receipt = d1Result.receipt ?? d1Receipt
         } catch {
           d1Result = durableD1Failure(formal ? 'formal_rehearsal_d1_adapter_error' : 'production_d1_adapter_error')
         }
@@ -1951,12 +2025,23 @@ function executeProduction(manifest, authorization) {
       cleanup = disposeExpectedReconciliation(materialized)
     }
   }
-  if (!d1Result) {
+  if (!d1Result && liveResult.outcome === 'PASS') {
     const receipt = adapters.d1Error(
       formal ? 'formal_rehearsal_d1_adapter_error' : 'production_d1_adapter_error',
       d1,
+      workerIdentity,
     )
-    d1Result = adapters.normalizeD1Result(receipt, d1)
+    d1Result = adapters.normalizeD1Result(receipt, d1, workerIdentity)
+    d1Receipt = d1Result.receipt ?? receipt
+  }
+  d1Result ??= {
+    outcome: 'ERROR',
+    first_terminal_stage: 'd1_identity',
+    failure: { classification: formal ? 'formal_rehearsal_d1_adapter_error' : 'production_d1_adapter_error' },
+    stage_counts: Object.fromEntries(PRODUCTION_D1_STAGES.map((stage) => [stage, 0])),
+    stage_durations_ms: Object.fromEntries(PRODUCTION_D1_STAGES.map((stage) => [stage, 0])),
+    evidence_hashes: {},
+    sha256: null,
   }
   let workerResult
   let workerReceipt
@@ -2050,14 +2135,19 @@ function executeProduction(manifest, authorization) {
     finalized: true,
   }
   let result = terminalResult(value)
+  const applyPersistenceElapsed = (elapsedMilliseconds) => {
+    value.ended_at = attemptClock.finish(elapsedMilliseconds)
+    if (terminal.outcome === 'PASS') {
+      value.outcome = 'TIMEOUT'
+      value.first_terminal_stage = terminal.stage
+      value.failure = { classification: 'overall_timeout' }
+      value.evidence.promotable = false
+    }
+    result = terminalResult(value)
+  }
   const measuredBeforePersistence = attemptClock.elapsedMilliseconds()
   if (measuredBeforePersistence > OVERALL_TIMEOUT_SECONDS * 1000) {
-    value.outcome = 'TIMEOUT'
-    value.first_terminal_stage = terminal.stage
-    value.failure = { classification: 'overall_timeout' }
-    value.evidence.promotable = false
-    value.ended_at = attemptClock.finish(measuredBeforePersistence)
-    result = terminalResult(value)
+    applyPersistenceElapsed(measuredBeforePersistence)
   }
   try {
     executionDeliverySink().persistTerminalResult({
@@ -2068,12 +2158,7 @@ function executeProduction(manifest, authorization) {
     }, withinOverallDeadline)
   } catch (error) {
     if (!(error instanceof DeliverySinkDeadlineError)) throw error
-    value.outcome = 'TIMEOUT'
-    value.first_terminal_stage = terminal.stage
-    value.failure = { classification: 'overall_timeout' }
-    value.evidence.promotable = false
-    value.ended_at = attemptClock.finish(attemptClock.elapsedMilliseconds())
-    result = terminalResult(value)
+    applyPersistenceElapsed(attemptClock.elapsedMilliseconds())
     executionDeliverySink().persistTerminalResult({
       terminal: result,
       manifest,
@@ -2140,7 +2225,7 @@ export function validateProductionTerminalEvidence(result) {
     || startedAtMilliseconds === null || endedAtMilliseconds === null
     || endedAtMilliseconds < startedAtMilliseconds
     || (endedAtMilliseconds - startedAtMilliseconds > OVERALL_TIMEOUT_SECONDS * 1000
-      && !(value.outcome === 'TIMEOUT' && value.failure?.classification === 'overall_timeout'))
+      && value.outcome === 'PASS')
     || !['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(value.outcome)
     || !isPlainRecord(value.stage_counts) || !exact(value.stage_counts, DELIVERY_STAGES)
     || !isPlainRecord(value.stage_durations_ms) || !exact(value.stage_durations_ms, DELIVERY_STAGES)
@@ -2186,7 +2271,7 @@ export function validateProductionTerminalEvidence(result) {
       fail('production terminal evidence is invalid')
     }
   } else if (!isPlainRecord(value.failure) || !exact(value.failure, ['classification'])
-    || typeof value.failure.classification !== 'string' || value.failure.classification.length === 0) {
+    || !validFailureClassification(value.outcome, value.failure.classification)) {
     fail('production terminal evidence is invalid')
   }
   const manifest = receipts.manifest
@@ -2219,10 +2304,19 @@ export function validateProductionTerminalEvidence(result) {
       fail('production terminal evidence is invalid')
     }
   } else {
-    const normalizedD1 = normalizeProductionD1Result(d1Receipt, parsedManifest.d1)
+    const normalizedD1 = normalizeProductionD1Result(d1Receipt, parsedManifest.d1, {
+      ...value.identities,
+      attempt_id: value.attempt_id,
+      candidate_id: parsedManifest.repository.commit,
+    })
     if (!isPlainRecord(d1Receipt?.value)
       || !Buffer.from(d1Receipt.bytes ?? []).equals(canonicalJsonBytes(d1Receipt.value))
       || normalizedD1.sha256 !== value.evidence.hashes.d1_stage_receipt_sha256
+      || !D1_EVIDENCE_IDENTITIES.every((field) => d1Receipt.value.evidence[field] === ({
+        ...value.identities,
+        attempt_id: value.attempt_id,
+        candidate_id: parsedManifest.repository.commit,
+      })[field])
       || d1Receipt.value.evidence.source !== 'production'
       || d1Receipt.value.evidence.production !== true
       || d1Receipt.value.evidence.promotable !== (d1Receipt.value.outcome === 'PASS')
@@ -2283,11 +2377,15 @@ export function runFormalRehearsal(config) {
         }),
       })
       return runInFormalRehearsalContext(context, () => {
-        const authorization = Object.freeze({
+        const authorizationBytes = canonicalJsonBytes({
           format: AUTHORIZATION_FORMAT,
           authorization_id: `formal-rehearsal-${currentFormalFaultForTestsOnly()?.stage ?? 'pass'}-${currentFormalFaultForTestsOnly()?.kind ?? 'pass'}-${manifest.sha256.slice(0, 16)}`,
           manifest_sha256: manifest.sha256,
           decision: 'approve',
+        })
+        const authorization = Object.freeze({
+          bytes: authorizationBytes,
+          sha256: sha256(authorizationBytes),
         })
         const terminal = execute(manifest, authorization)
         if (terminal.value.evidence.production === true || terminal.value.evidence.source === 'production') {

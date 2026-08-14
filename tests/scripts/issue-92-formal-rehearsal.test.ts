@@ -39,6 +39,16 @@ function declaredFile(path: string) {
   return { path, sha256: sha256(readFileSync(join(REPOSITORY_ROOT, path))) }
 }
 
+function authorizationRecord(manifestSha256: string, authorizationId: string) {
+  const bytes = Buffer.from(`${JSON.stringify({
+    format: 'blogman-issue-23-authorization/v1',
+    authorization_id: authorizationId,
+    manifest_sha256: manifestSha256,
+    decision: 'approve',
+  }, null, 2)}\n`, 'utf8')
+  return { bytes, sha256: sha256(bytes) }
+}
+
 function stableFormalOperations(operations: Array<Record<string, unknown>>) {
   return JSON.parse(JSON.stringify(operations).replace(
     /\/[^"\s]*blogman-issue-23-execute-expected-[^"\s]*\/expected-reconciliation\.json/gu,
@@ -245,12 +255,10 @@ describe('Issue #92 formal rehearsal public path', () => {
     expect(() => deliveryEntry.validateProductionTerminalEvidence(result.terminal))
       .toThrow(/production terminal evidence/u)
 
-    const productionAuthorization = {
-      format: 'blogman-issue-23-authorization/v1',
-      authorization_id: `formal-manifest-production-policy-${result.manifest.sha256.slice(0, 12)}`,
-      manifest_sha256: result.manifest.sha256,
-      decision: 'approve',
-    }
+    const productionAuthorization = authorizationRecord(
+      result.manifest.sha256,
+      `formal-manifest-production-policy-${result.manifest.sha256.slice(0, 12)}`,
+    )
     expect(() => deliveryEntry.execute(result.manifest, productionAuthorization))
       .toThrow(/ci evidence|d1 evidence|production/u)
 
@@ -263,12 +271,10 @@ describe('Issue #92 formal rehearsal public path', () => {
       mutate(value)
       const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
       const manifest = { value, bytes, sha256: sha256(bytes) }
-      const authorization = {
-        format: 'blogman-issue-23-authorization/v1',
-        authorization_id: `formal-manifest-mutation-${manifest.sha256.slice(0, 12)}`,
-        manifest_sha256: manifest.sha256,
-        decision: 'approve',
-      }
+      const authorization = authorizationRecord(
+        manifest.sha256,
+        `formal-manifest-mutation-${manifest.sha256.slice(0, 12)}`,
+      )
       expect(() => runInFormalRehearsalContext({ sink: [] }, () => (
         deliveryEntry.execute(manifest, authorization)
       ))).toThrow(/formal test manifest|manifest format|ci\.conclusion|classification/u)
@@ -303,12 +309,10 @@ describe('Issue #92 formal rehearsal public path', () => {
             }),
           })
           const terminal = runFormalFaultHarnessForTestsOnly(fault, () => (
-            runInFormalRehearsalContext(context, () => deliveryEntry.execute(manifest, {
-              format: 'blogman-issue-23-authorization/v1',
-              authorization_id: `formal-matrix-${fault.stage}-${fault.kind}`,
-              manifest_sha256: manifest.sha256,
-              decision: 'approve',
-            }))
+            runInFormalRehearsalContext(context, () => deliveryEntry.execute(
+              manifest,
+              authorizationRecord(manifest.sha256, `formal-matrix-${fault.stage}-${fault.kind}`),
+            ))
           ))
           return { terminal, operations }
         } finally {

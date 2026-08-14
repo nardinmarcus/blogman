@@ -23,7 +23,6 @@ import {
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const wranglerPath = realpathSync(join(repoRoot, 'node_modules', '.bin', 'wrangler'))
-const transportCapabilities = new WeakMap()
 
 const canonicalPaths = Object.freeze({
   reset: join(repoRoot, 'db', 'issue-23-clean-start-reset.sql'),
@@ -62,6 +61,9 @@ const TRANSPORT_CONFIG_KEYS = Object.freeze([
   'rollout_safety_sha256',
   'expected_reconciliation_path',
   'expected_reconciliation_sha256',
+  'manifest_sha256',
+  'authorization_sha256',
+  'attempt_id',
   'candidate_id',
   'evidence_class',
   'migrations',
@@ -219,6 +221,9 @@ function validateConfig(config) {
     assertSafeToken(config[field], field)
   }
   for (const field of [
+    'manifest_sha256',
+    'authorization_sha256',
+    'attempt_id',
     'config_sha256',
     'wrangler_sha256',
     'reset_sql_sha256',
@@ -640,18 +645,15 @@ export function createD1Transport(config, childEnvironment, monotonicMs) {
     fail('operation is not supported')
   }
 
-  const transport = Object.freeze({ execute })
-  transportCapabilities.set(transport, Object.freeze({
-    source: normalizedConfig.mode === 'remote' ? 'production' : 'local-non-production',
-    production: normalizedConfig.mode === 'remote',
-    bindings_sha256: bindingsSha256,
-    wrangler_sha256: normalizedConfig.wrangler_sha256,
-  }))
-  return transport
-}
-
-export function getD1TransportProvenance(transport) {
-  return transportCapabilities.get(transport)
+  return Object.freeze({
+    execute,
+    evidence: Object.freeze({
+      source: normalizedConfig.mode === 'remote' ? 'production' : 'local-non-production',
+      production: normalizedConfig.mode === 'remote',
+      bindings_sha256: bindingsSha256,
+      wrangler_sha256: normalizedConfig.wrangler_sha256,
+    }),
+  })
 }
 
 const REHEARSAL_D1_STAGE_BY_OPERATION = Object.freeze({
@@ -778,12 +780,13 @@ export function createRehearsalD1Transport(bindings, sink, fault = null, childEn
     }
     return { status: 0, stdout: rehearsalD1Stdout(request.operation, normalizedBindings), stderr: '', duration_ms: 1 }
   }
-  const transport = Object.freeze({ execute })
-  transportCapabilities.set(transport, Object.freeze({
-    source: FORMAL_REHEARSAL_D1_EVIDENCE_SOURCE,
-    production: false,
-    bindings_sha256: bindingsSha256,
-    wrangler_sha256: bindings.wrangler_sha256,
-  }))
-  return transport
+  return Object.freeze({
+    execute,
+    evidence: Object.freeze({
+      source: FORMAL_REHEARSAL_D1_EVIDENCE_SOURCE,
+      production: false,
+      bindings_sha256: bindingsSha256,
+      wrangler_sha256: bindings.wrangler_sha256,
+    }),
+  })
 }

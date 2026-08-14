@@ -5,7 +5,6 @@ import {
   d1StageBindingsSha256,
   parseStrictJson,
 } from './issue-23-delivery-d1-contracts.mjs'
-import { getD1TransportProvenance } from './issue-23-delivery-d1-transport.mjs'
 
 export { D1_STAGE_TIMEOUT_MS }
 
@@ -48,6 +47,9 @@ const BINDING_KEYS = Object.freeze([
   'rollout_safety_sha256',
   'expected_reconciliation_path',
   'expected_reconciliation_sha256',
+  'manifest_sha256',
+  'authorization_sha256',
+  'attempt_id',
   'candidate_id',
   'evidence_class',
   'migrations',
@@ -192,6 +194,9 @@ function normalizeBindings(value) {
     'candidate_id',
   ]) assertSafeString(value[field], `bindings.${field}`)
   for (const field of [
+    'manifest_sha256',
+    'authorization_sha256',
+    'attempt_id',
     'config_sha256',
     'wrangler_sha256',
     'reset_sql_sha256',
@@ -670,7 +675,7 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, 
   if (monotonic_ms !== undefined && typeof monotonic_ms !== 'function') fail('monotonic_ms is invalid')
   const bindings = normalizeBindings(rawBindings)
   validateTransport(transport)
-  const provenance = getD1TransportProvenance(transport)
+  const provenance = isRecord(transport.evidence) ? transport.evidence : undefined
   const bindingSha256 = d1StageBindingsSha256(bindings)
   const bindingMismatch = provenance !== undefined
     && provenance.bindings_sha256 !== bindingSha256
@@ -760,6 +765,9 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, 
       promotable: production && terminal.outcome === 'PASS',
       bindings_sha256: bindingSha256,
       wrangler_sha256: bindings.wrangler_sha256,
+      manifest_sha256: bindings.manifest_sha256,
+      authorization_sha256: bindings.authorization_sha256,
+      attempt_id: bindings.attempt_id,
       account_id: bindings.account_id,
       d1_database_id: bindings.d1_database_id,
       config_sha256: bindings.config_sha256,

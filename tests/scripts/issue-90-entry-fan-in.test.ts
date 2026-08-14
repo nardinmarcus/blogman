@@ -62,7 +62,12 @@ import {
 import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-formal-runtime.mjs'
 import { hashD1ArtifactDirectory } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
 import { formalExecutionClosureSha256 } from '../../scripts/issue-23-delivery-execution-closure.mjs'
-import { repositoryDeliverySink, repositoryDeliverySinkRoot } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
+import { runInFormalRehearsalContext } from '../../scripts/issue-23-delivery-formal-context.mjs'
+import {
+  DeliverySinkDeadlineError,
+  repositoryDeliverySink,
+  repositoryDeliverySinkRoot,
+} from '../../scripts/issue-23-delivery-evidence-sink.mjs'
 import { isolatedAuthorityChildEnvironment } from '../helpers/issue-23-authority-isolation'
 
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
@@ -329,13 +334,18 @@ function manifest(overrides: Record<string, unknown> = {}) {
 
 type ManifestValue = ReturnType<typeof manifest>['value']
 
-function authorizationFor(prepared: ReturnType<typeof manifest>, id: string) {
+function authorizationValueFor(prepared: ReturnType<typeof manifest>, id: string) {
   return {
     format: AUTHORIZATION_FORMAT,
     authorization_id: id,
     manifest_sha256: prepared.sha256,
     decision: 'approve',
   }
+}
+
+function authorizationFor(prepared: ReturnType<typeof manifest>, id: string) {
+  const bytes = Buffer.from(`${JSON.stringify(authorizationValueFor(prepared, id), null, 2)}\n`, 'utf8')
+  return { bytes, sha256: hash(bytes) }
 }
 
 function actualPreparedManifest() {
@@ -537,7 +547,7 @@ function d1Result(failedStage: string | null = null) {
   const terminal = failedStage ?? null
   const failedIndex = failedStage === null ? stages.length - 1 : stages.indexOf(failedStage)
   const counts = Object.fromEntries(stages.map((stage, index) => [stage, index <= failedIndex ? 1 : 0]))
-  const durations = Object.fromEntries(stages.map((stage) => [stage, 1]))
+  const durations = Object.fromEntries(stages.map((stage) => [stage, counts[stage] === 1 ? 1 : 0]))
   const value = {
     format: D1_RESULT_FORMAT,
     outcome: failedStage === null ? 'PASS' : 'NON_PASS',
@@ -550,6 +560,9 @@ function d1Result(failedStage: string | null = null) {
       production: true,
       promotable: failedStage === null,
       ...Object.fromEntries(D1_EVIDENCE_HASHES.map((name) => [name, name === 'trace_sha256' ? D1_TRACE_HASH : HASH])),
+      manifest_sha256: '1'.repeat(64),
+      authorization_sha256: '2'.repeat(64),
+      attempt_id: '3'.repeat(64),
       account_id: 'account-id',
       d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
       candidate_id: CANDIDATE,
@@ -603,12 +616,24 @@ function configureD1(failedStage: string | null = null, receipt = d1Result(faile
     },
   }
   createD1TransportMock.mockImplementation(() => transport)
-  runD1StagesMock.mockImplementation(({ transport: activeTransport }: { transport: typeof transport }) => {
+  runD1StagesMock.mockImplementation(({
+    bindings,
+    transport: activeTransport,
+  }: { bindings: Record<string, string>, transport: typeof transport }) => {
     const operations = failedStage === null
       ? D1_OPERATIONS
       : D1_OPERATIONS.slice(0, D1_OPERATIONS.indexOf(failedStage) + 1)
     for (const operation of operations) activeTransport.execute({ operation })
-    return receipt
+    const boundReceipt = structuredClone(receipt)
+    Object.assign(boundReceipt.value.evidence, {
+      manifest_sha256: bindings.manifest_sha256,
+      authorization_sha256: bindings.authorization_sha256,
+      attempt_id: bindings.attempt_id,
+      candidate_id: bindings.candidate_id,
+    })
+    boundReceipt.bytes = Buffer.from(`${JSON.stringify(boundReceipt.value, null, 2)}\n`, 'utf8')
+    boundReceipt.sha256 = hash(boundReceipt.bytes)
+    return boundReceipt
   })
   return calls
 }
@@ -784,6 +809,41 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(() => execute(prepared, authorizationFor(prepared, 'artifact-file-tree-at-sign'))).not.toThrow()
   })
 
+  it('consumes the caller-provided schema-ordered Authorization bytes and exact identity', () => {
+    configureD1('d1_identity')
+    const prepared = manifest()
+    const authorization = authorizationFor(prepared, 'fan-in-canonical-authorization')
+
+    const terminal = execute(prepared, authorization)
+
+    expect(terminal.value.identities.authorization_sha256).toBe(authorization.sha256)
+    expect(repositoryDeliverySink.readTerminalEvidence(terminal.sha256).authorization.bytes)
+      .toEqual(authorization.bytes)
+  })
+
+  it.each([
+    ['non-schema key order', (value: ReturnType<typeof authorizationValueFor>) => ({
+      decision: value.decision,
+      manifest_sha256: value.manifest_sha256,
+      authorization_id: value.authorization_id,
+      format: value.format,
+    })],
+    ['duplicate JSON key', (value: ReturnType<typeof authorizationValueFor>) => (
+      `${JSON.stringify(value).slice(0, -1)},\"decision\":\"approve\"}`
+    )],
+  ])('rejects Authorization %s before consumption', (_name, encode) => {
+    const prepared = manifest()
+    const value = authorizationValueFor(prepared, `fan-in-authorization-${_name}`)
+    const encoded = encode(value)
+    const bytes = Buffer.from(typeof encoded === 'string'
+      ? `${encoded}\n`
+      : `${JSON.stringify(encoded, null, 2)}\n`, 'utf8')
+    const authorization = { bytes, sha256: hash(bytes) }
+
+    expect(() => execute(prepared, authorization)).toThrow(/authorization.*(?:schema-canonical|strict JSON)/u)
+    expect(existsSync(join(DURABLE_SINK_ROOT, 'authorizations', `${authorization.sha256}.json`))).toBe(false)
+  })
+
   it('consumes Authorization but stops before every production adapter when smoke authority is missing', () => {
     const original = process.env.DELIVERY_SMOKE_ADMIN
     delete process.env.DELIVERY_SMOKE_ADMIN
@@ -839,27 +899,19 @@ describe('Issue #90 formal entry fan-in', () => {
     const prepared = manifest()
     const baseAuthorization = authorizationFor(prepared, 'fan-in-adversarial-order')
     const authorization = {
-      get format() {
-        events.push('authorization:format')
-        return baseAuthorization.format
+      get bytes() {
+        events.push('authorization:bytes')
+        return baseAuthorization.bytes
       },
-      get authorization_id() {
-        events.push('authorization:authorization_id')
-        return baseAuthorization.authorization_id
-      },
-      get manifest_sha256() {
-        events.push('authorization:manifest_sha256')
-        return baseAuthorization.manifest_sha256
-      },
-      get decision() {
-        events.push('authorization:decision')
-        return baseAuthorization.decision
+      get sha256() {
+        events.push('authorization:sha256')
+        return baseAuthorization.sha256
       },
     }
 
     execute(prepared, authorization)
 
-    expect(events.indexOf('adapter-selected')).toBeGreaterThan(events.lastIndexOf('authorization:decision'))
+    expect(events.indexOf('adapter-selected')).toBeGreaterThan(events.lastIndexOf('authorization:sha256'))
     expect(events.indexOf('transport:d1_identity')).toBeGreaterThan(events.indexOf('adapter-selected'))
   })
 
@@ -876,12 +928,13 @@ describe('Issue #90 formal entry fan-in', () => {
       }
     })
     const prepared = manifest()
+    const baseAuthorization = authorizationFor(prepared, 'fan-in-order')
     const authorization = {
-      ...authorizationFor(prepared, 'fan-in-order'),
-      get decision() {
+      get bytes() {
         authorizationRead = true
-        return 'approve'
+        return baseAuthorization.bytes
       },
+      sha256: baseAuthorization.sha256,
     }
 
     const result = execute(prepared, authorization)
@@ -899,6 +952,51 @@ describe('Issue #90 formal entry fan-in', () => {
       first_terminal_stage: 'worker_deploy',
       failure: { classification: 'worker_adapter_error' },
       evidence: { source: 'production', production: true, promotable: false },
+    })
+  })
+
+  it('preserves the first terminal cause when persistence crosses the overall deadline', () => {
+    const prepared = manifest()
+    prepared.value.ci.conclusion = 'in_progress-test-evidence'
+    prepared.value.ci.evidence_class = 'formal-rehearsal-test-evidence'
+    prepared.value.d1.evidence_class = 'formal-rehearsal-test-evidence'
+    prepared.bytes = Buffer.from(`${JSON.stringify(prepared.value, null, 2)}\n`, 'utf8')
+    prepared.sha256 = hash(prepared.bytes)
+    const authorization = authorizationFor(prepared, 'fan-in-first-terminal-persistence')
+    let monotonic = 0n
+    const persisted: Array<Record<string, unknown>> = []
+    const deliverySink = {
+      consumeAuthorization: () => authorization.sha256,
+      persistTerminalResult: (input: { terminal: { value: Record<string, unknown> } }, deadline?: () => boolean) => {
+        persisted.push(structuredClone(input.terminal.value))
+        if (persisted.length === 1) {
+          monotonic = 5_400_001_000_000n
+          if (deadline?.() !== true) throw new DeliverySinkDeadlineError()
+        }
+        return input.terminal.value
+      },
+    }
+    createWorkerTransportMock.mockReturnValue({
+      livePreconditions: () => ({ outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }),
+      execute() {},
+    })
+
+    const terminal = runInFormalRehearsalContext({
+      sink: [],
+      deliverySink,
+      clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => monotonic },
+    }, () => execute(prepared, authorization))
+
+    expect(persisted).toHaveLength(2)
+    expect(terminal.value).toMatchObject({
+      outcome: 'NON_PASS',
+      first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'Manifest Drift' },
+    })
+    expect(persisted[1]).toMatchObject({
+      outcome: 'NON_PASS',
+      first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'Manifest Drift' },
     })
   })
 
@@ -939,6 +1037,24 @@ describe('Issue #90 formal entry fan-in', () => {
     })
     expect(result.value.outcome).not.toBe('PASS')
     expect(result.value.failure.classification).toBe('worker_adapter_error')
+  })
+
+  it('terminalizes malformed D1 after Authorization consumption without throwing or inventing suffix history', () => {
+    const prepared = actualPreparedManifest()
+    const malformed = { format: D1_RESULT_FORMAT, outcome: 'PASS' }
+    const malformedBytes = Buffer.from(`${JSON.stringify(malformed, null, 2)}\n`, 'utf8')
+    runD1StagesMock.mockReturnValue({ value: malformed, bytes: malformedBytes, sha256: hash(malformedBytes) })
+
+    const terminal = execute(prepared, authorizationFor(prepared, 'fan-in-malformed-d1-receipt'))
+
+    expect(terminal.value).toMatchObject({
+      authorization_consumed: true,
+      outcome: 'ERROR',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'production_d1_result_malformed' },
+      stage_counts: { d1_identity: 1, clean_start_reset: 0, worker_deploy: 0 },
+    })
+    expect(validateProductionTerminalEvidence(structuredClone(terminal))).toBe(true)
   })
 
   it('terminalizes a malformed worker receipt without inventing unprovable upload mutation history', () => {
@@ -1004,9 +1120,9 @@ describe('Issue #90 formal entry fan-in', () => {
 
   it('independently validates a durable production terminal ending at authorization_accept', () => {
     const prepared = actualPreparedManifest()
-    const authorizationValue = authorizationFor(prepared, 'fan-in-authorization-terminal')
-    const authorizationBytes = Buffer.from(`${JSON.stringify(authorizationValue, null, 2)}\n`, 'utf8')
-    const authorization = { value: authorizationValue, bytes: authorizationBytes, sha256: hash(authorizationBytes) }
+    const authorizationRecord = authorizationFor(prepared, 'fan-in-authorization-terminal')
+    const authorizationValue = authorizationValueFor(prepared, 'fan-in-authorization-terminal')
+    const authorization = { value: authorizationValue, ...authorizationRecord }
     const identities = {
       manifest_sha256: prepared.sha256,
       authorization_sha256: authorization.sha256,
@@ -1047,6 +1163,38 @@ describe('Issue #90 formal entry fan-in', () => {
     repositoryDeliverySink.persistTerminalResult({ terminal, manifest: prepared, d1: null, worker: null })
 
     expect(validateProductionTerminalEvidence(structuredClone(terminal))).toBe(true)
+
+    const invalidAuthorization = authorizationFor(prepared, 'fan-in-invalid-bounded-classification')
+    const invalidIdentities = {
+      manifest_sha256: prepared.sha256,
+      authorization_sha256: invalidAuthorization.sha256,
+    }
+    const invalidAttemptId = hash(Buffer.from(`${JSON.stringify({
+      format: 'blogman-issue-23-attempt/v1',
+      ...invalidIdentities,
+    }, null, 2)}\n`, 'utf8'))
+    const invalidTerminalValue = {
+      ...terminalValue,
+      identities: invalidIdentities,
+      attempt_id: invalidAttemptId,
+      outcome: 'TIMEOUT',
+      failure: { classification: 'worker_adapter_nonzero' },
+    }
+    const invalidTerminalBytes = Buffer.from(`${JSON.stringify(invalidTerminalValue, null, 2)}\n`, 'utf8')
+    const invalidTerminal = {
+      value: invalidTerminalValue,
+      bytes: invalidTerminalBytes,
+      sha256: hash(invalidTerminalBytes),
+    }
+    repositoryDeliverySink.consumeAuthorization(invalidAuthorization)
+    repositoryDeliverySink.persistTerminalResult({
+      terminal: invalidTerminal,
+      manifest: prepared,
+      d1: null,
+      worker: null,
+    })
+    expect(() => validateProductionTerminalEvidence(structuredClone(invalidTerminal)))
+      .toThrow(/production terminal evidence is invalid/u)
   })
 
   it('validates an execute-produced early NON_PASS terminal with no D1 or Worker receipt', () => {
@@ -1093,6 +1241,10 @@ describe('Issue #90 formal entry fan-in', () => {
       bytes: Buffer.from(record.bytes).toString('base64'),
       sha256: record.sha256,
     })
+    const encodedAuthorization = {
+      bytes: Buffer.from(authorization.bytes).toString('base64'),
+      sha256: authorization.sha256,
+    }
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
       import { execute, validateProductionTerminalEvidence } from ${JSON.stringify(ENTRY_MODULE_URL)}
       import { repositoryDeliverySink } from ${JSON.stringify(SINK_MODULE_URL)}
@@ -1103,7 +1255,10 @@ describe('Issue #90 formal entry fan-in', () => {
       })
       const manifest = decodeRecord(${JSON.stringify(encodeRecord(prepared))})
       const terminal = decodeRecord(${JSON.stringify(encodeRecord(terminal))})
-      const authorization = ${JSON.stringify(authorization)}
+      const authorization = {
+        bytes: Buffer.from(${JSON.stringify(encodedAuthorization.bytes)}, 'base64'),
+        sha256: ${JSON.stringify(encodedAuthorization.sha256)},
+      }
       if (validateProductionTerminalEvidence(terminal) !== true) process.exitCode = 2
       const durable = repositoryDeliverySink.readTerminalEvidence(terminal.sha256)
       const durableValues = [durable.terminal, durable.manifest, durable.d1, durable.worker]

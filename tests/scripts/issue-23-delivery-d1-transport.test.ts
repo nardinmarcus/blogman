@@ -20,7 +20,6 @@ import {
   D1TransportError,
   D1_TRANSPORT_MAX_OUTPUT_BYTES,
   createD1Transport,
-  getD1TransportProvenance,
   hashD1ArtifactDirectory as transportHashD1ArtifactDirectory,
 } from '../../scripts/issue-23-delivery-d1-transport.mjs'
 import {
@@ -110,6 +109,9 @@ function createConfig(overrides: Record<string, unknown> = {}) {
     rollout_safety_sha256: sha256File(rolloutSafetyPath),
     expected_reconciliation_path: expectedPath,
     expected_reconciliation_sha256: sha256File(expectedPath),
+    manifest_sha256: '1'.repeat(64),
+    authorization_sha256: '2'.repeat(64),
+    attempt_id: '3'.repeat(64),
     candidate_id: 'c'.repeat(40),
     evidence_class: 'test-non-production',
     migrations: MIGRATIONS,
@@ -149,7 +151,7 @@ describe('Issue #90 D1 transport', () => {
     const { config } = createConfig()
     const transport = createD1Transport(config)
 
-    expect(getD1TransportProvenance(transport)).toMatchObject({
+    expect(transport.evidence).toMatchObject({
       source: 'local-non-production',
       production: false,
       bindings_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
@@ -161,7 +163,7 @@ describe('Issue #90 D1 transport', () => {
     const { config } = createConfig()
     const transport = createD1Transport(config)
 
-    expect(Object.keys(transport)).toEqual(['execute'])
+    expect(Object.keys(transport)).toEqual(['execute', 'evidence'])
     const result = transport.execute(request('empty_d1_proof'))
 
     expect(result.status).toBe(0)
@@ -177,7 +179,7 @@ describe('Issue #90 D1 transport', () => {
 
     expect(transportModule).not.toHaveProperty('buildD1Command')
     expect(transportModule).not.toHaveProperty('registerD1TransportCapability')
-    expect(Object.keys(transport)).toEqual(['execute'])
+    expect(Object.keys(transport)).toEqual(['execute', 'evidence'])
     expect(transport.execute(request('empty_d1_proof')).status).toBe(0)
   })
 

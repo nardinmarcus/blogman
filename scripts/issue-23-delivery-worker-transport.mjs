@@ -3,6 +3,7 @@ import { readFileSync, chmodSync, lstatSync, mkdtempSync, readdirSync, realpathS
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { D1ChildError, runBoundedChild } from './issue-23-delivery-d1-child.mjs'
+import { parseStrictJson } from './issue-23-delivery-d1-contracts.mjs'
 import { WorkerTransportError } from './issue-23-delivery-worker-stages.mjs'
 
 const OVERALL_TIMEOUT_MS = 5400000
@@ -25,14 +26,10 @@ function exact(value, keys) { return record(value) && Object.keys(value).length 
 function safeId(value) { return typeof value === 'string' && /^[A-Za-z0-9._-]+$/u.test(value) }
 function sha256(value) { return typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value) }
 
-const transportCapabilities = new WeakMap()
 export const FORMAL_REHEARSAL_WORKER_EVIDENCE_SOURCE = 'formal-rehearsal-test-evidence'
 
-export function getWorkerTransportProvenance(transport) {
-  return transportCapabilities.get(transport)
-}
 function parseJson(stdout, label, duration_ms = 1) {
-  try { return JSON.parse(stdout) } catch { throw new WorkerTransportError('ERROR', `${label}_malformed`, duration_ms) }
+  try { return parseStrictJson(stdout) } catch { throw new WorkerTransportError('ERROR', `${label}_malformed`, duration_ms) }
 }
 
 function assertPath(value, label) {
@@ -366,7 +363,7 @@ export function createWorkerTransport(bindings, environments = { cloudflare: pro
     }
   }
 
-  const transport = Object.freeze({ livePreconditions, execute(request) {
+  const execute = (request) => {
     if (!exact(request, ['operation', 'stage', 'timeout_ms', 'elapsed_ms', 'version_id', 'deployment_id'])
       || request.operation !== request.stage || !['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'].includes(request.operation)
       || !Number.isSafeInteger(request.timeout_ms) || !Number.isSafeInteger(request.elapsed_ms)
@@ -445,12 +442,12 @@ export function createWorkerTransport(bindings, environments = { cloudflare: pro
     const reconciliationResult = invoke(reconciliationPlan.executable, reconciliationPlan.args, request, spent)
     spent += reconciliationResult.duration_ms
     return response({ before: before.value, after: after.value, checks, controls, reconciliation: parseReconciliation(reconciliationResult.stdout, reconciliationResult.duration_ms) }, spent)
-  } })
-  transportCapabilities.set(transport, Object.freeze({
-    source: 'production',
-    production: true,
-  }))
-  return transport
+  }
+  return Object.freeze({
+    livePreconditions,
+    execute,
+    evidence: Object.freeze({ source: 'production', production: true }),
+  })
 }
 
 /**
@@ -567,7 +564,9 @@ export function createRehearsalWorkerTransport(bindings, sink, fault = null, env
     return response({ before, after, checks, controls, reconciliation }, 1)
   }
 
-  const transport = Object.freeze({ livePreconditions, execute })
-  transportCapabilities.set(transport, Object.freeze({ source: FORMAL_REHEARSAL_WORKER_EVIDENCE_SOURCE, production: false }))
-  return transport
+  return Object.freeze({
+    livePreconditions,
+    execute,
+    evidence: Object.freeze({ source: FORMAL_REHEARSAL_WORKER_EVIDENCE_SOURCE, production: false }),
+  })
 }

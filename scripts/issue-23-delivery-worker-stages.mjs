@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { getWorkerTransportProvenance } from './issue-23-delivery-worker-transport.mjs'
+import { parseStrictJson } from './issue-23-delivery-d1-contracts.mjs'
 
 export const WORKER_STAGE_ORDER = Object.freeze(['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'])
 const TIMEOUT_MS = Object.freeze({ worker_deploy: 600000, version_traffic_verification: 300000, smoke_control_t0: 300000 })
@@ -79,7 +79,7 @@ function response(value) {
   }
   if (value.status !== 0 || value.stderr !== '') return { error: true, duration_ms: value.duration_ms }
   try {
-    return { value: JSON.parse(value.stdout), duration_ms: value.duration_ms }
+    return { value: parseStrictJson(value.stdout), duration_ms: value.duration_ms }
   } catch {
     return { malformed: true, duration_ms: value.duration_ms }
   }
@@ -120,7 +120,7 @@ export function runWorkerStages({ bindings, transport, elapsed_ms = 0, monotonic
     || typeof identity.candidate_id !== 'string' || !/^[a-f0-9]{40}$/u.test(identity.candidate_id)) {
     throw new Error('worker evidence identity is invalid')
   }
-  const provenance = getWorkerTransportProvenance(transport)
+  const provenance = record(transport.evidence) ? transport.evidence : undefined
   const trace = []
   const evidenceHashes = emptyEvidenceHashes()
   const mutation_counts = { attempted: 0, confirmed: 0 }

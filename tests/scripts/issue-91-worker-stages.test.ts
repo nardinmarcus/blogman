@@ -68,6 +68,25 @@ describe('Issue #91 worker suffix', () => {
     expect(JSON.stringify(result.value)).not.toMatch(/stdout|stderr|token|cookie|private/i)
   })
 
+  it('rejects duplicate Worker response keys at the strict JSON boundary', () => {
+    const upload = acceptedUpload().stdout
+    const duplicate = upload.replace(
+      '"version_id":"version-new"',
+      '"version_id":"forged-version","version_id":"version-new"',
+    )
+    const result = runWorkerStages({
+      bindings,
+      transport: transport([{ status: 0, stderr: '', stdout: duplicate, duration_ms: 1 }]),
+    })
+
+    expect(result.value).toMatchObject({
+      outcome: 'ERROR',
+      first_terminal_stage: 'worker_deploy',
+      failure: { classification: 'worker_response_malformed' },
+      stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 },
+    })
+  })
+
   it.each([
     ['malformed', { status: 0, stderr: '', stdout: '{', duration_ms: 1 }, 'worker_response_malformed'],
     ['timeout', response({ format: 'blogman-upload-source-lifecycle-acceptance/v1', state: 'accepted', upload_operation_id: `issue-23-${identity.candidate_id}-upload-1`, version_id: 'version-new', config_sha256: 'c'.repeat(64), snapshot_tree_sha256: 'a'.repeat(64), snapshot_identity_sha256: 'd'.repeat(64), snapshot_proof_before_sha256: 'e'.repeat(64), snapshot_proof_after_sha256: 'f'.repeat(64), build_directory_proof_sha256: '0'.repeat(64), wrangler_output_sha256: 'b'.repeat(64) }, 600001), 'stage_timeout'],

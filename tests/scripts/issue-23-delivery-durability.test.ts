@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -185,6 +185,23 @@ describe('Issue #23 durable delivery records', () => {
     expect(() => sink.consumeAuthorization(authorizationRecord())).toThrow(/canonical|identity/u)
   })
 
+  it('rejects unsafe leaf entries on Authorization EEXIST instead of treating them as consumed records', () => {
+    const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-leaf-'))
+    temporaryDirectories.push(root)
+    const sink = createRepositoryDeliverySink(root)
+    const authorization = authorizationRecord()
+    const destination = join(root, 'authorizations', `${authorization.sha256}.json`)
+    const target = join(root, 'leaf-target')
+    writeFileSync(target, authorization.bytes, { mode: 0o600 })
+
+    symlinkSync(target, destination)
+    expect(() => sink.consumeAuthorization(authorization)).toThrow(/canonical durable file/u)
+    rmSync(destination)
+
+    linkSync(target, destination)
+    expect(() => sink.consumeAuthorization(authorization)).toThrow(/canonical durable file/u)
+  })
+
   it('forwards a rejecting Authorization deadline through the canonical facade without publication', () => {
     const authorization = record({
       ...authorizationRecord().value,
@@ -321,8 +338,17 @@ describe('Issue #23 durable delivery records', () => {
       ...authorizationRecord().value,
       manifest_sha256: manifest.sha256,
     })
-    const d1 = record({ format: 'blogman-issue-23-d1-stages/v1', marker: 'd1' })
     const attemptId = 'd'.repeat(64)
+    const d1 = record({
+      format: 'blogman-issue-23-d1-stages/v1',
+      evidence: {
+        manifest_sha256: manifest.sha256,
+        authorization_sha256: authorization.sha256,
+        attempt_id: attemptId,
+        candidate_id: manifest.value.repository.commit,
+      },
+      marker: 'd1',
+    })
     const worker = record({
       format: 'blogman-issue-23-worker-stages/v1',
       evidence: {
@@ -382,6 +408,44 @@ describe('Issue #23 durable delivery records', () => {
       .toThrow(/authorization.*missing/u)
     expect(readdirSync(join(root, 'records'))).toEqual([])
     expect(readdirSync(join(root, 'terminals'))).toEqual([])
+  })
+
+  it('rejects reusing one D1 sidecar for a different attempt identity', () => {
+    const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-d1-identity-'))
+    temporaryDirectories.push(root)
+    const sink = createRepositoryDeliverySink(root)
+    const manifest = record({
+      format: 'blogman-issue-23-canonical-frozen-manifest/v1',
+      repository: { commit: 'c'.repeat(40) },
+    })
+    const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
+    const attemptId = 'd'.repeat(64)
+    const d1 = record({
+      format: 'blogman-issue-23-d1-stages/v1',
+      evidence: {
+        manifest_sha256: manifest.sha256,
+        authorization_sha256: authorization.sha256,
+        attempt_id: attemptId,
+        candidate_id: manifest.value.repository.commit,
+      },
+    })
+    const terminalValue = {
+      format: 'blogman-issue-23-terminal-result/v1',
+      identities: { manifest_sha256: manifest.sha256, authorization_sha256: authorization.sha256 },
+      attempt_id: attemptId,
+      evidence: { hashes: { d1_stage_receipt_sha256: d1.sha256, worker_stage_receipt_sha256: null } },
+    }
+    const terminal = record(terminalValue)
+    sink.consumeAuthorization(authorization)
+    expect(sink.persistTerminalResult({ terminal, manifest, d1, worker: null })).toBe(terminal.sha256)
+
+    const alternateTerminal = record({ ...terminalValue, attempt_id: 'e'.repeat(64) })
+    expect(() => sink.persistTerminalResult({
+      terminal: alternateTerminal,
+      manifest,
+      d1,
+      worker: null,
+    })).toThrow(/D1|attempt|identit/u)
   })
 
   it('rejects reusing one Worker sidecar for a different manifest or attempt identity', () => {
@@ -529,6 +593,24 @@ describe('Issue #23 durable delivery records', () => {
 
     expect(() => sink.persistTerminalResult({ terminal, manifest, d1: null, worker }))
       .toThrow(/private field/u)
+
+    for (const key of ['api_key', 'credential', 'private_output', 'access_token']) {
+      const unsafeWorker = record({
+        format: 'blogman-issue-23-worker-stages/v1',
+        evidence: { [key]: 'ordinary-cloudflare-value' },
+      })
+      const unsafeTerminal = record({
+        ...terminal.value,
+        evidence: {
+          hashes: {
+            d1_stage_receipt_sha256: null,
+            worker_stage_receipt_sha256: unsafeWorker.sha256,
+          },
+        },
+      })
+      expect(() => sink.persistTerminalResult({ terminal: unsafeTerminal, manifest, d1: null, worker: unsafeWorker }))
+        .toThrow(/private field/u)
+    }
     expect(readdirSync(join(root, 'records'))).toEqual([])
     expect(readdirSync(join(root, 'terminals'))).toEqual([])
   })

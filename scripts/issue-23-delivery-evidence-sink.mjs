@@ -14,6 +14,7 @@ import {
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { userInfo } from 'node:os'
+import { parseStrictJson } from './issue-23-delivery-d1-contracts.mjs'
 const PRODUCTION_AUTHORITY_HOME = resolve(userInfo().homedir)
 const PRODUCTION_AUTHORITY_ROOT = join(
   PRODUCTION_AUTHORITY_HOME,
@@ -56,7 +57,9 @@ function isRecord(value) {
 }
 
 const PRIVATE_EVIDENCE_KEYS = new Set([
-  'body', 'content', 'html', 'token', 'password', 'secret', 'rawresponse', 'responsebody',
+  'apikey', 'accesstoken', 'authorizationheader', 'body', 'content', 'cookie', 'credential',
+  'html', 'password', 'privateoutput', 'rawoutput', 'rawprivateadapteroutput', 'rawresponse',
+  'responsebody', 'secret', 'token',
 ])
 
 function assertNoPrivateEvidence(value) {
@@ -86,14 +89,15 @@ function canonicalRecord(record, label) {
   const bytes = Buffer.from(record.bytes)
   if (sha256(bytes) !== record.sha256) fail(`${label} identity does not match bytes`)
   const text = bytes.toString('utf8')
-  if (!text.endsWith('\n') || text.endsWith('\n\n') || text.includes('\r')) {
+  if (!Buffer.from(text, 'utf8').equals(bytes)
+    || !text.endsWith('\n') || text.endsWith('\n\n') || text.includes('\r')) {
     fail(`${label} bytes are not canonical`)
   }
   let value
   try {
-    value = JSON.parse(text.slice(0, -1))
+    value = parseStrictJson(text.slice(0, -1))
   } catch {
-    fail(`${label} bytes are not valid JSON`)
+    fail(`${label} bytes are not valid strict JSON`)
   }
   if (!isRecord(value) || `${JSON.stringify(value, null, 2)}\n` !== text) {
     fail(`${label} bytes are not canonical`)
@@ -187,12 +191,48 @@ function createCanonicalProductionDirectory(path, label) {
   return canonicalDirectoryIdentity(path, label)
 }
 
-function assertSecureFile(path, label) {
+function assertSecureFile(path, label, expectedLinks = 1) {
   let stat
   try { stat = lstatSync(path) } catch { fail(`${label} is missing from the durable sink`) }
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) fail(`${label} is not a canonical durable file`)
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== expectedLinks) fail(`${label} is not a canonical durable file`)
   if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) fail(`${label} owner drifted`)
   if ((stat.mode & 0o777) !== 0o600) fail(`${label} mode drifted`)
+}
+
+function assertSecurePublishedFile(path, directory, label) {
+  let metadata
+  try { metadata = lstatSync(path) } catch { fail(`${label} is missing from the durable sink`) }
+  if (metadata.nlink === 1) {
+    assertSecureFile(path, label)
+    return
+  }
+  if (metadata.nlink !== 2 || !metadata.isFile() || metadata.isSymbolicLink()
+    || (typeof process.getuid === 'function' && metadata.uid !== process.getuid())
+    || (metadata.mode & 0o777) !== 0o600) {
+    fail(`${label} is not a canonical durable file`)
+  }
+  const destinationName = path.split('/').at(-1)
+  const temporaryPrefix = `.${destinationName}.`
+  const companions = readdirSync(directory).filter((name) => (
+    name.startsWith(temporaryPrefix) && name.endsWith('.tmp')
+  )).filter((name) => {
+    try {
+      const candidate = lstatSync(join(directory, name))
+      return candidate.isFile() && !candidate.isSymbolicLink()
+        && candidate.dev === metadata.dev && candidate.ino === metadata.ino
+        && candidate.uid === metadata.uid && (candidate.mode & 0o777) === 0o600
+    } catch {
+      return false
+    }
+  })
+  if (companions.length !== 1) {
+    try {
+      assertSecureFile(path, label)
+      return
+    } catch {
+      fail(`${label} is not a canonical durable file`)
+    }
+  }
 }
 
 function atomicWrite(path, bytes, directory, deadline) {
@@ -210,8 +250,11 @@ function atomicWrite(path, bytes, directory, deadline) {
     closeSync(descriptor)
     descriptor = undefined
     linkSync(temporary, path)
+    assertSecureFile(path, 'durable destination', 2)
+    syncDirectory(directory)
     unlinkSync(temporary)
     syncDirectory(directory)
+    assertSecureFile(path, 'durable destination')
   } catch (error) {
     if (descriptor !== undefined) closeSync(descriptor)
     try { unlinkSync(temporary) } catch {}
@@ -224,6 +267,7 @@ function writeIfAbsent(path, bytes, directory, label, deadline) {
     atomicWrite(path, bytes, directory, deadline)
   } catch (error) {
     if (error?.code !== 'EEXIST') throw error
+    assertSecurePublishedFile(path, directory, label)
     let existing
     try { existing = readFileSync(path) } catch { throw error }
     if (!existing.equals(bytes)) fail(`${label} has conflicting durable bytes`)
@@ -237,7 +281,10 @@ function consumeAuthorization(root, record, deadline) {
   try {
     atomicWrite(destination, canonical.bytes, directory, deadline)
   } catch (error) {
-    if (error?.code === 'EEXIST') fail('authorization has already been consumed')
+    if (error?.code === 'EEXIST') {
+      assertSecurePublishedFile(destination, directory, 'authorization')
+      fail('authorization has already been consumed')
+    }
     throw error
   }
   return canonical.sha256
@@ -297,14 +344,15 @@ function persistTerminalResult(root, input, deadline) {
   if (authorization.value.manifest_sha256 !== manifest.sha256) {
     fail('terminal persistence authorization does not match manifest')
   }
-  if (worker !== null) {
-    const evidence = worker.value.evidence
+  for (const [record, label] of [[d1, 'D1'], [worker, 'Worker']]) {
+    if (record === null) continue
+    const evidence = record.value.evidence
     if (!isRecord(evidence)
       || evidence.manifest_sha256 !== manifest.sha256
       || evidence.authorization_sha256 !== authorization.sha256
       || evidence.attempt_id !== terminal.value.attempt_id
       || evidence.candidate_id !== manifest.value.repository?.commit) {
-      fail('Worker evidence identity does not match Terminal Result')
+      fail(`${label} evidence identity does not match Terminal Result`)
     }
   }
   const recordsDirectory = join(root, 'records')
