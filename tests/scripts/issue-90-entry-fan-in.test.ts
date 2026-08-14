@@ -1771,6 +1771,24 @@ describe('Issue #90 formal entry fan-in', () => {
     })
   })
 
+  it('rejects coordinated formal promotion of a fully recanonicalized production manifest', () => {
+    const prepared = manifest()
+    const authorization = authorizationFor(prepared, 'fan-in-coordinated-formal-promotion')
+    let consumed = false
+    const deliverySink = {
+      authority_class: 'explicit-test-only',
+      consumeAuthorization: () => { consumed = true; return authorization.sha256 },
+      persistTerminalResult: () => { throw new Error('must not persist') },
+      readTerminalEvidence: () => { throw new Error('not used') },
+    }
+
+    expect(() => runInFormalRehearsalContext({
+      sink: [], deliverySink,
+      clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
+    }, () => execute(prepared, authorization))).toThrow(/formal test manifest|ci\.conclusion|classification/u)
+    expect(consumed).toBe(false)
+  })
+
   it('does not select a local non-production lane at the production entry', () => {
     configureD1()
     const prepared = manifest({ d1: d1Binding({ mode: 'local', evidence_class: 'local-non-production' }) })
