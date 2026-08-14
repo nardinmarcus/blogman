@@ -1052,6 +1052,9 @@ function assertCurrentRepositoryIdentity(manifestValue) {
     || tree !== manifestValue.repository.tree
     || status !== ''
     || manifestValue.repository.clean !== true) {
+    if (process.env.BLOGMAN_DIAGNOSE_ENTRY_DRIFT === '1') {
+      process.stderr.write(`REPOSITORY_DRIFT_DIAGNOSTIC commit=${commit === manifestValue.repository.commit} tree=${tree === manifestValue.repository.tree} status=${status === ''} frozen_clean=${manifestValue.repository.clean === true}\n`)
+    }
     fail('live repository identity is Manifest Drift')
   }
 }
