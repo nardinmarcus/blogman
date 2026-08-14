@@ -221,9 +221,6 @@ function validateConfig(config) {
     assertSafeToken(config[field], field)
   }
   for (const field of [
-    'manifest_sha256',
-    'authorization_sha256',
-    'attempt_id',
     'config_sha256',
     'wrangler_sha256',
     'reset_sql_sha256',
@@ -241,8 +238,12 @@ function validateConfig(config) {
   ].includes(config.evidence_class)) {
     fail('evidence_class is invalid')
   }
+  const attemptBound = ['production', 'formal-rehearsal-test-evidence'].includes(config.evidence_class)
+  for (const field of ['manifest_sha256', 'authorization_sha256', 'attempt_id']) {
+    if (attemptBound || config[field] !== null) assertHash(config[field], field)
+  }
   if (config.mode === 'remote'
-    && !['production', 'formal-rehearsal-test-evidence'].includes(config.evidence_class)) {
+    && !attemptBound) {
     fail('remote transport requires production evidence')
   }
   if (!Array.isArray(config.migrations) || config.migrations.length !== 6) {

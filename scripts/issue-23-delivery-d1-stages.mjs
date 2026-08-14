@@ -194,9 +194,6 @@ function normalizeBindings(value) {
     'candidate_id',
   ]) assertSafeString(value[field], `bindings.${field}`)
   for (const field of [
-    'manifest_sha256',
-    'authorization_sha256',
-    'attempt_id',
     'config_sha256',
     'wrangler_sha256',
     'reset_sql_sha256',
@@ -221,6 +218,10 @@ function normalizeBindings(value) {
   if (!['production', 'local-non-production', 'test-non-production', 'synthetic-non-production', 'formal-rehearsal-test-evidence']
     .includes(value.evidence_class)) {
     fail('bindings.evidence_class is invalid')
+  }
+  const attemptBound = ['production', 'formal-rehearsal-test-evidence'].includes(value.evidence_class)
+  for (const field of ['manifest_sha256', 'authorization_sha256', 'attempt_id']) {
+    if (attemptBound || value[field] !== null) assertHash(value[field], `bindings.${field}`)
   }
   if (!Array.isArray(value.migrations) || value.migrations.length !== 6) {
     fail('bindings.migrations must contain exactly six entries')

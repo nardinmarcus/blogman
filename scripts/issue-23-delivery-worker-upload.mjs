@@ -492,6 +492,25 @@ function verifyFrozenSnapshotAgainstArchive(archive, destination, archiveSha256)
   return Buffer.from(`${JSON.stringify(proof)}\n`)
 }
 
+function executionDirectoryIdentity(path) {
+  if (!isAbsolute(path) || path !== resolve(path) || !shellSafeAbsolutePath.test(path)) throw new Error()
+  const metadata = lstatSync(path)
+  if (!metadata.isDirectory() || metadata.isSymbolicLink() || realpathSync(path) !== path
+    || (typeof process.getuid === 'function' && metadata.uid !== process.getuid())
+    || (metadata.mode & 0o022) !== 0) {
+    throw new Error()
+  }
+  return Object.freeze({ dev: metadata.dev, ino: metadata.ino, uid: metadata.uid, mode: metadata.mode & 0o777 })
+}
+
+function assertExecutionDirectoryIdentity(path, expected) {
+  const actual = executionDirectoryIdentity(path)
+  if (actual.dev !== expected.dev || actual.ino !== expected.ino
+    || actual.uid !== expected.uid || actual.mode !== expected.mode) {
+    throw new Error()
+  }
+}
+
 function verifyBoundExecutable(path, expectedSha256) {
   if (!sha256.test(expectedSha256 || '')
     || !isAbsolute(path) || path !== resolve(path) || !shellSafeAbsolutePath.test(path)
@@ -724,6 +743,7 @@ async function runUploadSourceLifecycle({
   const uploadOutputPath = process.env.WRANGLER_OUTPUT_FILE_PATH
   const held = []
   const evidence = []
+  const workingIdentity = executionDirectoryIdentity(workingDirectory)
   try {
     held.push(...holdStablePathChain(reportDirectory, 'directory', 0o700))
     const configChain = holdStablePathChain(config, 'file')
@@ -731,10 +751,9 @@ async function runUploadSourceLifecycle({
     held.push(...configChain)
     held.push(...holdStablePathChain(source, 'directory'))
     held.push(...holdStablePathChain(archive, 'file'))
-    held.push(...holdStablePathChain(workingDirectory, 'directory'))
     const stabilityRoot = privateStabilityRoot(
       held,
-      commonAncestor([reportDirectory, config, source, archive, workingDirectory]),
+      commonAncestor([reportDirectory, config, source, archive]),
     )
     bindStrictPathMetadata(held, stabilityRoot)
     const beforeEvidence = holdEvidenceFile(proofBeforePath, reportDirectory)
@@ -783,6 +802,7 @@ async function runUploadSourceLifecycle({
       try { return realpathSync(join(directory, 'npm')) === npmPath } catch { return false }
     })
     if (!npmBinDirectory) throw new Error()
+    assertExecutionDirectoryIdentity(workingDirectory, workingIdentity)
     const uploadEnvironment = {
       ...process.env,
       PATH: [...new Set([npmBinDirectory, dirname(nodePath)])].join(delimiter),
@@ -801,6 +821,7 @@ async function runUploadSourceLifecycle({
       stdio: ['ignore', 'ignore', 'ignore'],
     })
 
+    assertExecutionDirectoryIdentity(workingDirectory, workingIdentity)
     captureHeldEvidence(uploadEvidence, true)
     await verifyConfigBinding()
     const after = verifyUploadSourceSnapshot(
