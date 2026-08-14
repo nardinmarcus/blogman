@@ -708,11 +708,11 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, 
       const measuredDuration = monotonic_ms === undefined ? durationMs : monotonic_ms() - stageStarted
       durationMs = Math.max(durationMs, measuredDuration)
       assertNonNegativeInteger(durationMs, `${stage} duration`)
+      if ((monotonic_ms?.() ?? elapsedMs + durationMs) >= D1_OVERALL_TIMEOUT_MS) {
+        throw stageFailure('TIMEOUT', 'overall_timeout', durationMs)
+      }
       if (durationMs > D1_STAGE_TIMEOUT_MS[stage]) {
         throw stageFailure('TIMEOUT', 'timeout', durationMs)
-      }
-      if ((monotonic_ms?.() ?? elapsedMs + durationMs) > D1_OVERALL_TIMEOUT_MS) {
-        throw stageFailure('TIMEOUT', 'overall_timeout', durationMs)
       }
       elapsedMs += durationMs
     } catch (error) {

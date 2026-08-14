@@ -140,12 +140,12 @@ export function runWorkerStages({ bindings, transport, elapsed_ms = 0, monotonic
       trace.push({ stage, ...parsed.failure, duration_ms: parsed.duration_ms })
       break
     }
-    if (parsed.duration_ms > TIMEOUT_MS[stage]) {
-      trace.push({ stage, outcome: 'TIMEOUT', classification: 'stage_timeout', duration_ms: parsed.duration_ms })
+    if (elapsed >= OVERALL_TIMEOUT_MS) {
+      trace.push({ stage, outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: parsed.duration_ms })
       break
     }
-    if (elapsed > OVERALL_TIMEOUT_MS) {
-      trace.push({ stage, outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: parsed.duration_ms })
+    if (parsed.duration_ms > TIMEOUT_MS[stage]) {
+      trace.push({ stage, outcome: 'TIMEOUT', classification: 'stage_timeout', duration_ms: parsed.duration_ms })
       break
     }
     if (stage === 'worker_deploy') {

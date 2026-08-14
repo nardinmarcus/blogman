@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -281,6 +281,41 @@ describe('Issue #23 durable delivery records', () => {
     expect(readdirSync(target)).toEqual([])
   })
 
+  it('permits normal user .local modes while requiring a trusted 0700 blogman subtree', () => {
+    const parent = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-23-authority-modes-')))
+    temporaryDirectories.push(parent)
+    const home = join(parent, 'home')
+    const local = join(home, '.local')
+    const state = join(local, 'state')
+    const blogman = join(state, 'blogman')
+    mkdirSync(blogman, { recursive: true, mode: 0o700 })
+    chmodSync(home, 0o700)
+    chmodSync(local, 0o775)
+    chmodSync(state, 0o755)
+    chmodSync(blogman, 0o700)
+    const first = authorizationRecord()
+    const run = (authorization: ReturnType<typeof authorizationRecord>) => spawnSync(
+      process.execPath,
+      ['--input-type=module', '-e', `
+        import { repositoryDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
+        const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
+        try { repositoryDeliverySink.consumeAuthorization({ bytes, sha256: ${JSON.stringify(authorization.sha256)} }) }
+        catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 10 }
+      `],
+      { encoding: 'utf8', env: isolatedAuthorityChildEnvironment({ BLOGMAN_TEST_AUTHORITY_HOME: home }) },
+    )
+
+    expect(run(first).status).toBe(0)
+    chmodSync(blogman, 0o755)
+    const second = record({
+      ...authorizationRecord().value,
+      authorization_id: 'untrusted-blogman-mode',
+    })
+    const rejected = run(second)
+    expect(rejected.status).toBe(10)
+    expect(rejected.stderr).toMatch(/blogman.*mode|mode drifted/u)
+  })
+
   it('rejects symlink, owner/mode, and root identity drift', () => {
     const parent = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-integrity-'))
     temporaryDirectories.push(parent)
@@ -387,6 +422,36 @@ describe('Issue #23 durable delivery records', () => {
 
     expect(() => sink.persistTerminalResult({ terminal: contradictory, manifest, d1: null, worker }))
       .toThrow(/unsupported|schema|trajectory|terminal|Worker/u)
+    expect(readdirSync(join(root, 'records'))).toEqual([])
+    expect(readdirSync(join(root, 'terminals'))).toEqual([])
+  })
+
+  it('rejects exact-shape outcome/classification and mutation contradictions', () => {
+    const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-terminal-coherence-'))
+    temporaryDirectories.push(root)
+    const sink = createRepositoryDeliverySink(root)
+    const manifest = record({
+      format: 'blogman-issue-23-canonical-frozen-manifest/v1',
+      repository: { commit: 'c'.repeat(40) },
+    })
+    const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
+    const terminal = exactTerminalRecord(manifest, authorization)
+    sink.consumeAuthorization(authorization)
+
+    const wrongPair = record({
+      ...terminal.value,
+      outcome: 'TIMEOUT',
+      failure: { classification: 'upload_contract_invalid' },
+    })
+    expect(() => sink.persistTerminalResult({ terminal: wrongPair, manifest, d1: null, worker: null }))
+      .toThrow(/outcome\/classification/u)
+
+    const impossibleMutation = record({
+      ...terminal.value,
+      mutation_counts: { production_writes: 0, attempted: 1, confirmed: 0 },
+    })
+    expect(() => sink.persistTerminalResult({ terminal: impossibleMutation, manifest, d1: null, worker: null }))
+      .toThrow(/mutation evidence/u)
     expect(readdirSync(join(root, 'records'))).toEqual([])
     expect(readdirSync(join(root, 'terminals'))).toEqual([])
   })

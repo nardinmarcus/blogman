@@ -569,6 +569,16 @@ function actualPreparedManifest() {
   }
 }
 
+function formalPreparedManifest() {
+  const prepared = manifest()
+  prepared.value.ci.conclusion = 'in_progress-test-evidence'
+  prepared.value.ci.evidence_class = 'formal-rehearsal-test-evidence'
+  prepared.value.d1.evidence_class = 'formal-rehearsal-test-evidence'
+  prepared.bytes = Buffer.from(`${JSON.stringify(prepared.value, null, 2)}\n`, 'utf8')
+  prepared.sha256 = hash(prepared.bytes)
+  return prepared
+}
+
 function d1Result(failedStage: string | null = null) {
   const stages = [
     'd1_identity',
@@ -1077,6 +1087,75 @@ describe('Issue #90 formal entry fan-in', () => {
     })
   })
 
+  it('preserves D1 setup overall_timeout as the first terminal cause', () => {
+    const prepared = formalPreparedManifest()
+    const authorization = authorizationFor(prepared, 'fan-in-d1-setup-overall-timeout')
+    let monotonic = 0n
+    const persisted: Array<Record<string, unknown>> = []
+    createD1TransportMock.mockImplementation(() => {
+      monotonic = 5_400_001_000_000n
+      throw new DeliverySinkDeadlineError()
+    })
+    const deliverySink = {
+      authority_class: 'explicit-test-only',
+      consumeAuthorization: () => authorization.sha256,
+      persistTerminalResult: (input: { terminal: { value: Record<string, unknown> } }) => {
+        persisted.push(structuredClone(input.terminal.value))
+        return input.terminal.sha256
+      },
+      readTerminalEvidence: () => { throw new Error('not used') },
+    }
+
+    const terminal = runInFormalRehearsalContext({
+      sink: [], deliverySink,
+      clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => monotonic },
+    }, () => execute(prepared, authorization))
+
+    expect(terminal.value).toMatchObject({
+      outcome: 'TIMEOUT', first_terminal_stage: 'd1_identity',
+      failure: { classification: 'overall_timeout' },
+      stage_counts: { d1_identity: 1, clean_start_reset: 0, worker_deploy: 0 },
+      mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
+    })
+    expect(persisted).toHaveLength(1)
+  })
+
+  it('preserves pre-Worker overall_timeout without inventing a malformed receipt', () => {
+    const prepared = formalPreparedManifest()
+    const authorization = authorizationFor(prepared, 'fan-in-pre-worker-overall-timeout')
+    const calls = configureD1()
+    let monotonic = 0n
+    let workerFactoryCalls = 0
+    createWorkerTransportMock.mockImplementation(() => {
+      workerFactoryCalls += 1
+      if (workerFactoryCalls === 1) {
+        return { livePreconditions: () => ({ outcome: 'PASS', duration_ms: 1 }), execute() {} }
+      }
+      monotonic = 5_400_001_000_000n
+      throw new DeliverySinkDeadlineError()
+    })
+    const deliverySink = {
+      authority_class: 'explicit-test-only',
+      consumeAuthorization: () => authorization.sha256,
+      persistTerminalResult: (input: { terminal: { sha256: string } }) => input.terminal.sha256,
+      readTerminalEvidence: () => { throw new Error('not used') },
+    }
+
+    const terminal = runInFormalRehearsalContext({
+      sink: [], deliverySink,
+      clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => monotonic },
+    }, () => execute(prepared, authorization))
+
+    expect(calls).toEqual(D1_OPERATIONS)
+    expect(runWorkerStagesMock).not.toHaveBeenCalled()
+    expect(terminal.value).toMatchObject({
+      outcome: 'TIMEOUT', first_terminal_stage: 'worker_deploy',
+      failure: { classification: 'overall_timeout' },
+      stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 },
+      mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
+    })
+  })
+
   it('terminalizes D1 drift before reset with no suffix and no retry', () => {
     const calls = configureD1('d1_identity')
     const prepared = manifest()
@@ -1220,6 +1299,56 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(child.status, child.stderr).toBe(0)
   })
 
+  it('preserves upload_contract_invalid as an exact ERROR at the public execute seam', () => {
+    configureD1()
+    createWorkerTransportMock.mockReturnValue({
+      livePreconditions: () => ({ outcome: 'PASS', duration_ms: 1 }), execute() {},
+    })
+    runWorkerStagesMock.mockImplementation(({ bindings }) => {
+      const result = workerResult(bindings)
+      result.value.failure = { classification: 'upload_contract_invalid' }
+      result.bytes = Buffer.from(`${JSON.stringify(result.value, null, 2)}\n`, 'utf8')
+      result.sha256 = hash(result.bytes)
+      return result
+    })
+    const prepared = manifest()
+
+    const terminal = execute(prepared, authorizationFor(prepared, 'fan-in-upload-contract-invalid'))
+
+    expect(terminal.value).toMatchObject({
+      outcome: 'ERROR', first_terminal_stage: 'worker_deploy',
+      failure: { classification: 'upload_contract_invalid' },
+      stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 },
+      mutation_counts: { attempted: 3, confirmed: 2 },
+    })
+  })
+
+  it('maps a frozen D1 artifact changed after entry validation to Manifest Drift', () => {
+    configureD1()
+    const prepared = manifest()
+    const resetPath = join(REPOSITORY_ROOT, 'db', 'issue-23-clean-start-reset.sql')
+    let resetReads = 0
+    vi.mocked(readFileSync).mockImplementation(((path: Parameters<typeof readFileSync>[0], options?: Parameters<typeof readFileSync>[1]) => {
+      const value = fsActual.readFileSync!(path, options as never)
+      if (String(path) !== resetPath || (resetReads += 1) === 1) return value
+      const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value)
+      return Buffer.concat([bytes, Buffer.from('\n-- post-entry D1 artifact drift\n')])
+    }) as typeof readFileSync)
+    const authorization = authorizationFor(prepared, 'fan-in-d1-artifact-drift')
+
+    const terminal = execute(prepared, authorization)
+
+    expect(resetReads).toBeGreaterThanOrEqual(2)
+    expect(terminal.value).toMatchObject({
+      outcome: 'NON_PASS', first_terminal_stage: 'd1_identity',
+      failure: { classification: 'Manifest Drift' },
+      stage_counts: { d1_identity: 1, clean_start_reset: 0, worker_deploy: 0 },
+      mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
+    })
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+    expect(runWorkerStagesMock).not.toHaveBeenCalled()
+  })
+
   it('stops at live_preconditions on drift without selecting a D1 adapter', () => {
     configureD1()
     createWorkerTransportMock.mockReturnValue({
@@ -1306,14 +1435,12 @@ describe('Issue #90 formal entry fan-in', () => {
       sha256: hash(invalidTerminalBytes),
     }
     repositoryDeliverySink.consumeAuthorization(invalidAuthorization)
-    repositoryDeliverySink.persistTerminalResult({
+    expect(() => repositoryDeliverySink.persistTerminalResult({
       terminal: invalidTerminal,
       manifest: prepared,
       d1: null,
       worker: null,
-    })
-    expect(() => validateProductionTerminalEvidence(structuredClone(invalidTerminal)))
-      .toThrow(/production terminal evidence is invalid/u)
+    })).toThrow(/outcome\/classification/u)
   })
 
   it('validates an execute-produced early NON_PASS terminal with no D1 or Worker receipt', () => {
@@ -1485,12 +1612,14 @@ describe('Issue #90 formal entry fan-in', () => {
     const prepared = actualPreparedManifest()
     const originalRealpathSync = fsActual.realpathSync!
     let materializedDirectory = ''
+    let materializations = 0
     vi.mocked(realpathSync).mockImplementation((path, options) => {
       if (String(path).includes('blogman-issue-23-execute-expected-')) {
         materializedDirectory = String(path)
+        materializations += 1
       }
       if (String(path).endsWith('/scripts/migrations.mjs')
-        && materializedDirectory !== '') throw new Error('binding setup failed')
+        && materializations >= 2) throw new Error('binding setup failed')
       return originalRealpathSync(path, options)
     })
 

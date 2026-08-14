@@ -1034,7 +1034,11 @@ describe('Issue #23 D1 delivery stages', () => {
       elapsed_ms: livePreconditionsElapsedMs + d1ElapsedMs,
     })
 
-    expect(d1.value.outcome).toBe('PASS')
+    expect(d1.value).toMatchObject({
+      outcome: 'TIMEOUT',
+      first_terminal_stage: 'reconciliation',
+      failure: { classification: 'overall_timeout' },
+    })
     expect(d1Transport.calls.map(({ request }) => request.overall_elapsed_ms)).toEqual([
       5_399_992, 5_399_993, 5_399_994, 5_399_995,
       5_399_996, 5_399_997, 5_399_998, 5_399_999,

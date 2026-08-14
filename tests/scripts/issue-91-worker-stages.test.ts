@@ -114,12 +114,28 @@ describe('Issue #91 worker suffix', () => {
   })
 
   it.each([
-    ['malformed', { status: 0, stderr: '', stdout: '{', duration_ms: 1 }, 'worker_response_malformed'],
-    ['timeout', response({ format: 'blogman-upload-source-lifecycle-acceptance/v1', state: 'accepted', upload_operation_id: `issue-23-${identity.candidate_id}-upload-1`, version_id: 'version-new', config_sha256: 'c'.repeat(64), snapshot_tree_sha256: 'a'.repeat(64), snapshot_identity_sha256: 'd'.repeat(64), snapshot_proof_before_sha256: 'e'.repeat(64), snapshot_proof_after_sha256: 'f'.repeat(64), build_directory_proof_sha256: '0'.repeat(64), wrangler_output_sha256: 'b'.repeat(64) }, 600001), 'stage_timeout'],
-    ['non-pass traffic', response({ format: 'wrong', state: 'accepted', version_id: 'version-new', wrangler_output_sha256: 'b'.repeat(64) }), 'upload_contract_invalid'],
-  ])('terminalizes %s with no suffix retry', (_name, first, classification) => {
+    ['malformed', { status: 0, stderr: '', stdout: '{', duration_ms: 1 }, 'ERROR', 'worker_response_malformed'],
+    ['timeout', response({ format: 'blogman-upload-source-lifecycle-acceptance/v1', state: 'accepted', upload_operation_id: `issue-23-${identity.candidate_id}-upload-1`, version_id: 'version-new', config_sha256: 'c'.repeat(64), snapshot_tree_sha256: 'a'.repeat(64), snapshot_identity_sha256: 'd'.repeat(64), snapshot_proof_before_sha256: 'e'.repeat(64), snapshot_proof_after_sha256: 'f'.repeat(64), build_directory_proof_sha256: '0'.repeat(64), wrangler_output_sha256: 'b'.repeat(64) }, 600001), 'TIMEOUT', 'stage_timeout'],
+    ['invalid upload contract', response({ format: 'wrong', state: 'accepted', version_id: 'version-new', wrangler_output_sha256: 'b'.repeat(64) }), 'ERROR', 'upload_contract_invalid'],
+  ])('terminalizes %s with no suffix retry', (_name, first, outcome, classification) => {
     const result = runWorkerStages({ bindings, transport: transport([first]) })
-    expect(result.value).toMatchObject({ first_terminal_stage: 'worker_deploy', failure: { classification }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 } })
+    expect(result.value).toMatchObject({ outcome, first_terminal_stage: 'worker_deploy', failure: { classification }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 } })
+  })
+
+  it('chooses the tighter overall deadline before Stage timeout when both expire together', () => {
+    const result = runWorkerStages({
+      bindings,
+      elapsed_ms: 4_800_000,
+      transport: transport([acceptedUpload('version-new')].map((entry) => ({ ...entry, duration_ms: 600_001 }))),
+    })
+
+    expect(result.value).toMatchObject({
+      outcome: 'TIMEOUT',
+      first_terminal_stage: 'worker_deploy',
+      failure: { classification: 'overall_timeout' },
+      stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 },
+      mutation_counts: { attempted: 1, confirmed: 0 },
+    })
   })
 
   it.each([

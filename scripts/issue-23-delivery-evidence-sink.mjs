@@ -50,6 +50,32 @@ const D1_EVIDENCE_FIELDS = Object.freeze([
 const WORKER_EVIDENCE_HASHES = Object.freeze([
   'upload_acceptance_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256',
 ])
+const FAILURE_CLASSIFICATIONS_BY_OUTCOME = Object.freeze({
+  TIMEOUT: new Set(['overall_timeout', 'stage_timeout', 'timeout']),
+  UNCERTAIN: new Set([
+    'uncertain', 'formal_rehearsal_uncertain', 'live_preconditions_uncertain',
+    'worker_adapter_uncertain',
+  ]),
+  NON_PASS: new Set([
+    'Manifest Drift', 'cloudflare_permission_insufficient', 'd1_not_empty',
+    'empty_only_plan_invalid', 'formal_rehearsal_forced_failure', 'migration_contract_invalid',
+    'migration_ledger_invalid', 'reconciliation_contract_invalid', 'reconciliation_drift',
+    'smoke_control_contract_invalid', 'version_traffic_mismatch',
+  ]),
+  ERROR: new Set([
+    'cloudflare_auth_unavailable', 'credential_authority_unavailable', 'd1_identity_malformed',
+    'd1_identity_response_invalid', 'deployment_status_malformed', 'empty_d1_proof_invalid',
+    'formal_rehearsal_d1_adapter_error', 'formal_rehearsal_d1_result_malformed',
+    'formal_rehearsal_d1_setup_error', 'formal_rehearsal_response_malformed',
+    'live_preconditions_error', 'live_preconditions_malformed', 'malformed', 'nonzero',
+    'production_d1_adapter_error', 'production_d1_result_malformed', 'production_d1_setup_error',
+    'reconciliation_malformed', 'reconciliation_response_invalid', 'reset_response_invalid',
+    'rollout_controls_malformed', 'smoke_auth_policy_invalid', 'smoke_auth_unavailable', 'stage_error',
+    'transport_binding_mismatch', 'transport_error', 'upload_acceptance_malformed',
+    'upload_contract_invalid', 'worker_adapter_error', 'worker_adapter_nonzero',
+    'worker_response_malformed', 'worker_result_malformed',
+  ]),
+})
 const TERMINAL_EVIDENCE_HASHES = Object.freeze([
   'd1_stage_receipt_sha256',
   ...[
@@ -175,6 +201,11 @@ function assertHash(value, label, nullable = false) {
   if (typeof value !== 'string' || !/^[a-f0-9]{64}$/u.test(value)) fail(`${label} identity is invalid`)
 }
 
+function validFailureClassification(outcome, classification) {
+  return typeof classification === 'string'
+    && FAILURE_CLASSIFICATIONS_BY_OUTCOME[outcome]?.has(classification) === true
+}
+
 function assertStageMaps(counts, durations, stages, label) {
   if (!exactKeys(counts, stages) || !exactKeys(durations, stages)) fail(`${label} Stage schema is invalid`)
   for (const stage of stages) {
@@ -227,13 +258,17 @@ function assertTerminalSchema(value) {
       fail('terminal result trajectory is contradictory')
     }
   } else if (!exactKeys(value.failure, ['classification'])
-    || typeof value.failure.classification !== 'string' || value.failure.classification.length === 0) {
-    fail('terminal result failure is invalid')
+    || !validFailureClassification(value.outcome, value.failure.classification)) {
+    fail('terminal result outcome/classification is invalid')
   }
   if (!exactKeys(value.mutation_counts, ['production_writes', 'attempted', 'confirmed'])
     || Object.values(value.mutation_counts).some((count) => !Number.isSafeInteger(count) || count < 0)
     || value.mutation_counts.production_writes !== value.mutation_counts.confirmed
-    || value.mutation_counts.confirmed > value.mutation_counts.attempted) {
+    || value.mutation_counts.confirmed > value.mutation_counts.attempted
+    || value.mutation_counts.attempted > (
+      value.stage_counts.clean_start_reset + value.stage_counts.migrations_001_006
+      + value.stage_counts.worker_deploy + value.stage_counts.version_traffic_verification
+    )) {
     fail('terminal result mutation evidence is contradictory')
   }
   if (!exactKeys(value.evidence, ['source', 'production', 'promotable', 'hashes', 'cleanup'])
@@ -258,6 +293,18 @@ function assertD1Schema(value) {
     fail('D1 evidence schema contains unsupported fields')
   }
   assertStageMaps(value.stage_counts, value.stage_durations_ms, D1_STAGES, 'D1 evidence')
+  const terminalIndex = value.outcome === 'PASS' ? D1_STAGES.length - 1 : D1_STAGES.indexOf(value.first_terminal_stage)
+  if (terminalIndex < 0 || D1_STAGES.some((stage, index) => (
+    value.stage_counts[stage] !== (index <= terminalIndex ? 1 : 0)
+  )) || (value.outcome === 'PASS'
+    ? value.first_terminal_stage !== null || value.failure !== null
+    : !exactKeys(value.failure, ['classification'])
+      || !validFailureClassification(value.outcome, value.failure.classification))
+    || typeof value.evidence.source !== 'string'
+    || typeof value.evidence.production !== 'boolean'
+    || value.evidence.promotable !== (value.evidence.production && value.outcome === 'PASS')) {
+    fail('D1 evidence trajectory is contradictory')
+  }
   for (const field of D1_EVIDENCE_FIELDS.filter((name) => name.endsWith('sha256'))) {
     assertHash(value.evidence[field], `D1 evidence ${field}`)
   }
@@ -277,6 +324,35 @@ function assertWorkerSchema(value) {
     fail('Worker evidence schema contains unsupported fields')
   }
   assertStageMaps(value.stage_counts, value.stage_durations_ms, WORKER_STAGES, 'Worker evidence')
+  const terminalIndex = value.outcome === 'PASS'
+    ? WORKER_STAGES.length - 1
+    : WORKER_STAGES.indexOf(value.first_terminal_stage)
+  const preAdapterFailure = value.first_terminal_stage === 'worker_deploy'
+    && ['overall_timeout', 'worker_result_malformed'].includes(value.failure?.classification)
+    && value.mutation_counts.attempted === 0
+    && value.mutation_counts.confirmed === 0
+  if (terminalIndex < 0 || WORKER_STAGES.some((stage, index) => (
+    value.stage_counts[stage] !== (index <= terminalIndex ? 1 : 0)
+  )) || (value.outcome === 'PASS'
+    ? value.first_terminal_stage !== null || value.failure !== null
+    : !exactKeys(value.failure, ['classification'])
+      || !validFailureClassification(value.outcome, value.failure.classification))
+    || !Number.isSafeInteger(value.mutation_counts.attempted)
+    || !Number.isSafeInteger(value.mutation_counts.confirmed)
+    || value.mutation_counts.confirmed < 0
+    || value.mutation_counts.confirmed > value.mutation_counts.attempted
+    || (!preAdapterFailure
+      && value.mutation_counts.attempted !== (terminalIndex >= 1 ? 2 : 1))
+    || value.mutation_counts.confirmed !== (terminalIndex >= 2 ? 2 : terminalIndex >= 1 ? 1 : 0)
+    || typeof value.evidence.source !== 'string'
+    || typeof value.evidence.production !== 'boolean'
+    || value.evidence.promotable !== (value.evidence.production && value.outcome === 'PASS')) {
+    fail('Worker evidence trajectory is contradictory')
+  }
+  for (const field of ['manifest_sha256', 'authorization_sha256', 'attempt_id']) {
+    assertHash(value.evidence[field], `Worker evidence ${field}`)
+  }
+  for (const hash of Object.values(value.evidence.hashes)) assertHash(hash, 'Worker evidence hash', true)
 }
 
 function syncDirectory(path) {
@@ -311,6 +387,12 @@ function canonicalDirectoryIdentity(path, label) {
 
 function secureDirectoryIdentity(path, label) {
   const identity = directoryIdentity(path, label)
+  if (identity.mode !== 0o700) fail(`${label} mode drifted`)
+  return identity
+}
+
+function secureCanonicalDirectoryIdentity(path, label) {
+  const identity = canonicalDirectoryIdentity(path, label)
   if (identity.mode !== 0o700) fail(`${label} mode drifted`)
   return identity
 }
@@ -572,15 +654,21 @@ function deliverySink(resolvedRoot, rootIdentity, ancestors = [], authorityClass
     authority_class: authorityClass,
     consumeAuthorization(record, deadline) {
       assertSinkIdentity()
-      return consumeAuthorization(resolvedRoot, record, deadline)
+      const result = consumeAuthorization(resolvedRoot, record, deadline)
+      assertSinkIdentity()
+      return result
     },
     persistTerminalResult(input, deadline) {
       assertSinkIdentity()
-      return persistTerminalResult(resolvedRoot, input, deadline)
+      const result = persistTerminalResult(resolvedRoot, input, deadline)
+      assertSinkIdentity()
+      return result
     },
     readTerminalEvidence(terminalSha256) {
       assertSinkIdentity()
-      return readTerminalEvidence(resolvedRoot, terminalSha256)
+      const result = readTerminalEvidence(resolvedRoot, terminalSha256)
+      assertSinkIdentity()
+      return result
     },
   })
 }
@@ -605,10 +693,14 @@ function createCanonicalProductionSink() {
   }))
   for (const name of ['.local', 'state', 'blogman', 'issue-23-production-authority-v1']) {
     path = join(path, name)
+    const label = `authority ${name} directory`
+    const created = createCanonicalProductionDirectory(path, label)
+    const trusted = name === 'blogman' || name === 'issue-23-production-authority-v1'
     ancestors.push(Object.freeze({
       path,
-      label: `authority ${name} directory`,
-      identity: createCanonicalProductionDirectory(path, `authority ${name} directory`),
+      label,
+      identity: trusted ? secureCanonicalDirectoryIdentity(path, label) : created,
+      trusted,
     }))
   }
   if (path !== PRODUCTION_AUTHORITY_ROOT || realpathSync(path) !== PRODUCTION_AUTHORITY_ROOT) {

@@ -1383,9 +1383,20 @@ const FORMAL_REHEARSAL_D1_RECEIPT_POLICY = Object.freeze({
   input_production: false,
 })
 
-function sanitizedD1Error(classification, d1, attemptIdentity, evidencePolicy = PRODUCTION_D1_EVIDENCE_POLICY) {
+function sanitizedD1Error(
+  classification,
+  d1,
+  attemptIdentity,
+  evidencePolicy = PRODUCTION_D1_EVIDENCE_POLICY,
+  outcome = 'ERROR',
+  entered = true,
+) {
   const stageCounts = Object.fromEntries(PRODUCTION_D1_STAGES.map((stage) => [stage, 0]))
   const stageDurations = Object.fromEntries(PRODUCTION_D1_STAGES.map((stage) => [stage, 0]))
+  if (entered) {
+    stageCounts.d1_identity = 1
+    stageDurations.d1_identity = 1
+  }
   const identity = {
     manifest_sha256: attemptIdentity.manifest_sha256,
     authorization_sha256: attemptIdentity.authorization_sha256,
@@ -1396,8 +1407,8 @@ function sanitizedD1Error(classification, d1, attemptIdentity, evidencePolicy = 
   }
   const value = {
     format: 'blogman-issue-23-d1-stages/v1',
-    outcome: 'ERROR',
-    first_terminal_stage: null,
+    outcome,
+    first_terminal_stage: entered ? 'd1_identity' : null,
     failure: { classification },
     stage_counts: stageCounts,
     stage_durations_ms: stageDurations,
@@ -1595,7 +1606,7 @@ const FAILURE_CLASSIFICATIONS_BY_OUTCOME = Object.freeze({
     'Manifest Drift', 'cloudflare_permission_insufficient', 'd1_not_empty',
     'empty_only_plan_invalid', 'formal_rehearsal_forced_failure', 'migration_contract_invalid',
     'migration_ledger_invalid', 'reconciliation_contract_invalid', 'reconciliation_drift',
-    'smoke_control_contract_invalid', 'upload_contract_invalid', 'version_traffic_mismatch',
+    'smoke_control_contract_invalid', 'version_traffic_mismatch',
   ]),
   ERROR: new Set([
     'cloudflare_auth_unavailable', 'credential_authority_unavailable', 'd1_identity_malformed',
@@ -1606,7 +1617,7 @@ const FAILURE_CLASSIFICATIONS_BY_OUTCOME = Object.freeze({
     'reconciliation_malformed', 'reconciliation_response_invalid', 'reset_response_invalid',
     'rollout_controls_malformed', 'smoke_auth_policy_invalid', 'smoke_auth_unavailable', 'stage_error',
     'transport_binding_mismatch', 'transport_error', 'upload_acceptance_malformed',
-    'worker_adapter_error', 'worker_adapter_nonzero', 'worker_response_malformed', 'worker_result_malformed',
+    'upload_contract_invalid', 'worker_adapter_error', 'worker_adapter_nonzero', 'worker_response_malformed', 'worker_result_malformed',
   ]),
 })
 
@@ -1621,14 +1632,51 @@ const TERMINAL_EVIDENCE_HASHES = Object.freeze([
   ...WORKER_EVIDENCE_HASHES.map((name) => `worker_${name}`),
 ])
 
+function preWorkerOverallTimeoutResult(evidencePolicy, identity) {
+  const value = {
+    format: 'blogman-issue-23-worker-stages/v1',
+    outcome: 'TIMEOUT',
+    first_terminal_stage: 'worker_deploy',
+    failure: { classification: 'overall_timeout' },
+    stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 },
+    stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 },
+    mutation_counts: { attempted: 0, confirmed: 0 },
+    evidence: {
+      source: evidencePolicy.source,
+      production: evidencePolicy.production,
+      promotable: false,
+      ...identity,
+      hashes: {
+        upload_acceptance_sha256: null,
+        version_traffic_sha256: null,
+        smoke_control_t0_sha256: null,
+      },
+    },
+    finalized: true,
+  }
+  const bytes = canonicalJsonBytes(value)
+  const receipt = Object.freeze({ value, bytes, sha256: sha256(bytes) })
+  return {
+    outcome: value.outcome,
+    first_terminal_stage: value.first_terminal_stage,
+    failure: value.failure,
+    stage_counts: value.stage_counts,
+    stage_durations_ms: value.stage_durations_ms,
+    mutation_counts: value.mutation_counts,
+    evidence_hashes: value.evidence.hashes,
+    sha256: receipt.sha256,
+    receipt,
+  }
+}
+
 function malformedWorkerResult(evidencePolicy, identity) {
   const value = {
     format: 'blogman-issue-23-worker-stages/v1',
     outcome: 'ERROR',
-    first_terminal_stage: null,
+    first_terminal_stage: 'worker_deploy',
     failure: { classification: 'worker_result_malformed' },
-    stage_counts: { worker_deploy: 0, version_traffic_verification: 0, smoke_control_t0: 0 },
-    stage_durations_ms: { worker_deploy: 0, version_traffic_verification: 0, smoke_control_t0: 0 },
+    stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 },
+    stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 },
     mutation_counts: { attempted: 0, confirmed: 0 },
     evidence: {
       source: evidencePolicy.source,
@@ -1649,8 +1697,8 @@ function malformedWorkerResult(evidencePolicy, identity) {
     outcome: value.outcome,
     first_terminal_stage: 'worker_deploy',
     failure: value.failure,
-    stage_counts: { ...value.stage_counts, worker_deploy: 1 },
-    stage_durations_ms: { ...value.stage_durations_ms, worker_deploy: 1 },
+    stage_counts: value.stage_counts,
+    stage_durations_ms: value.stage_durations_ms,
     mutation_counts: value.mutation_counts,
     evidence_hashes: { ...value.evidence.hashes },
     sha256: receipt.sha256,
@@ -1713,8 +1761,12 @@ function normalizeWorkerResult(result, evidencePolicy, identity) {
       return malformed()
     }
   }
+  const preAdapterFailure = value.first_terminal_stage === 'worker_deploy'
+    && ['overall_timeout', 'worker_result_malformed'].includes(value.failure?.classification)
+    && value.mutation_counts.attempted === 0
+    && value.mutation_counts.confirmed === 0
   if (!Number.isSafeInteger(value.mutation_counts.attempted) || !Number.isSafeInteger(value.mutation_counts.confirmed)
-    || value.mutation_counts.attempted < 1 || value.mutation_counts.attempted > 2
+    || (!preAdapterFailure && (value.mutation_counts.attempted < 1 || value.mutation_counts.attempted > 2))
     || value.mutation_counts.confirmed < 0 || value.mutation_counts.confirmed > value.mutation_counts.attempted) {
     return malformed()
   }
@@ -1734,7 +1786,7 @@ function normalizeWorkerResult(result, evidencePolicy, identity) {
     }
   } else if (!exact(value.failure, ['classification'])
     || !validFailureClassification(value.outcome, value.failure.classification)
-    || value.mutation_counts.attempted !== (terminalIndex >= 1 ? 2 : 1)
+    || (!preAdapterFailure && value.mutation_counts.attempted !== (terminalIndex >= 1 ? 2 : 1))
     || value.mutation_counts.confirmed !== (terminalIndex >= 2 ? 2 : terminalIndex >= 1 ? 1 : 0)) {
     return malformed()
   }
@@ -1854,8 +1906,10 @@ function formalAdapterFactories(context) {
         }),
       })
     },
-    d1Error(classification, d1, identity) {
-      return sanitizedD1Error(classification, d1, identity, FORMAL_REHEARSAL_D1_EVIDENCE_POLICY)
+    d1Error(classification, d1, identity, outcome, entered) {
+      return sanitizedD1Error(
+        classification, d1, identity, FORMAL_REHEARSAL_D1_EVIDENCE_POLICY, outcome, entered,
+      )
     },
     evidence: Object.freeze({
       source: FORMAL_REHEARSAL_EVIDENCE_SOURCE,
@@ -1914,8 +1968,10 @@ function productionAdapterFactories() {
         }),
       })
     },
-    d1Error(classification, d1, identity) {
-      return sanitizedD1Error(classification, d1, identity, PRODUCTION_D1_EVIDENCE_POLICY)
+    d1Error(classification, d1, identity, outcome, entered) {
+      return sanitizedD1Error(
+        classification, d1, identity, PRODUCTION_D1_EVIDENCE_POLICY, outcome, entered,
+      )
     },
     evidence: Object.freeze({
       source: 'production',
@@ -2091,46 +2147,55 @@ function executeProduction(manifest, authorization) {
   let materialized
   let d1Result
   let d1Receipt
-  const durableD1Failure = (classification) => {
-    d1Receipt = adapters.d1Error(classification, d1, workerIdentity)
+  const durableD1Failure = (classification, outcome = 'ERROR', entered = true) => {
+    d1Receipt = adapters.d1Error(classification, d1, workerIdentity, outcome, entered)
     return adapters.normalizeD1Error(d1Receipt, d1, workerIdentity)
   }
   let cleanup = { created: false, cleaned: true, observed_absent: true }
   if (liveResult.outcome === 'PASS') {
     try {
-      if (!withinOverallDeadline()) throw new DeliverySinkDeadlineError()
-      materialized = materializeExpectedReconciliation(d1)
-      if (!withinOverallDeadline()) throw new DeliverySinkDeadlineError()
-      const bindings = deriveProductionD1Bindings(d1, materialized.path, workerIdentity)
-      let transport
       try {
-        transport = adapters.createD1Transport(
-          bindings,
-          credentials.environments,
-          attemptClock.elapsedMilliseconds,
-        )
+        assertCurrentFormalEntryClosure(manifest.value)
       } catch {
-        d1Result = durableD1Failure(formal ? 'formal_rehearsal_d1_setup_error' : 'production_d1_setup_error')
+        d1Result = durableD1Failure('Manifest Drift', 'NON_PASS', true)
       }
       if (!d1Result) {
+        if (!withinOverallDeadline()) throw new DeliverySinkDeadlineError()
+        materialized = materializeExpectedReconciliation(d1)
+        if (!withinOverallDeadline()) throw new DeliverySinkDeadlineError()
+        const bindings = deriveProductionD1Bindings(d1, materialized.path, workerIdentity)
+        let transport
         try {
-          d1Receipt = runD1Stages({
+          transport = adapters.createD1Transport(
             bindings,
-            transport,
-            elapsed_ms: attemptClock.elapsedMilliseconds(),
-            monotonic_ms: attemptClock.elapsedMilliseconds,
-          })
-          d1Result = adapters.normalizeD1Result(d1Receipt, d1, workerIdentity)
-          d1Receipt = d1Result.receipt ?? d1Receipt
-        } catch {
-          d1Result = durableD1Failure(formal ? 'formal_rehearsal_d1_adapter_error' : 'production_d1_adapter_error')
+            credentials.environments,
+            attemptClock.elapsedMilliseconds,
+          )
+        } catch (error) {
+          d1Result = error instanceof DeliverySinkDeadlineError || !withinOverallDeadline()
+            ? durableD1Failure('overall_timeout', 'TIMEOUT', true)
+            : durableD1Failure(formal ? 'formal_rehearsal_d1_setup_error' : 'production_d1_setup_error')
+        }
+        if (!d1Result) {
+          try {
+            d1Receipt = runD1Stages({
+              bindings,
+              transport,
+              elapsed_ms: attemptClock.elapsedMilliseconds(),
+              monotonic_ms: attemptClock.elapsedMilliseconds,
+            })
+            d1Result = adapters.normalizeD1Result(d1Receipt, d1, workerIdentity)
+            d1Receipt = d1Result.receipt ?? d1Receipt
+          } catch {
+            d1Result = durableD1Failure(formal ? 'formal_rehearsal_d1_adapter_error' : 'production_d1_adapter_error')
+          }
         }
       }
     } catch (error) {
       materialized ??= error?.materialized
-      d1Result = durableD1Failure(error instanceof DeliverySinkDeadlineError
-        ? 'overall_timeout'
-        : formal ? 'formal_rehearsal_d1_setup_error' : 'production_d1_setup_error')
+      d1Result = error instanceof DeliverySinkDeadlineError || !withinOverallDeadline()
+        ? durableD1Failure('overall_timeout', 'TIMEOUT', true)
+        : durableD1Failure(formal ? 'formal_rehearsal_d1_setup_error' : 'production_d1_setup_error')
     } finally {
       cleanup = disposeExpectedReconciliation(materialized)
     }
@@ -2179,8 +2244,8 @@ function executeProduction(manifest, authorization) {
       })
       workerResult = adapters.normalizeWorkerResult(workerReceipt, workerIdentity)
     } catch (error) {
-      workerResult = error instanceof DeliverySinkDeadlineError
-        ? malformedWorkerResult(adapters.evidence.production
+      workerResult = error instanceof DeliverySinkDeadlineError || !withinOverallDeadline()
+        ? preWorkerOverallTimeoutResult(adapters.evidence.production
           ? PRODUCTION_WORKER_EVIDENCE_POLICY
           : FORMAL_REHEARSAL_WORKER_EVIDENCE_POLICY, workerIdentity)
         : adapters.normalizeWorkerResult(null, workerIdentity)
