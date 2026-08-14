@@ -2568,6 +2568,9 @@ export function runFormalRehearsal(config) {
         sha256: sha256(authorizationBytes),
       })
       const terminal = execute(manifest, authorization)
+      if (process.env.BLOGMAN_DIAGNOSE_ENTRY_DRIFT === '1') {
+        process.stderr.write(`FORMAL_TERMINAL_DIAGNOSTIC outcome=${terminal.value.outcome} stage=${terminal.value.first_terminal_stage} classification=${terminal.value.failure?.classification ?? 'none'}\n`)
+      }
       if (terminal.value.evidence.production === true || terminal.value.evidence.source === 'production') {
         fail('formal rehearsal must not emit production evidence')
       }
