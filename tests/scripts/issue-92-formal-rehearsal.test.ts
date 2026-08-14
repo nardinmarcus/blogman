@@ -11,7 +11,10 @@ import { createRepositoryDeliverySink } from '../../scripts/issue-23-delivery-ev
 
 const REPOSITORY_ROOT = process.cwd()
 const IS_MACOS = platform() === 'darwin'
-const IS_MACOS_CI_GATE = IS_MACOS && process.env.GITHUB_ACTIONS === 'true'
+const RUN_EXACT_FORMAL_REHEARSAL = process.env.BLOGMAN_RUN_FORMAL_REHEARSAL === '1'
+const IS_MACOS_CI_GATE = IS_MACOS && (
+  process.env.GITHUB_ACTIONS === 'true' || RUN_EXACT_FORMAL_REHEARSAL
+)
 const BOUNDED_FORMAL_PATH_TIMEOUT_MS = 240_000
 const SHA256 = /^[a-f0-9]{64}$/u
 const ALL_STAGES = [
@@ -183,6 +186,11 @@ describe('Issue #92 formal rehearsal public path', () => {
 
   beforeAll(() => {
     if (!IS_MACOS_CI_GATE) return
+    if (RUN_EXACT_FORMAL_REHEARSAL) {
+      expect(process.env.BLOGMAN_FORMAL_REHEARSAL_EXPECTED_COMMIT).toBe(
+        repositoryFact(['rev-parse', 'HEAD']),
+      )
+    }
     expect(existsSync(join(REPOSITORY_ROOT, '.issue-23-delivery'))).toBe(false)
     repeatedFormalRuns = [runFormalRehearsal(formalConfig()), runFormalRehearsal(formalConfig())]
   }, BOUNDED_FORMAL_PATH_TIMEOUT_MS * 2)
