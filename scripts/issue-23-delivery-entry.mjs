@@ -2104,7 +2104,10 @@ function executeProduction(manifest, authorization) {
     assertCurrentFormalEntryClosure(manifest.value)
     assertWranglerTargetBinding(manifest.value)
     assertCurrentRepositoryIdentity(manifest.value)
-  } catch {
+  } catch (error) {
+    if (process.env.BLOGMAN_DIAGNOSE_ENTRY_DRIFT === '1') {
+      process.stderr.write(`ENTRY_DRIFT_DIAGNOSTIC ${error instanceof Error ? error.message : String(error)}\n`)
+    }
     entryDrift = { outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }
   }
   const adapters = activeAdapterFactories()
