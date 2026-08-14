@@ -361,6 +361,7 @@ type PrepareFixtureOptions = Record<string, unknown> & {
 
 function copyConfiguredFakeFixtureInputs(config: ReturnType<typeof baseConfig>, artifactRepositoryPath: string) {
   const paths = new Set([
+    ...FORMAL_EXECUTION_CLOSURE_PATHS,
     config.migration.reset_sql.path,
     config.migration.runner.path,
     config.migration.catalog.path,
@@ -406,6 +407,18 @@ function removeFakePrepareArtifactRepository(fixture: ReturnType<typeof createFa
     })
   } finally {
     rmSync(fixture.directory, { recursive: true, force: true })
+  }
+}
+
+function withFakePrepareRepository<T>(
+  config: ReturnType<typeof baseConfig>,
+  callback: (repositoryPath: string) => T,
+) {
+  const fixture = createFakePrepareArtifactRepository(config)
+  try {
+    return callback(fixture.artifactRepositoryPath)
+  } finally {
+    removeFakePrepareArtifactRepository(fixture)
   }
 }
 
@@ -505,6 +518,7 @@ describe('target macOS formal runtime receipt', () => {
   it('includes the private Worker upload execution and its build-proof dependency in the formal closure', () => {
     expect(FORMAL_EXECUTION_CLOSURE_PATHS).toEqual(expect.arrayContaining([
       'scripts/issue-23-delivery-worker-upload.mjs',
+      'scripts/issue-23-delivery-evidence-sink-internal.mjs',
       'scripts/issue-23-build-proof.mjs',
     ]))
   })
@@ -1521,15 +1535,15 @@ describe('Issue #23 Delivery Preparation', () => {
         checksum: hash(String(index + 1)),
       })),
     }
-    writeFileSync(join(repoRoot, runnerPath), `process.stdout.write(${JSON.stringify(JSON.stringify(catalog))})\n`)
-
-    try {
-      const config = baseConfig()
+    const config = baseConfig()
+    withFakePrepareRepository(config, (repositoryPath) => {
+      writeFileSync(join(repositoryPath, runnerPath), `process.stdout.write(${JSON.stringify(JSON.stringify(catalog))})\n`)
       config.migration.runner.path = runnerPath
-      config.migration.runner.sha256 = sha256(readFileSync(join(repoRoot, runnerPath)))
+      config.migration.runner.sha256 = sha256(readFileSync(join(repositoryPath, runnerPath)))
       config.migration.catalog.sha256 = sha256(Buffer.from(JSON.stringify(catalog)))
       let rehearsalRunnerPath = ''
       const result = prepareFixture(config, {
+        repositoryPath,
         rehearsalRunner: ({ migrationRunnerPath }: { migrationRunnerPath: string }) => {
           rehearsalRunnerPath = migrationRunnerPath
           return testRehearsalResult()
@@ -1538,16 +1552,16 @@ describe('Issue #23 Delivery Preparation', () => {
 
       expect(result.value.migration.catalog.sha256).toBe(sha256(Buffer.from(JSON.stringify(catalog))))
       expect(rehearsalRunnerPath).toBe(runnerPath)
-    } finally {
-      rmSync(join(repoRoot, runnerPath), { force: true })
-    }
+    })
   })
 
   it('binds configured migration names checksums catalog and declared hashes', () => {
     const runnerPath = 'tests/scripts/.issue-23-configured-runner-binding.mjs'
     const catalogPath = 'tests/scripts/.issue-23-catalog-binding'
-    const catalogDirectory = join(repoRoot, catalogPath)
-    const canonicalCatalogDirectory = join(repoRoot, 'db/ledger-migrations')
+    const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
+    const repositoryPath = artifactFixture.artifactRepositoryPath
+    const catalogDirectory = join(repositoryPath, catalogPath)
+    const canonicalCatalogDirectory = join(repositoryPath, 'db/ledger-migrations')
     const captureDirectory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-migration-binding-'))
     const capturePath = join(captureDirectory, 'argv.jsonl')
     const captureArguments = () => readFileSync(capturePath, 'utf8')
@@ -1568,7 +1582,7 @@ describe('Issue #23 Delivery Preparation', () => {
       return {
         ...entry,
         path,
-        sha256: sha256(readFileSync(join(repoRoot, path))),
+        sha256: sha256(readFileSync(join(repositoryPath, path))),
       }
     })
     const goodCatalog = {
@@ -1582,7 +1596,7 @@ describe('Issue #23 Delivery Preparation', () => {
     const declaredCatalogSha256 = sha256(Buffer.from(JSON.stringify(goodCatalog)))
 
     const writeRunner = (catalog: typeof goodCatalog) => {
-      writeFileSync(join(repoRoot, runnerPath), `
+      writeFileSync(join(repositoryPath, runnerPath), `
         import { appendFileSync } from 'node:fs'
         const args = process.argv.slice(2)
         appendFileSync(${JSON.stringify(capturePath)}, JSON.stringify(args) + '\\n')
@@ -1602,12 +1616,13 @@ describe('Issue #23 Delivery Preparation', () => {
       writeRunner(catalog)
       const config = baseConfig()
       config.migration.runner.path = runnerPath
-      config.migration.runner.sha256 = sha256(readFileSync(join(repoRoot, runnerPath)))
+      config.migration.runner.sha256 = sha256(readFileSync(join(repositoryPath, runnerPath)))
       config.migration.catalog.path = catalogPath
       config.migration.catalog.sha256 = declaredCatalogSha256
       config.migration.catalog.migrations = configuredEntries
       mutateConfig(config)
       return withTargetMacosRuntime(() => prepareFixture(config, {
+        repositoryPath,
         rehearsalRunner: ({
           repositoryPath,
           migrationRunnerPath,
@@ -1702,9 +1717,8 @@ describe('Issue #23 Delivery Preparation', () => {
           .toThrow(/migration|catalog|sha256/u)
       }
     } finally {
-      rmSync(join(repoRoot, runnerPath), { force: true })
-      rmSync(catalogDirectory, { recursive: true, force: true })
       rmSync(captureDirectory, { recursive: true, force: true })
+      removeFakePrepareArtifactRepository(artifactFixture)
     }
   }, 15_000)
 
@@ -2175,10 +2189,12 @@ describe('Issue #23 Delivery Preparation', () => {
 
   it('rejects a repository catalog-directory symlink before external catalog bytes drive preparation', () => {
     const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-catalog-symlink-'))
+    const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
+    const repositoryPath = artifactFixture.artifactRepositoryPath
     const externalCatalogDirectory = join(directory, 'catalog')
     const externalCatalogPath = join(externalCatalogDirectory, 'catalog.json')
     const reachedPath = join(externalCatalogDirectory, 'reached')
-    const linkPath = join(repoRoot, 'tests', 'scripts', '.issue-23-external-catalog-directory')
+    const linkPath = join(repositoryPath, 'tests', 'scripts', '.issue-23-external-catalog-directory')
     const runnerPath = 'tests/scripts/.issue-23-external-catalog-runner.mjs'
     const catalog = {
       format: 'blogman-migration-catalog/v1',
@@ -2192,7 +2208,7 @@ describe('Issue #23 Delivery Preparation', () => {
 
     mkdirSync(externalCatalogDirectory, { recursive: true })
     writeFileSync(externalCatalogPath, catalogBytes)
-    writeFileSync(join(repoRoot, runnerPath), `
+    writeFileSync(join(repositoryPath, runnerPath), `
       import { appendFileSync, readFileSync } from 'node:fs'
       import { join } from 'node:path'
       const args = process.argv.slice(2)
@@ -2205,13 +2221,13 @@ describe('Issue #23 Delivery Preparation', () => {
     try {
       const config = baseConfig()
       config.migration.runner.path = runnerPath
-      config.migration.runner.sha256 = sha256(readFileSync(join(repoRoot, runnerPath)))
+      config.migration.runner.sha256 = sha256(readFileSync(join(repositoryPath, runnerPath)))
       config.migration.catalog.path = 'tests/scripts/.issue-23-external-catalog-directory'
       config.migration.catalog.sha256 = sha256(catalogBytes)
 
       let thrown: Error | undefined
       try {
-        prepareFixture(config)
+        prepareFixture(config, { repositoryPath })
       } catch (error) {
         thrown = error as Error
       }
@@ -2220,17 +2236,20 @@ describe('Issue #23 Delivery Preparation', () => {
       expect(thrown?.message).toMatch(/escapes repository/u)
     } finally {
       rmSync(linkPath, { force: true })
-      rmSync(join(repoRoot, runnerPath), { force: true })
+      rmSync(join(repositoryPath, runnerPath), { force: true })
+      removeFakePrepareArtifactRepository(artifactFixture)
       rmSync(directory, { recursive: true, force: true })
     }
   })
 
   it('rejects a repository catalog-directory symlink before building local rehearsal argv', () => {
     const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-rehearsal-catalog-symlink-'))
+    const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
+    const repositoryPath = artifactFixture.artifactRepositoryPath
     const reachedPath = join(directory, 'reached')
-    const linkPath = join(repoRoot, 'tests', 'scripts', '.issue-23-rehearsal-catalog-directory')
+    const linkPath = join(repositoryPath, 'tests', 'scripts', '.issue-23-rehearsal-catalog-directory')
     const runnerPath = 'tests/scripts/.issue-23-rehearsal-catalog-runner.mjs'
-    writeFileSync(join(repoRoot, runnerPath), `
+    writeFileSync(join(repositoryPath, runnerPath), `
       import { appendFileSync } from 'node:fs'
       appendFileSync(${JSON.stringify(reachedPath)}, JSON.stringify(process.argv.slice(2)))
       process.stdout.write(JSON.stringify({ state: 'current' }))
@@ -2241,7 +2260,7 @@ describe('Issue #23 Delivery Preparation', () => {
       let thrown: Error | undefined
       try {
         runLocalRehearsalForTestsOnly({
-          repositoryPath: repoRoot,
+          repositoryPath,
           runnerPath,
           migrationCatalogPath: 'tests/scripts/.issue-23-rehearsal-catalog-directory',
           manifestDraftSha256: hash('a'),
@@ -2254,7 +2273,8 @@ describe('Issue #23 Delivery Preparation', () => {
       expect(thrown?.message).toMatch(/escapes repository/u)
     } finally {
       rmSync(linkPath, { force: true })
-      rmSync(join(repoRoot, runnerPath), { force: true })
+      rmSync(join(repositoryPath, runnerPath), { force: true })
+      removeFakePrepareArtifactRepository(artifactFixture)
       rmSync(directory, { recursive: true, force: true })
     }
   })
@@ -2701,7 +2721,9 @@ exec wrangler "$@"
 
   it('reports the formal command timeout instead of a generic apply failure', () => {
     const runnerPath = 'tests/scripts/.issue-23-timeout-runner.mjs'
-    writeFileSync(join(repoRoot, runnerPath), `
+    const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
+    const repositoryPath = artifactFixture.artifactRepositoryPath
+    writeFileSync(join(repositoryPath, runnerPath), `
       const command = process.argv[2]
       if (command === 'catalog') {
         process.stdout.write(JSON.stringify({ migrations: [1, 2, 3, 4, 5, 6].map((number) => ({ number })) }))
@@ -2714,19 +2736,21 @@ exec wrangler "$@"
 
     try {
       expect(() => runLocalRehearsalForTestsOnly({
-        repositoryPath: repoRoot,
+        repositoryPath,
         runnerPath,
         manifestDraftSha256: hash('a'),
         childTimeoutMs: 100,
       })).toThrow(/timed out/u)
     } finally {
-      rmSync(join(repoRoot, runnerPath), { force: true })
+      removeFakePrepareArtifactRepository(artifactFixture)
     }
   })
 
   it('fails closed when one supervisor output stream exceeds its independent bound', () => {
     const runnerPath = 'tests/scripts/.issue-23-output-runner.mjs'
-    writeFileSync(join(repoRoot, runnerPath), `
+    const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
+    const repositoryPath = artifactFixture.artifactRepositoryPath
+    writeFileSync(join(repositoryPath, runnerPath), `
       const command = process.argv[2]
       if (command === 'catalog') {
         process.stdout.write(JSON.stringify({ migrations: [1, 2, 3, 4, 5, 6].map((number) => ({ number })), padding: 'x'.repeat(4096) }))
@@ -2739,20 +2763,22 @@ exec wrangler "$@"
 
     try {
       expect(() => runLocalRehearsalForTestsOnly({
-        repositoryPath: repoRoot,
+        repositoryPath,
         runnerPath,
         manifestDraftSha256: hash('a'),
         maxOutputBytes: 1024,
       })).toThrow(/output exceeded/u)
     } finally {
-      rmSync(join(repoRoot, runnerPath), { force: true })
+      removeFakePrepareArtifactRepository(artifactFixture)
     }
   })
 
   it('rejects a command that leaves a descendant able to recreate disposable state', () => {
     const runnerPath = 'tests/scripts/.issue-23-recreate-runner.mjs'
+    const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
+    const repositoryPath = artifactFixture.artifactRepositoryPath
     const stateCapturePath = join(mkdtempSync(join(tmpdir(), 'blogman-issue-88-recreate-capture-')), 'state-path')
-    writeFileSync(join(repoRoot, runnerPath), `
+    writeFileSync(join(repositoryPath, runnerPath), `
       import { spawn } from 'node:child_process'
       import { join } from 'node:path'
       import { writeFileSync } from 'node:fs'
@@ -2773,7 +2799,7 @@ exec wrangler "$@"
 
     try {
       expect(() => runLocalRehearsalForTestsOnly({
-        repositoryPath: repoRoot,
+        repositoryPath,
         runnerPath,
         manifestDraftSha256: hash('a'),
         environment: { BLOGMAN_ISSUE_88_STATE_CAPTURE: stateCapturePath },
@@ -2784,7 +2810,7 @@ exec wrangler "$@"
       expect(existsSync(join(statePath, 'escaped'))).toBe(false)
     } finally {
       const capturedStatePath = existsSync(stateCapturePath) ? readFileSync(stateCapturePath, 'utf8') : ''
-      rmSync(join(repoRoot, runnerPath), { force: true })
+      removeFakePrepareArtifactRepository(artifactFixture)
       rmSync(dirname(stateCapturePath), { recursive: true, force: true })
       if (capturedStatePath) rmSync(capturedStatePath, { recursive: true, force: true })
     }
@@ -2793,6 +2819,8 @@ exec wrangler "$@"
   it('cleans a descendant on rehearsal timeout and blocks its network attempt', () => {
     const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-88-descendant-'))
     const runnerPath = 'tests/scripts/.issue-23-descendant-runner.mjs'
+    const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
+    const repositoryPath = artifactFixture.artifactRepositoryPath
     const probeBase = join(directory, 'probe')
     const runner = `
       import { spawn } from 'node:child_process'
@@ -2814,12 +2842,12 @@ exec wrangler "$@"
         process.stdout.write(JSON.stringify({ state: 'current' }))
       }
     `
-    writeFileSync(join(repoRoot, runnerPath), runner)
+    writeFileSync(join(repositoryPath, runnerPath), runner)
     const adapter = { calls: 0 }
 
     try {
       expect(() => runLocalRehearsalForTestsOnly({
-        repositoryPath: repoRoot,
+        repositoryPath,
         runnerPath,
         manifestDraftSha256: hash('a'),
         productionWriteAdapter: adapter,
@@ -2840,7 +2868,7 @@ exec wrangler "$@"
       expect(readFileSync(`${probeBase}.network`, 'utf8')).toBe('blocked')
       expect(adapter.calls).toBe(0)
     } finally {
-      rmSync(join(repoRoot, runnerPath), { force: true })
+      removeFakePrepareArtifactRepository(artifactFixture)
       rmSync(directory, { recursive: true, force: true })
     }
   })

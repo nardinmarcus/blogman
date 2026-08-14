@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import {
   chmodSync,
+  cpSync,
   mkdirSync,
   mkdtempSync,
-  unlinkSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -15,6 +16,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   D1TransportError,
@@ -39,9 +41,7 @@ import { D1_STAGE_TIMEOUT_MS } from '../../scripts/issue-23-delivery-d1-stages.m
 const repoRoot = process.cwd()
 const configPath = join(repoRoot, 'wrangler.toml')
 const resetSqlPath = join(repoRoot, 'db', 'issue-23-clean-start-reset.sql')
-const runnerPath = join(repoRoot, 'scripts', 'migrations.mjs')
 const catalogPath = join(repoRoot, 'db', 'ledger-migrations')
-const rolloutSafetyPath = join(repoRoot, 'scripts', 'rollout-safety.mjs')
 const temporaryDirectories: string[] = []
 const MIGRATIONS = [
   { number: 1, name: '001_initial_schema', checksum: '8a71414814571d4fe65e03fc92b3f976074d025ddf03a4dd9f861698b2387d05' },
@@ -80,7 +80,12 @@ function request(operation: string, stage = operation, elapsedMs = 0, overallEla
   }
 }
 
-function createConfig(overrides: Record<string, unknown> = {}) {
+function createConfig(overrides: Record<string, unknown> = {}, repositoryRoot = repoRoot) {
+  const repositoryConfigPath = join(repositoryRoot, 'wrangler.toml')
+  const repositoryResetSqlPath = join(repositoryRoot, 'db', 'issue-23-clean-start-reset.sql')
+  const repositoryRunnerPath = join(repositoryRoot, 'scripts', 'migrations.mjs')
+  const repositoryCatalogPath = join(repositoryRoot, 'db', 'ledger-migrations')
+  const repositoryRolloutSafetyPath = join(repositoryRoot, 'scripts', 'rollout-safety.mjs')
   const statePath = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-90-transport-')))
   temporaryDirectories.push(statePath)
   const expectedPath = join(statePath, 'expected-reconciliation.json')
@@ -94,19 +99,19 @@ function createConfig(overrides: Record<string, unknown> = {}) {
     mode: 'local',
     persist_path: statePath,
     database: 'DB',
-    config_path: configPath,
-    config_sha256: sha256File(configPath),
-    wrangler_sha256: sha256File(realpathSync(join(repoRoot, 'node_modules', '.bin', 'wrangler'))),
+    config_path: repositoryConfigPath,
+    config_sha256: sha256File(repositoryConfigPath),
+    wrangler_sha256: sha256File(realpathSync(join(repositoryRoot, 'node_modules', '.bin', 'wrangler'))),
     account_id: 'local-account-not-production',
     d1_database_id: 'local-d1-not-production',
-    reset_sql_path: resetSqlPath,
-    reset_sql_sha256: sha256File(resetSqlPath),
-    migration_runner_path: runnerPath,
-    migration_runner_sha256: sha256File(runnerPath),
-    migration_catalog_path: catalogPath,
-    migration_catalog_sha256: hashDirectory(catalogPath),
-    rollout_safety_path: rolloutSafetyPath,
-    rollout_safety_sha256: sha256File(rolloutSafetyPath),
+    reset_sql_path: repositoryResetSqlPath,
+    reset_sql_sha256: sha256File(repositoryResetSqlPath),
+    migration_runner_path: repositoryRunnerPath,
+    migration_runner_sha256: sha256File(repositoryRunnerPath),
+    migration_catalog_path: repositoryCatalogPath,
+    migration_catalog_sha256: hashDirectory(repositoryCatalogPath),
+    rollout_safety_path: repositoryRolloutSafetyPath,
+    rollout_safety_sha256: sha256File(repositoryRolloutSafetyPath),
     expected_reconciliation_path: expectedPath,
     expected_reconciliation_sha256: sha256File(expectedPath),
     manifest_sha256: '1'.repeat(64),
@@ -118,6 +123,20 @@ function createConfig(overrides: Record<string, unknown> = {}) {
     ...overrides,
   }
   return { config, statePath, expectedPath }
+}
+
+function createTransportWorkspace() {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-90-transport-workspace-')))
+  temporaryDirectories.push(directory)
+  const repository = join(directory, 'repository')
+  execFileSync('git', ['clone', '--quiet', '--shared', repoRoot, repository])
+  cpSync(join(repoRoot, 'scripts'), join(repository, 'scripts'), { recursive: true, force: true })
+  symlinkSync(join(repoRoot, 'node_modules'), join(repository, 'node_modules'), 'dir')
+  return repository
+}
+
+async function workspaceTransportModule(repository: string) {
+  return import(pathToFileURL(join(repository, 'scripts', 'issue-23-delivery-d1-transport.mjs')).href)
 }
 
 afterEach(() => {
@@ -261,7 +280,7 @@ describe('Issue #90 D1 transport', () => {
     const transport = createD1Transport(config)
     writeFileSync(temporaryConfig, `${readFileSync(temporaryConfig)}\n`)
 
-    expect(() => transport.execute(request('d1_identity'))).toThrow('D1 transport malformed')
+    expect(() => transport.execute(request('d1_identity'))).toThrow('D1 transport manifest_drift')
   })
 
   it('classifies bounded child output overflow without returning raw bytes', () => {
@@ -324,40 +343,72 @@ describe('Issue #90 D1 transport', () => {
     mkdirSync(statePath, { mode: 0o700 })
     temporaryDirectories.push(movedPath)
 
-    expect(() => transport.execute(request('empty_d1_proof'))).toThrow('D1 transport malformed')
+    expect(() => transport.execute(request('empty_d1_proof'))).toThrow('D1 transport manifest_drift')
   })
 
   it.each([
-    ['config', configPath],
-    ['reset SQL', resetSqlPath],
-    ['migration runner', runnerPath],
-    ['rollout safety', rolloutSafetyPath],
-  ])('rejects a %s content mutation before the next child spawn', (_label, path) => {
-    const original = readFileSync(path)
-    const { config } = createConfig()
-    const transport = path === configPath ? createD1Transport(config) : null
-    try {
-      writeFileSync(path, Buffer.concat([original, Buffer.from('\n')]))
-      if (transport) {
-        expect(() => transport.execute(request('d1_identity'))).toThrow('D1 transport malformed')
-      } else {
-        expect(() => createD1Transport(config)).toThrow('D1 transport malformed')
-      }
-    } finally {
-      writeFileSync(path, original)
-    }
+    ['config', 'wrangler.toml'],
+    ['reset SQL', 'db/issue-23-clean-start-reset.sql'],
+    ['migration runner', 'scripts/migrations.mjs'],
+    ['rollout safety', 'scripts/rollout-safety.mjs'],
+  ])('maps post-construction %s content drift to Manifest Drift before the next child spawn', async (_label, relativePath) => {
+    const repository = createTransportWorkspace()
+    const transportModule = await workspaceTransportModule(repository)
+    const { config } = createConfig({}, repository)
+    const transport = transportModule.createD1Transport(config)
+    writeFileSync(join(repository, relativePath), Buffer.concat([
+      readFileSync(join(repository, relativePath)),
+      Buffer.from('\n'),
+    ]))
+
+    expect(() => transport.execute(request('d1_identity'))).toThrowError(expect.objectContaining({
+      classification: transportModule.D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MANIFEST_DRIFT,
+    }))
   })
 
-  it('rejects a migration catalog tree mutation before the next child spawn', () => {
-    const marker = join(catalogPath, '999_issue_90_mutation.sql')
-    const { config } = createConfig()
-    try {
-      writeFileSync(marker, '-- mutation\n', { mode: 0o600 })
-      expect(() => createD1Transport(config)).toThrow('D1 transport malformed')
-    } finally {
-      unlinkSync(marker)
-    }
+  it('maps post-construction migration catalog drift to Manifest Drift before the next child spawn', async () => {
+    const repository = createTransportWorkspace()
+    const transportModule = await workspaceTransportModule(repository)
+    const { config } = createConfig({}, repository)
+    const transport = transportModule.createD1Transport(config)
+    writeFileSync(join(repository, 'db/ledger-migrations/999_issue_90_mutation.sql'), '-- mutation\n', { mode: 0o600 })
+
+    expect(() => transport.execute(request('d1_identity'))).toThrowError(expect.objectContaining({
+      classification: transportModule.D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MANIFEST_DRIFT,
+    }))
   })
+
+  it('maps same-byte post-construction bound artifact identity replacement to Manifest Drift', async () => {
+    const repository = createTransportWorkspace()
+    const transportModule = await workspaceTransportModule(repository)
+    const { config } = createConfig({}, repository)
+    const transport = transportModule.createD1Transport(config)
+    const path = join(repository, 'wrangler.toml')
+    const bytes = readFileSync(path)
+    rmSync(path)
+    writeFileSync(path, bytes, { mode: 0o644 })
+
+    expect(() => transport.execute(request('d1_identity'))).toThrowError(expect.objectContaining({
+      classification: transportModule.D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MANIFEST_DRIFT,
+    }))
+  })
+
+  it('isolates D1 artifact drift between concurrent test-owned repository fixtures', async () => {
+    const firstRepository = createTransportWorkspace()
+    const secondRepository = createTransportWorkspace()
+    const [firstModule, secondModule] = await Promise.all([
+      workspaceTransportModule(firstRepository),
+      workspaceTransportModule(secondRepository),
+    ])
+    const first = firstModule.createD1Transport(createConfig({}, firstRepository).config)
+    const second = secondModule.createD1Transport(createConfig({}, secondRepository).config)
+    writeFileSync(join(firstRepository, 'wrangler.toml'), `${readFileSync(join(firstRepository, 'wrangler.toml'))}\n`)
+
+    expect(() => first.execute(request('d1_identity'))).toThrowError(expect.objectContaining({
+      classification: firstModule.D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MANIFEST_DRIFT,
+    }))
+    expect(second.execute(request('d1_identity')).status).toBe(0)
+  }, 30_000)
 
   it('accepts the pinned Wrangler 4.86.0 D1 info fixture with write_queries_24h', () => {
     const info = readFileSync(

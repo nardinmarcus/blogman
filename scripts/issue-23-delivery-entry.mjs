@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { platform, tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   CANONICAL_MANIFEST_FORMAT,
@@ -23,10 +23,13 @@ import {
 } from './issue-23-delivery-worker-transport.mjs'
 import { runWorkerStages } from './issue-23-delivery-worker-stages.mjs'
 import {
-  createRepositoryDeliverySink,
+  createTestDeliverySink,
   DeliverySinkDeadlineError,
-  repositoryDeliverySink,
 } from './issue-23-delivery-evidence-sink.mjs'
+import {
+  canonicalProductionAuthorityRootForEntry,
+  createCanonicalProductionSinkForEntry,
+} from './issue-23-delivery-evidence-sink-internal.mjs'
 import { formalExecutionClosureSha256 } from './issue-23-delivery-execution-closure.mjs'
 
 export const LOCAL_ENTRY_FORMAT = 'blogman-issue-23-local-entry/v1'
@@ -1123,13 +1126,23 @@ function validatePreparedManifest(manifest) {
 
 function executionDeliverySink() {
   const context = currentFormalContext()
-  if (context) {
-    if (context.deliverySink?.authority_class !== 'explicit-test-only') {
-      fail('formal execution requires an explicit test-owned sink')
+  if (!context) return createCanonicalProductionSinkForEntry()
+  let sinkRoot
+  let systemTemporaryRoot
+  try {
+    sinkRoot = realpathSync(context.deliverySinkRoot)
+    systemTemporaryRoot = realpathSync(tmpdir())
+    const metadata = lstatSync(sinkRoot)
+    const fromTemporaryRoot = relative(systemTemporaryRoot, sinkRoot)
+    if (!metadata.isDirectory() || metadata.isSymbolicLink() || (metadata.mode & 0o777) !== 0o700
+      || fromTemporaryRoot === '' || fromTemporaryRoot === '..' || fromTemporaryRoot.startsWith('../')
+      || sinkRoot === canonicalProductionAuthorityRootForEntry()) {
+      throw new Error('untrusted formal sink root')
     }
-    return context.deliverySink
+  } catch {
+    fail('formal execution requires a test-owned ROOT under the system temporary directory')
   }
-  return repositoryDeliverySink
+  return createTestDeliverySink(sinkRoot)
 }
 
 function acceptAuthorization(manifestSha256, authorization, deadline) {
@@ -2032,6 +2045,20 @@ function runLivePreconditions(manifest, d1, identity, credentials, elapsed_ms = 
   } finally { disposeExpectedReconciliation(materialized) }
 }
 
+function reconciledProductionMutationCounts(d1Value, workerValue) {
+  const d1Attempted = d1Value === null
+    ? 0
+    : d1Value.stage_counts.clean_start_reset + d1Value.stage_counts.migrations_001_006
+  const d1TerminalIndex = d1Value === null ? -1 : PRODUCTION_D1_STAGES.indexOf(d1Value.first_terminal_stage)
+  const d1Confirmed = d1Value === null ? 0 : d1Value.outcome === 'PASS'
+    ? 2
+    : d1TerminalIndex > PRODUCTION_D1_STAGES.indexOf('migrations_001_006') ? 2
+      : d1TerminalIndex > PRODUCTION_D1_STAGES.indexOf('clean_start_reset') ? 1 : 0
+  const attempted = d1Attempted + (workerValue?.mutation_counts.attempted ?? 0)
+  const confirmed = d1Confirmed + (workerValue?.mutation_counts.confirmed ?? 0)
+  return { production_writes: confirmed, attempted, confirmed }
+}
+
 function productionEvidenceHashes(d1Result, workerResult) {
   const d1Hashes = d1Result?.evidence_hashes ?? {}
   const workerHashes = workerResult?.evidence_hashes ?? {}
@@ -2255,17 +2282,9 @@ function executeProduction(manifest, authorization) {
   const trace = authorizationFault
     ? [{ stage: 'authorization_accept', ...authorizationFault }]
     : productionTrace(liveResult, d1Result, workerResult)
-  const d1MutationAttempted = (d1Result?.stage_counts?.clean_start_reset ?? 0) + (d1Result?.stage_counts?.migrations_001_006 ?? 0)
-  const d1TerminalIndex = PRODUCTION_D1_STAGES.indexOf(d1Result?.first_terminal_stage)
-  const d1MutationConfirmed = d1Result?.outcome === 'PASS'
-    ? 2
-    : (d1TerminalIndex > PRODUCTION_D1_STAGES.indexOf('migrations_001_006') ? 2
-      : d1TerminalIndex > PRODUCTION_D1_STAGES.indexOf('clean_start_reset') ? 1 : 0)
   const terminal = trace.at(-1)
   if (!terminal) fail('production state machine did not run')
-  const productionWrites = d1MutationConfirmed + (workerResult?.mutation_counts.confirmed ?? 0)
-  const attempted = d1MutationAttempted + (workerResult?.mutation_counts.attempted ?? 0)
-  const confirmed = d1MutationConfirmed + (workerResult?.mutation_counts.confirmed ?? 0)
+  const reconciledMutations = reconciledProductionMutationCounts(d1Result, workerResult)
   const evidenceSource = adapters.evidence.source
   const evidenceProduction = adapters.evidence.production
   const evidencePromotable = adapters.evidence.promotable === null
@@ -2296,7 +2315,7 @@ function executeProduction(manifest, authorization) {
     stage_durations_ms: durations,
     mutation_counts: adapters.zeroMutations
       ? { production_writes: 0, attempted: 0, confirmed: 0 }
-      : { production_writes: productionWrites, attempted, confirmed },
+      : reconciledMutations,
     evidence: {
       source: evidenceSource,
       production: evidenceProduction,
@@ -2363,7 +2382,7 @@ export function validateProductionTerminalEvidence(result) {
   }
   let receipts
   try {
-    receipts = repositoryDeliverySink.readTerminalEvidence(result.sha256)
+    receipts = createCanonicalProductionSinkForEntry().readTerminalEvidence(result.sha256)
   } catch {
     fail('production terminal evidence is malformed')
   }
@@ -2528,6 +2547,13 @@ export function validateProductionTerminalEvidence(result) {
       fail('production terminal evidence is invalid')
     }
   }
+  const expectedMutations = reconciledProductionMutationCounts(
+    d1Receipt?.value ?? null,
+    receipts.worker?.value ?? null,
+  )
+  if (!Object.entries(expectedMutations).every(([name, count]) => value.mutation_counts[name] === count)) {
+    fail('production terminal evidence is invalid')
+  }
   return true
 }
 
@@ -2543,7 +2569,7 @@ export function runFormalRehearsal(config) {
   try {
     const context = Object.freeze({
       sink,
-      deliverySink: createRepositoryDeliverySink(sinkRoot),
+      deliverySinkRoot: sinkRoot,
       clock: Object.freeze({
         wallTimeMilliseconds: () => 0,
         monotonicNanoseconds: () => 0n,

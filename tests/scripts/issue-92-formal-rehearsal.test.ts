@@ -7,10 +7,6 @@ import { beforeAll, describe, expect, it } from 'vitest'
 import * as deliveryEntry from '../../scripts/issue-23-delivery-entry.mjs'
 import { runFormalRehearsal } from '../../scripts/issue-23-delivery-formal-rehearsal.mjs'
 import { runInFormalRehearsalContext } from '../../scripts/issue-23-delivery-formal-context.mjs'
-import {
-  createRepositoryDeliverySink,
-  repositoryDeliverySink,
-} from '../../scripts/issue-23-delivery-evidence-sink.mjs'
 
 const REPOSITORY_ROOT = process.cwd()
 const IS_MACOS = platform() === 'darwin'
@@ -204,20 +200,36 @@ describe('Issue #92 formal rehearsal public path', () => {
     expect(() => runFormalRehearsal({} as never, {} as never)).toThrow(/exactly one config/u)
   })
 
-  it('requires an explicit test-owned sink and rejects canonical-sink fallback', () => {
-    expect(() => runInFormalRehearsalContext({ sink: [] }, () => null))
-      .toThrow(/explicit test-owned sink|formal context/u)
-    expect(() => runInFormalRehearsalContext({
-      sink: [],
-      deliverySink: repositoryDeliverySink,
-      clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
-    }, () => null)).toThrow(/explicit test-owned sink|formal context/u)
+  it('requires a test-owned ROOT and rejects caller-supplied sink facades', () => {
+    const sinkRoot = mkdtempSync(join(tmpdir(), 'blogman-issue-23-formal-root-contract-'))
+    try {
+      expect(runInFormalRehearsalContext({
+        sink: [],
+        deliverySinkRoot: sinkRoot,
+        clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
+      }, () => 'accepted')).toBe('accepted')
+      expect(() => runInFormalRehearsalContext({
+        sink: [],
+        deliverySink: {
+          consumeAuthorization() { throw new Error('facade must not run') },
+          persistTerminalResult() { throw new Error('facade must not run') },
+          readTerminalEvidence() { throw new Error('facade must not run') },
+        },
+        clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
+      }, () => null)).toThrow(/test-owned ROOT|formal context/u)
+    } finally {
+      rmSync(sinkRoot, { recursive: true, force: true })
+    }
   })
 
-  it('allocates the explicit formal sink outside the frozen repository', () => {
+  it('allocates and validates the formal ROOT before constructing its sink', () => {
     const source = readFileSync(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-entry.mjs'), 'utf8')
     expect(source).toContain("mkdtempSync(join(tmpdir(), 'blogman-issue-23-formal-sink-'))")
     expect(source).not.toContain("mkdtempSync(join(ENTRY_REPO_ROOT, '.issue-23-formal-sink-'))")
+    const canonicalRootRejection = source.indexOf('sinkRoot === canonicalProductionAuthorityRootForEntry()')
+    const sinkConstruction = source.indexOf('createTestDeliverySink(sinkRoot)')
+    expect(canonicalRootRejection).toBeGreaterThan(-1)
+    expect(sinkConstruction).toBeGreaterThan(canonicalRootRejection)
   })
 
   it.skipIf(!IS_MACOS_CI_GATE)('runs two identical public rehearsals through isolated durable sinks and leaves no sink residue', () => {
@@ -306,7 +318,7 @@ describe('Issue #92 formal rehearsal public path', () => {
       try {
         expect(() => runInFormalRehearsalContext({
           sink: [],
-          deliverySink: createRepositoryDeliverySink(sinkRoot),
+          deliverySinkRoot: sinkRoot,
           clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
         }, () => deliveryEntry.execute(manifest, authorization)))
           .toThrow(/formal test manifest|manifest format|ci\.conclusion|classification/u)
@@ -332,7 +344,7 @@ describe('Issue #92 formal rehearsal public path', () => {
     try {
       expect(() => runInFormalRehearsalContext({
         sink: [],
-        deliverySink: createRepositoryDeliverySink(promotionSinkRoot),
+        deliverySinkRoot: promotionSinkRoot,
         clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
       }, () => deliveryEntry.execute(promotedManifest, promotedAuthorization)))
         .toThrow(/formal test manifest|ci\.conclusion|classification/u)
@@ -364,7 +376,7 @@ describe('Issue #92 formal rehearsal public path', () => {
         try {
           const context = Object.freeze({
             sink: operations,
-            deliverySink: createRepositoryDeliverySink(sinkRoot),
+            deliverySinkRoot: sinkRoot,
             clock: Object.freeze({
               wallTimeMilliseconds: () => 0,
               monotonicNanoseconds: () => 0n,

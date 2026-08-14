@@ -3,11 +3,14 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -64,11 +67,14 @@ vi.mock('../../scripts/issue-23-delivery-worker-transport.mjs', () => ({
 }))
 vi.mock('../../scripts/issue-23-delivery-worker-stages.mjs', () => ({ runWorkerStages: runWorkerStagesMock }))
 
+const formalSinkRoots: string[] = []
+
 afterEach(() => {
   vi.mocked(execFileSync).mockImplementation(childProcessActual.execFileSync!)
   vi.mocked(readFileSync).mockImplementation(fsActual.readFileSync!)
   vi.mocked(realpathSync).mockImplementation(fsActual.realpathSync!)
   vi.unstubAllEnvs()
+  for (const root of formalSinkRoots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
 import { execute, validateProductionTerminalEvidence } from '../../scripts/issue-23-delivery-entry.mjs'
@@ -80,12 +86,9 @@ import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-forma
 import { hashD1ArtifactDirectory } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
 import { formalExecutionClosureSha256 } from '../../scripts/issue-23-delivery-execution-closure.mjs'
 import { runInFormalRehearsalContext } from '../../scripts/issue-23-delivery-formal-context.mjs'
-import {
-  DeliverySinkDeadlineError,
-  repositoryDeliverySink,
-  repositoryDeliverySinkRoot,
-} from '../../scripts/issue-23-delivery-evidence-sink.mjs'
-import { isolatedAuthorityChildEnvironment } from '../helpers/issue-23-authority-isolation'
+import { DeliverySinkDeadlineError } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
+import { createCanonicalProductionSinkForEntry } from '../../scripts/issue-23-delivery-evidence-sink-internal.mjs'
+import { isolatedAuthorityChildEnvironment, TEST_AUTHORITY_ROOT } from '../helpers/issue-23-authority-isolation'
 
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const MANIFEST_FORMAT = 'blogman-issue-23-canonical-frozen-manifest/v1'
@@ -111,9 +114,9 @@ const D1_OPERATIONS = [
   'reconciliation',
 ]
 const REPOSITORY_ROOT = process.cwd()
-const DURABLE_SINK_ROOT = repositoryDeliverySinkRoot()
+const DURABLE_SINK_ROOT = TEST_AUTHORITY_ROOT
 const ENTRY_MODULE_URL = pathToFileURL(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-entry.mjs')).href
-const SINK_MODULE_URL = pathToFileURL(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-evidence-sink.mjs')).href
+const ENTRY_INTERNAL_SINK_MODULE_URL = pathToFileURL(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-evidence-sink-internal.mjs')).href
 const REPOSITORY_PRELOAD_URL = pathToFileURL(join(
   REPOSITORY_ROOT,
   'tests/helpers/issue-23-repository-preload.mjs',
@@ -185,6 +188,16 @@ function policy() {
       production_evidence: 'real_adapters_only',
       local_rehearsal_evidence: 'test_only',
     },
+  }
+}
+
+function formalContext(monotonicNanoseconds: () => bigint = () => 0n) {
+  const deliverySinkRoot = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-23-entry-formal-sink-')))
+  formalSinkRoots.push(deliverySinkRoot)
+  return {
+    sink: [],
+    deliverySinkRoot,
+    clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds },
   }
 }
 
@@ -877,7 +890,7 @@ describe('Issue #90 formal entry fan-in', () => {
       failure: { classification: 'Manifest Drift' },
     })
     expect(existsSync(join(DURABLE_SINK_ROOT, 'authorizations', `${authorization.sha256}.json`))).toBe(true)
-    expect(repositoryDeliverySink.readTerminalEvidence(terminal.sha256).authorization.sha256).toBe(authorization.sha256)
+    expect(createCanonicalProductionSinkForEntry().readTerminalEvidence(terminal.sha256).authorization.sha256).toBe(authorization.sha256)
     expect(() => execute(prepared, authorization)).toThrow(/consumed/u)
     expect(createWorkerTransportMock).not.toHaveBeenCalled()
     expect(createD1TransportMock).not.toHaveBeenCalled()
@@ -891,7 +904,7 @@ describe('Issue #90 formal entry fan-in', () => {
     const terminal = execute(prepared, authorization)
 
     expect(terminal.value.identities.authorization_sha256).toBe(authorization.sha256)
-    expect(repositoryDeliverySink.readTerminalEvidence(terminal.sha256).authorization.bytes)
+    expect(createCanonicalProductionSinkForEntry().readTerminalEvidence(terminal.sha256).authorization.bytes)
       .toEqual(authorization.bytes)
   })
 
@@ -1041,78 +1054,35 @@ describe('Issue #90 formal entry fan-in', () => {
     })
   })
 
-  it('uses the explicit formal sink for Authorization and Terminal with no canonical fallback', () => {
+  it('rejects the canonical production root and roots outside system tmp for formal execution', () => {
     const prepared = formalPreparedManifest()
-    const authorization = authorizationFor(prepared, 'fan-in-explicit-formal-sink')
-    let consumed = 0
-    let persisted = 0
-    const deliverySink = {
-      authority_class: 'explicit-test-only',
-      consumeAuthorization: () => { consumed += 1; return authorization.sha256 },
-      persistTerminalResult: (input: { terminal: { sha256: string } }) => {
-        persisted += 1
-        return input.terminal.sha256
-      },
-      readTerminalEvidence: () => { throw new Error('not used') },
-    }
     configureD1('d1_identity')
-
-    const terminal = runInFormalRehearsalContext({
-      sink: [], deliverySink,
-      clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
-    }, () => execute(prepared, authorization))
-
-    expect(consumed).toBe(1)
-    expect(persisted).toBe(1)
-    expect(terminal.value.evidence).toMatchObject({
-      source: 'formal-rehearsal-test-evidence', production: false, promotable: false,
-    })
+    for (const deliverySinkRoot of [
+      DURABLE_SINK_ROOT,
+      realpathSync(mkdtempSync(join(tmpdir(), '..', 'blogman-issue-23-outside-system-tmp-'))),
+    ]) {
+      formalSinkRoots.push(deliverySinkRoot)
+      expect(() => runInFormalRehearsalContext({
+        sink: [],
+        deliverySinkRoot,
+        clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
+      }, () => execute(prepared, authorizationFor(prepared, `formal-root-${formalSinkRoots.length}`))))
+        .toThrow(/test-owned ROOT.*system temporary/u)
+    }
   })
 
-  it('preserves the first terminal cause when persistence crosses the overall deadline', () => {
-    const prepared = manifest()
-    prepared.value.ci.conclusion = 'in_progress-test-evidence'
-    prepared.value.ci.evidence_class = 'formal-rehearsal-test-evidence'
-    prepared.value.d1.evidence_class = 'formal-rehearsal-test-evidence'
-    prepared.bytes = Buffer.from(`${JSON.stringify(prepared.value, null, 2)}\n`, 'utf8')
-    prepared.sha256 = hash(prepared.bytes)
-    const authorization = authorizationFor(prepared, 'fan-in-first-terminal-persistence')
-    let monotonic = 0n
-    const persisted: Array<Record<string, unknown>> = []
-    const deliverySink = {
-      authority_class: 'explicit-test-only',
-      consumeAuthorization: () => authorization.sha256,
-      persistTerminalResult: (input: { terminal: { value: Record<string, unknown> } }, deadline?: () => boolean) => {
-        persisted.push(structuredClone(input.terminal.value))
-        if (persisted.length === 1) {
-          monotonic = 5_400_001_000_000n
-          if (deadline?.() !== true) throw new DeliverySinkDeadlineError()
-        }
-        return input.terminal.value
-      },
-      readTerminalEvidence: () => { throw new Error('not used') },
-    }
-    createWorkerTransportMock.mockReturnValue({
-      livePreconditions: () => ({ outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }),
-      execute() {},
-    })
+  it('constructs the formal sink from a test-owned ROOT with no caller write facade', () => {
+    const prepared = formalPreparedManifest()
+    const authorization = authorizationFor(prepared, 'fan-in-explicit-formal-root')
+    const context = formalContext()
+    configureD1('d1_identity')
 
-    const terminal = runInFormalRehearsalContext({
-      sink: [],
-      deliverySink,
-      clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => monotonic },
-    }, () => execute(prepared, authorization))
+    const terminal = runInFormalRehearsalContext(context, () => execute(prepared, authorization))
 
-    expect(persisted).toHaveLength(2)
-    expect(terminal.value).toMatchObject({
-      outcome: 'NON_PASS',
-      first_terminal_stage: 'live_preconditions',
-      failure: { classification: 'Manifest Drift' },
-    })
-    expect(persisted[1]).toMatchObject({
-      outcome: 'NON_PASS',
-      first_terminal_stage: 'live_preconditions',
-      failure: { classification: 'Manifest Drift' },
+    expect(readdirSync(join(context.deliverySinkRoot, 'authorizations'))).toEqual([`${authorization.sha256}.json`])
+    expect(readdirSync(join(context.deliverySinkRoot, 'terminals'))).toHaveLength(1)
+    expect(terminal.value.evidence).toMatchObject({
+      source: 'formal-rehearsal-test-evidence', production: false, promotable: false,
     })
   })
 
@@ -1120,25 +1090,13 @@ describe('Issue #90 formal entry fan-in', () => {
     const prepared = formalPreparedManifest()
     const authorization = authorizationFor(prepared, 'fan-in-d1-setup-overall-timeout')
     let monotonic = 0n
-    const persisted: Array<Record<string, unknown>> = []
     createD1TransportMock.mockImplementation(() => {
       monotonic = 5_400_001_000_000n
       throw new DeliverySinkDeadlineError()
     })
-    const deliverySink = {
-      authority_class: 'explicit-test-only',
-      consumeAuthorization: () => authorization.sha256,
-      persistTerminalResult: (input: { terminal: { value: Record<string, unknown> } }) => {
-        persisted.push(structuredClone(input.terminal.value))
-        return input.terminal.sha256
-      },
-      readTerminalEvidence: () => { throw new Error('not used') },
-    }
+    const context = formalContext(() => monotonic)
 
-    const terminal = runInFormalRehearsalContext({
-      sink: [], deliverySink,
-      clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => monotonic },
-    }, () => execute(prepared, authorization))
+    const terminal = runInFormalRehearsalContext(context, () => execute(prepared, authorization))
 
     expect(terminal.value).toMatchObject({
       outcome: 'TIMEOUT', first_terminal_stage: 'd1_identity',
@@ -1146,7 +1104,7 @@ describe('Issue #90 formal entry fan-in', () => {
       stage_counts: { d1_identity: 1, clean_start_reset: 0, worker_deploy: 0 },
       mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
     })
-    expect(persisted).toHaveLength(1)
+    expect(readdirSync(join(context.deliverySinkRoot, 'terminals'))).toHaveLength(1)
   })
 
   it('preserves pre-Worker overall_timeout without inventing a malformed receipt', () => {
@@ -1163,17 +1121,9 @@ describe('Issue #90 formal entry fan-in', () => {
       monotonic = 5_400_001_000_000n
       throw new DeliverySinkDeadlineError()
     })
-    const deliverySink = {
-      authority_class: 'explicit-test-only',
-      consumeAuthorization: () => authorization.sha256,
-      persistTerminalResult: (input: { terminal: { sha256: string } }) => input.terminal.sha256,
-      readTerminalEvidence: () => { throw new Error('not used') },
-    }
+    const context = formalContext(() => monotonic)
 
-    const terminal = runInFormalRehearsalContext({
-      sink: [], deliverySink,
-      clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => monotonic },
-    }, () => execute(prepared, authorization))
+    const terminal = runInFormalRehearsalContext(context, () => execute(prepared, authorization))
 
     expect(calls).toEqual(D1_OPERATIONS)
     expect(runWorkerStagesMock).not.toHaveBeenCalled()
@@ -1436,8 +1386,8 @@ describe('Issue #90 formal entry fan-in', () => {
     const terminalBytes = Buffer.from(`${JSON.stringify(terminalValue, null, 2)}\n`, 'utf8')
     const terminal = { value: terminalValue, bytes: terminalBytes, sha256: hash(terminalBytes) }
 
-    repositoryDeliverySink.consumeAuthorization(authorization)
-    repositoryDeliverySink.persistTerminalResult({ terminal, manifest: prepared, d1: null, worker: null })
+    createCanonicalProductionSinkForEntry().consumeAuthorization(authorization)
+    createCanonicalProductionSinkForEntry().persistTerminalResult({ terminal, manifest: prepared, d1: null, worker: null })
 
     expect(validateProductionTerminalEvidence(structuredClone(terminal))).toBe(true)
 
@@ -1463,8 +1413,8 @@ describe('Issue #90 formal entry fan-in', () => {
       bytes: invalidTerminalBytes,
       sha256: hash(invalidTerminalBytes),
     }
-    repositoryDeliverySink.consumeAuthorization(invalidAuthorization)
-    expect(() => repositoryDeliverySink.persistTerminalResult({
+    createCanonicalProductionSinkForEntry().consumeAuthorization(invalidAuthorization)
+    expect(() => createCanonicalProductionSinkForEntry().persistTerminalResult({
       terminal: invalidTerminal,
       manifest: prepared,
       d1: null,
@@ -1522,7 +1472,7 @@ describe('Issue #90 formal entry fan-in', () => {
     }
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
       import { execute, validateProductionTerminalEvidence } from ${JSON.stringify(ENTRY_MODULE_URL)}
-      import { repositoryDeliverySink } from ${JSON.stringify(SINK_MODULE_URL)}
+      import { createCanonicalProductionSinkForEntry } from ${JSON.stringify(ENTRY_INTERNAL_SINK_MODULE_URL)}
       const decodeRecord = (record) => ({
         value: record.value,
         bytes: Buffer.from(record.bytes, 'base64'),
@@ -1535,7 +1485,7 @@ describe('Issue #90 formal entry fan-in', () => {
         sha256: ${JSON.stringify(encodedAuthorization.sha256)},
       }
       if (validateProductionTerminalEvidence(terminal) !== true) process.exitCode = 2
-      const durable = repositoryDeliverySink.readTerminalEvidence(terminal.sha256)
+      const durable = createCanonicalProductionSinkForEntry().readTerminalEvidence(terminal.sha256)
       const durableValues = [durable.terminal, durable.manifest, durable.d1, durable.worker]
         .filter(Boolean).map((record) => record.value)
       if (JSON.stringify(durableValues).includes(${JSON.stringify(credentialMarker)})) process.exitCode = 3
@@ -1803,19 +1753,13 @@ describe('Issue #90 formal entry fan-in', () => {
   it('rejects coordinated formal promotion of a fully recanonicalized production manifest', () => {
     const prepared = manifest()
     const authorization = authorizationFor(prepared, 'fan-in-coordinated-formal-promotion')
-    let consumed = false
-    const deliverySink = {
-      authority_class: 'explicit-test-only',
-      consumeAuthorization: () => { consumed = true; return authorization.sha256 },
-      persistTerminalResult: () => { throw new Error('must not persist') },
-      readTerminalEvidence: () => { throw new Error('not used') },
-    }
+    const context = formalContext()
 
-    expect(() => runInFormalRehearsalContext({
-      sink: [], deliverySink,
-      clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
-    }, () => execute(prepared, authorization))).toThrow(/formal test manifest|ci\.conclusion|classification/u)
-    expect(consumed).toBe(false)
+    expect(() => runInFormalRehearsalContext(
+      context,
+      () => execute(prepared, authorization),
+    )).toThrow(/formal test manifest|ci\.conclusion|classification/u)
+    expect(readdirSync(context.deliverySinkRoot)).toEqual([])
   })
 
   it('does not select a local non-production lane at the production entry', () => {

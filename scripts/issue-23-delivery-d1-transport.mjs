@@ -170,7 +170,7 @@ function assertSafeFilesystemEntry(path, type, label) {
 function assertCanonicalPath(path, canonicalPath, label) {
   assertAbsolutePath(path, label)
   if (path !== canonicalPath) fail(`${label} must be the canonical path`)
-  assertSafeFilesystemEntry(path, 'file', label)
+  return assertSafeFilesystemEntry(path, 'file', label)
 }
 
 function sha256(bytes) {
@@ -290,28 +290,38 @@ function assertPersistIdentity(path, expectedIdentity) {
   return actualIdentity
 }
 
-function validateBoundArtifactsOrThrow(config, expectedPersistIdentity = null) {
+function validateBoundArtifactsOrThrow(config, expectedIdentity = null, classification = D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED) {
   try {
-    return validateBoundArtifacts(config, expectedPersistIdentity)
+    return validateBoundArtifacts(config, expectedIdentity)
   } catch {
-    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED)
+    throw new D1TransportError(classification)
   }
 }
 
-function validateBoundArtifacts(config, expectedPersistIdentity = null) {
-  assertSafeFilesystemEntry(wranglerPath, 'file', 'Wrangler executable')
+function boundIdentity(metadata) {
+  return Object.freeze({
+    dev: metadata.dev,
+    ino: metadata.ino,
+    mode: metadata.mode & 0o777,
+    size: metadata.size,
+  })
+}
+
+function validateBoundArtifacts(config, expectedIdentity = null) {
+  const artifacts = {}
+  artifacts.wrangler = boundIdentity(assertSafeFilesystemEntry(wranglerPath, 'file', 'Wrangler executable'))
   if (sha256(readFileSync(wranglerPath)) !== config.wrangler_sha256) {
     fail('Wrangler executable hash drifted')
   }
-  assertSafeFilesystemEntry(config.config_path, 'file', 'bound Wrangler config')
+  artifacts.config = boundIdentity(assertSafeFilesystemEntry(config.config_path, 'file', 'bound Wrangler config'))
   if (sha256(readFileSync(config.config_path)) !== config.config_sha256) {
     fail('bound Wrangler config hash drifted')
   }
-  assertCanonicalPath(config.reset_sql_path, canonicalPaths.reset, 'bound reset SQL')
+  artifacts.reset = boundIdentity(assertCanonicalPath(config.reset_sql_path, canonicalPaths.reset, 'bound reset SQL'))
   if (sha256(readFileSync(config.reset_sql_path)) !== config.reset_sql_sha256) {
     fail('bound reset SQL hash drifted')
   }
-  assertCanonicalPath(config.migration_runner_path, canonicalPaths.runner, 'bound migration runner')
+  artifacts.runner = boundIdentity(assertCanonicalPath(config.migration_runner_path, canonicalPaths.runner, 'bound migration runner'))
   if (sha256(readFileSync(config.migration_runner_path)) !== config.migration_runner_sha256) {
     fail('bound migration runner hash drifted')
   }
@@ -319,25 +329,37 @@ function validateBoundArtifacts(config, expectedPersistIdentity = null) {
   if (config.migration_catalog_path !== canonicalPaths.catalog) {
     fail('bound migration catalog must be canonical')
   }
+  artifacts.catalog = boundIdentity(assertSafeFilesystemEntry(
+    config.migration_catalog_path,
+    'directory',
+    'bound migration catalog',
+  ))
   if (hashD1ArtifactDirectory(config.migration_catalog_path) !== config.migration_catalog_sha256) {
     fail('bound migration catalog hash drifted')
   }
-  assertCanonicalPath(config.rollout_safety_path, canonicalPaths.rolloutSafety, 'bound rollout safety')
+  artifacts.rolloutSafety = boundIdentity(assertCanonicalPath(config.rollout_safety_path, canonicalPaths.rolloutSafety, 'bound rollout safety'))
   if (sha256(readFileSync(config.rollout_safety_path)) !== config.rollout_safety_sha256) {
     fail('bound rollout safety hash drifted')
   }
-  assertSafeFilesystemEntry(config.expected_reconciliation_path, 'file', 'bound expected reconciliation')
+  artifacts.expectedReconciliation = boundIdentity(assertSafeFilesystemEntry(
+    config.expected_reconciliation_path,
+    'file',
+    'bound expected reconciliation',
+  ))
   if (sha256(readFileSync(config.expected_reconciliation_path)) !== config.expected_reconciliation_sha256) {
     fail('bound expected reconciliation hash drifted')
   }
   validateExpectedReconciliation(config.expected_reconciliation_path)
-  if (config.mode === 'local') {
-    const persistIdentity = expectedPersistIdentity === null
+  const persist = config.mode === 'local'
+    ? expectedIdentity === null
       ? assertPrivatePersistDirectory(config.persist_path)
-      : assertPersistIdentity(config.persist_path, expectedPersistIdentity)
-    return persistIdentity
+      : assertPersistIdentity(config.persist_path, expectedIdentity.persist)
+    : null
+  if (expectedIdentity !== null
+    && JSON.stringify(artifacts) !== JSON.stringify(expectedIdentity.artifacts)) {
+    fail('bound artifact identity drifted')
   }
-  return null
+  return Object.freeze({ artifacts: Object.freeze(artifacts), persist })
 }
 
 function validateRequest(request) {
@@ -571,7 +593,7 @@ export function createD1Transport(config, childEnvironment, monotonicMs) {
   }
   const privateEnvironment = childEnvironment ?? process.env
   const normalizedConfig = validateConfig(config)
-  const persistIdentity = validateBoundArtifactsOrThrow(normalizedConfig)
+  const frozenBoundIdentity = validateBoundArtifactsOrThrow(normalizedConfig)
   const bindingsSha256 = d1StageBindingsSha256(normalizedConfig)
 
   function budgetFor(request, spentMs = 0) {
@@ -598,7 +620,11 @@ export function createD1Transport(config, childEnvironment, monotonicMs) {
   function execute(request) {
     if (arguments.length !== 1) fail('execute accepts exactly one request argument')
     const normalizedRequest = validateRequest(request)
-    validateBoundArtifactsOrThrow(normalizedConfig, persistIdentity)
+    validateBoundArtifactsOrThrow(
+      normalizedConfig,
+      frozenBoundIdentity,
+      D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MANIFEST_DRIFT,
+    )
     if (normalizedRequest.operation === 'd1_identity'
       || normalizedRequest.operation === 'clean_start_reset'
       || normalizedRequest.operation === 'empty_d1_proof') {

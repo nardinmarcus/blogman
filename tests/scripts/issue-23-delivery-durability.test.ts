@@ -1,15 +1,16 @@
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
+import * as deliverySinkModule from '../../scripts/issue-23-delivery-evidence-sink.mjs'
+import { createTestDeliverySink } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
 import {
-  createRepositoryDeliverySink,
-  repositoryDeliverySink,
-  repositoryDeliverySinkRoot,
-} from '../../scripts/issue-23-delivery-evidence-sink.mjs'
+  canonicalProductionAuthorityRootForEntry,
+  createCanonicalProductionSinkForEntry,
+} from '../../scripts/issue-23-delivery-evidence-sink-internal.mjs'
 import {
   PROTECTED_AUTHORITY_ROOT,
   TEST_AUTHORITY_ROOT,
@@ -19,6 +20,7 @@ import {
 
 const temporaryDirectories: string[] = []
 const sinkModuleUrl = pathToFileURL(join(process.cwd(), 'scripts/issue-23-delivery-evidence-sink.mjs')).href
+const internalSinkModuleUrl = pathToFileURL(join(process.cwd(), 'scripts/issue-23-delivery-evidence-sink-internal.mjs')).href
 
 function record(value: Record<string, unknown>) {
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
@@ -111,6 +113,7 @@ function exactTerminalRecord(
     classification?: string
     d1?: ReturnType<typeof record> | null
     worker?: ReturnType<typeof record> | null
+    mutationCounts?: { production_writes: number; attempted: number; confirmed: number }
   } = {},
 ) {
   const attemptId = options.attemptId ?? derivedAttemptId(manifest.sha256, authorization.sha256)
@@ -119,6 +122,16 @@ function exactTerminalRecord(
   const terminalIndex = deliveryStages.indexOf(firstStage)
   const d1 = options.d1 ?? null
   const worker = options.worker ?? null
+  const d1Attempted = d1 === null ? 0
+    : Number(d1.value.stage_counts.clean_start_reset) + Number(d1.value.stage_counts.migrations_001_006)
+  const d1Confirmed = d1?.value.outcome === 'PASS' ? 2 : 0
+  const workerMutations = worker?.value.mutation_counts as { attempted?: number; confirmed?: number } | undefined
+  const confirmed = d1Confirmed + (workerMutations?.confirmed ?? 0)
+  const mutationCounts = options.mutationCounts ?? {
+    production_writes: confirmed,
+    attempted: d1Attempted + (workerMutations?.attempted ?? 0),
+    confirmed,
+  }
   const hashes = {
     d1_stage_receipt_sha256: d1?.sha256 ?? null,
     ...Object.fromEntries(d1HashNames.map((name) => [`d1_${name}`, d1 === null ? null : 'd'.repeat(64)])),
@@ -137,7 +150,7 @@ function exactTerminalRecord(
     failure: outcome === 'PASS' ? null : { classification: options.classification ?? 'stage_error' },
     stage_counts: Object.fromEntries(deliveryStages.map((stage, index) => [stage, index <= terminalIndex ? 1 : 0])),
     stage_durations_ms: Object.fromEntries(deliveryStages.map((stage, index) => [stage, index <= terminalIndex ? 1 : 0])),
-    mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
+    mutation_counts: mutationCounts,
     evidence: {
       source: 'production', production: true, promotable: outcome === 'PASS', hashes,
       cleanup: { created: false, cleaned: true, observed_absent: true },
@@ -151,10 +164,19 @@ afterEach(() => {
 })
 
 describe('Issue #23 durable delivery records', () => {
+  it('exposes only the noncanonical test factory and refuses the canonical production root', () => {
+    expect(Object.keys(deliverySinkModule).sort()).toEqual([
+      'DeliverySinkDeadlineError',
+      'createTestDeliverySink',
+    ])
+    expect(() => deliverySinkModule.createTestDeliverySink(TEST_AUTHORITY_ROOT))
+      .toThrow(/canonical production root/u)
+  })
+
   it('accepts a benign embedded task path while rejecting credential tokens and arbitrary Authorization fields', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-boundary-'))
     temporaryDirectories.push(root)
-    const sink = createRepositoryDeliverySink(root)
+    const sink = createTestDeliverySink(root)
 
     for (const prefix of ['sk-', 'nm_']) {
       const secretShapedValue = `${prefix}test-only-credential`
@@ -189,10 +211,10 @@ describe('Issue #23 durable delivery records', () => {
     })
     const authorizationPath = join(TEST_AUTHORITY_ROOT, 'authorizations', `${authorization.sha256}.json`)
 
-    expect(repositoryDeliverySinkRoot()).toBe(TEST_AUTHORITY_ROOT)
-    expect(repositoryDeliverySinkRoot()).not.toBe(PROTECTED_AUTHORITY_ROOT)
+    expect(canonicalProductionAuthorityRootForEntry()).toBe(TEST_AUTHORITY_ROOT)
+    expect(canonicalProductionAuthorityRootForEntry()).not.toBe(PROTECTED_AUTHORITY_ROOT)
     try {
-      expect(repositoryDeliverySink.consumeAuthorization(authorization)).toBe(authorization.sha256)
+      expect(createCanonicalProductionSinkForEntry().consumeAuthorization(authorization)).toBe(authorization.sha256)
       expect(readFileSync(authorizationPath)).toEqual(authorization.bytes)
       expect(authoritySnapshot()).toBe(before)
     } finally {
@@ -201,10 +223,10 @@ describe('Issue #23 durable delivery records', () => {
   })
 
   it('does not let PATH or Git environment redirect the canonical production sink root', () => {
-    const expected = repositoryDeliverySinkRoot()
+    const expected = canonicalProductionAuthorityRootForEntry()
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
-      import { repositoryDeliverySinkRoot } from ${JSON.stringify(sinkModuleUrl)}
-      process.stdout.write(repositoryDeliverySinkRoot())
+      import { canonicalProductionAuthorityRootForEntry } from ${JSON.stringify(internalSinkModuleUrl)}
+      process.stdout.write(canonicalProductionAuthorityRootForEntry())
     `], {
       encoding: 'utf8',
       env: isolatedAuthorityChildEnvironment({
@@ -226,9 +248,9 @@ describe('Issue #23 durable delivery records', () => {
       authorization_id: `clone-independent-${process.pid}`,
     })
     const source = `
-      import { repositoryDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
+      import { createCanonicalProductionSinkForEntry } from ${JSON.stringify(internalSinkModuleUrl)}
       const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
-      try { repositoryDeliverySink.consumeAuthorization({ bytes, sha256: ${JSON.stringify(authorization.sha256)} }) }
+      try { createCanonicalProductionSinkForEntry().consumeAuthorization({ bytes, sha256: ${JSON.stringify(authorization.sha256)} }) }
       catch (error) { if (/consumed/u.test(error.message)) process.exitCode = 10; else throw error }
     `
     expect(spawnSync(process.execPath, ['--input-type=module', '-e', source], {
@@ -239,16 +261,16 @@ describe('Issue #23 durable delivery records', () => {
       cwd: secondClone,
       env: isolatedAuthorityChildEnvironment(),
     }).status).toBe(10)
-    rmSync(join(repositoryDeliverySinkRoot(), 'authorizations', `${authorization.sha256}.json`), { force: true })
+    rmSync(join(canonicalProductionAuthorityRootForEntry(), 'authorizations', `${authorization.sha256}.json`), { force: true })
   })
 
   it('uses one clone-independent canonical production sink root', () => {
-    const commonRoot = repositoryDeliverySinkRoot()
+    const commonRoot = canonicalProductionAuthorityRootForEntry()
     const worktree = mkdtempSync(join(tmpdir(), 'blogman-issue-23-worktree-'))
     temporaryDirectories.push(worktree)
     spawnSync('git', ['worktree', 'add', '--detach', worktree, 'HEAD'], { encoding: 'utf8' })
     try {
-      expect(repositoryDeliverySinkRoot()).toBe(commonRoot)
+      expect(canonicalProductionAuthorityRootForEntry()).toBe(commonRoot)
     } finally {
       spawnSync('git', ['worktree', 'remove', '--force', worktree], { encoding: 'utf8' })
     }
@@ -264,10 +286,10 @@ describe('Issue #23 durable delivery records', () => {
     symlinkSync(target, join(home, '.local'))
     const authorization = authorizationRecord()
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
-      import { repositoryDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
+      import { createCanonicalProductionSinkForEntry } from ${JSON.stringify(internalSinkModuleUrl)}
       const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
       try {
-        repositoryDeliverySink.consumeAuthorization({ bytes, sha256: ${JSON.stringify(authorization.sha256)} })
+        createCanonicalProductionSinkForEntry().consumeAuthorization({ bytes, sha256: ${JSON.stringify(authorization.sha256)} })
         process.exitCode = 2
       } catch (error) {
         if (!/canonical|symlink/u.test(error instanceof Error ? error.message : String(error))) process.exitCode = 3
@@ -291,20 +313,25 @@ describe('Issue #23 durable delivery records', () => {
     mkdirSync(blogman, { recursive: true, mode: 0o700 })
     chmodSync(home, 0o700)
     chmodSync(local, 0o775)
-    chmodSync(state, 0o755)
+    chmodSync(state, 0o777)
     chmodSync(blogman, 0o700)
     const first = authorizationRecord()
     const run = (authorization: ReturnType<typeof authorizationRecord>) => spawnSync(
       process.execPath,
       ['--input-type=module', '-e', `
-        import { repositoryDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
+        import { createCanonicalProductionSinkForEntry } from ${JSON.stringify(internalSinkModuleUrl)}
         const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
-        try { repositoryDeliverySink.consumeAuthorization({ bytes, sha256: ${JSON.stringify(authorization.sha256)} }) }
+        try { createCanonicalProductionSinkForEntry().consumeAuthorization({ bytes, sha256: ${JSON.stringify(authorization.sha256)} }) }
         catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 10 }
       `],
       { encoding: 'utf8', env: isolatedAuthorityChildEnvironment({ BLOGMAN_TEST_AUTHORITY_HOME: home }) },
     )
 
+    const unsafeAncestor = run(first)
+    expect(unsafeAncestor.status).toBe(10)
+    expect(unsafeAncestor.stderr).toMatch(/state.*mode|unsafe.*ancestor|world-writable/u)
+    expect(lstatSync(state).mode & 0o777).toBe(0o777)
+    chmodSync(state, 0o755)
     expect(run(first).status).toBe(0)
     chmodSync(blogman, 0o755)
     const second = record({
@@ -320,7 +347,7 @@ describe('Issue #23 durable delivery records', () => {
     const parent = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-integrity-'))
     temporaryDirectories.push(parent)
     const root = join(parent, 'sink')
-    const sink = createRepositoryDeliverySink(root)
+    const sink = createTestDeliverySink(root)
     chmodSync(root, 0o755)
     expect(() => sink.consumeAuthorization(authorizationRecord())).toThrow(/mode|identity/u)
     chmodSync(root, 0o700)
@@ -333,7 +360,7 @@ describe('Issue #23 durable delivery records', () => {
   })
 
   it('publishes and fsyncs the destination name before removing and fsyncing the temporary name', () => {
-    const source = readFileSync(join(process.cwd(), 'scripts/issue-23-delivery-evidence-sink.mjs'), 'utf8')
+    const source = readFileSync(join(process.cwd(), 'scripts/issue-23-delivery-evidence-sink-internal.mjs'), 'utf8')
     const atomicWrite = source.slice(
       source.indexOf('function atomicWrite('),
       source.indexOf('function writeIfAbsent('),
@@ -352,7 +379,7 @@ describe('Issue #23 durable delivery records', () => {
   it('rejects unsafe leaf entries on Authorization EEXIST instead of treating them as consumed records', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-leaf-'))
     temporaryDirectories.push(root)
-    const sink = createRepositoryDeliverySink(root)
+    const sink = createTestDeliverySink(root)
     const authorization = authorizationRecord()
     const destination = join(root, 'authorizations', `${authorization.sha256}.json`)
     const target = join(root, 'leaf-target')
@@ -369,7 +396,7 @@ describe('Issue #23 durable delivery records', () => {
   it('rejects an untrusted attempt identity before terminal path construction or escape', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-attempt-traversal-'))
     temporaryDirectories.push(root)
-    const sink = createRepositoryDeliverySink(root)
+    const sink = createTestDeliverySink(root)
     const manifest = record({
       format: 'blogman-issue-23-canonical-frozen-manifest/v1',
       repository: { commit: 'c'.repeat(40) },
@@ -388,7 +415,7 @@ describe('Issue #23 durable delivery records', () => {
   it('rejects unsupported Worker fields and contradictory Terminal trajectory before persistence', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-exact-durable-schema-'))
     temporaryDirectories.push(root)
-    const sink = createRepositoryDeliverySink(root)
+    const sink = createTestDeliverySink(root)
     const manifest = record({
       format: 'blogman-issue-23-canonical-frozen-manifest/v1',
       repository: { commit: 'c'.repeat(40) },
@@ -425,7 +452,7 @@ describe('Issue #23 durable delivery records', () => {
   it('rejects an arbitrary unsupported Worker field with an otherwise coherent terminal', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-worker-unsupported-field-'))
     temporaryDirectories.push(root)
-    const sink = createRepositoryDeliverySink(root)
+    const sink = createTestDeliverySink(root)
     const manifest = record({
       format: 'blogman-issue-23-canonical-frozen-manifest/v1',
       repository: { commit: 'c'.repeat(40) },
@@ -448,10 +475,38 @@ describe('Issue #23 durable delivery records', () => {
     expect(readdirSync(join(root, 'terminals'))).toEqual([])
   })
 
+  it('rejects Terminal mutation counts that contradict D1 and Worker sidecars', () => {
+    const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-terminal-sidecar-mutations-'))
+    temporaryDirectories.push(root)
+    const sink = createTestDeliverySink(root)
+    const manifest = record({
+      format: 'blogman-issue-23-canonical-frozen-manifest/v1',
+      repository: { commit: 'c'.repeat(40) },
+    })
+    const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
+    const attemptId = derivedAttemptId(manifest.sha256, authorization.sha256)
+    const d1 = exactD1Record(manifest, authorization, attemptId, 'PASS')
+    const worker = exactWorkerRecord(manifest, authorization, attemptId)
+    const terminal = exactTerminalRecord(manifest, authorization, {
+      attemptId,
+      firstStage: 'worker_deploy',
+      classification: 'worker_adapter_error',
+      d1,
+      worker,
+      mutationCounts: { production_writes: 0, attempted: 0, confirmed: 0 },
+    })
+    sink.consumeAuthorization(authorization)
+
+    expect(() => sink.persistTerminalResult({ terminal, manifest, d1, worker }))
+      .toThrow(/mutation evidence.*sidecar|mutation.*contradict/u)
+    expect(readdirSync(join(root, 'records'))).toEqual([])
+    expect(readdirSync(join(root, 'terminals'))).toEqual([])
+  })
+
   it('rejects exact-shape outcome/classification and mutation contradictions', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-terminal-coherence-'))
     temporaryDirectories.push(root)
-    const sink = createRepositoryDeliverySink(root)
+    const sink = createTestDeliverySink(root)
     const manifest = record({
       format: 'blogman-issue-23-canonical-frozen-manifest/v1',
       repository: { commit: 'c'.repeat(40) },
@@ -484,13 +539,13 @@ describe('Issue #23 durable delivery records', () => {
       authorization_id: `deadline-authorization-${process.pid}`,
     })
     const authorizationPath = join(
-      repositoryDeliverySinkRoot(),
+      canonicalProductionAuthorityRootForEntry(),
       'authorizations',
       `${authorization.sha256}.json`,
     )
 
     try {
-      expect(() => repositoryDeliverySink.consumeAuthorization(authorization, () => false))
+      expect(() => createCanonicalProductionSinkForEntry().consumeAuthorization(authorization, () => false))
         .toThrow(/deadline/u)
       expect(() => readFileSync(authorizationPath)).toThrow()
     } finally {
@@ -499,7 +554,7 @@ describe('Issue #23 durable delivery records', () => {
   })
 
   it('forwards a rejecting Terminal deadline through the canonical facade without publication', () => {
-    const root = repositoryDeliverySinkRoot()
+    const root = canonicalProductionAuthorityRootForEntry()
     const manifest = record({
       format: 'blogman-issue-23-canonical-frozen-manifest/v1',
       marker: `deadline-forwarding-${process.pid}`,
@@ -520,9 +575,9 @@ describe('Issue #23 durable delivery records', () => {
     const manifestPath = join(root, 'records', `${manifest.sha256}.json`)
     const terminalPath = join(root, 'terminals', `${attemptId}.json`)
 
-    repositoryDeliverySink.consumeAuthorization(authorization)
+    createCanonicalProductionSinkForEntry().consumeAuthorization(authorization)
     try {
-      expect(() => repositoryDeliverySink.persistTerminalResult(
+      expect(() => createCanonicalProductionSinkForEntry().persistTerminalResult(
         { terminal, manifest, d1: null, worker: null },
         () => false,
       )).toThrow(/deadline/u)
@@ -539,12 +594,12 @@ describe('Issue #23 durable delivery records', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-sink-'))
     temporaryDirectories.push(root)
     const authorization = authorizationRecord()
-    createRepositoryDeliverySink(root)
+    createTestDeliverySink(root)
     const contenderSource = `
-      import { createRepositoryDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
+      import { createTestDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
       const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
       const record = { bytes, sha256: ${JSON.stringify(authorization.sha256)} }
-      try { createRepositoryDeliverySink(${JSON.stringify(root)}).consumeAuthorization(record) }
+      try { createTestDeliverySink(${JSON.stringify(root)}).consumeAuthorization(record) }
       catch (error) { if (/consumed/u.test(error.message)) process.exitCode = 10; else throw error }
     `
     const run = () => new Promise<number | null>((resolve) => {
@@ -557,11 +612,11 @@ describe('Issue #23 durable delivery records', () => {
     expect((await Promise.all([run(), run()])).sort()).toEqual([0, 10])
 
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
-      import { createRepositoryDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
+      import { createTestDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
       const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
       const record = { bytes, sha256: ${JSON.stringify(authorization.sha256)} }
       try {
-        createRepositoryDeliverySink(${JSON.stringify(root)}).consumeAuthorization(record)
+        createTestDeliverySink(${JSON.stringify(root)}).consumeAuthorization(record)
         process.exitCode = 2
       } catch (error) {
         if (!/consumed/u.test(error instanceof Error ? error.message : String(error))) process.exitCode = 3
@@ -582,10 +637,10 @@ describe('Issue #23 durable delivery records', () => {
     spawnSync('git', ['-C', repository, 'worktree', 'add', '--detach', worktree, 'HEAD'])
     const authorization = authorizationRecord()
     const source = `
-      import { createRepositoryDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
+      import { createTestDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
       const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
       const record = { bytes, sha256: ${JSON.stringify(authorization.sha256)} }
-      try { createRepositoryDeliverySink(${JSON.stringify(repository)}).consumeAuthorization(record) }
+      try { createTestDeliverySink(${JSON.stringify(repository)}).consumeAuthorization(record) }
       catch (error) { if (/consumed/u.test(error.message)) process.exitCode = 10; else throw error }
     `
     try {
@@ -625,14 +680,14 @@ describe('Issue #23 durable delivery records', () => {
       d1,
       worker,
     })
-    const sink = createRepositoryDeliverySink(root)
+    const sink = createTestDeliverySink(root)
     sink.consumeAuthorization(authorization)
 
     expect(sink.persistTerminalResult({ terminal, manifest, d1, worker })).toBe(terminal.sha256)
 
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
-      import { createRepositoryDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
-      const result = createRepositoryDeliverySink(${JSON.stringify(root)}).readTerminalEvidence(${JSON.stringify(terminal.sha256)})
+      import { createTestDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
+      const result = createTestDeliverySink(${JSON.stringify(root)}).readTerminalEvidence(${JSON.stringify(terminal.sha256)})
       if (result.terminal.sha256 !== ${JSON.stringify(terminal.sha256)}
         || result.manifest.sha256 !== ${JSON.stringify(manifest.sha256)}
         || result.authorization.sha256 !== ${JSON.stringify(authorization.sha256)}
@@ -647,7 +702,7 @@ describe('Issue #23 durable delivery records', () => {
   it('rejects terminal persistence when its exact Authorization was never consumed', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-missing-authorization-'))
     temporaryDirectories.push(root)
-    const sink = createRepositoryDeliverySink(root)
+    const sink = createTestDeliverySink(root)
     const manifest = record({ format: 'blogman-issue-23-canonical-frozen-manifest/v1', marker: 'missing-authorization' })
     const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
     const terminal = exactTerminalRecord(manifest, authorization)
@@ -661,7 +716,7 @@ describe('Issue #23 durable delivery records', () => {
   it('rejects reusing one D1 sidecar for a different attempt identity', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-d1-identity-'))
     temporaryDirectories.push(root)
-    const sink = createRepositoryDeliverySink(root)
+    const sink = createTestDeliverySink(root)
     const manifest = record({
       format: 'blogman-issue-23-canonical-frozen-manifest/v1',
       repository: { commit: 'c'.repeat(40) },
@@ -700,7 +755,7 @@ describe('Issue #23 durable delivery records', () => {
   it('rejects reusing one Worker sidecar for a different manifest or attempt identity', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-worker-identity-'))
     temporaryDirectories.push(root)
-    const sink = createRepositoryDeliverySink(root)
+    const sink = createTestDeliverySink(root)
     const manifest = record({
       format: 'blogman-issue-23-canonical-frozen-manifest/v1',
       repository: { commit: 'c'.repeat(40) },
@@ -753,7 +808,7 @@ describe('Issue #23 durable delivery records', () => {
   it('rejects alternate or asymmetric receipt sidecars before any durable record write', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-binding-'))
     temporaryDirectories.push(root)
-    const sink = createRepositoryDeliverySink(root)
+    const sink = createTestDeliverySink(root)
     const manifest = record({ format: 'blogman-issue-23-canonical-frozen-manifest/v1', marker: 'binding' })
     const d1 = record({ format: 'blogman-issue-23-d1-stages/v1', marker: 'expected-d1' })
     const alternateD1 = record({ format: 'blogman-issue-23-d1-stages/v1', marker: 'alternate-d1' })
@@ -814,7 +869,7 @@ describe('Issue #23 durable delivery records', () => {
   it('rejects malformed private receipt evidence before any durable record write', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-private-'))
     temporaryDirectories.push(root)
-    const sink = createRepositoryDeliverySink(root)
+    const sink = createTestDeliverySink(root)
     const manifest = record({
       format: 'blogman-issue-23-canonical-frozen-manifest/v1',
       repository: { commit: 'c'.repeat(40) },
@@ -859,7 +914,7 @@ describe('Issue #23 durable delivery records', () => {
   it('keeps exactly one attempt slot when a conflicting terminal follows persistence', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-terminal-cas-'))
     temporaryDirectories.push(root)
-    const sink = createRepositoryDeliverySink(root)
+    const sink = createTestDeliverySink(root)
     const manifest = record({ format: 'blogman-issue-23-canonical-frozen-manifest/v1', marker: 'terminal-cas' })
     const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
     const attemptId = derivedAttemptId(manifest.sha256, authorization.sha256)
@@ -884,7 +939,7 @@ describe('Issue #23 durable delivery records', () => {
     const manifest = record({ format: 'blogman-issue-23-canonical-frozen-manifest/v1', marker: 'conflict' })
     const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
     const terminal = exactTerminalRecord(manifest, authorization)
-    const sink = createRepositoryDeliverySink(root)
+    const sink = createTestDeliverySink(root)
     sink.consumeAuthorization(authorization)
     sink.persistTerminalResult({ terminal, manifest, d1: null, worker: null })
     const forged = record({ ...terminal.value, marker: 'forged' })
