@@ -375,12 +375,8 @@ describe('Issue #23 durable delivery records', () => {
       repository: { commit: 'c'.repeat(40) },
     })
     const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
-    const terminal = record({
-      format: 'blogman-issue-23-terminal-result/v1',
-      identities: { manifest_sha256: manifest.sha256, authorization_sha256: authorization.sha256 },
-      attempt_id: '../escaped-terminal',
-      evidence: { hashes: { d1_stage_receipt_sha256: null, worker_stage_receipt_sha256: null } },
-    })
+    const validTerminal = exactTerminalRecord(manifest, authorization)
+    const terminal = record({ ...validTerminal.value, attempt_id: '../escaped-terminal' })
     sink.consumeAuthorization(authorization)
 
     expect(() => sink.persistTerminalResult({ terminal, manifest, d1: null, worker: null }))
