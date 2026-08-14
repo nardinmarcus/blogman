@@ -39,7 +39,7 @@ process.env.BLOGMAN_TEST_AUTHORITY_PRELOAD = fileURLToPath(
   new URL('../helpers/issue-23-authority-preload.mjs', import.meta.url),
 )
 
-const { authoritySnapshot } = await import('../helpers/issue-23-authority-isolation.ts')
+const { authoritySnapshot } = await import('../helpers/issue-23-authority-isolation')
 const protectedSnapshot = authoritySnapshot()
 
 afterAll(() => {

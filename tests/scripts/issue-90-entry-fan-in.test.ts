@@ -63,7 +63,7 @@ import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-forma
 import { hashD1ArtifactDirectory } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
 import { formalExecutionClosureSha256 } from '../../scripts/issue-23-delivery-execution-closure.mjs'
 import { repositoryDeliverySink, repositoryDeliverySinkRoot } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
-import { isolatedAuthorityChildEnvironment } from '../helpers/issue-23-authority-isolation.ts'
+import { isolatedAuthorityChildEnvironment } from '../helpers/issue-23-authority-isolation'
 
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const MANIFEST_FORMAT = 'blogman-issue-23-canonical-frozen-manifest/v1'

@@ -13,7 +13,7 @@ if (!isAbsolute(TEST_AUTHORITY_HOME) || !isAbsolute(PROTECTED_AUTHORITY_ROOT)) {
   throw new Error('Issue #23 test authority isolation was not installed before test import')
 }
 
-export function isolatedAuthorityChildEnvironment(overrides: NodeJS.ProcessEnv = {}) {
+export function isolatedAuthorityChildEnvironment(overrides: Partial<NodeJS.ProcessEnv> = {}) {
   const preload = process.env.BLOGMAN_TEST_AUTHORITY_PRELOAD
   if (typeof preload !== 'string' || !isAbsolute(preload)) {
     throw new Error('Issue #23 test authority preload is unavailable')
@@ -46,7 +46,7 @@ export function authoritySnapshot(root = PROTECTED_AUTHORITY_ROOT) {
       kind: value.isSymbolicLink() ? 'symlink' : value.isDirectory() ? 'dir' : value.isFile() ? 'file' : 'other',
       dev: value.dev.toString(),
       ino: value.ino.toString(),
-      mode: Number(value.mode & 0o777n),
+      mode: Number(value.mode) & 0o777,
       uid: value.uid.toString(),
       gid: value.gid.toString(),
       size: value.size.toString(),

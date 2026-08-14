@@ -15,7 +15,7 @@ import {
   TEST_AUTHORITY_ROOT,
   authoritySnapshot,
   isolatedAuthorityChildEnvironment,
-} from '../helpers/issue-23-authority-isolation.ts'
+} from '../helpers/issue-23-authority-isolation'
 
 const temporaryDirectories: string[] = []
 const sinkModuleUrl = pathToFileURL(join(process.cwd(), 'scripts/issue-23-delivery-evidence-sink.mjs')).href
