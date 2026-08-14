@@ -7,7 +7,10 @@ import { beforeAll, describe, expect, it } from 'vitest'
 import * as deliveryEntry from '../../scripts/issue-23-delivery-entry.mjs'
 import { runFormalRehearsal } from '../../scripts/issue-23-delivery-formal-rehearsal.mjs'
 import { runInFormalRehearsalContext } from '../../scripts/issue-23-delivery-formal-context.mjs'
-import { createRepositoryDeliverySink } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
+import {
+  createRepositoryDeliverySink,
+  repositoryDeliverySink,
+} from '../../scripts/issue-23-delivery-evidence-sink.mjs'
 
 const REPOSITORY_ROOT = process.cwd()
 const IS_MACOS = platform() === 'darwin'
@@ -201,6 +204,16 @@ describe('Issue #92 formal rehearsal public path', () => {
     expect(() => runFormalRehearsal({} as never, {} as never)).toThrow(/exactly one config/u)
   })
 
+  it('requires an explicit test-owned sink and rejects canonical-sink fallback', () => {
+    expect(() => runInFormalRehearsalContext({ sink: [] }, () => null))
+      .toThrow(/explicit test-owned sink|formal context/u)
+    expect(() => runInFormalRehearsalContext({
+      sink: [],
+      deliverySink: repositoryDeliverySink,
+      clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
+    }, () => null)).toThrow(/explicit test-owned sink|formal context/u)
+  })
+
   it.skipIf(!IS_MACOS_CI_GATE)('runs two identical public rehearsals through isolated durable sinks and leaves no sink residue', () => {
     const [first, result] = repeatedFormalRuns
 
@@ -283,9 +296,44 @@ describe('Issue #92 formal rehearsal public path', () => {
         manifest.sha256,
         `formal-manifest-mutation-${manifest.sha256.slice(0, 12)}`,
       )
-      expect(() => runInFormalRehearsalContext({ sink: [] }, () => (
-        deliveryEntry.execute(manifest, authorization)
-      ))).toThrow(/formal test manifest|manifest format|ci\.conclusion|classification/u)
+      const sinkRoot = mkdtempSync(join(REPOSITORY_ROOT, '.issue-23-formal-sink-'))
+      try {
+        expect(() => runInFormalRehearsalContext({
+          sink: [],
+          deliverySink: createRepositoryDeliverySink(sinkRoot),
+          clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
+        }, () => deliveryEntry.execute(manifest, authorization)))
+          .toThrow(/formal test manifest|manifest format|ci\.conclusion|classification/u)
+      } finally {
+        rmSync(sinkRoot, { recursive: true, force: true })
+      }
+    }
+
+    const promotedValue = structuredClone(result.manifest.value) as Record<string, unknown>
+    Object.assign(promotedValue.ci as Record<string, unknown>, {
+      conclusion: 'success', evidence_class: 'production-ci-evidence',
+    })
+    Object.assign(promotedValue.d1 as Record<string, unknown>, {
+      evidence_class: 'production',
+    })
+    const promotedBytes = Buffer.from(`${JSON.stringify(promotedValue, null, 2)}\n`, 'utf8')
+    const promotedManifest = { value: promotedValue, bytes: promotedBytes, sha256: sha256(promotedBytes) }
+    const promotedAuthorization = authorizationRecord(
+      promotedManifest.sha256,
+      `formal-coordinated-promotion-${promotedManifest.sha256.slice(0, 12)}`,
+    )
+    const promotionSinkRoot = mkdtempSync(join(REPOSITORY_ROOT, '.issue-23-formal-sink-'))
+    try {
+      expect(() => runInFormalRehearsalContext({
+        sink: [],
+        deliverySink: createRepositoryDeliverySink(promotionSinkRoot),
+        clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
+      }, () => deliveryEntry.execute(promotedManifest, promotedAuthorization)))
+        .toThrow(/formal test manifest|ci\.conclusion|classification/u)
+      expect(readdirSync(promotionSinkRoot).flatMap((name) => readdirSync(join(promotionSinkRoot, name))))
+        .toEqual([])
+    } finally {
+      rmSync(promotionSinkRoot, { recursive: true, force: true })
     }
   })
 

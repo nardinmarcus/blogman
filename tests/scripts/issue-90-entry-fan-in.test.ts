@@ -773,21 +773,20 @@ describe('Issue #90 formal entry fan-in', () => {
     ['formal entry', (value: ManifestValue) => { value.preparation.execute_entry.sha256 = 'a'.repeat(64) }],
     ['Worker upload entry', (value: ManifestValue) => { value.preparation.worker_upload_entry.sha256 = 'a'.repeat(64) }],
     ['rollout control entry', (value: ManifestValue) => { value.d1.rollout_safety_sha256 = 'a'.repeat(64) }],
-  ])('rejects %s closure drift before reading Authorization or selecting an adapter', (_name, mutate) => {
+  ])('consumes Authorization and persists one terminal for %s closure drift', (_name, mutate) => {
     configureD1()
     const value = structuredClone(manifest().value) as ManifestValue
     mutate(value)
     const prepared = preparedFromValue(value)
-    let authorizationRead = false
-    const authorization = new Proxy(authorizationFor(prepared, `fan-in-entry-drift-${_name}`), {
-      get() {
-        authorizationRead = true
-        throw new Error('Authorization must not be read for formal entry drift')
-      },
-    })
+    const authorization = authorizationFor(prepared, `fan-in-entry-drift-${_name}`)
 
-    expect(() => execute(prepared, authorization)).toThrow(/formal|entry|closure|drift/u)
-    expect(authorizationRead).toBe(false)
+    const terminal = execute(prepared, authorization)
+
+    expect(terminal.value).toMatchObject({
+      outcome: 'NON_PASS', first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'Manifest Drift' },
+    })
+    expect(() => execute(prepared, authorization)).toThrow(/consumed/u)
     expect(createD1TransportMock).not.toHaveBeenCalled()
     expect(createWorkerTransportMock).not.toHaveBeenCalled()
   })
@@ -795,7 +794,7 @@ describe('Issue #90 formal entry fan-in', () => {
   it.each([
     'scripts/issue-23-delivery-worker-transport.mjs',
     'scripts/issue-23-build-proof.mjs',
-  ])('rejects post-prepare mutation of %s before reading Authorization or selecting adapters', (relativePath) => {
+  ])('consumes Authorization before post-prepare mutation of %s and persists drift', (relativePath) => {
     configureD1()
     const prepared = manifest()
     const mutatedPath = join(REPOSITORY_ROOT, relativePath)
@@ -805,21 +804,20 @@ describe('Issue #90 formal entry fan-in', () => {
       const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value)
       return Buffer.concat([bytes, Buffer.from('\n// post-prepare closure mutation\n')])
     }) as typeof readFileSync)
-    let authorizationRead = false
-    const authorization = new Proxy(authorizationFor(prepared, `fan-in-post-prepare-drift-${relativePath}`), {
-      get() {
-        authorizationRead = true
-        throw new Error('Authorization must not be read for closure drift')
-      },
-    })
+    const authorization = authorizationFor(prepared, `fan-in-post-prepare-drift-${relativePath}`)
 
-    expect(() => execute(prepared, authorization)).toThrow(/formal|entry|closure|drift/u)
-    expect(authorizationRead).toBe(false)
+    const terminal = execute(prepared, authorization)
+
+    expect(terminal.value).toMatchObject({
+      outcome: 'NON_PASS', first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'Manifest Drift' },
+    })
+    expect(() => execute(prepared, authorization)).toThrow(/consumed/u)
     expect(createD1TransportMock).not.toHaveBeenCalled()
     expect(createWorkerTransportMock).not.toHaveBeenCalled()
   })
 
-  it('rechecks exact Wrangler Worker target before Authorization or adapter selection', () => {
+  it('consumes Authorization before exact Wrangler target drift and persists one terminal', () => {
     configureD1()
     const prepared = manifest()
     vi.mocked(readFileSync).mockImplementation(((path: Parameters<typeof readFileSync>[0], options?: Parameters<typeof readFileSync>[1]) => {
@@ -827,16 +825,15 @@ describe('Issue #90 formal entry fan-in', () => {
       if (String(path) !== join(REPOSITORY_ROOT, 'wrangler.toml')) return value
       return String(value).replace('name = "blogman"', 'name = "different-worker"')
     }) as typeof readFileSync)
-    let authorizationRead = false
-    const authorization = new Proxy(authorizationFor(prepared, 'fan-in-wrangler-target-drift'), {
-      get() {
-        authorizationRead = true
-        throw new Error('Authorization must not be read for Wrangler target drift')
-      },
-    })
+    const authorization = authorizationFor(prepared, 'fan-in-wrangler-target-drift')
 
-    expect(() => execute(prepared, authorization)).toThrow(/d1\.config drifted|Wrangler config target identity drifted/u)
-    expect(authorizationRead).toBe(false)
+    const terminal = execute(prepared, authorization)
+
+    expect(terminal.value).toMatchObject({
+      outcome: 'NON_PASS', first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'Manifest Drift' },
+    })
+    expect(() => execute(prepared, authorization)).toThrow(/consumed/u)
     expect(createWorkerTransportMock).not.toHaveBeenCalled()
     expect(createD1TransportMock).not.toHaveBeenCalled()
   })
@@ -850,7 +847,7 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(() => execute(prepared, authorizationFor(prepared, 'artifact-file-tree-at-sign'))).not.toThrow()
   })
 
-  it('rejects live repository identity drift before Authorization consumption', () => {
+  it('consumes Authorization before live repository drift, persists one terminal, and rejects replay', () => {
     const prepared = manifest()
     const authorization = authorizationFor(prepared, 'fan-in-repository-drift')
     vi.mocked(execFileSync).mockImplementation((file, args, options) => {
@@ -860,8 +857,17 @@ describe('Issue #90 formal entry fan-in', () => {
       return childProcessActual.execFileSync!(file, args, options as never) as never
     })
 
-    expect(() => execute(prepared, authorization)).toThrow(/repository.*(?:drift|identity)|Manifest Drift/u)
-    expect(existsSync(join(DURABLE_SINK_ROOT, 'authorizations', `${authorization.sha256}.json`))).toBe(false)
+    const terminal = execute(prepared, authorization)
+
+    expect(terminal.value).toMatchObject({
+      authorization_consumed: true,
+      outcome: 'NON_PASS',
+      first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'Manifest Drift' },
+    })
+    expect(existsSync(join(DURABLE_SINK_ROOT, 'authorizations', `${authorization.sha256}.json`))).toBe(true)
+    expect(repositoryDeliverySink.readTerminalEvidence(terminal.sha256).authorization.sha256).toBe(authorization.sha256)
+    expect(() => execute(prepared, authorization)).toThrow(/consumed/u)
     expect(createWorkerTransportMock).not.toHaveBeenCalled()
     expect(createD1TransportMock).not.toHaveBeenCalled()
   })
@@ -1035,6 +1041,7 @@ describe('Issue #90 formal entry fan-in', () => {
     let monotonic = 0n
     const persisted: Array<Record<string, unknown>> = []
     const deliverySink = {
+      authority_class: 'explicit-test-only',
       consumeAuthorization: () => authorization.sha256,
       persistTerminalResult: (input: { terminal: { value: Record<string, unknown> } }, deadline?: () => boolean) => {
         persisted.push(structuredClone(input.terminal.value))
@@ -1044,6 +1051,7 @@ describe('Issue #90 formal entry fan-in', () => {
         }
         return input.terminal.value
       },
+      readTerminalEvidence: () => { throw new Error('not used') },
     }
     createWorkerTransportMock.mockReturnValue({
       livePreconditions: () => ({ outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }),

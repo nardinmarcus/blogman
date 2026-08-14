@@ -554,7 +554,7 @@ export function repositoryDeliverySinkRoot() {
   return PRODUCTION_AUTHORITY_ROOT
 }
 
-function deliverySink(resolvedRoot, rootIdentity, ancestors = []) {
+function deliverySink(resolvedRoot, rootIdentity, ancestors = [], authorityClass = 'explicit-test-only') {
   const directories = Object.freeze(Object.fromEntries(['authorizations', 'records', 'terminals'].map((name) => {
     const path = join(resolvedRoot, name)
     return [name, Object.freeze({ path, identity: createDirectory(path, `${name} directory`) })]
@@ -569,6 +569,7 @@ function deliverySink(resolvedRoot, rootIdentity, ancestors = []) {
     }
   }
   return Object.freeze({
+    authority_class: authorityClass,
     consumeAuthorization(record, deadline) {
       assertSinkIdentity()
       return consumeAuthorization(resolvedRoot, record, deadline)
@@ -614,7 +615,7 @@ function createCanonicalProductionSink() {
     fail('production authority resolved outside its canonical lexical root')
   }
   const rootIdentity = secureDirectoryIdentity(PRODUCTION_AUTHORITY_ROOT, 'sink root')
-  return deliverySink(PRODUCTION_AUTHORITY_ROOT, rootIdentity, ancestors)
+  return deliverySink(PRODUCTION_AUTHORITY_ROOT, rootIdentity, ancestors, 'canonical-production')
 }
 
 function defaultSink() {
@@ -623,6 +624,7 @@ function defaultSink() {
 
 /** Canonical production authority. Test/formal sinks cannot replace this facade. */
 export const repositoryDeliverySink = Object.freeze({
+  authority_class: 'canonical-production',
   consumeAuthorization: (record, deadline) => defaultSink().consumeAuthorization(record, deadline),
   persistTerminalResult: (input, deadline) => defaultSink().persistTerminalResult(input, deadline),
   readTerminalEvidence: (terminalSha256) => defaultSink().readTerminalEvidence(terminalSha256),

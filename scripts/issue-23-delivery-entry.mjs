@@ -1122,7 +1122,14 @@ function validatePreparedManifest(manifest) {
 }
 
 function executionDeliverySink() {
-  return currentFormalContext()?.deliverySink ?? repositoryDeliverySink
+  const context = currentFormalContext()
+  if (context) {
+    if (context.deliverySink?.authority_class !== 'explicit-test-only') {
+      fail('formal execution requires an explicit test-owned sink')
+    }
+    return context.deliverySink
+  }
+  return repositoryDeliverySink
 }
 
 function acceptAuthorization(manifestSha256, authorization, deadline) {
@@ -2019,10 +2026,6 @@ function executeProduction(manifest, authorization) {
   const d1 = formal
     ? validateFormalRehearsalManifest(manifest.value, manifestBytes)
     : validateCanonicalManifest(manifest.value, manifestBytes)
-  assertCurrentFormalEntryClosure(manifest.value)
-  assertWranglerTargetBinding(manifest.value)
-  assertCurrentRepositoryIdentity(manifest.value)
-  const adapters = activeAdapterFactories()
   const attemptClock = createAttemptClock()
   const withinOverallDeadline = () => attemptClock.elapsedMilliseconds() <= OVERALL_TIMEOUT_SECONDS * 1000
   const authorizationDigest = acceptAuthorization(sha256(manifestBytes), authorization, withinOverallDeadline)
@@ -2040,6 +2043,15 @@ function executeProduction(manifest, authorization) {
     attempt_id: attemptId,
     candidate_id: manifest.value.repository.commit,
   })
+  let entryDrift
+  try {
+    assertCurrentFormalEntryClosure(manifest.value)
+    assertWranglerTargetBinding(manifest.value)
+    assertCurrentRepositoryIdentity(manifest.value)
+  } catch {
+    entryDrift = { outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }
+  }
+  const adapters = activeAdapterFactories()
   const authorizationFault = authorizationElapsed > DELIVERY_STAGE_POLICY[0].timeout_seconds * 1000
     ? { outcome: 'TIMEOUT', classification: 'stage_timeout', duration_ms: authorizationElapsed }
     : formalFaultResult('authorization_accept')
@@ -2048,6 +2060,8 @@ function executeProduction(manifest, authorization) {
   const liveStarted = attemptClock.elapsedMilliseconds()
   if (authorizationFault) {
     liveResult = authorizationFault
+  } else if (entryDrift) {
+    liveResult = entryDrift
   } else {
     try {
       credentials = adapters.resolveCredentials(manifest.value)
@@ -2460,49 +2474,47 @@ export function runFormalRehearsal(config) {
   if (arguments.length !== 1) fail('runFormalRehearsal accepts exactly one config argument')
   if (platform() !== 'darwin') fail('runFormalRehearsal requires target macOS')
   const sink = []
-  return runInFormalRehearsalContext(Object.freeze({ sink }), () => {
-    const manifest = prepare(config)
-    const sinkRoot = mkdtempSync(join(ENTRY_REPO_ROOT, '.issue-23-formal-sink-'))
-    try {
-      const context = Object.freeze({
-        sink,
-        deliverySink: createRepositoryDeliverySink(sinkRoot),
-        clock: Object.freeze({
-          wallTimeMilliseconds: () => 0,
-          monotonicNanoseconds: () => 0n,
-        }),
+  const sinkRoot = mkdtempSync(join(ENTRY_REPO_ROOT, '.issue-23-formal-sink-'))
+  try {
+    const context = Object.freeze({
+      sink,
+      deliverySink: createRepositoryDeliverySink(sinkRoot),
+      clock: Object.freeze({
+        wallTimeMilliseconds: () => 0,
+        monotonicNanoseconds: () => 0n,
+      }),
+    })
+    return runInFormalRehearsalContext(context, () => {
+      const manifest = prepare(config)
+      const authorizationBytes = canonicalJsonBytes({
+        format: AUTHORIZATION_FORMAT,
+        authorization_id: `formal-rehearsal-${currentFormalFaultForTestsOnly()?.stage ?? 'pass'}-${currentFormalFaultForTestsOnly()?.kind ?? 'pass'}-${manifest.sha256.slice(0, 16)}`,
+        manifest_sha256: manifest.sha256,
+        decision: 'approve',
       })
-      return runInFormalRehearsalContext(context, () => {
-        const authorizationBytes = canonicalJsonBytes({
-          format: AUTHORIZATION_FORMAT,
-          authorization_id: `formal-rehearsal-${currentFormalFaultForTestsOnly()?.stage ?? 'pass'}-${currentFormalFaultForTestsOnly()?.kind ?? 'pass'}-${manifest.sha256.slice(0, 16)}`,
-          manifest_sha256: manifest.sha256,
-          decision: 'approve',
-        })
-        const authorization = Object.freeze({
-          bytes: authorizationBytes,
-          sha256: sha256(authorizationBytes),
-        })
-        const terminal = execute(manifest, authorization)
-        if (terminal.value.evidence.production === true || terminal.value.evidence.source === 'production') {
-          fail('formal rehearsal must not emit production evidence')
-        }
-        try {
-          validateProductionTerminalEvidence(terminal)
-          fail('formal rehearsal terminal result must not pass production evidence validation')
-        } catch (error) {
-          if (!/production terminal evidence/u.test(error.message)) throw error
-        }
-        return Object.freeze({
-          manifest,
-          terminal,
-          operations: Object.freeze(sink.map((entry) => Object.freeze({ ...entry }))),
-        })
+      const authorization = Object.freeze({
+        bytes: authorizationBytes,
+        sha256: sha256(authorizationBytes),
       })
-    } finally {
-      rmSync(sinkRoot, { recursive: true, force: true })
-    }
-  })
+      const terminal = execute(manifest, authorization)
+      if (terminal.value.evidence.production === true || terminal.value.evidence.source === 'production') {
+        fail('formal rehearsal must not emit production evidence')
+      }
+      try {
+        validateProductionTerminalEvidence(terminal)
+        fail('formal rehearsal terminal result must not pass production evidence validation')
+      } catch (error) {
+        if (!/production terminal evidence/u.test(error.message)) throw error
+      }
+      return Object.freeze({
+        manifest,
+        terminal,
+        operations: Object.freeze(sink.map((entry) => Object.freeze({ ...entry }))),
+      })
+    })
+  } finally {
+    rmSync(sinkRoot, { recursive: true, force: true })
+  }
 }
 
 export function execute(manifest, authorization) {
