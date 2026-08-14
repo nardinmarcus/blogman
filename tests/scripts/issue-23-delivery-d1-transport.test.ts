@@ -372,9 +372,13 @@ describe('Issue #90 D1 transport', () => {
       write_queries_24h: 7,
     })
     expect(() => parseRemoteD1InfoResponse(
+      info.replace('"uuid": "11111111-2222-4333-8444-555555555555"', '"uuid": "22222222-3333-4444-8555-666666666666"'),
+      '11111111-2222-4333-8444-555555555555',
+    )).toThrowError(expect.objectContaining({ code: 'DELIVERY_DATABASE_MISMATCH' }))
+    expect(() => parseRemoteD1InfoResponse(
       info.replace('"uuid": "11111111-2222-4333-8444-555555555555"', '"uuid": "11111111-2222-4333-8444-555555555555", "\\u0075uid": "forged"'),
       '11111111-2222-4333-8444-555555555555',
-    )).toThrow()
+    )).toThrowError(expect.not.objectContaining({ code: 'DELIVERY_DATABASE_MISMATCH' }))
   })
 
   it('accepts only the pinned Wrangler alpha D1 info variant', () => {

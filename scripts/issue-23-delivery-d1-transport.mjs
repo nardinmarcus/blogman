@@ -461,8 +461,10 @@ function parseLocalIdentity(stdout) {
 function parseRemoteIdentity(stdout, expectedDatabaseId) {
   try {
     parseRemoteD1InfoResponse(stdout, expectedDatabaseId)
-  } catch {
-    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED)
+  } catch (error) {
+    throw new D1TransportError(error?.code === 'DELIVERY_DATABASE_MISMATCH'
+      ? D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MANIFEST_DRIFT
+      : D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED)
   }
 }
 

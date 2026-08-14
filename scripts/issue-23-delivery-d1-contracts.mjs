@@ -325,7 +325,11 @@ export function parseRemoteD1InfoResponse(stdout, expectedDatabaseId) {
     assertString(response.name)
     assertNonNegativeInteger(response.num_tables)
     assertString(response.uuid)
-    if (response.uuid !== expectedDatabaseId) throw new Error('database identity drift')
+    if (response.uuid !== expectedDatabaseId) {
+      const error = new Error('database identity drift')
+      error.code = 'DELIVERY_DATABASE_MISMATCH'
+      throw error
+    }
     assertExactKeys(response.read_replication, ['mode'])
     if (!['auto', 'disabled'].includes(response.read_replication.mode)) {
       throw new Error('unsupported read replication mode')
@@ -341,7 +345,8 @@ export function parseRemoteD1InfoResponse(stdout, expectedDatabaseId) {
       throw new Error('unsupported D1 info version')
     }
     return response
-  } catch {
+  } catch (error) {
+    if (error?.code === 'DELIVERY_DATABASE_MISMATCH') throw error
     throw new Error('invalid Wrangler D1 info response')
   }
 }

@@ -143,10 +143,10 @@ function removeTransportTree(root) {
   }
   if (failure) throw new WorkerTransportError('UNCERTAIN', 'worker_adapter_uncertain', 1)
 }
-function childFailure(error) {
+function childFailure(error, timeoutClassification = 'stage_timeout') {
   if (error instanceof D1ChildError) {
     const duration = Math.max(1, error.durationMs)
-    if (error.classification === 'timeout') return new WorkerTransportError('TIMEOUT', 'stage_timeout', duration)
+    if (error.classification === 'timeout') return new WorkerTransportError('TIMEOUT', timeoutClassification, duration)
     if (error.classification === 'nonzero') return new WorkerTransportError('ERROR', 'worker_adapter_nonzero', duration)
     return new WorkerTransportError('UNCERTAIN', 'worker_adapter_uncertain', duration)
   }
@@ -304,20 +304,32 @@ export function createWorkerTransport(bindings, environments = { cloudflare: pro
   function invoke(executable, args, request, spent, env = environments.cloudflare, stdin = null) {
     validateLocalBindings()
     const actualSpent = Math.max(spent, monotonicMs() - request.elapsed_ms)
-    const remaining = Math.min(
-      request.timeout_ms - actualSpent,
-      OVERALL_TIMEOUT_MS - request.elapsed_ms - actualSpent,
-    )
-    if (!Number.isSafeInteger(remaining) || remaining <= 0) {
+    const stageRemaining = request.timeout_ms - actualSpent
+    const overallRemaining = OVERALL_TIMEOUT_MS - request.elapsed_ms - actualSpent
+    if (!Number.isSafeInteger(overallRemaining) || overallRemaining <= 0) {
       throw new WorkerTransportError('TIMEOUT', 'overall_timeout', 1)
     }
+    if (!Number.isSafeInteger(stageRemaining) || stageRemaining <= 0) {
+      throw new WorkerTransportError('TIMEOUT', 'stage_timeout', 1)
+    }
+    const timeoutClassification = overallRemaining <= stageRemaining
+      ? 'overall_timeout'
+      : 'stage_timeout'
     try {
-      const result = runBoundedChild(executable, args, remaining, MAX_OUTPUT_BYTES, process.cwd(), env, stdin)
+      const result = runBoundedChild(
+        executable,
+        args,
+        Math.min(stageRemaining, overallRemaining),
+        MAX_OUTPUT_BYTES,
+        process.cwd(),
+        env,
+        stdin,
+      )
       if (result.stderr !== '') throw new WorkerTransportError('UNCERTAIN', 'worker_adapter_uncertain', result.duration_ms)
       return result
     } catch (error) {
       if (error instanceof WorkerTransportError) throw error
-      throw childFailure(error)
+      throw childFailure(error, timeoutClassification)
     }
   }
 

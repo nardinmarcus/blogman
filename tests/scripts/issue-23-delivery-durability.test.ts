@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -10,6 +10,12 @@ import {
   repositoryDeliverySink,
   repositoryDeliverySinkRoot,
 } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
+import {
+  PROTECTED_AUTHORITY_ROOT,
+  TEST_AUTHORITY_ROOT,
+  authoritySnapshot,
+  isolatedAuthorityChildEnvironment,
+} from '../helpers/issue-23-authority-isolation.ts'
 
 const temporaryDirectories: string[] = []
 const sinkModuleUrl = pathToFileURL(join(process.cwd(), 'scripts/issue-23-delivery-evidence-sink.mjs')).href
@@ -63,6 +69,25 @@ describe('Issue #23 durable delivery records', () => {
     expect(sink.consumeAuthorization(benign)).toBe(benign.sha256)
   })
 
+  it('uses only the test-owned canonical authority and leaves the protected authority unchanged', () => {
+    const before = authoritySnapshot()
+    const authorization = record({
+      ...authorizationRecord().value,
+      authorization_id: `isolated-authority-${process.pid}`,
+    })
+    const authorizationPath = join(TEST_AUTHORITY_ROOT, 'authorizations', `${authorization.sha256}.json`)
+
+    expect(repositoryDeliverySinkRoot()).toBe(TEST_AUTHORITY_ROOT)
+    expect(repositoryDeliverySinkRoot()).not.toBe(PROTECTED_AUTHORITY_ROOT)
+    try {
+      expect(repositoryDeliverySink.consumeAuthorization(authorization)).toBe(authorization.sha256)
+      expect(readFileSync(authorizationPath)).toEqual(authorization.bytes)
+      expect(authoritySnapshot()).toBe(before)
+    } finally {
+      rmSync(authorizationPath, { force: true })
+    }
+  })
+
   it('does not let PATH or Git environment redirect the canonical production sink root', () => {
     const expected = repositoryDeliverySinkRoot()
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
@@ -70,7 +95,11 @@ describe('Issue #23 durable delivery records', () => {
       process.stdout.write(repositoryDeliverySinkRoot())
     `], {
       encoding: 'utf8',
-      env: { PATH: '/definitely-not-a-bin', GIT_DIR: '/tmp/redirected', GIT_COMMON_DIR: '/tmp/redirected-common' },
+      env: isolatedAuthorityChildEnvironment({
+        PATH: '/definitely-not-a-bin',
+        GIT_DIR: '/tmp/redirected',
+        GIT_COMMON_DIR: '/tmp/redirected-common',
+      }),
     })
     expect(child.status, child.stderr).toBe(0)
     expect(child.stdout).toBe(expected)
@@ -90,8 +119,14 @@ describe('Issue #23 durable delivery records', () => {
       try { repositoryDeliverySink.consumeAuthorization({ bytes, sha256: ${JSON.stringify(authorization.sha256)} }) }
       catch (error) { if (/consumed/u.test(error.message)) process.exitCode = 10; else throw error }
     `
-    expect(spawnSync(process.execPath, ['--input-type=module', '-e', source], { cwd: firstClone }).status).toBe(0)
-    expect(spawnSync(process.execPath, ['--input-type=module', '-e', source], { cwd: secondClone }).status).toBe(10)
+    expect(spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+      cwd: firstClone,
+      env: isolatedAuthorityChildEnvironment(),
+    }).status).toBe(0)
+    expect(spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+      cwd: secondClone,
+      env: isolatedAuthorityChildEnvironment(),
+    }).status).toBe(10)
     rmSync(join(repositoryDeliverySinkRoot(), 'authorizations', `${authorization.sha256}.json`), { force: true })
   })
 
@@ -105,6 +140,33 @@ describe('Issue #23 durable delivery records', () => {
     } finally {
       spawnSync('git', ['worktree', 'remove', '--force', worktree], { encoding: 'utf8' })
     }
+  })
+
+  it('rejects a symlinked canonical ancestor in a disposable preloaded child without writing the target', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'blogman-issue-23-canonical-ancestor-'))
+    temporaryDirectories.push(parent)
+    const home = join(parent, 'home')
+    const target = join(parent, 'redirect-target')
+    mkdirSync(home, { mode: 0o700 })
+    mkdirSync(target, { mode: 0o700 })
+    symlinkSync(target, join(home, '.local'))
+    const authorization = authorizationRecord()
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { repositoryDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
+      const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
+      try {
+        repositoryDeliverySink.consumeAuthorization({ bytes, sha256: ${JSON.stringify(authorization.sha256)} })
+        process.exitCode = 2
+      } catch (error) {
+        if (!/canonical|symlink/u.test(error instanceof Error ? error.message : String(error))) process.exitCode = 3
+      }
+    `], {
+      encoding: 'utf8',
+      env: isolatedAuthorityChildEnvironment({ BLOGMAN_TEST_AUTHORITY_HOME: home }),
+    })
+
+    expect(child.status, child.stderr).toBe(0)
+    expect(readdirSync(target)).toEqual([])
   })
 
   it('rejects symlink, owner/mode, and root identity drift', () => {
@@ -193,7 +255,10 @@ describe('Issue #23 durable delivery records', () => {
       catch (error) { if (/consumed/u.test(error.message)) process.exitCode = 10; else throw error }
     `
     const run = () => new Promise<number | null>((resolve) => {
-      const child = spawn(process.execPath, ['--input-type=module', '-e', contenderSource], { stdio: 'ignore' })
+      const child = spawn(process.execPath, ['--input-type=module', '-e', contenderSource], {
+        stdio: 'ignore',
+        env: isolatedAuthorityChildEnvironment(),
+      })
       child.once('exit', resolve)
     })
     expect((await Promise.all([run(), run()])).sort()).toEqual([0, 10])
@@ -208,7 +273,7 @@ describe('Issue #23 durable delivery records', () => {
       } catch (error) {
         if (!/consumed/u.test(error instanceof Error ? error.message : String(error))) process.exitCode = 3
       }
-    `], { encoding: 'utf8' })
+    `], { encoding: 'utf8', env: isolatedAuthorityChildEnvironment() })
 
     expect(child.status, child.stderr).toBe(0)
   })
@@ -231,8 +296,14 @@ describe('Issue #23 durable delivery records', () => {
       catch (error) { if (/consumed/u.test(error.message)) process.exitCode = 10; else throw error }
     `
     try {
-      expect(spawnSync(process.execPath, ['--input-type=module', '-e', source], { cwd: repository }).status).toBe(0)
-      expect(spawnSync(process.execPath, ['--input-type=module', '-e', source], { cwd: worktree }).status).toBe(10)
+      expect(spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+        cwd: repository,
+        env: isolatedAuthorityChildEnvironment(),
+      }).status).toBe(0)
+      expect(spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+        cwd: worktree,
+        env: isolatedAuthorityChildEnvironment(),
+      }).status).toBe(10)
     } finally {
       spawnSync('git', ['-C', repository, 'worktree', 'remove', '--force', worktree])
     }
@@ -290,7 +361,7 @@ describe('Issue #23 durable delivery records', () => {
         || result.authorization.value.manifest_sha256 !== ${JSON.stringify(manifest.sha256)}
         || result.d1.sha256 !== ${JSON.stringify(d1.sha256)}
         || result.worker.sha256 !== ${JSON.stringify(worker.sha256)}) process.exitCode = 2
-    `], { encoding: 'utf8' })
+    `], { encoding: 'utf8', env: isolatedAuthorityChildEnvironment() })
 
     expect(child.status, child.stderr).toBe(0)
   })

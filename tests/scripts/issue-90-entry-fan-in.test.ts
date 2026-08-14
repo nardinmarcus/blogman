@@ -63,6 +63,7 @@ import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-forma
 import { hashD1ArtifactDirectory } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
 import { formalExecutionClosureSha256 } from '../../scripts/issue-23-delivery-execution-closure.mjs'
 import { repositoryDeliverySink, repositoryDeliverySinkRoot } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
+import { isolatedAuthorityChildEnvironment } from '../helpers/issue-23-authority-isolation.ts'
 
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const MANIFEST_FORMAT = 'blogman-issue-23-canonical-frozen-manifest/v1'
@@ -976,7 +977,11 @@ describe('Issue #90 formal entry fan-in', () => {
       const record = ${JSON.stringify(encoded)}
       const terminal = { value: record.value, bytes: Buffer.from(record.bytes, 'base64'), sha256: record.sha256 }
       if (validateProductionTerminalEvidence(terminal) !== true) process.exitCode = 2
-    `], { cwd: REPOSITORY_ROOT, encoding: 'utf8' })
+    `], {
+      cwd: REPOSITORY_ROOT,
+      encoding: 'utf8',
+      env: isolatedAuthorityChildEnvironment(),
+    })
     expect(child.status, child.stderr).toBe(0)
   })
 
@@ -1122,7 +1127,11 @@ describe('Issue #90 formal entry fan-in', () => {
           process.exitCode = 7
         }
       }
-    `], { cwd: REPOSITORY_ROOT, encoding: 'utf8' })
+    `], {
+      cwd: REPOSITORY_ROOT,
+      encoding: 'utf8',
+      env: isolatedAuthorityChildEnvironment(),
+    })
 
     expect(child.status, child.stderr).toBe(0)
   })
@@ -1258,7 +1267,11 @@ describe('Issue #90 formal entry fan-in', () => {
       const record = ${JSON.stringify(encoded)}
       const terminal = { value: record.value, bytes: Buffer.from(record.bytes, 'base64'), sha256: record.sha256 }
       if (validateProductionTerminalEvidence(terminal) !== true) process.exitCode = 2
-    `], { cwd: REPOSITORY_ROOT, encoding: 'utf8' })
+    `], {
+      cwd: REPOSITORY_ROOT,
+      encoding: 'utf8',
+      env: isolatedAuthorityChildEnvironment(),
+    })
     expect(child.status, child.stderr).toBe(0)
   })
 

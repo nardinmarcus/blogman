@@ -14,8 +14,9 @@ import {
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { userInfo } from 'node:os'
+const PRODUCTION_AUTHORITY_HOME = resolve(userInfo().homedir)
 const PRODUCTION_AUTHORITY_ROOT = join(
-  userInfo().homedir,
+  PRODUCTION_AUTHORITY_HOME,
   '.local',
   'state',
   'blogman',
@@ -144,17 +145,30 @@ function writeAll(descriptor, bytes) {
   while (offset < bytes.length) offset += writeSync(descriptor, bytes, offset, bytes.length - offset)
 }
 
-function secureDirectoryIdentity(path, label) {
+function directoryIdentity(path, label) {
   let stat
   try { stat = lstatSync(path) } catch { fail(`${label} is unavailable`) }
   if (!stat.isDirectory() || stat.isSymbolicLink()) fail(`${label} is not a canonical directory`)
   if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) fail(`${label} owner drifted`)
-  if ((stat.mode & 0o777) !== 0o700) fail(`${label} mode drifted`)
   return Object.freeze({ dev: stat.dev, ino: stat.ino, uid: stat.uid, mode: stat.mode & 0o777 })
 }
 
-function assertDirectoryIdentity(path, expected, label) {
-  const actual = secureDirectoryIdentity(path, label)
+function canonicalDirectoryIdentity(path, label) {
+  const identity = directoryIdentity(path, label)
+  let canonical
+  try { canonical = realpathSync(path) } catch { fail(`${label} is unavailable`) }
+  if (canonical !== path) fail(`${label} resolved outside its canonical lexical path`)
+  return identity
+}
+
+function secureDirectoryIdentity(path, label) {
+  const identity = directoryIdentity(path, label)
+  if (identity.mode !== 0o700) fail(`${label} mode drifted`)
+  return identity
+}
+
+function assertDirectoryIdentity(path, expected, label, identity = secureDirectoryIdentity) {
+  const actual = identity(path, label)
   if (actual.dev !== expected.dev || actual.ino !== expected.ino || actual.uid !== expected.uid
     || actual.mode !== expected.mode) fail(`${label} root identity drifted`)
 }
@@ -164,6 +178,13 @@ function createDirectory(path, label) {
     if (error?.code !== 'EEXIST') throw error
   }
   return secureDirectoryIdentity(path, label)
+}
+
+function createCanonicalProductionDirectory(path, label) {
+  try { mkdirSync(path, { mode: 0o700 }) } catch (error) {
+    if (error?.code !== 'EEXIST') throw error
+  }
+  return canonicalDirectoryIdentity(path, label)
 }
 
 function assertSecureFile(path, label) {
@@ -336,18 +357,15 @@ export function repositoryDeliverySinkRoot() {
   return PRODUCTION_AUTHORITY_ROOT
 }
 
-export function createRepositoryDeliverySink(root) {
-  if (typeof root !== 'string') fail('explicit test-only sink root is required')
-  const requestedRoot = resolve(root)
-  mkdirSync(dirname(requestedRoot), { recursive: true, mode: 0o700 })
-  createDirectory(requestedRoot, 'sink root')
-  const resolvedRoot = realpathSync(requestedRoot)
-  const rootIdentity = secureDirectoryIdentity(resolvedRoot, 'sink root')
+function deliverySink(resolvedRoot, rootIdentity, ancestors = []) {
   const directories = Object.freeze(Object.fromEntries(['authorizations', 'records', 'terminals'].map((name) => {
     const path = join(resolvedRoot, name)
     return [name, Object.freeze({ path, identity: createDirectory(path, `${name} directory`) })]
   })))
   const assertSinkIdentity = () => {
+    for (const entry of ancestors) {
+      assertDirectoryIdentity(entry.path, entry.identity, entry.label, canonicalDirectoryIdentity)
+    }
     assertDirectoryIdentity(resolvedRoot, rootIdentity, 'sink root')
     for (const [name, entry] of Object.entries(directories)) {
       assertDirectoryIdentity(entry.path, entry.identity, `${name} directory`)
@@ -369,8 +387,41 @@ export function createRepositoryDeliverySink(root) {
   })
 }
 
+export function createRepositoryDeliverySink(root) {
+  if (typeof root !== 'string') fail('explicit test-only sink root is required')
+  const requestedRoot = resolve(root)
+  mkdirSync(dirname(requestedRoot), { recursive: true, mode: 0o700 })
+  createDirectory(requestedRoot, 'sink root')
+  const resolvedRoot = realpathSync(requestedRoot)
+  const rootIdentity = secureDirectoryIdentity(resolvedRoot, 'sink root')
+  return deliverySink(resolvedRoot, rootIdentity)
+}
+
+function createCanonicalProductionSink() {
+  const ancestors = []
+  let path = PRODUCTION_AUTHORITY_HOME
+  ancestors.push(Object.freeze({
+    path,
+    label: 'authority home',
+    identity: canonicalDirectoryIdentity(path, 'authority home'),
+  }))
+  for (const name of ['.local', 'state', 'blogman', 'issue-23-production-authority-v1']) {
+    path = join(path, name)
+    ancestors.push(Object.freeze({
+      path,
+      label: `authority ${name} directory`,
+      identity: createCanonicalProductionDirectory(path, `authority ${name} directory`),
+    }))
+  }
+  if (path !== PRODUCTION_AUTHORITY_ROOT || realpathSync(path) !== PRODUCTION_AUTHORITY_ROOT) {
+    fail('production authority resolved outside its canonical lexical root')
+  }
+  const rootIdentity = secureDirectoryIdentity(PRODUCTION_AUTHORITY_ROOT, 'sink root')
+  return deliverySink(PRODUCTION_AUTHORITY_ROOT, rootIdentity, ancestors)
+}
+
 function defaultSink() {
-  return createRepositoryDeliverySink(PRODUCTION_AUTHORITY_ROOT)
+  return createCanonicalProductionSink()
 }
 
 /** Canonical production authority. Test/formal sinks cannot replace this facade. */

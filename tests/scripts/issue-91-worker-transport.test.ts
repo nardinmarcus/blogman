@@ -133,6 +133,65 @@ function bindings(fixture: ReturnType<typeof fixture>, port: number) {
 }
 
 describe('Issue #91 private smoke_control_t0 adapter', () => {
+  it.each([
+    ['Stage', 0, 300_000, 'stage_timeout'],
+    ['overall', 5_300_000, 5_400_000, 'overall_timeout'],
+  ] as const)('blocks %s equality before child dispatch with the exact timeout classification', (
+    _bound,
+    elapsedMs,
+    monotonicMs,
+    classification,
+  ) => {
+    const current = fixture()
+    const value = bindings(current, 1)
+    const environment = Object.assign(Object.create(null), { WORKER_FAKE_LOG: current.log })
+    const transport = createWorkerTransport(
+      value,
+      { cloudflare: environment, smoke: Object.create(null) },
+      () => monotonicMs,
+    )
+
+    expect(() => transport.execute({
+      operation: 'version_traffic_verification',
+      stage: 'version_traffic_verification',
+      timeout_ms: 300_000,
+      elapsed_ms: elapsedMs,
+      version_id: 'version-new',
+      deployment_id: undefined,
+    })).toThrowError(expect.objectContaining({ classification }))
+    expect(readFileSync(current.log, 'utf8')).toBe('')
+  })
+
+  it.each([
+    ['Stage', 0, 299_940, 'stage_timeout'],
+    ['overall', 5_399_900, 5_399_940, 'overall_timeout'],
+  ] as const)('preserves the %s bound when the selected child budget times out', (
+    _bound,
+    elapsedMs,
+    monotonicMs,
+    classification,
+  ) => {
+    const current = fixture()
+    writeFileSync(current.wrangler, '#!/usr/bin/env node\nsetInterval(() => {}, 1000)\n')
+    const value = bindings(current, 1)
+    value.wrangler_sha256 = hash(current.wrangler)
+    const environment = Object.assign(Object.create(null), { WORKER_FAKE_LOG: current.log })
+    const transport = createWorkerTransport(
+      value,
+      { cloudflare: environment, smoke: Object.create(null) },
+      () => monotonicMs,
+    )
+
+    expect(() => transport.execute({
+      operation: 'version_traffic_verification',
+      stage: 'version_traffic_verification',
+      timeout_ms: 300_000,
+      elapsed_ms: elapsedMs,
+      version_id: 'version-new',
+      deployment_id: undefined,
+    })).toThrowError(expect.objectContaining({ classification }))
+  })
+
   it('uses only fake executables and a loopback server for bounded pre/post, six GETs, controls, and reconciliation', async () => {
     const current = fixture()
     const port = await localServer(current.root)
