@@ -56,18 +56,32 @@ vi.mock('node:fs', async () => {
   }
 })
 
-vi.mock('../../scripts/issue-23-delivery-d1-transport.mjs', () => ({
-  createD1Transport: createD1TransportMock,
-  createRehearsalD1Transport: createD1TransportMock,
-}))
+vi.mock('../../scripts/issue-23-delivery-d1-transport.mjs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../scripts/issue-23-delivery-d1-transport.mjs')>()
+  return {
+    ...actual,
+    D1_COMMAND_CONTRACT: {
+      ...actual.D1_COMMAND_CONTRACT,
+      createTransportForTestsOnly: createD1TransportMock,
+    },
+    createRehearsalD1Transport: createD1TransportMock,
+  }
+})
 vi.mock('../../scripts/issue-23-delivery-d1-stages.mjs', () => ({
   D1_STAGE_ORDER: ['d1_identity', 'clean_start_reset', 'empty_d1_proof', 'migrations_001_006', 'reconciliation'],
   runD1Stages: runD1StagesMock,
 }))
-vi.mock('../../scripts/issue-23-delivery-worker-transport.mjs', () => ({
-  createWorkerTransport: createWorkerTransportMock,
-  createRehearsalWorkerTransport: createWorkerTransportMock,
-}))
+vi.mock('../../scripts/issue-23-delivery-worker-transport.mjs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../scripts/issue-23-delivery-worker-transport.mjs')>()
+  return {
+    ...actual,
+    WORKER_COMMAND_CONTRACT: {
+      ...actual.WORKER_COMMAND_CONTRACT,
+      createTransportForTestsOnly: createWorkerTransportMock,
+    },
+    createRehearsalWorkerTransport: createWorkerTransportMock,
+  }
+})
 vi.mock('../../scripts/issue-23-delivery-worker-stages.mjs', () => ({ runWorkerStages: runWorkerStagesMock }))
 
 const formalSinkRoots: string[] = []
@@ -403,7 +417,7 @@ function isolatedEntryChildEnvironment() {
 function authorizationValueFor(prepared: ReturnType<typeof manifest>, id: string) {
   return {
     format: AUTHORIZATION_FORMAT,
-    authorization_id: id,
+    authorization_id: `issue23-authorization-${hash(Buffer.from(id, 'utf8'))}`,
     manifest_sha256: prepared.sha256,
     decision: 'approve',
   }
@@ -962,6 +976,18 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(terminal.value.identities.authorization_sha256).toBe(authorization.sha256)
     expect(readFileSync(join(DURABLE_SINK_ROOT, 'authorizations', `${authorization.sha256}.json`)))
       .toEqual(authorization.bytes)
+  })
+
+  it('rejects non-opaque authorization_id before consumption or adapter selection', () => {
+    const prepared = manifest()
+    const value = authorizationValueFor(prepared, 'fan-in-invalid-authorization-id')
+    value.authorization_id = 'CLOUDFLARE_API_TOKEN=ordinary-cloudflare-secret-value'
+    const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
+
+    expect(() => execute(prepared, { bytes, sha256: hash(bytes) })).toThrow(/authorization_id is invalid/u)
+    expect(existsSync(DURABLE_SINK_ROOT)).toBe(false)
+    expect(createWorkerTransportMock).not.toHaveBeenCalled()
+    expect(createD1TransportMock).not.toHaveBeenCalled()
   })
 
   it.each([

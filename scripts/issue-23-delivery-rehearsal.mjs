@@ -9,7 +9,7 @@ import {
   buildLocalRehearsalCommands,
   parseLocalCommandResult,
 } from './issue-23-delivery-entry.mjs'
-import { createD1Transport } from './issue-23-delivery-d1-transport.mjs'
+import { createLocalD1Transport } from './issue-23-delivery-d1-transport.mjs'
 import { runD1Stages } from './issue-23-delivery-d1-stages.mjs'
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
@@ -566,7 +566,7 @@ function runCanonicalLocalRehearsal({
     process.env.NODE_OPTIONS = env.NODE_OPTIONS
     process.env.BLOGMAN_REHEARSAL_NETWORK_SANDBOX = '1'
     try {
-      const transport = createD1Transport(localBindings)
+      const transport = createLocalD1Transport(localBindings)
       d1Result = runD1Stages({ bindings: localBindings, transport })
     } finally {
       if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS

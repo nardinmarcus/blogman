@@ -16,10 +16,7 @@ import {
   parseStrictJson,
   parseWranglerWhoamiResponse,
 } from './issue-23-delivery-d1-contracts.mjs'
-import {
-  D1ChildError,
-  runBoundedChild,
-} from './issue-23-delivery-d1-child.mjs'
+import { D1ChildError, runBoundedChild } from './issue-23-delivery-d1-child.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const wranglerPath = realpathSync(join(repoRoot, 'node_modules', '.bin', 'wrangler'))
@@ -585,11 +582,26 @@ function rolloutSafetyCommand(config) {
 
 export { hashD1ArtifactDirectory }
 
-export function createD1Transport(config, childEnvironment, monotonicMs) {
+export const D1_COMMAND_CONTRACT = Object.freeze({
+  repoRoot,
+  wranglerPath,
+  fail,
+  validateConfig,
+  validateBoundArtifactsOrThrow,
+  deadlineBudget,
+  validateRequest,
+  buildD1Command,
+  buildRemoteWhoamiCommand,
+  identityResponse,
+  canonicalRunnerCommand,
+  rolloutSafetyCommand,
+})
+
+function createLocalD1TransportImplementation(config, childEnvironment, monotonicMs) {
   if (arguments.length < 1 || arguments.length > 3
     || (childEnvironment !== undefined && Object.getPrototypeOf(childEnvironment) !== null)
     || (monotonicMs !== undefined && typeof monotonicMs !== 'function')) {
-    fail('createD1Transport rejects unsupported public adapter overrides')
+    fail('local transport rejects unsupported adapter overrides')
   }
   const privateEnvironment = childEnvironment ?? process.env
   const normalizedConfig = validateConfig(config)
@@ -676,6 +688,14 @@ export function createD1Transport(config, childEnvironment, monotonicMs) {
     execute,
     bindings_sha256: bindingsSha256,
   })
+}
+
+export function createLocalD1Transport(config, childEnvironment, monotonicMs) {
+  if (config?.mode !== 'local'
+    || !['local-non-production', 'test-non-production', 'synthetic-non-production'].includes(config.evidence_class)) {
+    fail('local transport requires structurally nonproduction local evidence')
+  }
+  return createLocalD1TransportImplementation(config, childEnvironment, monotonicMs)
 }
 
 const REHEARSAL_D1_STAGE_BY_OPERATION = Object.freeze({

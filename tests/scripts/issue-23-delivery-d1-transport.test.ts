@@ -21,7 +21,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   D1TransportError,
   D1_TRANSPORT_MAX_OUTPUT_BYTES,
-  createD1Transport,
+  createLocalD1Transport,
   hashD1ArtifactDirectory as transportHashD1ArtifactDirectory,
 } from '../../scripts/issue-23-delivery-d1-transport.mjs'
 import {
@@ -155,7 +155,7 @@ describe('Issue #90 D1 transport', () => {
     })).toMatch(/^[a-f0-9]{64}$/u)
   })
 
-  it('rejects remote transport config without production evidence', () => {
+  it('rejects every remote transport config at the public local-only boundary', () => {
     const { config } = createConfig({
       mode: 'remote',
       evidence_class: 'test-non-production',
@@ -163,12 +163,12 @@ describe('Issue #90 D1 transport', () => {
     const remoteConfig = { ...config }
     Reflect.deleteProperty(remoteConfig, 'persist_path')
 
-    expect(() => createD1Transport(remoteConfig)).toThrow('remote transport requires production evidence')
+    expect(() => createLocalD1Transport(remoteConfig)).toThrow('local transport requires structurally nonproduction local evidence')
   })
 
   it('exposes only a binding digest and no caller-readable provenance brand', () => {
     const { config } = createConfig()
-    const transport = createD1Transport(config)
+    const transport = createLocalD1Transport(config)
 
     expect(transport).not.toHaveProperty('evidence')
     expect(transport.bindings_sha256).toMatch(/^[a-f0-9]{64}$/u)
@@ -176,7 +176,7 @@ describe('Issue #90 D1 transport', () => {
 
   it('exposes the internal execute contract and dispatches a bounded local D1 query', () => {
     const { config } = createConfig()
-    const transport = createD1Transport(config)
+    const transport = createLocalD1Transport(config)
 
     expect(Object.keys(transport)).toEqual(['execute', 'bindings_sha256'])
     const result = transport.execute(request('empty_d1_proof'))
@@ -189,7 +189,7 @@ describe('Issue #90 D1 transport', () => {
 
   it('keeps command construction private while exposing only the bounded execute seam', { timeout: 30_000 }, async () => {
     const { config } = createConfig()
-    const transport = createD1Transport(config)
+    const transport = createLocalD1Transport(config)
     const transportModule = await import('../../scripts/issue-23-delivery-d1-transport.mjs')
 
     expect(transportModule).not.toHaveProperty('buildD1Command')
@@ -200,7 +200,7 @@ describe('Issue #90 D1 transport', () => {
 
   it('keeps the request contract to five keys and rejects extras', () => {
     const { config } = createConfig()
-    const transport = createD1Transport(config)
+    const transport = createLocalD1Transport(config)
 
     expect(Object.keys(request('empty_d1_proof'))).toEqual([
       'operation',
@@ -217,18 +217,18 @@ describe('Issue #90 D1 transport', () => {
     const { config } = createConfig()
     const environment = Object.assign(Object.create(null), process.env)
 
-    const stageExpired = createD1Transport(config, environment, () => D1_STAGE_TIMEOUT_MS.migrations_001_006)
+    const stageExpired = createLocalD1Transport(config, environment, () => D1_STAGE_TIMEOUT_MS.migrations_001_006)
     expect(() => stageExpired.execute(request('migration_catalog', 'migrations_001_006')))
       .toThrowError(expect.objectContaining({ classification: 'timeout' }))
 
-    const overallExpired = createD1Transport(config, environment, () => 5_400_000)
+    const overallExpired = createLocalD1Transport(config, environment, () => 5_400_000)
     expect(() => overallExpired.execute(request('d1_identity')))
       .toThrowError(expect.objectContaining({ classification: 'overall_timeout' }))
   })
 
   it('dispatches migration operations through the canonical runner instead of accepting SQL or file overrides', () => {
     const { config } = createConfig()
-    const transport = createD1Transport(config)
+    const transport = createLocalD1Transport(config)
 
     const catalog = transport.execute(request('migration_catalog', 'migrations_001_006'))
     const catalogValue = JSON.parse(catalog.stdout)
@@ -252,9 +252,9 @@ describe('Issue #90 D1 transport', () => {
   it('rejects caller dependency injection and overrides', () => {
     const { config } = createConfig()
 
-    expect(() => createD1Transport(config, { runChild: () => ({}) })).toThrow(/exactly one|unsupported/u)
-    expect(() => createD1Transport({ ...config, command: '/tmp/evil' })).toThrow(/unsupported/u)
-    expect(() => createD1Transport({ ...config, timeout_ms: 1 })).toThrow(/unsupported/u)
+    expect(() => createLocalD1Transport(config, { runChild: () => ({}) })).toThrow(/exactly one|unsupported/u)
+    expect(() => createLocalD1Transport({ ...config, command: '/tmp/evil' })).toThrow(/unsupported/u)
+    expect(() => createLocalD1Transport({ ...config, timeout_ms: 1 })).toThrow(/unsupported/u)
   })
 
   it('rejects duplicate keys in the bound expected reconciliation contract before spawning a child', () => {
@@ -262,7 +262,7 @@ describe('Issue #90 D1 transport', () => {
     const duplicate = '{"format":"blogman-d1-reconciliation/v1","\\u0066ormat":"forged"}'
     writeFileSync(expectedPath, duplicate, { mode: 0o600 })
 
-    expect(() => createD1Transport({
+    expect(() => createLocalD1Transport({
       ...config,
       expected_reconciliation_sha256: sha256File(expectedPath),
     })).toThrow('D1 transport malformed')
@@ -277,7 +277,7 @@ describe('Issue #90 D1 transport', () => {
     writeFileSync(temporaryConfig, readFileSync(configPath), { mode: 0o600 })
     const originalHash = sha256File(temporaryConfig)
     const { config } = createConfig({ config_path: temporaryConfig, config_sha256: originalHash })
-    const transport = createD1Transport(config)
+    const transport = createLocalD1Transport(config)
     writeFileSync(temporaryConfig, `${readFileSync(temporaryConfig)}\n`)
 
     expect(() => transport.execute(request('d1_identity'))).toThrow('D1 transport manifest_drift')
@@ -293,9 +293,9 @@ describe('Issue #90 D1 transport', () => {
       expected_reconciliation_sha256: sha256File(oversizedPath),
     }
 
-    expect(() => createD1Transport(mutated)).toThrow('D1 transport malformed')
+    expect(() => createLocalD1Transport(mutated)).toThrow('D1 transport malformed')
     try {
-      createD1Transport(mutated)
+      createLocalD1Transport(mutated)
     } catch (error) {
       expect(String(error)).not.toContain('x'.repeat(100))
       expect(error).toBeInstanceOf(D1TransportError)
@@ -307,7 +307,7 @@ describe('Issue #90 D1 transport', () => {
     const symlinkPath = join(config.persist_path, 'reset.sql')
     symlinkSync(resetSqlPath, symlinkPath)
 
-    expect(() => createD1Transport({
+    expect(() => createLocalD1Transport({
       ...config,
       reset_sql_path: symlinkPath,
       reset_sql_sha256: sha256File(resetSqlPath),
@@ -323,21 +323,21 @@ describe('Issue #90 D1 transport', () => {
       config_sha256: sha256File(temporaryConfig),
     })
 
-    expect(() => createD1Transport(config)).toThrow('D1 transport malformed')
+    expect(() => createLocalD1Transport(config)).toThrow('D1 transport malformed')
   })
 
   it('requires a local persist directory to be private and outside the repository', () => {
     const { config, statePath } = createConfig()
     chmodSync(statePath, 0o755)
-    expect(() => createD1Transport(config)).toThrow('D1 transport malformed')
+    expect(() => createLocalD1Transport(config)).toThrow('D1 transport malformed')
     chmodSync(statePath, 0o700)
 
-    expect(() => createD1Transport({ ...config, persist_path: repoRoot })).toThrow('D1 transport malformed')
+    expect(() => createLocalD1Transport({ ...config, persist_path: repoRoot })).toThrow('D1 transport malformed')
   })
 
   it('binds the local persist directory identity for the full transport lifecycle', () => {
     const { config, statePath } = createConfig()
-    const transport = createD1Transport(config)
+    const transport = createLocalD1Transport(config)
     const movedPath = `${statePath}.moved`
     renameSync(statePath, movedPath)
     mkdirSync(statePath, { mode: 0o700 })
@@ -355,7 +355,7 @@ describe('Issue #90 D1 transport', () => {
     const repository = createTransportWorkspace()
     const transportModule = await workspaceTransportModule(repository)
     const { config } = createConfig({}, repository)
-    const transport = transportModule.createD1Transport(config)
+    const transport = transportModule.createLocalD1Transport(config)
     writeFileSync(join(repository, relativePath), Buffer.concat([
       readFileSync(join(repository, relativePath)),
       Buffer.from('\n'),
@@ -370,7 +370,7 @@ describe('Issue #90 D1 transport', () => {
     const repository = createTransportWorkspace()
     const transportModule = await workspaceTransportModule(repository)
     const { config } = createConfig({}, repository)
-    const transport = transportModule.createD1Transport(config)
+    const transport = transportModule.createLocalD1Transport(config)
     writeFileSync(join(repository, 'db/ledger-migrations/999_issue_90_mutation.sql'), '-- mutation\n', { mode: 0o600 })
 
     expect(() => transport.execute(request('d1_identity'))).toThrowError(expect.objectContaining({
@@ -382,7 +382,7 @@ describe('Issue #90 D1 transport', () => {
     const repository = createTransportWorkspace()
     const transportModule = await workspaceTransportModule(repository)
     const { config } = createConfig({}, repository)
-    const transport = transportModule.createD1Transport(config)
+    const transport = transportModule.createLocalD1Transport(config)
     const path = join(repository, 'wrangler.toml')
     const bytes = readFileSync(path)
     rmSync(path)
@@ -400,8 +400,8 @@ describe('Issue #90 D1 transport', () => {
       workspaceTransportModule(firstRepository),
       workspaceTransportModule(secondRepository),
     ])
-    const first = firstModule.createD1Transport(createConfig({}, firstRepository).config)
-    const second = secondModule.createD1Transport(createConfig({}, secondRepository).config)
+    const first = firstModule.createLocalD1Transport(createConfig({}, firstRepository).config)
+    const second = secondModule.createLocalD1Transport(createConfig({}, secondRepository).config)
     writeFileSync(join(firstRepository, 'wrangler.toml'), `${readFileSync(join(firstRepository, 'wrangler.toml'))}\n`)
 
     expect(() => first.execute(request('d1_identity'))).toThrowError(expect.objectContaining({

@@ -7,6 +7,8 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import * as deliverySinkModule from '../../scripts/issue-23-delivery-evidence-sink.mjs'
 import { createTestDeliverySink } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
+import * as d1TransportModule from '../../scripts/issue-23-delivery-d1-transport.mjs'
+import * as workerTransportModule from '../../scripts/issue-23-delivery-worker-transport.mjs'
 import {
   TEST_AUTHORITY_ROOT,
   isolatedAuthorityChildEnvironment,
@@ -27,10 +29,14 @@ function record(value: Record<string, unknown>) {
   return { value, bytes, sha256: createHash('sha256').update(bytes).digest('hex') }
 }
 
+function authorizationId(seed: string) {
+  return `issue23-authorization-${createHash('sha256').update(seed).digest('hex')}`
+}
+
 function authorizationRecord() {
   return record({
     format: 'blogman-issue-23-authorization/v1',
-    authorization_id: 'durable-authorization-replay',
+    authorization_id: authorizationId('durable-authorization-replay'),
     manifest_sha256: 'a'.repeat(64),
     decision: 'approve',
   })
@@ -194,6 +200,19 @@ describe('Issue #23 durable delivery records', () => {
     }
   })
 
+  it('exposes no importable real production transport factory', () => {
+    expect(d1TransportModule).not.toHaveProperty('createD1Transport')
+    expect(workerTransportModule).not.toHaveProperty('createWorkerTransport')
+    const before = existsSync(TEST_AUTHORITY_ROOT) ? readdirSync(TEST_AUTHORITY_ROOT).sort() : null
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      const d1 = await import(${JSON.stringify(pathToFileURL(join(process.cwd(), 'scripts/issue-23-delivery-d1-transport.mjs')).href)})
+      const worker = await import(${JSON.stringify(pathToFileURL(join(process.cwd(), 'scripts/issue-23-delivery-worker-transport.mjs')).href)})
+      if (typeof d1.createD1Transport === 'function' || typeof worker.createWorkerTransport === 'function') process.exitCode = 2
+    `], { encoding: 'utf8', env: isolatedAuthorityChildEnvironment() })
+    expect(child.status, child.stderr).toBe(0)
+    expect(existsSync(TEST_AUTHORITY_ROOT) ? readdirSync(TEST_AUTHORITY_ROOT).sort() : null).toEqual(before)
+  })
+
   it.each([
     ['exact', (canonicalRoot: string) => canonicalRoot],
     ['descendant', (canonicalRoot: string) => join(canonicalRoot, 'test-sink')],
@@ -219,6 +238,30 @@ describe('Issue #23 durable delivery records', () => {
       import { createTestDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
       try {
         createTestDeliverySink(${JSON.stringify(root)})
+        process.exitCode = 2
+      } catch (error) {
+        if (!/canonical|overlap/u.test(error instanceof Error ? error.message : String(error))) process.exitCode = 3
+      }
+    `], { encoding: 'utf8', env: isolatedAuthorityChildEnvironment({ BLOGMAN_TEST_AUTHORITY_HOME: home }) })
+
+    expect(child.status, child.stderr).toBe(0)
+    expect(existsSync(canonicalRoot)).toBe(false)
+  })
+
+  it.runIf(process.platform === 'darwin')('rejects a case-equivalent canonical namespace alias before mutation', () => {
+    const parent = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-23-case-overlap-')))
+    temporaryDirectories.push(parent)
+    const home = join(parent, 'home')
+    const canonicalParent = join(home, '.local', 'state', 'blogman')
+    const canonicalRoot = join(canonicalParent, 'issue-23-production-authority-v1')
+    const aliasedRoot = join(home, '.LOCAL', 'state', 'blogman', 'issue-23-production-authority-v1', 'test-sink')
+    mkdirSync(canonicalParent, { recursive: true, mode: 0o700 })
+    for (const path of [home, join(home, '.local'), join(home, '.local', 'state'), canonicalParent]) chmodSync(path, 0o700)
+
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { createTestDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
+      try {
+        createTestDeliverySink(${JSON.stringify(aliasedRoot)})
         process.exitCode = 2
       } catch (error) {
         if (!/canonical|overlap/u.test(error instanceof Error ? error.message : String(error))) process.exitCode = 3
@@ -267,7 +310,32 @@ describe('Issue #23 durable delivery records', () => {
     expect(existsSync(canonicalRoot)).toBe(false)
   })
 
-  it('accepts a benign embedded task path while rejecting credential tokens and arbitrary Authorization fields', () => {
+  it('accepts only one opaque public authorization identifier grammar', () => {
+    const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-authorization-id-'))
+    temporaryDirectories.push(root)
+    const sink = createTestDeliverySink(root)
+    const valid = record({
+      ...authorizationRecord().value,
+      authorization_id: `issue23-authorization-${'a'.repeat(64)}`,
+    })
+    expect(sink.consumeAuthorization(valid)).toBe(valid.sha256)
+
+    for (const authorization_id of [
+      'operator approved production',
+      'CLOUDFLARE_API_TOKEN=ordinary-cloudflare-secret-value',
+      '/private/operator/authorization.json',
+      `issue23-authorization-${'A'.repeat(64)}`,
+      `issue23-authorization-${'a'.repeat(63)}`,
+      `prefix-issue23-authorization-${'a'.repeat(64)}`,
+    ]) {
+      expect(() => sink.consumeAuthorization(record({
+        ...authorizationRecord().value,
+        authorization_id,
+      })), authorization_id).toThrow(/authorization_id is invalid/u)
+    }
+  })
+
+  it('rejects credential tokens and arbitrary Authorization fields', () => {
     const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-boundary-'))
     temporaryDirectories.push(root)
     const sink = createTestDeliverySink(root)
@@ -286,15 +354,10 @@ describe('Issue #23 durable delivery records', () => {
     }))).toThrow(/authorization.*fields|malformed/u)
     expect(() => sink.consumeAuthorization(record({
       format: 'blogman-issue-23-authorization/v1',
-      authorization_id: 'missing-decision',
+      authorization_id: authorizationId('missing-decision'),
       manifest_sha256: 'a'.repeat(64),
     }))).toThrow(/authorization.*field|malformed/u)
 
-    const benign = record({
-      ...authorizationRecord().value,
-      authorization_id: 'after-task-async-storage.external.js',
-    })
-    expect(sink.consumeAuthorization(benign)).toBe(benign.sha256)
   })
 
   it('rejects symlink, owner/mode, and root identity drift', () => {
@@ -631,7 +694,7 @@ describe('Issue #23 durable delivery records', () => {
 
     const alternateAuthorization = record({
       ...authorizationRecord().value,
-      authorization_id: 'alternate-d1-attempt-authorization',
+      authorization_id: authorizationId('alternate-d1-attempt-authorization'),
       manifest_sha256: manifest.sha256,
     })
     sink.consumeAuthorization(alternateAuthorization)
@@ -683,7 +746,7 @@ describe('Issue #23 durable delivery records', () => {
     })
     const alternateAuthorization = record({
       ...authorizationRecord().value,
-      authorization_id: 'alternate-manifest-authorization',
+      authorization_id: authorizationId('alternate-manifest-authorization'),
       manifest_sha256: alternateManifest.sha256,
     })
     sink.consumeAuthorization(alternateAuthorization)

@@ -20,7 +20,7 @@ import {
 } from '../../scripts/issue-23-delivery-d1-stages.mjs'
 import {
   D1TransportError,
-  createD1Transport,
+  createLocalD1Transport,
 } from '../../scripts/issue-23-delivery-d1-transport.mjs'
 import { runWorkerStages } from '../../scripts/issue-23-delivery-worker-stages.mjs'
 
@@ -448,7 +448,7 @@ describe('Issue #23 D1 delivery stages', () => {
 
   it('terminalizes a transport-A and bindings-B digest mismatch before any child call', () => {
     const transportBindingsA = createBoundTransportBindings()
-    const transportA = createD1Transport(transportBindingsA)
+    const transportA = createLocalD1Transport(transportBindingsA)
     const bindingsB = { ...transportBindingsA, candidate_id: 'd'.repeat(40) }
 
     const result = runD1Stages({ bindings: bindingsB, transport: transportA })
@@ -1068,7 +1068,7 @@ describe('Issue #23 D1 delivery stages', () => {
     temporaryDirectories.push(statePath)
     const expectedPath = createExpectedReconciliation(statePath)
     const bindings = createLocalIntegrationBindings(statePath, expectedPath)
-    const transport = createD1Transport(bindings)
+    const transport = createLocalD1Transport(bindings)
 
     const result = runD1Stages({ bindings, transport })
 

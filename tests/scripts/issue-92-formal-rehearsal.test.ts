@@ -44,7 +44,7 @@ function declaredFile(path: string) {
 function authorizationRecord(manifestSha256: string, authorizationId: string) {
   const bytes = Buffer.from(`${JSON.stringify({
     format: 'blogman-issue-23-authorization/v1',
-    authorization_id: authorizationId,
+    authorization_id: `issue23-authorization-${sha256(authorizationId)}`,
     manifest_sha256: manifestSha256,
     decision: 'approve',
   }, null, 2)}\n`, 'utf8')

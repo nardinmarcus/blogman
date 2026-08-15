@@ -29,17 +29,27 @@ import {
 import { currentFormalRehearsalContext, runInFormalRehearsalContext } from './issue-23-delivery-formal-context.mjs'
 import { currentFormalFaultForTestsOnly } from './issue-23-delivery-formal-fault-harness.mjs'
 import {
-  createD1Transport,
+  D1_COMMAND_CONTRACT,
+  D1_TRANSPORT_FAILURE_CLASSIFICATIONS,
+  D1_TRANSPORT_MAX_OUTPUT_BYTES,
+  D1TransportError,
   createRehearsalD1Transport,
 } from './issue-23-delivery-d1-transport.mjs'
-import { hashD1ArtifactDirectory, parseStrictJson } from './issue-23-delivery-d1-contracts.mjs'
+import {
+  d1StageBindingsSha256,
+  hashD1ArtifactDirectory,
+  parseStrictJson,
+} from './issue-23-delivery-d1-contracts.mjs'
+import { D1ChildError, runBoundedChild } from './issue-23-delivery-d1-child.mjs'
 import { runD1Stages } from './issue-23-delivery-d1-stages.mjs'
 import {
+  WORKER_COMMAND_CONTRACT,
   createRehearsalWorkerTransport,
-  createWorkerTransport,
 } from './issue-23-delivery-worker-transport.mjs'
-import { runWorkerStages } from './issue-23-delivery-worker-stages.mjs'
+import { WorkerTransportError, runWorkerStages } from './issue-23-delivery-worker-stages.mjs'
 import { formalExecutionClosureSha256 } from './issue-23-delivery-execution-closure.mjs'
+
+const AUTHORIZATION_ID_PATTERN = /^issue23-authorization-[a-f0-9]{64}$/u
 
 function buildDeliverySinkOwnership() {
   const PRODUCTION_AUTHORITY_HOME = resolve(userInfo().homedir)
@@ -204,9 +214,7 @@ function buildDeliverySinkOwnership() {
     }
     if (canonical.value.format !== AUTHORIZATION_FORMAT) fail('authorization format is invalid')
     if (typeof canonical.value.authorization_id !== 'string'
-      || canonical.value.authorization_id.length === 0
-      || canonical.value.authorization_id.length > 256
-      || /[\u0000\r\n]/u.test(canonical.value.authorization_id)) {
+      || !AUTHORIZATION_ID_PATTERN.test(canonical.value.authorization_id)) {
       fail('authorization authorization_id is invalid')
     }
     if (typeof canonical.value.manifest_sha256 !== 'string'
@@ -727,8 +735,49 @@ function buildDeliverySinkOwnership() {
   }
 
   function overlapsCanonicalAuthority(path) {
-    return isSameOrDescendant(PRODUCTION_AUTHORITY_ROOT, path)
-      || isSameOrDescendant(path, PRODUCTION_AUTHORITY_ROOT)
+    if (isSameOrDescendant(PRODUCTION_AUTHORITY_ROOT, path)
+      || isSameOrDescendant(path, PRODUCTION_AUTHORITY_ROOT)) return true
+    if (platform() !== 'darwin') return false
+    const foldedAuthority = PRODUCTION_AUTHORITY_ROOT.toLowerCase()
+    const foldedPath = path.toLowerCase()
+    return isSameOrDescendant(foldedAuthority, foldedPath)
+      || isSameOrDescendant(foldedPath, foldedAuthority)
+  }
+
+  function canonicalNamespaceDirectoryIdentities() {
+    const identities = []
+    let path = PRODUCTION_AUTHORITY_HOME
+    for (const name of ['.local', 'state', 'blogman', 'issue-23-production-authority-v1']) {
+      path = join(path, name)
+      try {
+        const metadata = lstatSync(path)
+        if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
+          identities.push({ dev: metadata.dev, ino: metadata.ino })
+        }
+      } catch (error) {
+        if (error?.code !== 'ENOENT') fail('canonical production authority path is unavailable')
+      }
+    }
+    return identities
+  }
+
+  function sharesCanonicalNamespaceDirectory(path) {
+    const canonical = canonicalNamespaceDirectoryIdentities()
+    let current = path
+    while (true) {
+      try {
+        const metadata = lstatSync(current)
+        if (metadata.isDirectory() && canonical.some(({ dev, ino }) => metadata.dev === dev && metadata.ino === ino)) {
+          return true
+        }
+      } catch (error) {
+        if (error?.code !== 'ENOENT') fail('test-only sink path is unavailable')
+      }
+      if (current === PRODUCTION_AUTHORITY_HOME) return false
+      const parent = dirname(current)
+      if (parent === current) return false
+      current = parent
+    }
   }
 
   function prospectiveRealPath(path) {
@@ -754,7 +803,7 @@ function buildDeliverySinkOwnership() {
   }
 
   function rejectCanonicalAuthorityOverlap(path) {
-    if (overlapsCanonicalAuthority(path)) {
+    if (overlapsCanonicalAuthority(path) || sharesCanonicalNamespaceDirectory(path)) {
       fail('test-only sink refuses canonical production authority overlap')
     }
   }
@@ -2018,7 +2067,9 @@ function acceptAuthorization(manifestSha256, authorization, deadline) {
   }
   if (sha256(authorizationBytes) !== authorization.sha256) fail('authorization identity does not match bytes')
   if (value.format !== AUTHORIZATION_FORMAT) fail('authorization format is invalid')
-  assertSafeString(value.authorization_id, 'authorization_id')
+  if (typeof value.authorization_id !== 'string' || !AUTHORIZATION_ID_PATTERN.test(value.authorization_id)) {
+    fail('authorization_id is invalid')
+  }
   if (value.manifest_sha256 !== manifestSha256) fail('authorization manifest does not match')
   if (value.decision !== 'approve') fail('authorization decision must be approve')
 
@@ -2773,13 +2824,354 @@ function formalAdapterFactories(context) {
   })
 }
 
+const d1 = D1_COMMAND_CONTRACT
+
+function runProductionD1Bounded(
+  executable,
+  args,
+  timeoutMs,
+  environment = process.env,
+  timeoutClassification = D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT,
+) {
+  try {
+    return runBoundedChild(
+      executable,
+      args,
+      timeoutMs,
+      D1_TRANSPORT_MAX_OUTPUT_BYTES,
+      d1.repoRoot,
+      environment,
+    )
+  } catch (error) {
+    if (error instanceof D1ChildError) {
+      throw new D1TransportError(
+        error.classification === D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT
+          ? timeoutClassification
+          : error.classification,
+        error.durationMs,
+      )
+    }
+    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.UNCERTAIN)
+  }
+}
+
+function createProductionD1Transport(config, childEnvironment, monotonicMs) {
+  if (typeof d1.createTransportForTestsOnly === 'function') {
+    return d1.createTransportForTestsOnly(config, childEnvironment, monotonicMs)
+  }
+  if (arguments.length < 1 || arguments.length > 3
+    || (childEnvironment !== undefined && Object.getPrototypeOf(childEnvironment) !== null)
+    || (monotonicMs !== undefined && typeof monotonicMs !== 'function')) {
+    d1.fail('production D1 transport rejects unsupported adapter overrides')
+  }
+  const privateEnvironment = childEnvironment ?? process.env
+  const normalizedConfig = d1.validateConfig(config)
+  const frozenBoundIdentity = d1.validateBoundArtifactsOrThrow(normalizedConfig)
+  const bindingsSha256 = d1StageBindingsSha256(normalizedConfig)
+
+  function budgetFor(request, spentMs = 0) {
+    let actualOverallElapsedMs = request.overall_elapsed_ms + spentMs
+    if (monotonicMs !== undefined) {
+      const measured = monotonicMs()
+      if (!Number.isSafeInteger(measured) || measured < 0) d1.fail('internal monotonic clock is invalid')
+      actualOverallElapsedMs = Math.max(actualOverallElapsedMs, measured)
+    }
+    return d1.deadlineBudget(request, spentMs, actualOverallElapsedMs)
+  }
+
+  function runRequestBounded(executable, args, request, spentMs = 0) {
+    const budget = budgetFor(request, spentMs)
+    return runProductionD1Bounded(
+      executable,
+      args,
+      budget.timeout_ms,
+      privateEnvironment,
+      budget.timeout_classification,
+    )
+  }
+
+  function execute(request) {
+    if (arguments.length !== 1) d1.fail('execute accepts exactly one request argument')
+    const normalizedRequest = d1.validateRequest(request)
+    d1.validateBoundArtifactsOrThrow(
+      normalizedConfig,
+      frozenBoundIdentity,
+      D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MANIFEST_DRIFT,
+    )
+    if (normalizedRequest.operation === 'd1_identity'
+      || normalizedRequest.operation === 'clean_start_reset'
+      || normalizedRequest.operation === 'empty_d1_proof') {
+      const command = d1.buildD1Command(normalizedConfig, normalizedRequest)
+      if (normalizedRequest.operation !== 'd1_identity') {
+        return runRequestBounded(command.executable, command.args, normalizedRequest)
+      }
+      const infoCommand = runRequestBounded(command.executable, command.args, normalizedRequest)
+      if (infoCommand.stderr !== '') return d1.identityResponse(normalizedConfig, infoCommand)
+      if (normalizedConfig.mode === 'local') return d1.identityResponse(normalizedConfig, infoCommand)
+      let whoamiCommand
+      try {
+        whoamiCommand = runRequestBounded(
+          d1.wranglerPath,
+          d1.buildRemoteWhoamiCommand(normalizedConfig),
+          normalizedRequest,
+          infoCommand.duration_ms,
+        )
+      } catch (error) {
+        if (error instanceof D1TransportError) {
+          throw new D1TransportError(
+            error.classification,
+            infoCommand.duration_ms + error.durationMs,
+          )
+        }
+        throw error
+      }
+      return d1.identityResponse(normalizedConfig, infoCommand, whoamiCommand)
+    }
+    if (normalizedRequest.operation === 'migration_catalog') {
+      return runRequestBounded(process.execPath, d1.canonicalRunnerCommand(normalizedConfig, 'catalog'), normalizedRequest)
+    }
+    if (normalizedRequest.operation === 'migration_plan') {
+      return runRequestBounded(process.execPath, d1.canonicalRunnerCommand(normalizedConfig, 'plan'), normalizedRequest)
+    }
+    if (normalizedRequest.operation === 'migration_apply') {
+      return runRequestBounded(process.execPath, d1.canonicalRunnerCommand(normalizedConfig, 'apply'), normalizedRequest)
+    }
+    if (normalizedRequest.operation === 'migration_verify') {
+      return runRequestBounded(process.execPath, d1.canonicalRunnerCommand(normalizedConfig, 'verify'), normalizedRequest)
+    }
+    if (normalizedRequest.operation === 'reconciliation') {
+      return runRequestBounded(process.execPath, d1.rolloutSafetyCommand(normalizedConfig), normalizedRequest)
+    }
+    d1.fail('operation is not supported')
+  }
+
+  return Object.freeze({
+    execute,
+    bindings_sha256: bindingsSha256,
+  })
+}
+
+const worker = WORKER_COMMAND_CONTRACT
+
+function createProductionWorkerTransport(bindings, environments = { cloudflare: process.env, smoke: process.env }, monotonicMs = () => 0) {
+  if (typeof worker.createTransportForTestsOnly === 'function') {
+    return worker.createTransportForTestsOnly(bindings, environments, monotonicMs)
+  }
+  if (!bindings || typeof bindings !== 'object') worker.fail('bindings are required')
+  for (const key of [
+    'manifest_sha256', 'authorization_sha256', 'attempt_id', 'smoke_admin_credential',
+    'config_path', 'config_sha256', 'artifact_archive_path', 'artifact_archive_sha256',
+    'artifact_source_path', 'artifact_file_tree_sha256', 'artifact_file_tree_files', 'artifact_sha256',
+    'candidate_id', 'worker_name', 'd1_database_id', 'rollout_safety_path', 'rollout_safety_sha256',
+    'expected_reconciliation_path', 'expected_reconciliation_sha256', 'worker_upload_entry_path',
+    'worker_upload_entry_sha256', 'wrangler_path', 'wrangler_sha256', 'node_path', 'node_sha256',
+    'npm_path', 'npm_sha256', 'open_next_path', 'open_next_sha256', 'working_directory',
+    'curl_path', 'curl_sha256', 'package_json_path',
+    'package_json_sha256', 'lockfile_path', 'lockfile_sha256', 'database', 'origin', 'smoke', 'baseline',
+  ]) if (!Object.hasOwn(bindings, key)) worker.fail(`${key} is required`)
+  for (const key of [
+    'config_path', 'artifact_archive_path', 'artifact_source_path', 'rollout_safety_path',
+    'expected_reconciliation_path', 'worker_upload_entry_path', 'wrangler_path', 'node_path', 'npm_path',
+    'open_next_path', 'working_directory', 'curl_path', 'package_json_path', 'lockfile_path',
+  ]) worker.assertPath(bindings[key], key)
+  for (const key of [
+    'manifest_sha256', 'authorization_sha256', 'attempt_id',
+    'config_sha256', 'artifact_archive_sha256', 'artifact_file_tree_sha256', 'artifact_sha256',
+    'rollout_safety_sha256', 'expected_reconciliation_sha256', 'worker_upload_entry_sha256', 'wrangler_sha256',
+    'node_sha256', 'npm_sha256', 'open_next_sha256', 'curl_sha256', 'package_json_sha256', 'lockfile_sha256',
+  ]) worker.assertHash(bindings[key], key)
+  if (!/^[a-f0-9]{40}$/u.test(bindings.candidate_id) || !worker.safeId(bindings.worker_name) || !worker.safeId(bindings.d1_database_id)
+    || typeof bindings.smoke_admin_credential !== 'string'
+    || !/^[A-Za-z0-9._~-]+$/u.test(bindings.smoke_admin_credential)
+    || !worker.safeId(bindings.database) || typeof bindings.origin !== 'string' || !Array.isArray(bindings.smoke?.requests)
+    || !worker.exact(bindings.baseline, ['deployment_id', 'version_id', 'd1_database_id', 'traffic'])
+    || !worker.safeId(bindings.baseline.deployment_id) || !worker.safeId(bindings.baseline.version_id)
+    || bindings.baseline.d1_database_id !== bindings.d1_database_id
+    || !Array.isArray(bindings.baseline.traffic) || bindings.baseline.traffic.length !== 1
+    || !worker.exact(bindings.baseline.traffic[0], ['version_id', 'percentage'])
+    || bindings.baseline.traffic[0].version_id !== bindings.baseline.version_id
+    || bindings.baseline.traffic[0].percentage !== 100
+    || JSON.stringify(bindings.smoke.requests) !== JSON.stringify(worker.SMOKE_PATHS.map(([path, status]) => ({ path, status })))) {
+    worker.fail('bindings are invalid')
+  }
+  const origin = new URL(bindings.origin)
+  if (!['http:', 'https:'].includes(origin.protocol)) worker.fail('origin is invalid')
+
+  function validateLocalBindings() {
+    worker.assertBoundFile(bindings.config_path, bindings.config_sha256)
+    worker.assertBoundFile(bindings.artifact_archive_path, bindings.artifact_archive_sha256)
+    worker.validateArtifactSource(bindings)
+    worker.assertBoundFile(bindings.rollout_safety_path, bindings.rollout_safety_sha256)
+    worker.assertBoundFile(bindings.expected_reconciliation_path, bindings.expected_reconciliation_sha256)
+    worker.assertBoundFile(bindings.worker_upload_entry_path, bindings.worker_upload_entry_sha256)
+    worker.assertBoundFile(bindings.wrangler_path, bindings.wrangler_sha256)
+    worker.assertBoundFile(bindings.node_path, bindings.node_sha256)
+    worker.assertBoundFile(bindings.npm_path, bindings.npm_sha256)
+    worker.assertBoundFile(bindings.open_next_path, bindings.open_next_sha256)
+    worker.assertBoundDirectory(bindings.working_directory, 'working_directory')
+    worker.assertBoundFile(bindings.curl_path, bindings.curl_sha256)
+    worker.assertBoundFile(bindings.package_json_path, bindings.package_json_sha256)
+    worker.assertBoundFile(bindings.lockfile_path, bindings.lockfile_sha256)
+  }
+
+  function invoke(executable, args, request, spent, env = environments.cloudflare, stdin = null) {
+    validateLocalBindings()
+    const actualSpent = Math.max(spent, monotonicMs() - request.elapsed_ms)
+    const stageRemaining = request.timeout_ms - actualSpent
+    const overallRemaining = worker.OVERALL_TIMEOUT_MS - request.elapsed_ms - actualSpent
+    if (!Number.isSafeInteger(overallRemaining) || overallRemaining <= 0) {
+      throw new WorkerTransportError('TIMEOUT', 'overall_timeout', 1)
+    }
+    if (!Number.isSafeInteger(stageRemaining) || stageRemaining <= 0) {
+      throw new WorkerTransportError('TIMEOUT', 'stage_timeout', 1)
+    }
+    const timeoutClassification = overallRemaining <= stageRemaining
+      ? 'overall_timeout'
+      : 'stage_timeout'
+    try {
+      const result = runBoundedChild(
+        executable,
+        args,
+        Math.min(stageRemaining, overallRemaining),
+        worker.MAX_OUTPUT_BYTES,
+        bindings.working_directory,
+        env,
+        stdin,
+      )
+      if (result.stderr !== '') throw new WorkerTransportError('UNCERTAIN', 'worker_adapter_uncertain', result.duration_ms)
+      return result
+    } catch (error) {
+      if (error instanceof WorkerTransportError) throw error
+      throw worker.childFailure(error, timeoutClassification)
+    }
+  }
+
+  function deploymentStatus(request, spent, version) {
+    const command = worker.deploymentStatusCommand(bindings)
+    const result = invoke(command.executable, command.args, request, spent)
+    return { value: worker.parseDeployment(result.stdout, version, bindings.d1_database_id, result.duration_ms), duration_ms: result.duration_ms }
+  }
+  function d1Identity(request, spent) {
+    const command = worker.d1IdentityCommand(bindings)
+    const result = invoke(command.executable, command.args, request, spent)
+    worker.parseD1Identity(result.stdout, bindings.d1_database_id, result.duration_ms)
+    return result.duration_ms
+  }
+
+  function livePreconditions(elapsed_ms = 0) {
+    if (!Number.isSafeInteger(elapsed_ms) || elapsed_ms < 0 || elapsed_ms >= worker.OVERALL_TIMEOUT_MS) {
+      return { outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: 1 }
+    }
+    const request = { timeout_ms: 120000, elapsed_ms }
+    try {
+      validateLocalBindings()
+      const baseline = deploymentStatus(request, 0, bindings.baseline.version_id)
+      if (baseline.value.deployment_id !== bindings.baseline.deployment_id) {
+        throw new WorkerTransportError('NON_PASS', 'Manifest Drift', baseline.duration_ms)
+      }
+      const identityDuration = d1Identity(request, baseline.duration_ms)
+      return { outcome: 'PASS', duration_ms: baseline.duration_ms + identityDuration }
+    } catch (error) {
+      const failure = error instanceof WorkerTransportError
+        ? error
+        : new WorkerTransportError('UNCERTAIN', 'live_preconditions_uncertain', 1)
+      return { outcome: failure.outcome, classification: failure.classification, duration_ms: failure.duration_ms }
+    }
+  }
+
+  const execute = (request) => {
+    if (!worker.exact(request, ['operation', 'stage', 'timeout_ms', 'elapsed_ms', 'version_id', 'deployment_id'])
+      || request.operation !== request.stage || !['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'].includes(request.operation)
+      || !Number.isSafeInteger(request.timeout_ms) || !Number.isSafeInteger(request.elapsed_ms)
+      || request.timeout_ms <= 0 || request.elapsed_ms < 0) worker.fail('request is invalid')
+    validateLocalBindings()
+    if (request.operation === 'worker_deploy') {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-91-upload-')))
+      chmodSync(root, 0o700)
+      try {
+        const output = join(root, 'upload.jsonl')
+        const before = join(root, 'before.json')
+        const after = join(root, 'after.json')
+        const proof = join(root, 'proof.json')
+        const destination = join(root, 'source')
+        for (const path of [output, before, after, proof]) writeFileSync(path, '', { mode: 0o600 })
+        const command = worker.uploadCommand(bindings, { destination, before, after, proof })
+        const result = invoke(
+          command.executable,
+          command.args,
+          request,
+          0,
+          { ...environments.cloudflare, WRANGLER_OUTPUT_FILE_PATH: output },
+        )
+        return worker.response(parseJson(result.stdout, 'upload_acceptance', result.duration_ms), result.duration_ms)
+      } finally {
+        worker.removeTransportTree(root)
+      }
+    }
+    if (request.operation === 'version_traffic_verification') {
+      if (!worker.safeId(request.version_id)) throw new WorkerTransportError('ERROR', 'worker_adapter_uncertain')
+      let spent = 0
+      const command = worker.versionDeployCommand(bindings, request.version_id)
+      const deploy = invoke(command.executable, command.args, request, spent)
+      spent += deploy.duration_ms
+      const status = deploymentStatus(request, spent, request.version_id)
+      spent += status.duration_ms
+      const identityDuration = d1Identity(request, spent)
+      spent += identityDuration
+      return worker.response(status.value, spent)
+    }
+    if (!worker.safeId(request.version_id) || !worker.safeId(request.deployment_id)) {
+      throw new WorkerTransportError('ERROR', 'worker_adapter_uncertain')
+    }
+    let spent = 0
+    const before = deploymentStatus(request, spent, request.version_id)
+    spent += before.duration_ms
+    if (before.value.deployment_id !== request.deployment_id) throw new WorkerTransportError('NON_PASS', 'version_traffic_mismatch', spent)
+    spent += d1Identity(request, spent)
+    const checks = {}
+    for (const { path, status } of bindings.smoke.requests) {
+      const url = new URL(path, origin).toString()
+      const command = worker.smokeCommand(bindings, url)
+      const requestResult = invoke(
+        command.executable,
+        command.args,
+        request,
+        spent,
+        environments.smoke,
+        worker.smokeStdin(bindings.smoke_admin_credential),
+      )
+      spent += requestResult.duration_ms
+      if (requestResult.stdout !== String(status)) {
+        throw new WorkerTransportError('NON_PASS', 'smoke_control_contract_invalid', spent)
+      }
+      checks[path] = status
+    }
+    const after = deploymentStatus(request, spent, request.version_id)
+    spent += after.duration_ms
+    if (after.value.deployment_id !== request.deployment_id) throw new WorkerTransportError('NON_PASS', 'version_traffic_mismatch', spent)
+    spent += d1Identity(request, spent)
+    const controlsPlan = worker.controlsCommand(bindings)
+    const controlsResult = invoke(controlsPlan.executable, controlsPlan.args, request, spent)
+    spent += controlsResult.duration_ms
+    const controls = worker.parseControls(controlsResult.stdout, controlsResult.duration_ms)
+    const reconciliationPlan = worker.reconciliationCommand(bindings)
+    const reconciliationResult = invoke(reconciliationPlan.executable, reconciliationPlan.args, request, spent)
+    spent += reconciliationResult.duration_ms
+    return worker.response({ before: before.value, after: after.value, checks, controls, reconciliation: worker.parseReconciliation(reconciliationResult.stdout, reconciliationResult.duration_ms) }, spent)
+  }
+  return Object.freeze({
+    livePreconditions,
+    execute,
+  })
+}
+
 function productionAdapterFactories() {
   return Object.freeze({
     createD1Transport(bindings, environments, monotonicMs) {
-      return createD1Transport(bindings, environments.cloudflare, monotonicMs)
+      return createProductionD1Transport(bindings, environments.cloudflare, monotonicMs)
     },
     createWorkerTransport(bindings, environments, monotonicMs) {
-      return createWorkerTransport(bindings, environments, monotonicMs)
+      return createProductionWorkerTransport(bindings, environments, monotonicMs)
     },
     normalizeD1Result: normalizeProductionD1Result,
     normalizeD1Error: normalizeProductionD1Receipt,
@@ -3419,7 +3811,7 @@ export function runFormalRehearsal(config) {
       const manifest = prepare(config)
       const authorizationBytes = canonicalJsonBytes({
         format: AUTHORIZATION_FORMAT,
-        authorization_id: `formal-rehearsal-${currentFormalFaultForTestsOnly()?.stage ?? 'pass'}-${currentFormalFaultForTestsOnly()?.kind ?? 'pass'}-${manifest.sha256.slice(0, 16)}`,
+        authorization_id: `issue23-authorization-${manifest.sha256}`,
         manifest_sha256: manifest.sha256,
         decision: 'approve',
       })
