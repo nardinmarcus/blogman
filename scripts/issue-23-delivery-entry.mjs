@@ -3358,48 +3358,75 @@ function executeProduction(manifest, authorization) {
     attempt_id: attemptId,
     candidate_id: manifest.value.repository.commit,
   })
-  let entryDrift
-  try {
-    assertCurrentFormalEntryClosure(manifest.value)
-    assertWranglerTargetBinding(manifest.value)
-    assertCurrentRepositoryIdentity(manifest.value)
-  } catch {
-    entryDrift = { outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }
-  }
   const adapters = activeAdapterFactories()
   const authorizationFault = authorizationElapsed > DELIVERY_STAGE_POLICY[0].timeout_seconds * 1000
     ? { outcome: 'TIMEOUT', classification: 'stage_timeout', duration_ms: authorizationElapsed }
     : formalFaultResult('authorization_accept')
   let credentials
   let liveResult
+  // live_preconditions starts immediately after durable Authorization acceptance:
+  // formal-entry closure, Wrangler target, repository identity, credential
+  // resolution, and adapter live checks all consume its frozen 120s budget.
   const liveStarted = attemptClock.elapsedMilliseconds()
+  const liveElapsed = () => attemptClock.elapsedMilliseconds() - liveStarted
+  const liveDeadlineResult = () => {
+    const measured = liveElapsed()
+    if (measured > DELIVERY_STAGE_POLICY[1].timeout_seconds * 1000) {
+      return { outcome: 'TIMEOUT', classification: 'stage_timeout', duration_ms: Math.max(1, measured) }
+    }
+    if (!withinOverallDeadline()) {
+      return { outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: Math.max(1, measured) }
+    }
+    return null
+  }
   if (authorizationFault) {
     liveResult = authorizationFault
-  } else if (entryDrift) {
-    liveResult = entryDrift
   } else {
     try {
-      credentials = adapters.resolveCredentials(manifest.value)
-      liveResult = runLivePreconditions(
-        manifest.value,
-        d1,
-        workerIdentity,
-        credentials,
-        liveStarted,
-        attemptClock.elapsedMilliseconds,
-      )
-      const liveMeasured = attemptClock.elapsedMilliseconds() - liveStarted
-      liveResult.duration_ms = Math.max(liveResult.duration_ms, liveMeasured)
-      if (liveMeasured > DELIVERY_STAGE_POLICY[1].timeout_seconds * 1000) {
-        liveResult = { outcome: 'TIMEOUT', classification: 'stage_timeout', duration_ms: liveMeasured }
-      } else if (!withinOverallDeadline()) {
-        liveResult = { outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: liveMeasured }
+      assertCurrentFormalEntryClosure(manifest.value)
+      liveResult = liveDeadlineResult()
+      if (!liveResult) {
+        assertWranglerTargetBinding(manifest.value)
+        liveResult = liveDeadlineResult()
       }
-    } catch (error) {
+      if (!liveResult) {
+        assertCurrentRepositoryIdentity(manifest.value)
+        liveResult = liveDeadlineResult()
+      }
+    } catch {
       liveResult = {
-        outcome: 'ERROR',
-        classification: error?.classification ?? 'credential_authority_unavailable',
-        duration_ms: 1,
+        outcome: 'NON_PASS',
+        classification: 'Manifest Drift',
+        duration_ms: Math.max(1, liveElapsed()),
+      }
+    }
+    if (!liveResult) {
+      try {
+        credentials = adapters.resolveCredentials(manifest.value)
+        liveResult = liveDeadlineResult()
+        if (!liveResult) {
+          liveResult = runLivePreconditions(
+            manifest.value,
+            d1,
+            workerIdentity,
+            credentials,
+            liveStarted,
+            attemptClock.elapsedMilliseconds,
+          )
+          const liveMeasured = liveElapsed()
+          liveResult.duration_ms = Math.max(liveResult.duration_ms, liveMeasured)
+          if (liveMeasured > DELIVERY_STAGE_POLICY[1].timeout_seconds * 1000) {
+            liveResult = { outcome: 'TIMEOUT', classification: 'stage_timeout', duration_ms: liveMeasured }
+          } else if (!withinOverallDeadline()) {
+            liveResult = { outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: liveMeasured }
+          }
+        }
+      } catch (error) {
+        liveResult = {
+          outcome: 'ERROR',
+          classification: error?.classification ?? 'credential_authority_unavailable',
+          duration_ms: Math.max(1, liveElapsed()),
+        }
       }
     }
   }
@@ -3412,6 +3439,11 @@ function executeProduction(manifest, authorization) {
   }
   let cleanup = { created: false, cleaned: true, observed_absent: true }
   if (liveResult.outcome === 'PASS') {
+    // d1_identity starts before its closure recheck, expected-reconciliation
+    // materialization, binding derivation, and real transport construction; the
+    // original Stage start is seeded into the single D1 stage runner so setup
+    // consumes the Stage duration and child budget and cannot be reset.
+    const d1StageStarted = attemptClock.elapsedMilliseconds()
     try {
       try {
         assertCurrentFormalEntryClosure(manifest.value)
@@ -3440,8 +3472,9 @@ function executeProduction(manifest, authorization) {
             d1Receipt = runD1Stages({
               bindings,
               transport,
-              elapsed_ms: attemptClock.elapsedMilliseconds(),
+              elapsed_ms: d1StageStarted,
               monotonic_ms: attemptClock.elapsedMilliseconds,
+              initial_stage_started_ms: d1StageStarted,
             })
             d1Result = adapters.normalizeD1Result(d1Receipt, d1, workerIdentity)
             d1Receipt = d1Result.receipt ?? d1Receipt
@@ -3480,6 +3513,10 @@ function executeProduction(manifest, authorization) {
   let workerResult
   let workerReceipt
   if (d1Result.outcome === 'PASS') {
+    // worker_deploy starts before Worker materialization, binding derivation,
+    // and transport construction; the original Stage start is seeded into the
+    // single Worker stage runner the same way.
+    const workerStageStarted = attemptClock.elapsedMilliseconds()
     let workerExpected
     try {
       if (!withinOverallDeadline()) throw new DeliverySinkDeadlineError()
@@ -3498,8 +3535,9 @@ function executeProduction(manifest, authorization) {
           credentials.environments,
           attemptClock.elapsedMilliseconds,
         ),
-        elapsed_ms: attemptClock.elapsedMilliseconds(),
+        elapsed_ms: workerStageStarted,
         monotonic_ms: attemptClock.elapsedMilliseconds,
+        initial_stage_started_ms: workerStageStarted,
       })
       workerResult = adapters.normalizeWorkerResult(workerReceipt, workerIdentity)
     } catch (error) {
@@ -3513,7 +3551,12 @@ function executeProduction(manifest, authorization) {
   }
   const trace = authorizationFault
     ? [{ stage: 'authorization_accept', ...authorizationFault }]
-    : productionTrace(liveResult, d1Result, workerResult)
+    : [
+      // Successful durable Authorization consumption is a real traced Stage with
+      // its real monotonic duration; count and duration can never be zero here.
+      { stage: 'authorization_accept', outcome: 'PASS', duration_ms: Math.max(1, authorizationElapsed) },
+      ...productionTrace(liveResult, d1Result, workerResult),
+    ]
   const terminal = trace.at(-1)
   if (!terminal) fail('production state machine did not run')
   const reconciledMutations = reconciledProductionMutationCounts(d1Result, workerResult)

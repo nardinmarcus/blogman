@@ -1063,6 +1063,84 @@ describe('Issue #23 D1 delivery stages', () => {
     })
   })
 
+  it('terminalizes d1_identity without dispatching any child when seeded Stage-owned setup exhausts the Stage budget', () => {
+    const transport = createSuccessTransport()
+
+    const result = runD1Stages({
+      bindings: BINDINGS,
+      transport,
+      elapsed_ms: 1,
+      monotonic_ms: () => 120_001,
+      initial_stage_started_ms: 1,
+    })
+
+    expect(result.value).toMatchObject({
+      outcome: 'TIMEOUT',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'timeout' },
+      stage_counts: {
+        d1_identity: 1,
+        clean_start_reset: 0,
+        empty_d1_proof: 0,
+        migrations_001_006: 0,
+        reconciliation: 0,
+      },
+      stage_durations_ms: { d1_identity: 120_000, clean_start_reset: 0 },
+    })
+    expect(transport.calls).toEqual([])
+  })
+
+  it('carries the seeded original Stage start into the d1_identity duration and child budget near the boundary', () => {
+    const transport = createSuccessTransport()
+
+    const result = runD1Stages({
+      bindings: BINDINGS,
+      transport,
+      elapsed_ms: 0,
+      monotonic_ms: () => 119_500,
+      initial_stage_started_ms: 0,
+    })
+
+    expect(result.value.outcome).toBe('PASS')
+    expect(result.value.stage_durations_ms.d1_identity).toBe(119_500)
+    const identityRequest = transport.calls[0]?.request as Record<string, number>
+    expect(identityRequest).toMatchObject({
+      operation: 'd1_identity',
+      timeout_ms: 120_000,
+      elapsed_ms: 119_500,
+      overall_elapsed_ms: 119_500,
+    })
+    expect(identityRequest.timeout_ms - identityRequest.elapsed_ms).toBe(500)
+  })
+
+  it('selects overall_timeout over the Stage budget from the seeded d1_identity clock when overall is tighter', () => {
+    const transport = createSuccessTransport()
+
+    const result = runD1Stages({
+      bindings: BINDINGS,
+      transport,
+      elapsed_ms: 5_399_000,
+      monotonic_ms: () => 5_400_000,
+      initial_stage_started_ms: 5_399_000,
+    })
+
+    expect(result.value).toMatchObject({
+      outcome: 'TIMEOUT',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'overall_timeout' },
+      stage_durations_ms: { d1_identity: 1_000 },
+    })
+    expect(transport.calls).toEqual([])
+  })
+
+  it.each([-1, 1.5, Number.NaN])('rejects invalid initial_stage_started_ms %s', (seed) => {
+    expect(() => runD1Stages({
+      bindings: BINDINGS,
+      transport: createSuccessTransport(),
+      initial_stage_started_ms: seed,
+    })).toThrow(/initial_stage_started_ms/u)
+  })
+
   it('composes the real local transport with all five D1 stages', () => {
     const statePath = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-90-stage-integration-')))
     temporaryDirectories.push(statePath)

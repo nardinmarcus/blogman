@@ -1803,4 +1803,121 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(() => execute(prepared, authorizationFor(prepared, 'fan-in-arity'), { override: true }))
       .toThrow(/two arguments/u)
   })
+
+  it('records a nonzero real monotonic duration for successful authorization_accept', () => {
+    const prepared = formalPreparedManifest()
+    configureD1()
+    let monotonic = 0n
+    const context = formalContext(() => (monotonic += 1_000_000n))
+
+    const terminal = runInFormalRehearsalContext(context, () => execute(
+      prepared,
+      authorizationFor(prepared, 'fan-in-auth-accept-duration'),
+    ))
+
+    expect(terminal.value.stage_counts.authorization_accept).toBe(1)
+    expect(terminal.value.stage_durations_ms.authorization_accept).toBeGreaterThan(0)
+    expect(terminal.value.first_terminal_stage).not.toBe('authorization_accept')
+  })
+
+  it('terminalizes live_preconditions stage_timeout from Stage-owned closure work before any adapter or D1 mutation', () => {
+    const prepared = formalPreparedManifest()
+    configureD1()
+    let monotonic = 0n
+    vi.mocked(readFileSync).mockImplementation(((path: Parameters<typeof readFileSync>[0], options?: Parameters<typeof readFileSync>[1]) => {
+      const value = fsActual.readFileSync!(path, options as never)
+      monotonic += 30_000_000_000n
+      return value
+    }) as typeof readFileSync)
+    const context = formalContext(() => monotonic)
+
+    const terminal = runInFormalRehearsalContext(context, () => execute(
+      prepared,
+      authorizationFor(prepared, 'fan-in-live-setup-stage-timeout'),
+    ))
+
+    expect(terminal.value).toMatchObject({
+      outcome: 'TIMEOUT',
+      first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'stage_timeout' },
+      stage_counts: {
+        authorization_accept: 1,
+        live_preconditions: 1,
+        d1_identity: 0,
+        worker_deploy: 0,
+      },
+      mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
+    })
+    expect(terminal.value.stage_durations_ms.live_preconditions).toBeGreaterThan(120_000)
+    expect(createWorkerTransportMock).not.toHaveBeenCalled()
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+    expect(runD1StagesMock).not.toHaveBeenCalled()
+    expect(runWorkerStagesMock).not.toHaveBeenCalled()
+  })
+
+  it('seeds D1 and Worker Stage clocks before their Stage-owned setup begins', () => {
+    const prepared = formalPreparedManifest()
+    let monotonic = 0n
+    let lastReading = 0n
+    const context = formalContext(() => {
+      lastReading = (monotonic += 1_000_000n)
+      return lastReading
+    })
+    let d1FactoryReading = 0
+    let workerFactoryReading = 0
+    let workerFactoryCalls = 0
+    configureD1()
+    const d1Factory = createD1TransportMock.getMockImplementation()!
+    createD1TransportMock.mockImplementation((...args: unknown[]) => {
+      d1FactoryReading = Number(lastReading / 1_000_000n)
+      return d1Factory(...args)
+    })
+    createWorkerTransportMock.mockImplementation(() => {
+      workerFactoryCalls += 1
+      if (workerFactoryCalls === 1) {
+        return { livePreconditions: () => ({ outcome: 'PASS', duration_ms: 1 }), execute() {} }
+      }
+      workerFactoryReading = Number(lastReading / 1_000_000n)
+      return { execute() {} }
+    })
+    runWorkerStagesMock.mockImplementation(({ bindings }) => passingWorkerResult(bindings))
+
+    const terminal = runInFormalRehearsalContext(context, () => execute(
+      prepared,
+      authorizationFor(prepared, 'fan-in-stage-clock-seeds'),
+    ))
+
+    expect(terminal.value.outcome).toBe('PASS')
+    const d1StageCall = runD1StagesMock.mock.calls.at(-1)?.[0] as Record<string, number>
+    const workerStageCall = runWorkerStagesMock.mock.calls.at(-1)?.[0] as Record<string, number>
+    expect(d1StageCall.initial_stage_started_ms).toBe(d1StageCall.elapsed_ms)
+    expect(d1StageCall.initial_stage_started_ms).toBeGreaterThan(0)
+    expect(d1StageCall.initial_stage_started_ms).toBeLessThan(d1FactoryReading)
+    expect(workerStageCall.initial_stage_started_ms).toBe(workerStageCall.elapsed_ms)
+    expect(workerStageCall.initial_stage_started_ms).toBeGreaterThan(0)
+    expect(workerStageCall.initial_stage_started_ms).toBeLessThan(workerFactoryReading)
+  })
+
+  it('keeps the bounded setup classification when D1 transport setup fails before any deadline', () => {
+    const prepared = formalPreparedManifest()
+    let monotonic = 0n
+    const context = formalContext(() => (monotonic += 1_000_000n))
+    createD1TransportMock.mockImplementationOnce(() => {
+      throw new Error('transport setup failed')
+    })
+
+    const terminal = runInFormalRehearsalContext(context, () => execute(
+      prepared,
+      authorizationFor(prepared, 'fan-in-d1-setup-error-bounded'),
+    ))
+
+    expect(terminal.value).toMatchObject({
+      outcome: 'ERROR',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'formal_rehearsal_d1_setup_error' },
+      stage_counts: { d1_identity: 1, clean_start_reset: 0, worker_deploy: 0 },
+      mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
+    })
+    expect(JSON.stringify(terminal.value)).not.toMatch(/transport setup failed/u)
+  })
 })

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { runWorkerStages } from '../../scripts/issue-23-delivery-worker-stages.mjs'
+import { WorkerTransportError, runWorkerStages } from '../../scripts/issue-23-delivery-worker-stages.mjs'
 
 const smoke = { requests: [
   { path: '/api/search', status: 200 }, { path: '/api/settings/appearance', status: 200 },
@@ -120,6 +120,75 @@ describe('Issue #91 worker suffix', () => {
   ])('terminalizes %s with no suffix retry', (_name, first, outcome, classification) => {
     const result = runWorkerStages({ bindings, transport: transport([first]) })
     expect(result.value).toMatchObject({ outcome, first_terminal_stage: 'worker_deploy', failure: { classification }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 } })
+  })
+
+  it('refuses the upload when seeded Stage-owned setup exhausts the worker_deploy budget', () => {
+    const now = 601_001
+    let uploadAttempted = false
+    const guarded = {
+      execute(request: { timeout_ms: number; elapsed_ms: number }) {
+        if (request.timeout_ms - (now - request.elapsed_ms) <= 0) {
+          throw new WorkerTransportError('TIMEOUT', 'stage_timeout', 1)
+        }
+        uploadAttempted = true
+        return acceptedUpload()
+      },
+    }
+
+    const result = runWorkerStages({
+      bindings,
+      transport: guarded,
+      elapsed_ms: 1_000,
+      monotonic_ms: () => now,
+      initial_stage_started_ms: 1_000,
+    })
+
+    expect(uploadAttempted).toBe(false)
+    expect(result.value).toMatchObject({
+      outcome: 'TIMEOUT',
+      first_terminal_stage: 'worker_deploy',
+      failure: { classification: 'stage_timeout' },
+      stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 },
+      stage_durations_ms: { worker_deploy: 600_001, version_traffic_verification: 0, smoke_control_t0: 0 },
+      mutation_counts: { attempted: 1, confirmed: 0 },
+    })
+  })
+
+  it('carries the seeded original Stage start into the worker_deploy duration and child budget near the boundary', () => {
+    const stageStarted = 4_700_000
+    const now = stageStarted + 599_500
+    const requests: Array<Record<string, unknown>> = []
+    const seeded = {
+      execute(request: Record<string, unknown>) {
+        requests.push(request)
+        if (requests.length > 1) throw new WorkerTransportError('UNCERTAIN', 'worker_adapter_uncertain', 1)
+        return acceptedUpload()
+      },
+    }
+
+    const result = runWorkerStages({
+      bindings,
+      transport: seeded,
+      elapsed_ms: stageStarted,
+      monotonic_ms: () => now,
+      initial_stage_started_ms: stageStarted,
+    })
+
+    expect(requests[0]).toMatchObject({
+      operation: 'worker_deploy',
+      timeout_ms: 600_000,
+      elapsed_ms: stageStarted,
+    })
+    expect(600_000 - (now - (requests[0] as { elapsed_ms: number }).elapsed_ms)).toBe(500)
+    expect(result.value.stage_durations_ms.worker_deploy).toBe(599_500)
+  })
+
+  it.each([-1, 1.5, Number.NaN])('rejects invalid initial_stage_started_ms %s', (seed) => {
+    expect(() => runWorkerStages({
+      bindings,
+      transport: transport([acceptedUpload()]),
+      initial_stage_started_ms: seed,
+    })).toThrow(/initial_stage_started_ms/u)
   })
 
   it('chooses the tighter overall deadline before Stage timeout when both expire together', () => {

@@ -104,8 +104,12 @@ function deploymentMatches(value, version, d1DatabaseId) {
 }
 
 /** Private suffix seam. A response has only public facts; raw adapter output never escapes. */
-export function runWorkerStages({ bindings, transport, elapsed_ms = 0, monotonic_ms }) {
+export function runWorkerStages({ bindings, transport, elapsed_ms = 0, monotonic_ms, initial_stage_started_ms }) {
   if (monotonic_ms !== undefined && typeof monotonic_ms !== 'function') throw new Error('monotonic_ms is invalid')
+  if (initial_stage_started_ms !== undefined
+    && (!Number.isSafeInteger(initial_stage_started_ms) || initial_stage_started_ms < 0)) {
+    throw new Error('initial_stage_started_ms is invalid')
+  }
   const identity = Object.fromEntries(EVIDENCE_IDENTITY_FIELDS.map((field) => [field, bindings?.[field]]))
   if (!EVIDENCE_IDENTITY_FIELDS.slice(0, 3).every((field) => sha256(identity[field]))
     || typeof identity.candidate_id !== 'string' || !/^[a-f0-9]{40}$/u.test(identity.candidate_id)) {
@@ -117,8 +121,15 @@ export function runWorkerStages({ bindings, transport, elapsed_ms = 0, monotonic
   let elapsed = elapsed_ms
   let version
   let deployment
+  let firstStage = true
   for (const stage of WORKER_STAGE_ORDER) {
-    const stageStarted = monotonic_ms?.() ?? elapsed
+    // The first Stage clock may be seeded by the caller so Stage-owned setup
+    // (materialization, binding derivation, transport construction) is accounted
+    // inside the Stage duration and its child budget.
+    const stageStarted = firstStage && initial_stage_started_ms !== undefined
+      ? initial_stage_started_ms
+      : monotonic_ms?.() ?? elapsed
+    firstStage = false
     if (!Number.isSafeInteger(elapsed) || elapsed < 0 || stageStarted >= OVERALL_TIMEOUT_MS) {
       trace.push({ stage, outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: 1 })
       break

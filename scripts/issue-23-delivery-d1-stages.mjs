@@ -669,11 +669,15 @@ const STAGE_RUNNERS = Object.freeze({
   reconciliation: runReconciliation,
 })
 
-export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, monotonic_ms }) {
+export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, monotonic_ms, initial_stage_started_ms }) {
   if (!Number.isSafeInteger(elapsed_ms) || elapsed_ms < 0 || elapsed_ms > D1_OVERALL_TIMEOUT_MS) {
     fail('elapsed_ms is invalid')
   }
   if (monotonic_ms !== undefined && typeof monotonic_ms !== 'function') fail('monotonic_ms is invalid')
+  if (initial_stage_started_ms !== undefined
+    && (!Number.isSafeInteger(initial_stage_started_ms) || initial_stage_started_ms < 0)) {
+    fail('initial_stage_started_ms is invalid')
+  }
   const bindings = normalizeBindings(rawBindings)
   validateTransport(transport)
   const bindingSha256 = d1StageBindingsSha256(bindings)
@@ -683,9 +687,16 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, 
   const stageDurations = Object.fromEntries(D1_STAGE_ORDER.map((stage) => [stage, 0]))
   const trace = []
   let elapsedMs = elapsed_ms
+  let firstStage = true
 
   for (const stage of D1_STAGE_ORDER) {
-    const stageStarted = monotonic_ms?.() ?? elapsedMs
+    // The first Stage clock may be seeded by the caller so Stage-owned setup
+    // (closure recheck, materialization, binding derivation, transport
+    // construction) is accounted inside the Stage duration and its child budget.
+    const stageStarted = firstStage && initial_stage_started_ms !== undefined
+      ? initial_stage_started_ms
+      : monotonic_ms?.() ?? elapsedMs
+    firstStage = false
     if (stageStarted >= D1_OVERALL_TIMEOUT_MS) {
       stageCounts[stage] += 1
       trace.push({ stage, outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: 1 })
