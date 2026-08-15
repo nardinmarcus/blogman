@@ -226,7 +226,7 @@ describe('Issue #92 formal rehearsal public path', () => {
     const source = readFileSync(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-entry.mjs'), 'utf8')
     expect(source).toContain("mkdtempSync(join(tmpdir(), 'blogman-issue-23-formal-sink-'))")
     expect(source).not.toContain("mkdtempSync(join(ENTRY_REPO_ROOT, '.issue-23-formal-sink-'))")
-    const canonicalRootRejection = source.indexOf('sinkRoot === canonicalProductionAuthorityRootForEntry()')
+    const canonicalRootRejection = source.indexOf('isCanonicalProductionAuthorityRoot(sinkRoot)')
     const sinkConstruction = source.indexOf('createTestDeliverySink(sinkRoot)')
     expect(canonicalRootRejection).toBeGreaterThan(-1)
     expect(sinkConstruction).toBeGreaterThan(canonicalRootRejection)

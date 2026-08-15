@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -8,6 +9,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -84,10 +86,12 @@ import {
 } from '../../scripts/issue-23-delivery-prepare.mjs'
 import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-formal-runtime.mjs'
 import { hashD1ArtifactDirectory } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
-import { formalExecutionClosureSha256 } from '../../scripts/issue-23-delivery-execution-closure.mjs'
+import {
+  FORMAL_EXECUTION_CLOSURE_PATHS,
+  formalExecutionClosureSha256,
+} from '../../scripts/issue-23-delivery-execution-closure.mjs'
 import { runInFormalRehearsalContext } from '../../scripts/issue-23-delivery-formal-context.mjs'
 import { DeliverySinkDeadlineError } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
-import { createCanonicalProductionSinkForEntry } from '../../scripts/issue-23-delivery-evidence-sink-internal.mjs'
 import { isolatedAuthorityChildEnvironment, TEST_AUTHORITY_ROOT } from '../helpers/issue-23-authority-isolation'
 
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
@@ -116,7 +120,6 @@ const D1_OPERATIONS = [
 const REPOSITORY_ROOT = process.cwd()
 const DURABLE_SINK_ROOT = TEST_AUTHORITY_ROOT
 const ENTRY_MODULE_URL = pathToFileURL(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-entry.mjs')).href
-const ENTRY_INTERNAL_SINK_MODULE_URL = pathToFileURL(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-evidence-sink-internal.mjs')).href
 const REPOSITORY_PRELOAD_URL = pathToFileURL(join(
   REPOSITORY_ROOT,
   'tests/helpers/issue-23-repository-preload.mjs',
@@ -199,6 +202,17 @@ function formalContext(monotonicNanoseconds: () => bigint = () => 0n) {
     deliverySinkRoot,
     clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds },
   }
+}
+
+function createEntryPrepareWorkspace() {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-90-entry-workspace-')))
+  const repositoryPath = join(directory, 'repository')
+  childProcessActual.execFileSync!('git', ['clone', '--quiet', '--shared', REPOSITORY_ROOT, repositoryPath])
+  for (const path of FORMAL_EXECUTION_CLOSURE_PATHS) {
+    cpSync(join(REPOSITORY_ROOT, path), join(repositoryPath, path), { force: true })
+  }
+  symlinkSync(join(REPOSITORY_ROOT, 'node_modules'), join(repositoryPath, 'node_modules'), 'dir')
+  return { directory, repositoryPath }
 }
 
 function expectedReconciliation() {
@@ -396,6 +410,7 @@ function authorizationFor(prepared: ReturnType<typeof manifest>, id: string) {
 }
 
 function actualPreparedManifest() {
+  const workspace = createEntryPrepareWorkspace()
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPOSITORY_ROOT, encoding: 'utf8' }).trim()
   const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: REPOSITORY_ROOT, encoding: 'utf8' }).trim()
   const migrationCatalogPath = join(REPOSITORY_ROOT, 'db', 'ledger-migrations')
@@ -532,7 +547,7 @@ function actualPreparedManifest() {
   }
   try {
     const prepared = prepareForTestsOnly(config, {
-      repositoryPath: REPOSITORY_ROOT,
+      repositoryPath: workspace.repositoryPath,
       repositoryResolver: () => ({ commit, tree, clean: true }),
       ciResolver: (_path: string, source: typeof config, repository: { commit: string; tree: string }) => ({
         provider: source.ci.provider,
@@ -578,8 +593,7 @@ function actualPreparedManifest() {
     ])
     return result
   } finally {
-    rmSync(join(REPOSITORY_ROOT, '.next'), { recursive: true, force: true })
-    rmSync(join(REPOSITORY_ROOT, '.open-next'), { recursive: true, force: true })
+    rmSync(workspace.directory, { recursive: true, force: true })
   }
 }
 
@@ -890,7 +904,8 @@ describe('Issue #90 formal entry fan-in', () => {
       failure: { classification: 'Manifest Drift' },
     })
     expect(existsSync(join(DURABLE_SINK_ROOT, 'authorizations', `${authorization.sha256}.json`))).toBe(true)
-    expect(createCanonicalProductionSinkForEntry().readTerminalEvidence(terminal.sha256).authorization.sha256).toBe(authorization.sha256)
+    expect(readFileSync(join(DURABLE_SINK_ROOT, 'authorizations', `${authorization.sha256}.json`)))
+      .toEqual(authorization.bytes)
     expect(() => execute(prepared, authorization)).toThrow(/consumed/u)
     expect(createWorkerTransportMock).not.toHaveBeenCalled()
     expect(createD1TransportMock).not.toHaveBeenCalled()
@@ -904,7 +919,7 @@ describe('Issue #90 formal entry fan-in', () => {
     const terminal = execute(prepared, authorization)
 
     expect(terminal.value.identities.authorization_sha256).toBe(authorization.sha256)
-    expect(createCanonicalProductionSinkForEntry().readTerminalEvidence(terminal.sha256).authorization.bytes)
+    expect(readFileSync(join(DURABLE_SINK_ROOT, 'authorizations', `${authorization.sha256}.json`)))
       .toEqual(authorization.bytes)
   })
 
@@ -1349,83 +1364,6 @@ describe('Issue #90 formal entry fan-in', () => {
     expect(createD1TransportMock).not.toHaveBeenCalled()
   })
 
-  it('independently validates a durable production terminal ending at authorization_accept', () => {
-    const prepared = actualPreparedManifest()
-    const authorizationRecord = authorizationFor(prepared, 'fan-in-authorization-terminal')
-    const authorizationValue = authorizationValueFor(prepared, 'fan-in-authorization-terminal')
-    const authorization = { value: authorizationValue, ...authorizationRecord }
-    const identities = {
-      manifest_sha256: prepared.sha256,
-      authorization_sha256: authorization.sha256,
-    }
-    const attemptId = hash(Buffer.from(`${JSON.stringify({
-      format: 'blogman-issue-23-attempt/v1',
-      ...identities,
-    }, null, 2)}\n`, 'utf8'))
-    const stages = policy().stages.map(({ name }) => name)
-    const terminalValue = {
-      format: 'blogman-issue-23-terminal-result/v1',
-      identities,
-      attempt_id: attemptId,
-      started_at: '2026-08-11T00:00:00.000Z',
-      ended_at: '2026-08-11T00:00:00.001Z',
-      authorization_consumed: true,
-      outcome: 'ERROR',
-      first_terminal_stage: 'authorization_accept',
-      failure: { classification: 'credential_authority_unavailable' },
-      stage_counts: Object.fromEntries(stages.map((stage) => [stage, stage === 'authorization_accept' ? 1 : 0])),
-      stage_durations_ms: Object.fromEntries(stages.map((stage) => [stage, stage === 'authorization_accept' ? 1 : 0])),
-      mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
-      evidence: {
-        source: 'production', production: true, promotable: false,
-        hashes: Object.fromEntries([
-          'd1_stage_receipt_sha256', ...D1_EVIDENCE_HASHES.map((name) => `d1_${name}`),
-          'worker_stage_receipt_sha256',
-          'worker_upload_acceptance_sha256', 'worker_version_traffic_sha256', 'worker_smoke_control_t0_sha256',
-        ].map((name) => [name, null])),
-        cleanup: { created: false, cleaned: true, observed_absent: true },
-      },
-      finalized: true,
-    }
-    const terminalBytes = Buffer.from(`${JSON.stringify(terminalValue, null, 2)}\n`, 'utf8')
-    const terminal = { value: terminalValue, bytes: terminalBytes, sha256: hash(terminalBytes) }
-
-    createCanonicalProductionSinkForEntry().consumeAuthorization(authorization)
-    createCanonicalProductionSinkForEntry().persistTerminalResult({ terminal, manifest: prepared, d1: null, worker: null })
-
-    expect(validateProductionTerminalEvidence(structuredClone(terminal))).toBe(true)
-
-    const invalidAuthorization = authorizationFor(prepared, 'fan-in-invalid-bounded-classification')
-    const invalidIdentities = {
-      manifest_sha256: prepared.sha256,
-      authorization_sha256: invalidAuthorization.sha256,
-    }
-    const invalidAttemptId = hash(Buffer.from(`${JSON.stringify({
-      format: 'blogman-issue-23-attempt/v1',
-      ...invalidIdentities,
-    }, null, 2)}\n`, 'utf8'))
-    const invalidTerminalValue = {
-      ...terminalValue,
-      identities: invalidIdentities,
-      attempt_id: invalidAttemptId,
-      outcome: 'TIMEOUT',
-      failure: { classification: 'worker_adapter_nonzero' },
-    }
-    const invalidTerminalBytes = Buffer.from(`${JSON.stringify(invalidTerminalValue, null, 2)}\n`, 'utf8')
-    const invalidTerminal = {
-      value: invalidTerminalValue,
-      bytes: invalidTerminalBytes,
-      sha256: hash(invalidTerminalBytes),
-    }
-    createCanonicalProductionSinkForEntry().consumeAuthorization(invalidAuthorization)
-    expect(() => createCanonicalProductionSinkForEntry().persistTerminalResult({
-      terminal: invalidTerminal,
-      manifest: prepared,
-      d1: null,
-      worker: null,
-    })).toThrow(/outcome\/classification/u)
-  })
-
   it('validates an execute-produced early NON_PASS terminal with no D1 or Worker receipt', () => {
     const prepared = actualPreparedManifest()
     createWorkerTransportMock.mockReturnValue({
@@ -1475,8 +1413,9 @@ describe('Issue #90 formal entry fan-in', () => {
       sha256: authorization.sha256,
     }
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { readFileSync, readdirSync } from 'node:fs'
+      import { join } from 'node:path'
       import { execute, validateProductionTerminalEvidence } from ${JSON.stringify(ENTRY_MODULE_URL)}
-      import { createCanonicalProductionSinkForEntry } from ${JSON.stringify(ENTRY_INTERNAL_SINK_MODULE_URL)}
       const decodeRecord = (record) => ({
         value: record.value,
         bytes: Buffer.from(record.bytes, 'base64'),
@@ -1489,10 +1428,11 @@ describe('Issue #90 formal entry fan-in', () => {
         sha256: ${JSON.stringify(encodedAuthorization.sha256)},
       }
       if (validateProductionTerminalEvidence(terminal) !== true) process.exitCode = 2
-      const durable = createCanonicalProductionSinkForEntry().readTerminalEvidence(terminal.sha256)
-      const durableValues = [durable.terminal, durable.manifest, durable.d1, durable.worker]
-        .filter(Boolean).map((record) => record.value)
-      if (JSON.stringify(durableValues).includes(${JSON.stringify(credentialMarker)})) process.exitCode = 3
+      const authorityRoot = ${JSON.stringify(DURABLE_SINK_ROOT)}
+      const durableBytes = ['authorizations', 'records', 'terminals'].flatMap((directory) => (
+        readdirSync(join(authorityRoot, directory)).map((name) => readFileSync(join(authorityRoot, directory, name), 'utf8'))
+      ))
+      if (durableBytes.some((bytes) => bytes.includes(${JSON.stringify(credentialMarker)}))) process.exitCode = 3
       const forged = structuredClone(terminal)
       forged.value.identities.manifest_sha256 = 'f'.repeat(64)
       try {

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, linkSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -8,19 +8,12 @@ import { afterEach, describe, expect, it } from 'vitest'
 import * as deliverySinkModule from '../../scripts/issue-23-delivery-evidence-sink.mjs'
 import { createTestDeliverySink } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
 import {
-  canonicalProductionAuthorityRootForEntry,
-  createCanonicalProductionSinkForEntry,
-} from '../../scripts/issue-23-delivery-evidence-sink-internal.mjs'
-import {
-  PROTECTED_AUTHORITY_ROOT,
   TEST_AUTHORITY_ROOT,
-  authoritySnapshot,
   isolatedAuthorityChildEnvironment,
 } from '../helpers/issue-23-authority-isolation'
 
 const temporaryDirectories: string[] = []
 const sinkModuleUrl = pathToFileURL(join(process.cwd(), 'scripts/issue-23-delivery-evidence-sink.mjs')).href
-const internalSinkModuleUrl = pathToFileURL(join(process.cwd(), 'scripts/issue-23-delivery-evidence-sink-internal.mjs')).href
 
 function record(value: Record<string, unknown>) {
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
@@ -50,7 +43,6 @@ const deliveryStages = [
   'version_traffic_verification', 'smoke_control_t0',
 ]
 const d1Stages = ['d1_identity', 'clean_start_reset', 'empty_d1_proof', 'migrations_001_006', 'reconciliation']
-const workerStages = ['worker_deploy', 'version_traffic_verification', 'smoke_control_t0']
 const d1HashNames = [
   'bindings_sha256', 'wrangler_sha256', 'config_sha256', 'reset_sql_sha256',
   'migration_runner_sha256', 'migration_catalog_sha256', 'rollout_safety_sha256',
@@ -164,13 +156,25 @@ afterEach(() => {
 })
 
 describe('Issue #23 durable delivery records', () => {
-  it('exposes only the noncanonical test factory and refuses the canonical production root', () => {
+  it('exposes no importable canonical root or writer and refuses direct canonical selection', () => {
     expect(Object.keys(deliverySinkModule).sort()).toEqual([
       'DeliverySinkDeadlineError',
       'createTestDeliverySink',
     ])
     expect(() => deliverySinkModule.createTestDeliverySink(TEST_AUTHORITY_ROOT))
       .toThrow(/canonical production root/u)
+
+    const internalModule = join(process.cwd(), 'scripts/issue-23-delivery-evidence-sink-internal.mjs')
+    expect(existsSync(internalModule)).toBe(false)
+    const directImport = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      await import(${JSON.stringify(pathToFileURL(internalModule).href)})
+    `], { encoding: 'utf8', env: isolatedAuthorityChildEnvironment() })
+    expect(directImport.status).not.toBe(0)
+
+    for (const name of readdirSync(join(process.cwd(), 'scripts')).filter((name) => name.endsWith('.mjs'))) {
+      const source = readFileSync(join(process.cwd(), 'scripts', name), 'utf8')
+      expect(source, name).not.toMatch(/export\s+(?:const|function|class)\s+(?:canonicalProduction|createCanonicalProduction|repositoryDeliverySink)/u)
+    }
   })
 
   it('accepts a benign embedded task path while rejecting credential tokens and arbitrary Authorization fields', () => {
@@ -203,146 +207,6 @@ describe('Issue #23 durable delivery records', () => {
     expect(sink.consumeAuthorization(benign)).toBe(benign.sha256)
   })
 
-  it('uses only the test-owned canonical authority and leaves the protected authority unchanged', () => {
-    const before = authoritySnapshot()
-    const authorization = record({
-      ...authorizationRecord().value,
-      authorization_id: `isolated-authority-${process.pid}`,
-    })
-    const authorizationPath = join(TEST_AUTHORITY_ROOT, 'authorizations', `${authorization.sha256}.json`)
-
-    expect(canonicalProductionAuthorityRootForEntry()).toBe(TEST_AUTHORITY_ROOT)
-    expect(canonicalProductionAuthorityRootForEntry()).not.toBe(PROTECTED_AUTHORITY_ROOT)
-    try {
-      expect(createCanonicalProductionSinkForEntry().consumeAuthorization(authorization)).toBe(authorization.sha256)
-      expect(readFileSync(authorizationPath)).toEqual(authorization.bytes)
-      expect(authoritySnapshot()).toBe(before)
-    } finally {
-      rmSync(authorizationPath, { force: true })
-    }
-  })
-
-  it('does not let PATH or Git environment redirect the canonical production sink root', () => {
-    const expected = canonicalProductionAuthorityRootForEntry()
-    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
-      import { canonicalProductionAuthorityRootForEntry } from ${JSON.stringify(internalSinkModuleUrl)}
-      process.stdout.write(canonicalProductionAuthorityRootForEntry())
-    `], {
-      encoding: 'utf8',
-      env: isolatedAuthorityChildEnvironment({
-        PATH: '/definitely-not-a-bin',
-        GIT_DIR: '/tmp/redirected',
-        GIT_COMMON_DIR: '/tmp/redirected-common',
-      }),
-    })
-    expect(child.status, child.stderr).toBe(0)
-    expect(child.stdout).toBe(expected)
-  })
-
-  it('rejects the same production Authorization from independent clone roots', () => {
-    const firstClone = mkdtempSync(join(tmpdir(), 'blogman-issue-23-clone-a-'))
-    const secondClone = mkdtempSync(join(tmpdir(), 'blogman-issue-23-clone-b-'))
-    temporaryDirectories.push(firstClone, secondClone)
-    const authorization = record({
-      ...authorizationRecord().value,
-      authorization_id: `clone-independent-${process.pid}`,
-    })
-    const source = `
-      import { createCanonicalProductionSinkForEntry } from ${JSON.stringify(internalSinkModuleUrl)}
-      const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
-      try { createCanonicalProductionSinkForEntry().consumeAuthorization({ bytes, sha256: ${JSON.stringify(authorization.sha256)} }) }
-      catch (error) { if (/consumed/u.test(error.message)) process.exitCode = 10; else throw error }
-    `
-    expect(spawnSync(process.execPath, ['--input-type=module', '-e', source], {
-      cwd: firstClone,
-      env: isolatedAuthorityChildEnvironment(),
-    }).status).toBe(0)
-    expect(spawnSync(process.execPath, ['--input-type=module', '-e', source], {
-      cwd: secondClone,
-      env: isolatedAuthorityChildEnvironment(),
-    }).status).toBe(10)
-    rmSync(join(canonicalProductionAuthorityRootForEntry(), 'authorizations', `${authorization.sha256}.json`), { force: true })
-  })
-
-  it('uses one clone-independent canonical production sink root', () => {
-    const commonRoot = canonicalProductionAuthorityRootForEntry()
-    const worktree = mkdtempSync(join(tmpdir(), 'blogman-issue-23-worktree-'))
-    temporaryDirectories.push(worktree)
-    spawnSync('git', ['worktree', 'add', '--detach', worktree, 'HEAD'], { encoding: 'utf8' })
-    try {
-      expect(canonicalProductionAuthorityRootForEntry()).toBe(commonRoot)
-    } finally {
-      spawnSync('git', ['worktree', 'remove', '--force', worktree], { encoding: 'utf8' })
-    }
-  })
-
-  it('rejects a symlinked canonical ancestor in a disposable preloaded child without writing the target', () => {
-    const parent = mkdtempSync(join(tmpdir(), 'blogman-issue-23-canonical-ancestor-'))
-    temporaryDirectories.push(parent)
-    const home = join(parent, 'home')
-    const target = join(parent, 'redirect-target')
-    mkdirSync(home, { mode: 0o700 })
-    mkdirSync(target, { mode: 0o700 })
-    symlinkSync(target, join(home, '.local'))
-    const authorization = authorizationRecord()
-    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
-      import { createCanonicalProductionSinkForEntry } from ${JSON.stringify(internalSinkModuleUrl)}
-      const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
-      try {
-        createCanonicalProductionSinkForEntry().consumeAuthorization({ bytes, sha256: ${JSON.stringify(authorization.sha256)} })
-        process.exitCode = 2
-      } catch (error) {
-        if (!/canonical|symlink/u.test(error instanceof Error ? error.message : String(error))) process.exitCode = 3
-      }
-    `], {
-      encoding: 'utf8',
-      env: isolatedAuthorityChildEnvironment({ BLOGMAN_TEST_AUTHORITY_HOME: home }),
-    })
-
-    expect(child.status, child.stderr).toBe(0)
-    expect(readdirSync(target)).toEqual([])
-  })
-
-  it('permits normal user .local modes while requiring a trusted 0700 blogman subtree', () => {
-    const parent = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-23-authority-modes-')))
-    temporaryDirectories.push(parent)
-    const home = join(parent, 'home')
-    const local = join(home, '.local')
-    const state = join(local, 'state')
-    const blogman = join(state, 'blogman')
-    mkdirSync(blogman, { recursive: true, mode: 0o700 })
-    chmodSync(home, 0o700)
-    chmodSync(local, 0o775)
-    chmodSync(state, 0o777)
-    chmodSync(blogman, 0o700)
-    const first = authorizationRecord()
-    const run = (authorization: ReturnType<typeof authorizationRecord>) => spawnSync(
-      process.execPath,
-      ['--input-type=module', '-e', `
-        import { createCanonicalProductionSinkForEntry } from ${JSON.stringify(internalSinkModuleUrl)}
-        const bytes = Buffer.from(${JSON.stringify(authorization.bytes.toString('base64'))}, 'base64')
-        try { createCanonicalProductionSinkForEntry().consumeAuthorization({ bytes, sha256: ${JSON.stringify(authorization.sha256)} }) }
-        catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 10 }
-      `],
-      { encoding: 'utf8', env: isolatedAuthorityChildEnvironment({ BLOGMAN_TEST_AUTHORITY_HOME: home }) },
-    )
-
-    const unsafeAncestor = run(first)
-    expect(unsafeAncestor.status).toBe(10)
-    expect(unsafeAncestor.stderr).toMatch(/state.*mode|unsafe.*ancestor|world-writable/u)
-    expect(lstatSync(state).mode & 0o777).toBe(0o777)
-    chmodSync(state, 0o755)
-    expect(run(first).status).toBe(0)
-    chmodSync(blogman, 0o755)
-    const second = record({
-      ...authorizationRecord().value,
-      authorization_id: 'untrusted-blogman-mode',
-    })
-    const rejected = run(second)
-    expect(rejected.status).toBe(10)
-    expect(rejected.stderr).toMatch(/blogman.*mode|mode drifted/u)
-  })
-
   it('rejects symlink, owner/mode, and root identity drift', () => {
     const parent = mkdtempSync(join(tmpdir(), 'blogman-issue-23-durable-integrity-'))
     temporaryDirectories.push(parent)
@@ -360,7 +224,7 @@ describe('Issue #23 durable delivery records', () => {
   })
 
   it('publishes and fsyncs the destination name before removing and fsyncing the temporary name', () => {
-    const source = readFileSync(join(process.cwd(), 'scripts/issue-23-delivery-evidence-sink-internal.mjs'), 'utf8')
+    const source = readFileSync(join(process.cwd(), 'scripts/issue-23-delivery-entry.mjs'), 'utf8')
     const atomicWrite = source.slice(
       source.indexOf('function atomicWrite('),
       source.indexOf('function writeIfAbsent('),
@@ -531,63 +395,6 @@ describe('Issue #23 durable delivery records', () => {
       .toThrow(/mutation evidence/u)
     expect(readdirSync(join(root, 'records'))).toEqual([])
     expect(readdirSync(join(root, 'terminals'))).toEqual([])
-  })
-
-  it('forwards a rejecting Authorization deadline through the canonical facade without publication', () => {
-    const authorization = record({
-      ...authorizationRecord().value,
-      authorization_id: `deadline-authorization-${process.pid}`,
-    })
-    const authorizationPath = join(
-      canonicalProductionAuthorityRootForEntry(),
-      'authorizations',
-      `${authorization.sha256}.json`,
-    )
-
-    try {
-      expect(() => createCanonicalProductionSinkForEntry().consumeAuthorization(authorization, () => false))
-        .toThrow(/deadline/u)
-      expect(() => readFileSync(authorizationPath)).toThrow()
-    } finally {
-      rmSync(authorizationPath, { force: true })
-    }
-  })
-
-  it('forwards a rejecting Terminal deadline through the canonical facade without publication', () => {
-    const root = canonicalProductionAuthorityRootForEntry()
-    const manifest = record({
-      format: 'blogman-issue-23-canonical-frozen-manifest/v1',
-      marker: `deadline-forwarding-${process.pid}`,
-    })
-    const authorization = record({
-      ...authorizationRecord().value,
-      authorization_id: `deadline-terminal-authorization-${process.pid}`,
-      manifest_sha256: manifest.sha256,
-    })
-    const attemptId = createHash('sha256').update(`deadline-attempt-${process.pid}`).digest('hex')
-    const terminal = record({
-      format: 'blogman-issue-23-terminal-result/v1',
-      identities: { manifest_sha256: manifest.sha256, authorization_sha256: authorization.sha256 },
-      attempt_id: attemptId,
-      evidence: { hashes: { d1_stage_receipt_sha256: null, worker_stage_receipt_sha256: null } },
-    })
-    const authorizationPath = join(root, 'authorizations', `${authorization.sha256}.json`)
-    const manifestPath = join(root, 'records', `${manifest.sha256}.json`)
-    const terminalPath = join(root, 'terminals', `${attemptId}.json`)
-
-    createCanonicalProductionSinkForEntry().consumeAuthorization(authorization)
-    try {
-      expect(() => createCanonicalProductionSinkForEntry().persistTerminalResult(
-        { terminal, manifest, d1: null, worker: null },
-        () => false,
-      )).toThrow(/deadline/u)
-      expect(() => readFileSync(manifestPath)).toThrow()
-      expect(() => readFileSync(terminalPath)).toThrow()
-    } finally {
-      rmSync(authorizationPath, { force: true })
-      rmSync(manifestPath, { force: true })
-      rmSync(terminalPath, { force: true })
-    }
   })
 
   it('atomically permits exactly one concurrent process and rejects fresh-process replay', async () => {
