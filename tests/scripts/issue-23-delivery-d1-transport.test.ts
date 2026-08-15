@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import {
   chmodSync,
+  cpSync,
   mkdirSync,
   mkdtempSync,
-  unlinkSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -15,12 +16,12 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   D1TransportError,
   D1_TRANSPORT_MAX_OUTPUT_BYTES,
-  createD1Transport,
-  getD1TransportProvenance,
+  createLocalD1Transport,
   hashD1ArtifactDirectory as transportHashD1ArtifactDirectory,
 } from '../../scripts/issue-23-delivery-d1-transport.mjs'
 import {
@@ -40,9 +41,7 @@ import { D1_STAGE_TIMEOUT_MS } from '../../scripts/issue-23-delivery-d1-stages.m
 const repoRoot = process.cwd()
 const configPath = join(repoRoot, 'wrangler.toml')
 const resetSqlPath = join(repoRoot, 'db', 'issue-23-clean-start-reset.sql')
-const runnerPath = join(repoRoot, 'scripts', 'migrations.mjs')
 const catalogPath = join(repoRoot, 'db', 'ledger-migrations')
-const rolloutSafetyPath = join(repoRoot, 'scripts', 'rollout-safety.mjs')
 const temporaryDirectories: string[] = []
 const MIGRATIONS = [
   { number: 1, name: '001_initial_schema', checksum: '8a71414814571d4fe65e03fc92b3f976074d025ddf03a4dd9f861698b2387d05' },
@@ -81,7 +80,12 @@ function request(operation: string, stage = operation, elapsedMs = 0, overallEla
   }
 }
 
-function createConfig(overrides: Record<string, unknown> = {}) {
+function createConfig(overrides: Record<string, unknown> = {}, repositoryRoot = repoRoot) {
+  const repositoryConfigPath = join(repositoryRoot, 'wrangler.toml')
+  const repositoryResetSqlPath = join(repositoryRoot, 'db', 'issue-23-clean-start-reset.sql')
+  const repositoryRunnerPath = join(repositoryRoot, 'scripts', 'migrations.mjs')
+  const repositoryCatalogPath = join(repositoryRoot, 'db', 'ledger-migrations')
+  const repositoryRolloutSafetyPath = join(repositoryRoot, 'scripts', 'rollout-safety.mjs')
   const statePath = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-90-transport-')))
   temporaryDirectories.push(statePath)
   const expectedPath = join(statePath, 'expected-reconciliation.json')
@@ -95,27 +99,44 @@ function createConfig(overrides: Record<string, unknown> = {}) {
     mode: 'local',
     persist_path: statePath,
     database: 'DB',
-    config_path: configPath,
-    config_sha256: sha256File(configPath),
-    wrangler_sha256: sha256File(realpathSync(join(repoRoot, 'node_modules', '.bin', 'wrangler'))),
+    config_path: repositoryConfigPath,
+    config_sha256: sha256File(repositoryConfigPath),
+    wrangler_sha256: sha256File(realpathSync(join(repositoryRoot, 'node_modules', '.bin', 'wrangler'))),
     account_id: 'local-account-not-production',
     d1_database_id: 'local-d1-not-production',
-    reset_sql_path: resetSqlPath,
-    reset_sql_sha256: sha256File(resetSqlPath),
-    migration_runner_path: runnerPath,
-    migration_runner_sha256: sha256File(runnerPath),
-    migration_catalog_path: catalogPath,
-    migration_catalog_sha256: hashDirectory(catalogPath),
-    rollout_safety_path: rolloutSafetyPath,
-    rollout_safety_sha256: sha256File(rolloutSafetyPath),
+    reset_sql_path: repositoryResetSqlPath,
+    reset_sql_sha256: sha256File(repositoryResetSqlPath),
+    migration_runner_path: repositoryRunnerPath,
+    migration_runner_sha256: sha256File(repositoryRunnerPath),
+    migration_catalog_path: repositoryCatalogPath,
+    migration_catalog_sha256: hashDirectory(repositoryCatalogPath),
+    rollout_safety_path: repositoryRolloutSafetyPath,
+    rollout_safety_sha256: sha256File(repositoryRolloutSafetyPath),
     expected_reconciliation_path: expectedPath,
     expected_reconciliation_sha256: sha256File(expectedPath),
+    manifest_sha256: '1'.repeat(64),
+    authorization_sha256: '2'.repeat(64),
+    attempt_id: '3'.repeat(64),
     candidate_id: 'c'.repeat(40),
     evidence_class: 'test-non-production',
     migrations: MIGRATIONS,
     ...overrides,
   }
   return { config, statePath, expectedPath }
+}
+
+function createTransportWorkspace() {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-90-transport-workspace-')))
+  temporaryDirectories.push(directory)
+  const repository = join(directory, 'repository')
+  execFileSync('git', ['clone', '--quiet', '--shared', repoRoot, repository])
+  cpSync(join(repoRoot, 'scripts'), join(repository, 'scripts'), { recursive: true, force: true })
+  symlinkSync(join(repoRoot, 'node_modules'), join(repository, 'node_modules'), 'dir')
+  return repository
+}
+
+async function workspaceTransportModule(repository: string) {
+  return import(pathToFileURL(join(repository, 'scripts', 'issue-23-delivery-d1-transport.mjs')).href)
 }
 
 afterEach(() => {
@@ -134,7 +155,7 @@ describe('Issue #90 D1 transport', () => {
     })).toMatch(/^[a-f0-9]{64}$/u)
   })
 
-  it('rejects remote transport config without production evidence', () => {
+  it('rejects every remote transport config at the public local-only boundary', () => {
     const { config } = createConfig({
       mode: 'remote',
       evidence_class: 'test-non-production',
@@ -142,26 +163,22 @@ describe('Issue #90 D1 transport', () => {
     const remoteConfig = { ...config }
     Reflect.deleteProperty(remoteConfig, 'persist_path')
 
-    expect(() => createD1Transport(remoteConfig)).toThrow('remote transport requires production evidence')
+    expect(() => createLocalD1Transport(remoteConfig)).toThrow('local transport requires structurally nonproduction local evidence')
   })
 
-  it('keeps local transport provenance non-production', () => {
+  it('exposes only a binding digest and no caller-readable provenance brand', () => {
     const { config } = createConfig()
-    const transport = createD1Transport(config)
+    const transport = createLocalD1Transport(config)
 
-    expect(getD1TransportProvenance(transport)).toMatchObject({
-      source: 'local-non-production',
-      production: false,
-      bindings_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
-      wrangler_sha256: config.wrangler_sha256,
-    })
+    expect(transport).not.toHaveProperty('evidence')
+    expect(transport.bindings_sha256).toMatch(/^[a-f0-9]{64}$/u)
   })
 
   it('exposes the internal execute contract and dispatches a bounded local D1 query', () => {
     const { config } = createConfig()
-    const transport = createD1Transport(config)
+    const transport = createLocalD1Transport(config)
 
-    expect(Object.keys(transport)).toEqual(['execute'])
+    expect(Object.keys(transport)).toEqual(['execute', 'bindings_sha256'])
     const result = transport.execute(request('empty_d1_proof'))
 
     expect(result.status).toBe(0)
@@ -172,18 +189,18 @@ describe('Issue #90 D1 transport', () => {
 
   it('keeps command construction private while exposing only the bounded execute seam', { timeout: 30_000 }, async () => {
     const { config } = createConfig()
-    const transport = createD1Transport(config)
+    const transport = createLocalD1Transport(config)
     const transportModule = await import('../../scripts/issue-23-delivery-d1-transport.mjs')
 
     expect(transportModule).not.toHaveProperty('buildD1Command')
     expect(transportModule).not.toHaveProperty('registerD1TransportCapability')
-    expect(Object.keys(transport)).toEqual(['execute'])
+    expect(Object.keys(transport)).toEqual(['execute', 'bindings_sha256'])
     expect(transport.execute(request('empty_d1_proof')).status).toBe(0)
   })
 
   it('keeps the request contract to five keys and rejects extras', () => {
     const { config } = createConfig()
-    const transport = createD1Transport(config)
+    const transport = createLocalD1Transport(config)
 
     expect(Object.keys(request('empty_d1_proof'))).toEqual([
       'operation',
@@ -196,9 +213,22 @@ describe('Issue #90 D1 transport', () => {
       .toThrow(/unsupported fields/u)
   })
 
+  it('recomputes actual Stage and overall deadlines after local validation before child dispatch', () => {
+    const { config } = createConfig()
+    const environment = Object.assign(Object.create(null), process.env)
+
+    const stageExpired = createLocalD1Transport(config, environment, () => D1_STAGE_TIMEOUT_MS.migrations_001_006)
+    expect(() => stageExpired.execute(request('migration_catalog', 'migrations_001_006')))
+      .toThrowError(expect.objectContaining({ classification: 'timeout' }))
+
+    const overallExpired = createLocalD1Transport(config, environment, () => 5_400_000)
+    expect(() => overallExpired.execute(request('d1_identity')))
+      .toThrowError(expect.objectContaining({ classification: 'overall_timeout' }))
+  })
+
   it('dispatches migration operations through the canonical runner instead of accepting SQL or file overrides', () => {
     const { config } = createConfig()
-    const transport = createD1Transport(config)
+    const transport = createLocalD1Transport(config)
 
     const catalog = transport.execute(request('migration_catalog', 'migrations_001_006'))
     const catalogValue = JSON.parse(catalog.stdout)
@@ -222,9 +252,9 @@ describe('Issue #90 D1 transport', () => {
   it('rejects caller dependency injection and overrides', () => {
     const { config } = createConfig()
 
-    expect(() => createD1Transport(config, { runChild: () => ({}) })).toThrow(/exactly one|unsupported/u)
-    expect(() => createD1Transport({ ...config, command: '/tmp/evil' })).toThrow(/unsupported/u)
-    expect(() => createD1Transport({ ...config, timeout_ms: 1 })).toThrow(/unsupported/u)
+    expect(() => createLocalD1Transport(config, { runChild: () => ({}) })).toThrow(/exactly one|unsupported/u)
+    expect(() => createLocalD1Transport({ ...config, command: '/tmp/evil' })).toThrow(/unsupported/u)
+    expect(() => createLocalD1Transport({ ...config, timeout_ms: 1 })).toThrow(/unsupported/u)
   })
 
   it('rejects duplicate keys in the bound expected reconciliation contract before spawning a child', () => {
@@ -232,7 +262,7 @@ describe('Issue #90 D1 transport', () => {
     const duplicate = '{"format":"blogman-d1-reconciliation/v1","\\u0066ormat":"forged"}'
     writeFileSync(expectedPath, duplicate, { mode: 0o600 })
 
-    expect(() => createD1Transport({
+    expect(() => createLocalD1Transport({
       ...config,
       expected_reconciliation_sha256: sha256File(expectedPath),
     })).toThrow('D1 transport malformed')
@@ -247,10 +277,10 @@ describe('Issue #90 D1 transport', () => {
     writeFileSync(temporaryConfig, readFileSync(configPath), { mode: 0o600 })
     const originalHash = sha256File(temporaryConfig)
     const { config } = createConfig({ config_path: temporaryConfig, config_sha256: originalHash })
-    const transport = createD1Transport(config)
+    const transport = createLocalD1Transport(config)
     writeFileSync(temporaryConfig, `${readFileSync(temporaryConfig)}\n`)
 
-    expect(() => transport.execute(request('d1_identity'))).toThrow('D1 transport malformed')
+    expect(() => transport.execute(request('d1_identity'))).toThrow('D1 transport manifest_drift')
   })
 
   it('classifies bounded child output overflow without returning raw bytes', () => {
@@ -263,9 +293,9 @@ describe('Issue #90 D1 transport', () => {
       expected_reconciliation_sha256: sha256File(oversizedPath),
     }
 
-    expect(() => createD1Transport(mutated)).toThrow('D1 transport malformed')
+    expect(() => createLocalD1Transport(mutated)).toThrow('D1 transport malformed')
     try {
-      createD1Transport(mutated)
+      createLocalD1Transport(mutated)
     } catch (error) {
       expect(String(error)).not.toContain('x'.repeat(100))
       expect(error).toBeInstanceOf(D1TransportError)
@@ -277,7 +307,7 @@ describe('Issue #90 D1 transport', () => {
     const symlinkPath = join(config.persist_path, 'reset.sql')
     symlinkSync(resetSqlPath, symlinkPath)
 
-    expect(() => createD1Transport({
+    expect(() => createLocalD1Transport({
       ...config,
       reset_sql_path: symlinkPath,
       reset_sql_sha256: sha256File(resetSqlPath),
@@ -293,60 +323,92 @@ describe('Issue #90 D1 transport', () => {
       config_sha256: sha256File(temporaryConfig),
     })
 
-    expect(() => createD1Transport(config)).toThrow('D1 transport malformed')
+    expect(() => createLocalD1Transport(config)).toThrow('D1 transport malformed')
   })
 
   it('requires a local persist directory to be private and outside the repository', () => {
     const { config, statePath } = createConfig()
     chmodSync(statePath, 0o755)
-    expect(() => createD1Transport(config)).toThrow('D1 transport malformed')
+    expect(() => createLocalD1Transport(config)).toThrow('D1 transport malformed')
     chmodSync(statePath, 0o700)
 
-    expect(() => createD1Transport({ ...config, persist_path: repoRoot })).toThrow('D1 transport malformed')
+    expect(() => createLocalD1Transport({ ...config, persist_path: repoRoot })).toThrow('D1 transport malformed')
   })
 
   it('binds the local persist directory identity for the full transport lifecycle', () => {
     const { config, statePath } = createConfig()
-    const transport = createD1Transport(config)
+    const transport = createLocalD1Transport(config)
     const movedPath = `${statePath}.moved`
     renameSync(statePath, movedPath)
     mkdirSync(statePath, { mode: 0o700 })
     temporaryDirectories.push(movedPath)
 
-    expect(() => transport.execute(request('empty_d1_proof'))).toThrow('D1 transport malformed')
+    expect(() => transport.execute(request('empty_d1_proof'))).toThrow('D1 transport manifest_drift')
   })
 
   it.each([
-    ['config', configPath],
-    ['reset SQL', resetSqlPath],
-    ['migration runner', runnerPath],
-    ['rollout safety', rolloutSafetyPath],
-  ])('rejects a %s content mutation before the next child spawn', (_label, path) => {
-    const original = readFileSync(path)
-    const { config } = createConfig()
-    const transport = path === configPath ? createD1Transport(config) : null
-    try {
-      writeFileSync(path, Buffer.concat([original, Buffer.from('\n')]))
-      if (transport) {
-        expect(() => transport.execute(request('d1_identity'))).toThrow('D1 transport malformed')
-      } else {
-        expect(() => createD1Transport(config)).toThrow('D1 transport malformed')
-      }
-    } finally {
-      writeFileSync(path, original)
-    }
+    ['config', 'wrangler.toml'],
+    ['reset SQL', 'db/issue-23-clean-start-reset.sql'],
+    ['migration runner', 'scripts/migrations.mjs'],
+    ['rollout safety', 'scripts/rollout-safety.mjs'],
+  ])('maps post-construction %s content drift to Manifest Drift before the next child spawn', async (_label, relativePath) => {
+    const repository = createTransportWorkspace()
+    const transportModule = await workspaceTransportModule(repository)
+    const { config } = createConfig({}, repository)
+    const transport = transportModule.createLocalD1Transport(config)
+    writeFileSync(join(repository, relativePath), Buffer.concat([
+      readFileSync(join(repository, relativePath)),
+      Buffer.from('\n'),
+    ]))
+
+    expect(() => transport.execute(request('d1_identity'))).toThrowError(expect.objectContaining({
+      classification: transportModule.D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MANIFEST_DRIFT,
+    }))
   })
 
-  it('rejects a migration catalog tree mutation before the next child spawn', () => {
-    const marker = join(catalogPath, '999_issue_90_mutation.sql')
-    const { config } = createConfig()
-    try {
-      writeFileSync(marker, '-- mutation\n', { mode: 0o600 })
-      expect(() => createD1Transport(config)).toThrow('D1 transport malformed')
-    } finally {
-      unlinkSync(marker)
-    }
+  it('maps post-construction migration catalog drift to Manifest Drift before the next child spawn', async () => {
+    const repository = createTransportWorkspace()
+    const transportModule = await workspaceTransportModule(repository)
+    const { config } = createConfig({}, repository)
+    const transport = transportModule.createLocalD1Transport(config)
+    writeFileSync(join(repository, 'db/ledger-migrations/999_issue_90_mutation.sql'), '-- mutation\n', { mode: 0o600 })
+
+    expect(() => transport.execute(request('d1_identity'))).toThrowError(expect.objectContaining({
+      classification: transportModule.D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MANIFEST_DRIFT,
+    }))
   })
+
+  it('maps same-byte post-construction bound artifact identity replacement to Manifest Drift', async () => {
+    const repository = createTransportWorkspace()
+    const transportModule = await workspaceTransportModule(repository)
+    const { config } = createConfig({}, repository)
+    const transport = transportModule.createLocalD1Transport(config)
+    const path = join(repository, 'wrangler.toml')
+    const bytes = readFileSync(path)
+    rmSync(path)
+    writeFileSync(path, bytes, { mode: 0o644 })
+
+    expect(() => transport.execute(request('d1_identity'))).toThrowError(expect.objectContaining({
+      classification: transportModule.D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MANIFEST_DRIFT,
+    }))
+  })
+
+  it('isolates D1 artifact drift between concurrent test-owned repository fixtures', async () => {
+    const firstRepository = createTransportWorkspace()
+    const secondRepository = createTransportWorkspace()
+    const [firstModule, secondModule] = await Promise.all([
+      workspaceTransportModule(firstRepository),
+      workspaceTransportModule(secondRepository),
+    ])
+    const first = firstModule.createLocalD1Transport(createConfig({}, firstRepository).config)
+    const second = secondModule.createLocalD1Transport(createConfig({}, secondRepository).config)
+    writeFileSync(join(firstRepository, 'wrangler.toml'), `${readFileSync(join(firstRepository, 'wrangler.toml'))}\n`)
+
+    expect(() => first.execute(request('d1_identity'))).toThrowError(expect.objectContaining({
+      classification: firstModule.D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MANIFEST_DRIFT,
+    }))
+    expect(second.execute(request('d1_identity')).status).toBe(0)
+  }, 30_000)
 
   it('accepts the pinned Wrangler 4.86.0 D1 info fixture with write_queries_24h', () => {
     const info = readFileSync(
@@ -359,9 +421,13 @@ describe('Issue #90 D1 transport', () => {
       write_queries_24h: 7,
     })
     expect(() => parseRemoteD1InfoResponse(
+      info.replace('"uuid": "11111111-2222-4333-8444-555555555555"', '"uuid": "22222222-3333-4444-8555-666666666666"'),
+      '11111111-2222-4333-8444-555555555555',
+    )).toThrowError(expect.objectContaining({ code: 'DELIVERY_DATABASE_MISMATCH' }))
+    expect(() => parseRemoteD1InfoResponse(
       info.replace('"uuid": "11111111-2222-4333-8444-555555555555"', '"uuid": "11111111-2222-4333-8444-555555555555", "\\u0075uid": "forged"'),
       '11111111-2222-4333-8444-555555555555',
-    )).toThrow()
+    )).toThrowError(expect.not.objectContaining({ code: 'DELIVERY_DATABASE_MISMATCH' }))
   })
 
   it('accepts only the pinned Wrangler alpha D1 info variant', () => {
@@ -388,6 +454,14 @@ describe('Issue #90 D1 transport', () => {
     expect(parseWranglerWhoamiResponse(whoami, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).toMatchObject({
       loggedIn: true,
     })
+    expect(() => parseWranglerWhoamiResponse(
+      whoami.replace('"account:Workers Scripts:write"', '"account:Workers Scripts:read"'),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    )).toThrowError(expect.objectContaining({ code: 'DELIVERY_PERMISSION_INSUFFICIENT' }))
+    expect(() => parseWranglerWhoamiResponse(
+      whoami.replace('"id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"', '"id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"'),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    )).toThrowError(expect.objectContaining({ code: 'DELIVERY_ACCOUNT_MISMATCH' }))
     expect(() => parseWranglerWhoamiResponse(
       whoami.replace('"api_access_enabled": true', '"api_access_enabled": "true"'),
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',

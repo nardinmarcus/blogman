@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const cliPath = join(repoRoot, 'scripts', 'issue-23-reseal.mjs')
+const cliPath = join(repoRoot, 'scripts', 'issue-23-delivery-history-audit.mjs')
 const historicalPreflight = join(
   repoRoot,
   'tests',
@@ -60,8 +60,6 @@ const inputEvidenceGolden = join(
   'issue-23-reseal',
   'input-evidence-manifest-v2.json',
 )
-const phaseBRunbook = join(repoRoot, 'docs', 'issue-23-phase-b-runbook.md')
-
 function sha256(value: string | Buffer) {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -96,32 +94,20 @@ interface MutableInputEvidence {
   unreviewed?: boolean
 }
 
-describe('Issue #23 local reseal CLI', () => {
-  it('keeps Phase B tool, snapshot, artifact, and evidence paths explicitly separated', () => {
-    const runbook = readFileSync(phaseBRunbook, 'utf8')
+describe('Issue #23 historical audit CLI', () => {
+  it.each(['prepare', 'seal', 'verify', 'verify-build-directory'])(
+    'rejects retired mutating command %s',
+    (command) => {
+      const result = spawnSync(process.execPath, [cliPath, command], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      })
 
-    expect(runbook).toContain('TOOL_WORKSPACE=/absolute/path/to/blogman-tool-workspace')
-    expect(runbook).toContain('FROZEN_SNAPSHOT=/absolute/private/frozen/snapshot')
-    expect(runbook).toContain('FROZEN_ARTIFACTS=/absolute/private/frozen/artifacts')
-    expect(runbook).toContain('WRANGLER="$TOOL_WORKSPACE/node_modules/.bin/wrangler"')
-    expect(runbook).toContain('node "$TOOL_WORKSPACE/scripts/issue-23-reseal.mjs"')
-    expect(runbook).toContain('node "$TOOL_WORKSPACE/scripts/migrations.mjs"')
-    expect(runbook).toContain('git -C "$FROZEN_SNAPSHOT" rev-parse HEAD')
-    expect(runbook).toContain('--repo "$FROZEN_SNAPSHOT" --artifacts "$FROZEN_ARTIFACTS"')
-    expect(runbook).not.toMatch(/(?:^|\n)node scripts\//u)
-    expect(runbook).not.toContain('./node_modules/.bin/wrangler')
-    expect(runbook).not.toContain('$PWD')
-    expect(runbook).not.toContain('--config wrangler.toml')
-
-    const bashBlocks = [...runbook.matchAll(/```bash\n([\s\S]*?)\n```/gu)]
-      .map((match) => match[1])
-    expect(bashBlocks.length).toBeGreaterThan(0)
-    const syntax = spawnSync('bash', ['-n'], {
-      encoding: 'utf8',
-      input: `${bashBlocks.join('\n')}\n`,
-    })
-    expect(syntax.status, syntax.stderr).toBe(0)
-  })
+      expect(result.status).toBe(1)
+      expect(result.stdout).toBe('')
+      expect(result.stderr).toContain('Usage: issue-23-delivery-history-audit audit')
+    },
+  )
 
   it('validates the canonical input-evidence v2 schema and golden bytes', () => {
     const schema = JSON.parse(readFileSync(inputEvidenceSchema, 'utf8'))
@@ -133,7 +119,7 @@ describe('Issue #23 local reseal CLI', () => {
 
     const result = spawnSync(process.execPath, [
       cliPath,
-      'validate',
+      'audit',
       '--document',
       inputEvidenceGolden,
     ], {
@@ -145,7 +131,8 @@ describe('Issue #23 local reseal CLI', () => {
     expect(JSON.parse(result.stdout)).toEqual({
       format: 'blogman-issue-23-input-evidence-manifest/v2',
       sha256: sha256(goldenBytes),
-      state: 'valid',
+      acceptance_authority: false,
+      state: 'valid-historical',
     })
   })
 
@@ -215,7 +202,7 @@ describe('Issue #23 local reseal CLI', () => {
       writeFileSync(documentPath, `${JSON.stringify(document, null, 2)}\n`)
       const result = spawnSync(process.execPath, [
         cliPath,
-        'validate',
+        'audit',
         '--document',
         documentPath,
       ], {
@@ -232,7 +219,7 @@ describe('Issue #23 local reseal CLI', () => {
   it('validates the canonical historical local-preflight v2 fixture', () => {
     const result = spawnSync(process.execPath, [
       cliPath,
-      'validate',
+      'audit',
       '--document',
       historicalPreflight,
     ], {
@@ -244,14 +231,15 @@ describe('Issue #23 local reseal CLI', () => {
     expect(JSON.parse(result.stdout)).toEqual({
       format: 'blogman-local-preflight-candidate/v2',
       sha256: '7d056cbb8c41dcb53c3347fd10828a90a7e27c8c3e74020ab7a7dd0327c3689b',
-      state: 'valid',
+      acceptance_authority: false,
+      state: 'valid-historical',
     })
   })
 
   it('validates the canonical historical approval-packet v2 fixture', () => {
     const result = spawnSync(process.execPath, [
       cliPath,
-      'validate',
+      'audit',
       '--document',
       historicalApproval,
     ], {
@@ -263,14 +251,15 @@ describe('Issue #23 local reseal CLI', () => {
     expect(JSON.parse(result.stdout)).toEqual({
       format: 'blogman-issue-23-approval-packet/v2',
       sha256: '9ab75338f5ff001aa4f46c4ae118b6156b3e10f404268d5945a198065e440896',
-      state: 'valid',
+      acceptance_authority: false,
+      state: 'valid-historical',
     })
   })
 
   it('validates the canonical historical PRE-CAS bindings v2 fixture', () => {
     const result = spawnSync(process.execPath, [
       cliPath,
-      'validate',
+      'audit',
       '--document',
       historicalPreCas,
     ], {
@@ -282,14 +271,15 @@ describe('Issue #23 local reseal CLI', () => {
     expect(JSON.parse(result.stdout)).toEqual({
       format: 'blogman-issue-23-pre-cas-bindings/v2',
       sha256: '7ab048f46534a7c396c42827ea3d78f803268c116bb78681f9926c9eaba4366a',
-      state: 'valid',
+      acceptance_authority: false,
+      state: 'valid-historical',
     })
   })
 
   it('validates the canonical historical package-manifest v2 fixture', () => {
     const result = spawnSync(process.execPath, [
       cliPath,
-      'validate',
+      'audit',
       '--document',
       historicalPackageManifest,
     ], {
@@ -301,7 +291,8 @@ describe('Issue #23 local reseal CLI', () => {
     expect(JSON.parse(result.stdout)).toEqual({
       format: 'blogman-issue-23-package-manifest/v2',
       sha256: '9577277baf5fe9deff888db0742d340140dff01518717b794a3ab9a0927f75d3',
-      state: 'valid',
+      acceptance_authority: false,
+      state: 'valid-historical',
     })
   })
 
@@ -319,7 +310,7 @@ describe('Issue #23 local reseal CLI', () => {
 
       const result = spawnSync(process.execPath, [
         cliPath,
-        'validate',
+        'audit',
         '--document',
         documentPath,
       ], {
@@ -331,7 +322,8 @@ describe('Issue #23 local reseal CLI', () => {
       expect(JSON.parse(result.stdout)).toEqual({
         format: 'blogman-local-preflight-candidate/v2',
         sha256: 'be613179ab5d0c634121f086e6e33c31ff8629a48a3ec390661509860a0e83a5',
-        state: 'valid',
+        acceptance_authority: false,
+      state: 'valid-historical',
       })
     } finally {
       rmSync(directory, { recursive: true, force: true })
@@ -348,7 +340,7 @@ describe('Issue #23 local reseal CLI', () => {
     )
     const result = spawnSync(process.execPath, [
       cliPath,
-      'validate',
+      'audit',
       '--package',
       packagePath,
     ], {
@@ -387,7 +379,7 @@ describe('Issue #23 local reseal CLI', () => {
 
       const result = spawnSync(process.execPath, [
         cliPath,
-        'validate',
+        'audit',
         '--package',
         directory,
       ], {
@@ -412,7 +404,7 @@ describe('Issue #23 local reseal CLI', () => {
 
       const reordered = spawnSync(process.execPath, [
         cliPath,
-        'validate',
+        'audit',
         '--document',
         reorderedPath,
       ], {
@@ -430,7 +422,7 @@ describe('Issue #23 local reseal CLI', () => {
       writeFileSync(driftedPath, drifted)
       const oneByteDrift = spawnSync(process.execPath, [
         cliPath,
-        'validate',
+        'audit',
         '--document',
         driftedPath,
       ], {
@@ -454,7 +446,7 @@ describe('Issue #23 local reseal CLI', () => {
 
       const result = spawnSync(process.execPath, [
         cliPath,
-        'validate',
+        'audit',
         '--document',
         documentPath,
       ], {
@@ -515,7 +507,7 @@ describe('Issue #23 local reseal CLI', () => {
 
         const result = spawnSync(process.execPath, [
           cliPath,
-          'validate',
+          'audit',
           '--package',
           packagePath,
         ], {

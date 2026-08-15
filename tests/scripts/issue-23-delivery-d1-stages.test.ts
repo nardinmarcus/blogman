@@ -19,7 +19,8 @@ import {
   runD1Stages,
 } from '../../scripts/issue-23-delivery-d1-stages.mjs'
 import {
-  createD1Transport,
+  D1TransportError,
+  createLocalD1Transport,
 } from '../../scripts/issue-23-delivery-d1-transport.mjs'
 import { runWorkerStages } from '../../scripts/issue-23-delivery-worker-stages.mjs'
 
@@ -61,6 +62,9 @@ const BINDINGS = {
   rollout_safety_sha256: sha256File(join(repoRoot, 'scripts', 'rollout-safety.mjs')),
   expected_reconciliation_path: join(repoRoot, 'package.json'),
   expected_reconciliation_sha256: sha256File(join(repoRoot, 'package.json')),
+  manifest_sha256: '1'.repeat(64),
+  authorization_sha256: '2'.repeat(64),
+  attempt_id: '3'.repeat(64),
   candidate_id: 'c'.repeat(40),
   evidence_class: 'test-non-production',
   migrations: MIGRATIONS,
@@ -115,6 +119,9 @@ function createLocalIntegrationBindings(
     rollout_safety_sha256: sha256File(rolloutSafetyPath),
     expected_reconciliation_path: expectedPath,
     expected_reconciliation_sha256: sha256File(expectedPath),
+    manifest_sha256: '1'.repeat(64),
+    authorization_sha256: '2'.repeat(64),
+    attempt_id: '3'.repeat(64),
     candidate_id: 'c'.repeat(40),
     evidence_class: 'local-non-production',
     migrations: MIGRATIONS,
@@ -289,10 +296,48 @@ describe('Issue #23 D1 delivery stages', () => {
     })
 
     expect(result.value.evidence).toMatchObject({
-      source: 'untrusted-test-transport',
+      source: 'stage-runner-non-production',
       production: false,
       promotable: false,
     })
+  })
+
+  it('ignores caller-forged production provenance on the public stage runner', () => {
+    const productionBindings = { ...BINDINGS, evidence_class: 'production' }
+    const probe = runD1Stages({ bindings: productionBindings, transport: createSuccessTransport() })
+    const transport = Object.assign(createSuccessTransport(), {
+      evidence: {
+        source: 'production',
+        production: true,
+        bindings_sha256: probe.value.evidence.bindings_sha256,
+      },
+    })
+
+    const result = runD1Stages({ bindings: productionBindings, transport })
+
+    expect(result.value).toMatchObject({
+      outcome: 'PASS',
+      evidence: {
+        source: 'stage-runner-non-production',
+        production: false,
+        promotable: false,
+      },
+    })
+  })
+
+  it('preserves a transport account mismatch as Manifest Drift with no suffix', () => {
+    const transport = overrideTransport({
+      d1_identity: () => { throw new D1TransportError('manifest_drift') },
+    })
+
+    const result = runD1Stages({ bindings: BINDINGS, transport })
+
+    expect(result.value).toMatchObject({
+      outcome: 'NON_PASS',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'Manifest Drift' },
+    })
+    expect(transport.calls.map(({ operation }) => operation)).toEqual(['d1_identity'])
   })
 
   it('never marks an unbranded terminal failure promotable', () => {
@@ -312,7 +357,7 @@ describe('Issue #23 D1 delivery stages', () => {
     expect(result.value).toMatchObject({
       outcome: 'TIMEOUT',
       evidence: {
-        source: 'untrusted-test-transport',
+        source: 'stage-runner-non-production',
         production: false,
         promotable: false,
       },
@@ -403,7 +448,7 @@ describe('Issue #23 D1 delivery stages', () => {
 
   it('terminalizes a transport-A and bindings-B digest mismatch before any child call', () => {
     const transportBindingsA = createBoundTransportBindings()
-    const transportA = createD1Transport(transportBindingsA)
+    const transportA = createLocalD1Transport(transportBindingsA)
     const bindingsB = { ...transportBindingsA, candidate_id: 'd'.repeat(40) }
 
     const result = runD1Stages({ bindings: bindingsB, transport: transportA })
@@ -945,6 +990,28 @@ describe('Issue #23 D1 delivery stages', () => {
     expect(result.value.stage_durations_ms.migrations_001_006).not.toBe(expectedDuration * 2)
   })
 
+  it('stops a multi-operation Stage suffix when the actual monotonic Stage deadline expires', () => {
+    const transport = createSuccessTransport()
+    const successExecute = transport.execute.bind(transport)
+    let elapsedMs = 0
+    transport.execute = (request: Record<string, unknown>) => {
+      const response = successExecute(request)
+      if (request.operation === 'migration_catalog') elapsedMs = D1_STAGE_TIMEOUT_MS.migrations_001_006
+      return response
+    }
+
+    const result = runD1Stages({ bindings: BINDINGS, transport, monotonic_ms: () => elapsedMs })
+
+    expect(result.value).toMatchObject({
+      outcome: 'TIMEOUT',
+      first_terminal_stage: 'migrations_001_006',
+      failure: { classification: 'timeout' },
+    })
+    expect(transport.calls.map(({ operation }) => operation)).toEqual([
+      'd1_identity', 'clean_start_reset', 'empty_d1_proof', 'migration_catalog',
+    ])
+  })
+
   it('shares one monotonic 5,400-second budget with preconditions and Worker stages, including equality', () => {
     const livePreconditionsElapsedMs = 5_399_992
     const d1Transport = createSuccessTransport()
@@ -956,12 +1023,22 @@ describe('Issue #23 D1 delivery stages', () => {
     const d1ElapsedMs = Object.values(d1.value.stage_durations_ms).reduce((sum, duration) => sum + duration, 0)
     const workerCalls: unknown[] = []
     const worker = runWorkerStages({
-      bindings: { smoke: { requests: [] } },
+      bindings: {
+        manifest_sha256: '1'.repeat(64),
+        authorization_sha256: '2'.repeat(64),
+        attempt_id: '3'.repeat(64),
+        candidate_id: '4'.repeat(40),
+        smoke: { requests: [] },
+      },
       transport: { execute(request: unknown) { workerCalls.push(request); throw new Error('must not run') } },
       elapsed_ms: livePreconditionsElapsedMs + d1ElapsedMs,
     })
 
-    expect(d1.value.outcome).toBe('PASS')
+    expect(d1.value).toMatchObject({
+      outcome: 'TIMEOUT',
+      first_terminal_stage: 'reconciliation',
+      failure: { classification: 'overall_timeout' },
+    })
     expect(d1Transport.calls.map(({ request }) => request.overall_elapsed_ms)).toEqual([
       5_399_992, 5_399_993, 5_399_994, 5_399_995,
       5_399_996, 5_399_997, 5_399_998, 5_399_999,
@@ -986,12 +1063,90 @@ describe('Issue #23 D1 delivery stages', () => {
     })
   })
 
+  it('terminalizes d1_identity without dispatching any child when seeded Stage-owned setup exhausts the Stage budget', () => {
+    const transport = createSuccessTransport()
+
+    const result = runD1Stages({
+      bindings: BINDINGS,
+      transport,
+      elapsed_ms: 1,
+      monotonic_ms: () => 120_001,
+      initial_stage_started_ms: 1,
+    })
+
+    expect(result.value).toMatchObject({
+      outcome: 'TIMEOUT',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'timeout' },
+      stage_counts: {
+        d1_identity: 1,
+        clean_start_reset: 0,
+        empty_d1_proof: 0,
+        migrations_001_006: 0,
+        reconciliation: 0,
+      },
+      stage_durations_ms: { d1_identity: 120_000, clean_start_reset: 0 },
+    })
+    expect(transport.calls).toEqual([])
+  })
+
+  it('carries the seeded original Stage start into the d1_identity duration and child budget near the boundary', () => {
+    const transport = createSuccessTransport()
+
+    const result = runD1Stages({
+      bindings: BINDINGS,
+      transport,
+      elapsed_ms: 0,
+      monotonic_ms: () => 119_500,
+      initial_stage_started_ms: 0,
+    })
+
+    expect(result.value.outcome).toBe('PASS')
+    expect(result.value.stage_durations_ms.d1_identity).toBe(119_500)
+    const identityRequest = transport.calls[0]?.request as Record<string, number>
+    expect(identityRequest).toMatchObject({
+      operation: 'd1_identity',
+      timeout_ms: 120_000,
+      elapsed_ms: 119_500,
+      overall_elapsed_ms: 119_500,
+    })
+    expect(identityRequest.timeout_ms - identityRequest.elapsed_ms).toBe(500)
+  })
+
+  it('selects overall_timeout over the Stage budget from the seeded d1_identity clock when overall is tighter', () => {
+    const transport = createSuccessTransport()
+
+    const result = runD1Stages({
+      bindings: BINDINGS,
+      transport,
+      elapsed_ms: 5_399_000,
+      monotonic_ms: () => 5_400_000,
+      initial_stage_started_ms: 5_399_000,
+    })
+
+    expect(result.value).toMatchObject({
+      outcome: 'TIMEOUT',
+      first_terminal_stage: 'd1_identity',
+      failure: { classification: 'overall_timeout' },
+      stage_durations_ms: { d1_identity: 1_000 },
+    })
+    expect(transport.calls).toEqual([])
+  })
+
+  it.each([-1, 1.5, Number.NaN])('rejects invalid initial_stage_started_ms %s', (seed) => {
+    expect(() => runD1Stages({
+      bindings: BINDINGS,
+      transport: createSuccessTransport(),
+      initial_stage_started_ms: seed,
+    })).toThrow(/initial_stage_started_ms/u)
+  })
+
   it('composes the real local transport with all five D1 stages', () => {
     const statePath = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-90-stage-integration-')))
     temporaryDirectories.push(statePath)
     const expectedPath = createExpectedReconciliation(statePath)
     const bindings = createLocalIntegrationBindings(statePath, expectedPath)
-    const transport = createD1Transport(bindings)
+    const transport = createLocalD1Transport(bindings)
 
     const result = runD1Stages({ bindings, transport })
 

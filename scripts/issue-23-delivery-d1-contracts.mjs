@@ -104,6 +104,9 @@ const D1_STAGE_BINDING_KEYS = Object.freeze([
   'rollout_safety_sha256',
   'expected_reconciliation_path',
   'expected_reconciliation_sha256',
+  'manifest_sha256',
+  'authorization_sha256',
+  'attempt_id',
   'candidate_id',
   'evidence_class',
   'migrations',
@@ -325,7 +328,11 @@ export function parseRemoteD1InfoResponse(stdout, expectedDatabaseId) {
     assertString(response.name)
     assertNonNegativeInteger(response.num_tables)
     assertString(response.uuid)
-    if (response.uuid !== expectedDatabaseId) throw new Error('database identity drift')
+    if (response.uuid !== expectedDatabaseId) {
+      const error = new Error('database identity drift')
+      error.code = 'DELIVERY_DATABASE_MISMATCH'
+      throw error
+    }
     assertExactKeys(response.read_replication, ['mode'])
     if (!['auto', 'disabled'].includes(response.read_replication.mode)) {
       throw new Error('unsupported read replication mode')
@@ -341,10 +348,17 @@ export function parseRemoteD1InfoResponse(stdout, expectedDatabaseId) {
       throw new Error('unsupported D1 info version')
     }
     return response
-  } catch {
+  } catch (error) {
+    if (error?.code === 'DELIVERY_DATABASE_MISMATCH') throw error
     throw new Error('invalid Wrangler D1 info response')
   }
 }
+
+const REQUIRED_DELIVERY_TOKEN_PERMISSIONS = Object.freeze([
+  'account:Account Settings:read',
+  'account:D1:write',
+  'account:Workers Scripts:write',
+])
 
 export function parseWranglerWhoamiResponse(stdout, expectedAccountId) {
   try {
@@ -381,10 +395,18 @@ export function parseWranglerWhoamiResponse(stdout, expectedAccountId) {
       }
     }
     if (response.accounts.filter((account) => account.id === expectedAccountId).length !== 1) {
-      throw new Error('account identity drift')
+      const error = new Error('account identity drift')
+      error.code = 'DELIVERY_ACCOUNT_MISMATCH'
+      throw error
+    }
+    if (!REQUIRED_DELIVERY_TOKEN_PERMISSIONS.every((permission) => response.tokenPermissions.includes(permission))) {
+      const error = new Error('delivery token permissions are insufficient')
+      error.code = 'DELIVERY_PERMISSION_INSUFFICIENT'
+      throw error
     }
     return response
-  } catch {
+  } catch (error) {
+    if (['DELIVERY_ACCOUNT_MISMATCH', 'DELIVERY_PERMISSION_INSUFFICIENT'].includes(error?.code)) throw error
     throw new Error('invalid Wrangler identity response')
   }
 }

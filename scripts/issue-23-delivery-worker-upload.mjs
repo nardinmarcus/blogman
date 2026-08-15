@@ -17,41 +17,13 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { verifyBuildDirectory } from './issue-23-build-proof.mjs'
 
-export const PHASE_B_STAGES = Object.freeze([
-  'pre_cas_local_gates',
-  'cas1',
-  'd1_identity',
-  'upload',
-  'clean_start_reset',
-  'clean_start_empty_verify',
-  'remote_migration_plan',
-  'migrations_001_006',
-  'cas2',
-  'traffic',
-  'smoke_reconcile',
-  't0',
-])
-
 const sha256 = /^[a-f0-9]{64}$/
-const candidate = /^[a-f0-9]{40}$/
 const shellSafeAbsolutePath = /^\/[A-Za-z0-9._/-]+$/
 const uploadOperationId = /^issue-23-[a-f0-9]{40}-upload-1$/
-const wranglerD1FilePrefix = '\u251c Checking if file needs uploading\n\u2502\n'
-const envelopeKeys = ['finalBookmark', 'meta', 'results', 'success']
-const resultKeys = [
-  'Database size (MB)',
-  'Rows read',
-  'Rows written',
-  'Total queries executed',
-]
-
-function invalidWranglerD1FileResponse() {
-  throw new Error('Invalid Wrangler D1 file response')
-}
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -60,10 +32,6 @@ function isRecord(value) {
 function hasExactKeys(value, expected) {
   return isRecord(value)
     && JSON.stringify(Object.keys(value).sort()) === JSON.stringify(expected)
-}
-
-function isNonNegativeSafeInteger(value) {
-  return Number.isSafeInteger(value) && value >= 0
 }
 
 function isPositiveSafeInteger(value) {
@@ -167,105 +135,6 @@ function assertUniqueJsonObjectKeys(json) {
   scanValue()
   skipWhitespace()
   if (index !== json.length) throw new SyntaxError()
-}
-
-function parseStrictJson(json) {
-  try {
-    const value = JSON.parse(json)
-    assertUniqueJsonObjectKeys(json)
-    return value
-  } catch {
-    invalidWranglerD1FileResponse()
-  }
-}
-
-function parseWranglerD1FileResponse(stdout) {
-  if (typeof stdout !== 'string') invalidWranglerD1FileResponse()
-  const json = stdout.startsWith(wranglerD1FilePrefix)
-    ? stdout.slice(wranglerD1FilePrefix.length)
-    : stdout
-  const response = parseStrictJson(json)
-  if (!Array.isArray(response) || response.length !== 1) {
-    invalidWranglerD1FileResponse()
-  }
-
-  const entry = response[0]
-  if (!hasExactKeys(entry, envelopeKeys)
-    || entry.success !== true
-    || typeof entry.finalBookmark !== 'string'
-    || entry.finalBookmark.trim() !== entry.finalBookmark
-    || entry.finalBookmark.length === 0
-    || !isRecord(entry.meta)
-    || !Array.isArray(entry.results)
-    || entry.results.length !== 1) {
-    invalidWranglerD1FileResponse()
-  }
-
-  const row = entry.results[0]
-  if (!hasExactKeys(row, resultKeys)
-    || !isPositiveSafeInteger(row['Total queries executed'])
-    || !isNonNegativeSafeInteger(row['Rows read'])
-    || !isNonNegativeSafeInteger(row['Rows written'])
-    || typeof row['Database size (MB)'] !== 'string'
-    || !/^\d+\.\d{2}$/.test(row['Database size (MB)'])
-    || !isNonNegativeSafeInteger(entry.meta.rows_read)
-    || !isNonNegativeSafeInteger(entry.meta.rows_written)
-    || !isNonNegativeSafeInteger(entry.meta.size_after)
-    || row['Rows read'] !== entry.meta.rows_read
-    || row['Rows written'] !== entry.meta.rows_written
-    || row['Database size (MB)'] !== (entry.meta.size_after / 1e6).toFixed(2)) {
-    invalidWranglerD1FileResponse()
-  }
-  return response
-}
-
-function hasCleanStartAuthorization(bindings) {
-  const disposition = bindings.historicalDataDisposition
-  return bindings.deliveryMode === 'clean-start'
-    && sha256.test(bindings.cleanStartResetSqlSha256)
-    && Object.isFrozen(disposition)
-    && disposition.productionExport === 'NOT_APPLICABLE'
-    && disposition.doubleRestore === 'NOT_APPLICABLE'
-    && disposition.historicalBaselineQueries === 'NOT_APPLICABLE'
-    && JSON.stringify(Object.keys(disposition).sort()) === JSON.stringify([
-      'doubleRestore',
-      'historicalBaselineQueries',
-      'productionExport',
-    ])
-}
-
-function validateInputs(configPath, bindings) {
-  if (!isAbsolute(configPath)) throw new Error('Phase B requires an absolute CONFIG path')
-  try {
-    if (!lstatSync(configPath).isFile()) throw new Error()
-  } catch {
-    throw new Error('Phase B requires an absolute CONFIG path to an existing regular file')
-  }
-  if (!Object.isFrozen(bindings)) throw new Error('Phase B requires immutable Phase B bindings')
-  if (!candidate.test(bindings.candidateId)
-    || !sha256.test(bindings.approvalPacketSha256)
-    || !sha256.test(bindings.buildArchiveSha256)
-    || !bindings.baselineDeploymentId
-    || !bindings.baselineVersionId
-    || !bindings.baselineD1DatabaseId) {
-    throw new Error('Phase B bindings are incomplete or invalid')
-  }
-  if (!hasCleanStartAuthorization(bindings)) {
-    throw new Error('Phase B clean-start authorization is incomplete or invalid')
-  }
-}
-
-export async function runPhaseBSequence({ configPath, bindings, runStage }) {
-  validateInputs(configPath, bindings)
-  if (typeof runStage !== 'function') throw new Error('Phase B requires a stage executor')
-
-  const context = Object.freeze({ configPath, bindings })
-  const counts = Object.fromEntries(PHASE_B_STAGES.map((stage) => [stage, 0]))
-  for (const stage of PHASE_B_STAGES) {
-    counts[stage] += 1
-    await runStage(stage, context)
-  }
-  return Object.freeze(counts)
 }
 
 async function bindUploadAssetsDirectory(configPath, uploadSourceDirectory) {
@@ -623,6 +492,25 @@ function verifyFrozenSnapshotAgainstArchive(archive, destination, archiveSha256)
   return Buffer.from(`${JSON.stringify(proof)}\n`)
 }
 
+function executionDirectoryIdentity(path) {
+  if (!isAbsolute(path) || path !== resolve(path) || !shellSafeAbsolutePath.test(path)) throw new Error()
+  const metadata = lstatSync(path)
+  if (!metadata.isDirectory() || metadata.isSymbolicLink() || realpathSync(path) !== path
+    || (typeof process.getuid === 'function' && metadata.uid !== process.getuid())
+    || (metadata.mode & 0o022) !== 0) {
+    throw new Error()
+  }
+  return Object.freeze({ dev: metadata.dev, ino: metadata.ino, uid: metadata.uid, mode: metadata.mode & 0o777 })
+}
+
+function assertExecutionDirectoryIdentity(path, expected) {
+  const actual = executionDirectoryIdentity(path)
+  if (actual.dev !== expected.dev || actual.ino !== expected.ino
+    || actual.uid !== expected.uid || actual.mode !== expected.mode) {
+    throw new Error()
+  }
+}
+
 function verifyBoundExecutable(path, expectedSha256) {
   if (!sha256.test(expectedSha256 || '')
     || !isAbsolute(path) || path !== resolve(path) || !shellSafeAbsolutePath.test(path)
@@ -842,6 +730,7 @@ async function runUploadSourceLifecycle({
   npmSha256,
   openNextPath,
   openNextSha256,
+  workingDirectory,
   source,
   destination,
   operationId,
@@ -854,6 +743,7 @@ async function runUploadSourceLifecycle({
   const uploadOutputPath = process.env.WRANGLER_OUTPUT_FILE_PATH
   const held = []
   const evidence = []
+  const workingIdentity = executionDirectoryIdentity(workingDirectory)
   try {
     held.push(...holdStablePathChain(reportDirectory, 'directory', 0o700))
     const configChain = holdStablePathChain(config, 'file')
@@ -908,6 +798,17 @@ async function runUploadSourceLifecycle({
     verifyBoundExecutable(nodePath, nodeSha256)
     verifyBoundExecutable(npmPath, npmSha256)
     verifyBoundExecutable(openNextPath, openNextSha256)
+    const npmBinDirectory = [dirname(npmPath), dirname(nodePath)].find((directory) => {
+      try { return realpathSync(join(directory, 'npm')) === npmPath } catch { return false }
+    })
+    if (!npmBinDirectory) throw new Error()
+    assertExecutionDirectoryIdentity(workingDirectory, workingIdentity)
+    const uploadEnvironment = {
+      ...process.env,
+      PATH: [...new Set([npmBinDirectory, dirname(nodePath)])].join(delimiter),
+      npm_execpath: npmPath,
+      npm_node_execpath: nodePath,
+    }
 
     const upload = spawnSync(nodePath, [
       openNextPath, 'upload',
@@ -915,10 +816,12 @@ async function runUploadSourceLifecycle({
       '--message', operationId,
       '--assets', join(destination, 'assets'),
     ], {
-      env: process.env,
-      stdio: ['inherit', 2, 2],
+      cwd: workingDirectory,
+      env: uploadEnvironment,
+      stdio: ['ignore', 'ignore', 'ignore'],
     })
 
+    assertExecutionDirectoryIdentity(workingDirectory, workingIdentity)
     captureHeldEvidence(uploadEvidence, true)
     await verifyConfigBinding()
     const after = verifyUploadSourceSnapshot(
@@ -967,42 +870,44 @@ function isMainModule() {
 async function runCli() {
   if (process.argv[2] === 'run-upload-source-lifecycle') {
     try {
-      if (process.argv.length !== 35
+      if (process.argv.length !== 37
         || process.argv[3] !== '--node-path'
         || process.argv[5] !== '--node-sha256'
         || process.argv[7] !== '--npm-path'
         || process.argv[9] !== '--npm-sha256'
         || process.argv[11] !== '--open-next-path'
         || process.argv[13] !== '--open-next-sha256'
-        || process.argv[15] !== '--config'
-        || process.argv[17] !== '--source'
-        || process.argv[19] !== '--destination'
-        || process.argv[21] !== '--operation-id'
-        || process.argv[23] !== '--proof-before'
-        || process.argv[25] !== '--proof-after'
-        || process.argv[27] !== '--archive'
-        || process.argv[29] !== '--archive-sha256'
-        || process.argv[31] !== '--build-proof'
-        || process.argv[33] !== '--expected-config-sha256') {
+        || process.argv[15] !== '--working-directory'
+        || process.argv[17] !== '--config'
+        || process.argv[19] !== '--source'
+        || process.argv[21] !== '--destination'
+        || process.argv[23] !== '--operation-id'
+        || process.argv[25] !== '--proof-before'
+        || process.argv[27] !== '--proof-after'
+        || process.argv[29] !== '--archive'
+        || process.argv[31] !== '--archive-sha256'
+        || process.argv[33] !== '--build-proof'
+        || process.argv[35] !== '--expected-config-sha256') {
         throw new Error()
       }
       const acceptance = await runUploadSourceLifecycle({
-        archive: process.argv[28],
-        archiveSha256: process.argv[30],
-        buildProofPath: process.argv[32],
-        config: process.argv[16],
-        expectedConfigSha256: process.argv[34],
+        archive: process.argv[30],
+        archiveSha256: process.argv[32],
+        buildProofPath: process.argv[34],
+        config: process.argv[18],
+        expectedConfigSha256: process.argv[36],
         nodePath: process.argv[4],
         nodeSha256: process.argv[6],
         npmPath: process.argv[8],
         npmSha256: process.argv[10],
         openNextPath: process.argv[12],
         openNextSha256: process.argv[14],
-        source: process.argv[18],
-        destination: process.argv[20],
-        operationId: process.argv[22],
-        proofBeforePath: process.argv[24],
-        proofAfterPath: process.argv[26],
+        workingDirectory: process.argv[16],
+        source: process.argv[20],
+        destination: process.argv[22],
+        operationId: process.argv[24],
+        proofBeforePath: process.argv[26],
+        proofAfterPath: process.argv[28],
       })
       process.stdout.write(`${JSON.stringify(acceptance)}\n`)
     } catch {
@@ -1073,16 +978,8 @@ async function runCli() {
     return
   }
 
-  try {
-    if (process.argv.length !== 3 || process.argv[2] !== 'validate-wrangler-d1-file-response') {
-      invalidWranglerD1FileResponse()
-    }
-    parseWranglerD1FileResponse(readFileSync(0, 'utf8'))
-    process.stdout.write('{"state":"valid"}\n')
-  } catch {
-    process.stderr.write('Invalid Wrangler D1 file response\n')
-    process.exitCode = 1
-  }
+  process.stderr.write('Invalid Issue #23 Worker upload command\n')
+  process.exitCode = 1
 }
 
 if (isMainModule()) await runCli()

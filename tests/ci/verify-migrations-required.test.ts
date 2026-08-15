@@ -63,7 +63,7 @@ describe('verify-migrations change classifier', () => {
 
   it.each([
     'docs/issue-23-phase-b-runbook.md',
-    'scripts/issue-23-reseal.mjs',
+    'scripts/issue-23-delivery-history-audit.mjs',
     'scripts/rollout-safety.mjs',
     'tests/migrations/rollout-safety.test.ts',
     '.github/workflows/verify.yml',

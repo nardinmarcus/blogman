@@ -1,12 +1,22 @@
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import {
-  filterReconciliationSchemaRows,
-  parseD1QueryResponse,
-} from '../../scripts/rollout-safety.mjs'
+import { filterReconciliationSchemaRows, parseD1QueryResponse } from '../../scripts/rollout-safety.mjs'
 
 const rows = [{ count: 14 }]
 
 describe('rollout safety D1 response parser', () => {
+  it('executes the public controls-status --remote CLI through the boolean gate without a D1 call', () => {
+    const script = fileURLToPath(new URL('../../scripts/rollout-safety.mjs', import.meta.url))
+    const result = spawnSync(process.execPath, [script, 'rollout', 'controls-status', '--remote'], {
+      encoding: 'utf8',
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toBe('Missing required option --database\n')
+  })
+
   it('excludes only the two exact D1-internal tables from final reconciliation', () => {
     expect(filterReconciliationSchemaRows([
       { type: 'table', name: '_cf_KV', tbl_name: '_cf_KV', sql: 'internal' },

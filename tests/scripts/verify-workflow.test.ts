@@ -66,12 +66,15 @@ describe('Verify workflow test partition', () => {
     expect(macosJob).toContain('timeout-minutes: 20')
     expect(macosJob).toContain("ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}")
     expect(macosJob).toContain('GH_TOKEN: ${{ github.token }}')
-    expect(macosJob.match(/run: npm run test:run/g)).toHaveLength(2)
+    expect(macosJob.match(/run: npm run test:run/g)).toHaveLength(3)
     expect(macosJob).toContain(
       'run: npm run test:run -- tests/scripts/issue-23-delivery-prepare.test.ts --reporter=verbose',
     )
     expect(macosJob).toContain(
       'run: npm run test:run -- tests/scripts/issue-92-formal-rehearsal.test.ts --reporter=verbose',
+    )
+    expect(macosJob).toContain(
+      "run: npm run test:run -- tests/scripts/issue-23-delivery-durability.test.ts -t 'case-equivalent canonical namespace alias' --reporter=verbose",
     )
     expect(macosJob).not.toContain('workflow_run')
     expect(macosJob).not.toMatch(/secrets\.|contents: write|actions: write/u)

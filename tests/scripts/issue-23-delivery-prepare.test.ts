@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, cpSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -20,9 +20,16 @@ import {
 import { runLocalRehearsal, runLocalRehearsalForTestsOnly } from '../../scripts/issue-23-delivery-rehearsal.mjs'
 import { hashD1ArtifactDirectory as contractHashD1ArtifactDirectory } from '../../scripts/issue-23-delivery-d1-contracts.mjs'
 import { buildFormalRuntimeReceipt } from '../../scripts/issue-23-delivery-formal-runtime.mjs'
+import {
+  FORMAL_EXECUTION_CLOSURE_PATHS,
+  formalExecutionClosureSha256,
+} from '../../scripts/issue-23-delivery-execution-closure.mjs'
 import nextConfig from '../../next.config'
 
 const projectRequire = createRequire(import.meta.url)
+const { parsePatchFile } = projectRequire('patch-package/dist/patch/parse.js') as {
+  parsePatchFile(file: string): unknown[]
+}
 
 function installedPackageRoot(packageName: string) {
   let directory = dirname(projectRequire.resolve(packageName))
@@ -97,8 +104,12 @@ function baseConfig() {
         sha256: hash('c'),
       },
       execute_entry: {
-        path: 'scripts/phase-b-sequence.mjs',
+        path: 'scripts/issue-23-delivery-entry.mjs',
         sha256: hash('d'),
+      },
+      worker_upload_entry: {
+        path: 'scripts/issue-23-delivery-worker-upload.mjs',
+        sha256: hash('1'),
       },
       manifest_schema: {
         path: 'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
@@ -166,13 +177,13 @@ function baseConfig() {
     },
     target: {
       account_id: 'account-public-id',
-      d1_database_id: 'd1-public-id',
+      d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
       worker_name: 'blogman',
       origin: 'https://blog.example.com',
       baseline: {
         deployment_id: 'deployment-before',
         version_id: 'version-before',
-        d1_database_id: 'd1-public-id',
+        d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
         traffic: [{ version_id: 'version-before', percentage: 100 }],
       },
     },
@@ -182,6 +193,7 @@ function baseConfig() {
         one_shot: true,
         credential_slots: [
           { name: 'cloudflare_delivery', scopes: ['account:read', 'workers:write', 'd1:write'] },
+          { name: 'delivery_smoke_admin', scopes: ['admin:smoke'] },
         ],
       },
       stages: DEFAULT_STAGE_POLICY,
@@ -328,9 +340,92 @@ function runBoundedChild(
   })
 }
 
-function prepareFixture(
+function runConcurrentChild(executable: string, args: string[], cwd: string) {
+  return new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+    const child = spawn(executable, args, { cwd, stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    child.once('error', reject)
+    child.once('close', (code) => resolve({ code, stderr }))
+  })
+}
+
+type PrepareFixtureOptions = Record<string, unknown> & {
+  repositoryPath?: string
+  inspectArtifactRepository?: (
+    artifactRepositoryPath: string,
+    prepared: ReturnType<typeof prepareForTestsOnly>,
+  ) => void
+}
+
+function copyConfiguredFakeFixtureInputs(config: ReturnType<typeof baseConfig>, artifactRepositoryPath: string) {
+  const paths = new Set([
+    ...FORMAL_EXECUTION_CLOSURE_PATHS,
+    config.migration.reset_sql.path,
+    config.migration.runner.path,
+    config.migration.catalog.path,
+    ...config.migration.catalog.migrations.map((entry) => entry.path),
+    config.artifact.worker.path,
+    ...config.artifact.file_tree.files.map((entry) => entry.path),
+  ].filter((path) => !path.startsWith('.open-next/') && path !== 'wrangler.toml'))
+  for (const relativePath of paths) {
+    const source = join(repoRoot, relativePath)
+    if (!existsSync(source)) continue
+    const destination = join(artifactRepositoryPath, relativePath)
+    rmSync(destination, { recursive: true, force: true })
+    mkdirSync(dirname(destination), { recursive: true })
+    cpSync(source, destination, { recursive: true, verbatimSymlinks: true })
+  }
+}
+
+function createFakePrepareArtifactRepository(config: ReturnType<typeof baseConfig>) {
+  const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-prepare-artifact-'))
+  const artifactRepositoryPath = join(directory, 'repository')
+  execFileSync('git', ['worktree', 'add', '--detach', artifactRepositoryPath, 'HEAD'], {
+    cwd: repoRoot,
+    stdio: 'pipe',
+  })
+  const fixtureBinDirectory = join(artifactRepositoryPath, 'node_modules', '.bin')
+  mkdirSync(fixtureBinDirectory, { recursive: true })
+  for (const executable of ['wrangler', 'opennextjs-cloudflare']) {
+    symlinkSync(
+      realpathSync(join(repoRoot, 'node_modules', '.bin', executable)),
+      join(fixtureBinDirectory, executable),
+      'file',
+    )
+  }
+  copyConfiguredFakeFixtureInputs(config, artifactRepositoryPath)
+  return { directory, artifactRepositoryPath }
+}
+
+function removeFakePrepareArtifactRepository(fixture: ReturnType<typeof createFakePrepareArtifactRepository>) {
+  try {
+    execFileSync('git', ['worktree', 'remove', '--force', fixture.artifactRepositoryPath], {
+      cwd: repoRoot,
+      stdio: 'pipe',
+    })
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true })
+  }
+}
+
+function withFakePrepareRepository<T>(
   config: ReturnType<typeof baseConfig>,
-  { repositoryPath = repoRoot, ...fixtureOptions }: Record<string, unknown> & { repositoryPath?: string } = {},
+  callback: (repositoryPath: string) => T,
+) {
+  const fixture = createFakePrepareArtifactRepository(config)
+  try {
+    return callback(fixture.artifactRepositoryPath)
+  } finally {
+    removeFakePrepareArtifactRepository(fixture)
+  }
+}
+
+function runPrepareFixture(
+  config: ReturnType<typeof baseConfig>,
+  repositoryPath: string,
+  fixtureOptions: Record<string, unknown>,
 ) {
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repositoryPath, encoding: 'utf8' }).trim()
   const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repositoryPath, encoding: 'utf8' }).trim()
@@ -357,21 +452,56 @@ function prepareFixture(
   })
 }
 
-function withIsolatedRepositoryFixture<T>(callback: (repositoryPath: string) => T): T {
-  return withTemporaryDirectory('blogman-issue-23-isolated-', (directory) => {
+function prepareFixture(config: ReturnType<typeof baseConfig>, options: PrepareFixtureOptions = {}) {
+  const { repositoryPath, inspectArtifactRepository, ...fixtureOptions } = options
+  const fakeBuild = !Object.hasOwn(fixtureOptions, 'buildRunner') || fixtureOptions.buildRunner !== undefined
+  if (repositoryPath || !fakeBuild) {
+    const prepared = runPrepareFixture(config, repositoryPath ?? repoRoot, fixtureOptions)
+    inspectArtifactRepository?.(repositoryPath ?? repoRoot, prepared)
+    return prepared
+  }
+  const artifactFixture = createFakePrepareArtifactRepository(config)
+  try {
+    const prepared = runPrepareFixture(config, artifactFixture.artifactRepositoryPath, fixtureOptions)
+    inspectArtifactRepository?.(artifactFixture.artifactRepositoryPath, prepared)
+    return prepared
+  } finally {
+    removeFakePrepareArtifactRepository(artifactFixture)
+  }
+}
+
+function withIsolatedRepositoryFixture<T>(
+  callback: (repositoryPath: string) => T,
+  { materializeDarwinDependencies = false } = {},
+): T {
+  const directory = mkdtempSync(join(dirname(repoRoot), '.blogman-issue-23-isolated-'))
+  try {
     const repositoryPath = join(directory, 'repository')
     execFileSync('git', ['clone', '--local', repoRoot, repositoryPath], { stdio: 'pipe' })
-    const fixtureBinDirectory = join(repositoryPath, 'node_modules', '.bin')
-    mkdirSync(fixtureBinDirectory, { recursive: true })
-    for (const executable of ['wrangler', 'opennextjs-cloudflare']) {
-      symlinkSync(
-        realpathSync(join(repoRoot, 'node_modules', '.bin', executable)),
-        join(fixtureBinDirectory, executable),
-        'file',
-      )
+    for (const path of FORMAL_EXECUTION_CLOSURE_PATHS) {
+      copyFileSync(join(repoRoot, path), join(repositoryPath, path))
+    }
+    if (materializeDarwinDependencies) {
+      execFileSync('/bin/cp', [
+        '-cR',
+        join(repoRoot, 'node_modules'),
+        join(repositoryPath, 'node_modules'),
+      ], { stdio: 'pipe', timeout: 120_000 })
+    } else {
+      const fixtureBinDirectory = join(repositoryPath, 'node_modules', '.bin')
+      mkdirSync(fixtureBinDirectory, { recursive: true })
+      for (const executable of ['wrangler', 'opennextjs-cloudflare']) {
+        symlinkSync(
+          realpathSync(join(repoRoot, 'node_modules', '.bin', executable)),
+          join(fixtureBinDirectory, executable),
+          'file',
+        )
+      }
     }
     return callback(repositoryPath)
-  })
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 }
 
 describe('repository remote canonicalization', () => {
@@ -399,6 +529,13 @@ describe('repository remote canonicalization', () => {
 })
 
 describe('target macOS formal runtime receipt', () => {
+  it('includes the private Worker upload execution and its build-proof dependency in the formal closure', () => {
+    expect(FORMAL_EXECUTION_CLOSURE_PATHS).toEqual(expect.arrayContaining([
+      'scripts/issue-23-delivery-worker-upload.mjs',
+      'scripts/issue-23-build-proof.mjs',
+    ]))
+  })
+
   it('binds the target receipt, runtime, toolchain, and formal entry independently of the host OS', () => {
     const prepared = prepareFixture(baseConfig())
     const { runtime, runtime_receipt: receipt } = prepared.value.rehearsal
@@ -411,7 +548,7 @@ describe('target macOS formal runtime receipt', () => {
     expect(receipt).toEqual(RUNTIME_RECEIPT)
     expect(receipt.entry).toEqual({
       path: 'scripts/issue-23-delivery-entry.mjs',
-      identity_sha256: sha256(readFileSync(join(repoRoot, 'scripts/issue-23-delivery-entry.mjs'))),
+      identity_sha256: formalExecutionClosureSha256(repoRoot),
     })
     for (const tool of ['node', 'npm', 'wrangler', 'opennextjs_cloudflare', 'curl'] as const) {
       expect(receipt[tool]).toEqual(prepared.value.toolchain[tool])
@@ -833,11 +970,36 @@ try {
   })
 })
 
+function canonicalCheckoutSnapshot() {
+  const paths = [
+    '.next',
+    '.open-next',
+    'tests/scripts/.issue-23-external-link.bin',
+  ]
+  return {
+    status: execFileSync('git', ['status', '--porcelain=v1', '-uall'], { cwd: repoRoot, encoding: 'utf8' }),
+    tree: execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoRoot, encoding: 'utf8' }).trim(),
+    present: Object.fromEntries(paths.map((path) => {
+      try {
+        lstatSync(join(repoRoot, path))
+        return [path, true]
+      } catch {
+        return [path, false]
+      }
+    })),
+  }
+}
+
+function expectCanonicalCheckoutUntouched(before: ReturnType<typeof canonicalCheckoutSnapshot>) {
+  expect(Object.values(before.present).some(Boolean)).toBe(false)
+  expect(canonicalCheckoutSnapshot()).toEqual(before)
+}
+
 function expectPreArchiveFailure(callback: () => unknown) {
-  const archivePath = join(repoRoot, '.open-next', 'open-next-build.zip')
-  rmSync(archivePath, { force: true })
+  const checkout = canonicalCheckoutSnapshot()
+  expectCanonicalCheckoutUntouched(checkout)
   expect(callback).toThrow()
-  expect(existsSync(archivePath)).toBe(false)
+  expectCanonicalCheckoutUntouched(checkout)
 }
 
 function readPatchContract(relativePath: string) {
@@ -856,6 +1018,13 @@ type FlightReferenceSpec = {
   query: string
   layer: string
   async: boolean
+}
+
+type WebpackPlugin = new () => { apply(compiler: unknown): void }
+
+type ExternalModuleIdentity = {
+  canonical: string
+  unrelated: string
 }
 
 async function emitFlightManifest(
@@ -983,6 +1152,95 @@ function createPatchedNextFixture() {
   }
 }
 
+async function loadPatchedExternalModuleIdPlugins(directory: string) {
+  const nextRoot = join(directory, 'node_modules', 'next')
+  const cjsPluginPath = join(nextRoot, 'dist', 'build', 'webpack', 'plugins', 'canonical-app-render-external-module-ids-plugin.js')
+  const esmPluginPath = join(nextRoot, 'dist', 'esm', 'build', 'webpack', 'plugins', 'canonical-app-render-external-module-ids-plugin.js')
+  const plugins: Array<{ label: string; Plugin?: WebpackPlugin }> = [
+    {
+      label: 'CJS',
+      Plugin: existsSync(cjsPluginPath)
+        ? (await import(pathToFileURL(cjsPluginPath).href)).CanonicalAppRenderExternalModuleIdsPlugin
+        : undefined,
+    },
+  ]
+
+  if (!existsSync(esmPluginPath)) return [...plugins, { label: 'ESM', Plugin: undefined }]
+  const esmBundlePath = join(directory, 'canonical-app-render-external-module-ids-plugin.esm.cjs')
+  buildSync({
+    bundle: true,
+    entryPoints: [esmPluginPath],
+    format: 'cjs',
+    outfile: esmBundlePath,
+    platform: 'node',
+    logLevel: 'silent',
+  })
+  const esm = await import(pathToFileURL(esmBundlePath).href)
+  return [...plugins, { label: 'ESM', Plugin: esm.CanonicalAppRenderExternalModuleIdsPlugin as WebpackPlugin }]
+}
+
+async function compileExternalModuleIdentity(
+  directory: string,
+  aliases: string[],
+  Plugin?: WebpackPlugin,
+): Promise<ExternalModuleIdentity> {
+  const compilerRoot = mkdtempSync(join(directory, 'module-id-'))
+  const canonicalRequest = 'next/dist/server/app-render/work-unit-async-storage.external.js'
+  const unrelatedRequest = 'unrelated-external-package'
+  writeFileSync(
+    join(compilerRoot, 'entry.js'),
+    aliases.map((request) => `require(${JSON.stringify(request)})`).join('\n'),
+  )
+  const { webpack } = projectRequire('next/dist/compiled/webpack/webpack') as {
+    webpack: (config: unknown, callback: (error?: Error, stats?: {
+      hasErrors(): boolean
+      toJson(options: unknown): { modules?: Array<{ id?: string; identifier?: string }> }
+      toString(options: unknown): string
+    }) => void) => void
+  }
+
+  try {
+    return await new Promise((resolve, reject) => {
+      webpack({
+        context: compilerRoot,
+        entry: './entry.js',
+        externals: [({ request }: { request: string }, callback: (error?: Error | null, result?: string) => void) => {
+          if (request === './alias-alpha' || request === './alias-zeta') {
+            callback(null, canonicalRequest)
+            return
+          }
+          if (request === './unrelated-external') {
+            callback(null, unrelatedRequest)
+            return
+          }
+          callback()
+        }],
+        externalsType: 'commonjs',
+        mode: 'production',
+        optimization: { minimize: false, moduleIds: 'named' },
+        output: { filename: 'output.js', path: join(compilerRoot, 'dist') },
+        plugins: Plugin ? [new Plugin()] : [],
+        target: 'node',
+      }, (error, stats) => {
+        if (error) return reject(error)
+        if (!stats || stats.hasErrors()) return reject(new Error(stats?.toString({ errors: true }) ?? 'Webpack produced no stats'))
+        const modules = stats.toJson({ all: false, ids: true, modules: true }).modules ?? []
+        const idFor = (request: string) => modules.find(
+          (module) => module.identifier === `external commonjs ${JSON.stringify(request)}`,
+        )?.id
+        const canonical = idFor(canonicalRequest)
+        const unrelated = idFor(unrelatedRequest)
+        if (typeof canonical !== 'string' || typeof unrelated !== 'string') {
+          return reject(new Error(`Missing external module IDs: ${JSON.stringify(modules)}`))
+        }
+        resolve({ canonical, unrelated })
+      })
+    })
+  } finally {
+    rmSync(compilerRoot, { recursive: true, force: true })
+  }
+}
+
 async function loadPatchedFlightManifestPlugins(directory: string) {
   const nextRoot = join(directory, 'node_modules', 'next')
   const rscModules = { 'app/client.tsx': { moduleId: 'rsc-shared-id', async: false } }
@@ -1042,7 +1300,7 @@ function readFlightManifestSharedIdOutcome(bytes: string) {
   return Object.values(manifest.clientModules)[0] as { async: boolean; id: string }
 }
 
-function buildFileMap(result: ReturnType<typeof prepareFixture>) {
+function buildFileMap(repositoryPath: string, result: ReturnType<typeof prepareFixture>) {
   const artifactPaths = new Set(
     result.value.artifact.file_tree.files
       .map(({ path }) => path)
@@ -1052,7 +1310,7 @@ function buildFileMap(result: ReturnType<typeof prepareFixture>) {
   return [...artifactPaths]
     .sort()
     .map((path) => {
-      const bytes = readFileSync(join(repoRoot, path))
+      const bytes = readFileSync(join(repositoryPath, path))
       return { path, bytes: bytes.byteLength, sha256: sha256(bytes) }
     })
 }
@@ -1091,6 +1349,18 @@ function firstChangedByteContext(before: Buffer | string, after: Buffer | string
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 describe('Issue #23 Delivery Preparation', () => {
+  it('patch contract: every tracked patch parses with patch-package', () => {
+    const trackedPatches = execFileSync('git', ['ls-files', '--', 'patches/*.patch'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    }).trim().split('\n').filter(Boolean)
+
+    expect(trackedPatches.length).toBeGreaterThan(0)
+    for (const relativePath of trackedPatches) {
+      expect(() => parsePatchFile(readPatchContract(relativePath)), relativePath).not.toThrow()
+    }
+  })
+
   it('manifest-order contract: stabilizes Next CJS pages-manifest serialization', () => {
     const patch = readPatchContract('patches/next+16.2.6.patch')
 
@@ -1121,6 +1391,48 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(patch).toContain('a/node_modules/next/dist/esm/build/webpack/plugins/flight-manifest-plugin.js')
     expect(patch).toContain('sortManifestObjectKeys')
     expect(patch).toContain('Array.isArray')
+  })
+
+  it('module-id patch contract: installs the canonicalizer in Next CJS server webpack config', () => {
+    const patch = readPatchContract('patches/next+16.2.6.patch')
+
+    expect(patch).toContain('a/node_modules/next/dist/build/webpack-config.js')
+    expect(patch).toContain('require("./webpack/plugins/canonical-app-render-external-module-ids-plugin")')
+    expect(patch).toContain('isNodeServer && !isRspack && new _canonicalapprenderexternalmoduleidsplugin.CanonicalAppRenderExternalModuleIdsPlugin()')
+  })
+
+  it('module-id patch contract: installs the canonicalizer in Next ESM server webpack config', () => {
+    const patch = readPatchContract('patches/next+16.2.6.patch')
+
+    expect(patch).toContain('a/node_modules/next/dist/esm/build/webpack-config.js')
+    expect(patch).toContain("import { CanonicalAppRenderExternalModuleIdsPlugin } from './webpack/plugins/canonical-app-render-external-module-ids-plugin'")
+    expect(patch).toContain('isNodeServer && !isRspack && new CanonicalAppRenderExternalModuleIdsPlugin()')
+  })
+
+  it('module-id contract: canonicalizes real app-render .external.js requests before named IDs', { timeout: PATCHED_NEXT_FIXTURE_TEST_TIMEOUT_MS }, async () => {
+    const fixture = createPatchedNextFixture()
+    try {
+      const plugins = await loadPatchedExternalModuleIdPlugins(fixture)
+      for (const { label, Plugin } of plugins) {
+        const forward = await compileExternalModuleIdentity(
+          fixture,
+          ['./alias-alpha', './alias-zeta', './unrelated-external'],
+          Plugin,
+        )
+        const reversed = await compileExternalModuleIdentity(
+          fixture,
+          ['./alias-zeta', './alias-alpha', './unrelated-external'],
+          Plugin,
+        )
+
+        expect(forward.canonical, label).toBe('next/dist/server/app-render/work-unit-async-storage.external.js')
+        expect(reversed.canonical, label).toBe(forward.canonical)
+        expect(forward.unrelated, label).toBe('./unrelated-external')
+        expect(reversed.unrelated, label).toBe(forward.unrelated)
+      }
+    } finally {
+      rmSync(fixture, { recursive: true, force: true })
+    }
   })
 
   it('manifest-order contract: emits identical flight manifests for equivalent chunk traversal order', async () => {
@@ -1261,15 +1573,15 @@ describe('Issue #23 Delivery Preparation', () => {
         checksum: hash(String(index + 1)),
       })),
     }
-    writeFileSync(join(repoRoot, runnerPath), `process.stdout.write(${JSON.stringify(JSON.stringify(catalog))})\n`)
-
-    try {
-      const config = baseConfig()
+    const config = baseConfig()
+    withFakePrepareRepository(config, (repositoryPath) => {
+      writeFileSync(join(repositoryPath, runnerPath), `process.stdout.write(${JSON.stringify(JSON.stringify(catalog))})\n`)
       config.migration.runner.path = runnerPath
-      config.migration.runner.sha256 = sha256(readFileSync(join(repoRoot, runnerPath)))
+      config.migration.runner.sha256 = sha256(readFileSync(join(repositoryPath, runnerPath)))
       config.migration.catalog.sha256 = sha256(Buffer.from(JSON.stringify(catalog)))
       let rehearsalRunnerPath = ''
       const result = prepareFixture(config, {
+        repositoryPath,
         rehearsalRunner: ({ migrationRunnerPath }: { migrationRunnerPath: string }) => {
           rehearsalRunnerPath = migrationRunnerPath
           return testRehearsalResult()
@@ -1278,16 +1590,16 @@ describe('Issue #23 Delivery Preparation', () => {
 
       expect(result.value.migration.catalog.sha256).toBe(sha256(Buffer.from(JSON.stringify(catalog))))
       expect(rehearsalRunnerPath).toBe(runnerPath)
-    } finally {
-      rmSync(join(repoRoot, runnerPath), { force: true })
-    }
+    })
   })
 
   it('binds configured migration names checksums catalog and declared hashes', () => {
     const runnerPath = 'tests/scripts/.issue-23-configured-runner-binding.mjs'
     const catalogPath = 'tests/scripts/.issue-23-catalog-binding'
-    const catalogDirectory = join(repoRoot, catalogPath)
-    const canonicalCatalogDirectory = join(repoRoot, 'db/ledger-migrations')
+    const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
+    const repositoryPath = artifactFixture.artifactRepositoryPath
+    const catalogDirectory = join(repositoryPath, catalogPath)
+    const canonicalCatalogDirectory = join(repositoryPath, 'db/ledger-migrations')
     const captureDirectory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-migration-binding-'))
     const capturePath = join(captureDirectory, 'argv.jsonl')
     const captureArguments = () => readFileSync(capturePath, 'utf8')
@@ -1308,7 +1620,7 @@ describe('Issue #23 Delivery Preparation', () => {
       return {
         ...entry,
         path,
-        sha256: sha256(readFileSync(join(repoRoot, path))),
+        sha256: sha256(readFileSync(join(repositoryPath, path))),
       }
     })
     const goodCatalog = {
@@ -1322,7 +1634,7 @@ describe('Issue #23 Delivery Preparation', () => {
     const declaredCatalogSha256 = sha256(Buffer.from(JSON.stringify(goodCatalog)))
 
     const writeRunner = (catalog: typeof goodCatalog) => {
-      writeFileSync(join(repoRoot, runnerPath), `
+      writeFileSync(join(repositoryPath, runnerPath), `
         import { appendFileSync } from 'node:fs'
         const args = process.argv.slice(2)
         appendFileSync(${JSON.stringify(capturePath)}, JSON.stringify(args) + '\\n')
@@ -1342,12 +1654,13 @@ describe('Issue #23 Delivery Preparation', () => {
       writeRunner(catalog)
       const config = baseConfig()
       config.migration.runner.path = runnerPath
-      config.migration.runner.sha256 = sha256(readFileSync(join(repoRoot, runnerPath)))
+      config.migration.runner.sha256 = sha256(readFileSync(join(repositoryPath, runnerPath)))
       config.migration.catalog.path = catalogPath
       config.migration.catalog.sha256 = declaredCatalogSha256
       config.migration.catalog.migrations = configuredEntries
       mutateConfig(config)
       return withTargetMacosRuntime(() => prepareFixture(config, {
+        repositoryPath,
         rehearsalRunner: ({
           repositoryPath,
           migrationRunnerPath,
@@ -1442,9 +1755,59 @@ describe('Issue #23 Delivery Preparation', () => {
           .toThrow(/migration|catalog|sha256/u)
       }
     } finally {
-      rmSync(join(repoRoot, runnerPath), { force: true })
-      rmSync(catalogDirectory, { recursive: true, force: true })
       rmSync(captureDirectory, { recursive: true, force: true })
+      removeFakePrepareArtifactRepository(artifactFixture)
+    }
+  }, 15_000)
+
+  it('isolates parallel fixture outputs while keeping the canonical repository clean', async () => {
+    const checkoutStatus = execFileSync('git', ['status', '--porcelain=v1', '-uall'], { cwd: repoRoot, encoding: 'utf8' })
+    const checkoutTree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoRoot, encoding: 'utf8' }).trim()
+    const checkoutOwnedPaths = [
+      join(repoRoot, '.next'),
+      join(repoRoot, '.open-next'),
+      join(repoRoot, 'tests/scripts/.issue-23-external-link.bin'),
+    ]
+    expect(checkoutOwnedPaths.some((path) => existsSync(path))).toBe(false)
+    const first = createFakePrepareArtifactRepository(baseConfig())
+    const second = createFakePrepareArtifactRepository(baseConfig())
+    expect(first.artifactRepositoryPath).not.toBe(second.artifactRepositoryPath)
+    const secondBuildRoot = join(second.artifactRepositoryPath, '.open-next')
+    const inputs = ['assets/index.html', 'runtime.js', 'worker.js']
+    try {
+      fixtureBuild(first.artifactRepositoryPath, { artifact: baseConfig().artifact })
+      fixtureBuild(second.artifactRepositoryPath, { artifact: baseConfig().artifact })
+      const identities = Object.fromEntries(inputs.map((path) => [
+        path,
+        sha256(readFileSync(join(secondBuildRoot, path))),
+      ]))
+
+      const [cleanup, archive] = await Promise.all([
+        runConcurrentChild(process.execPath, [
+          '-e',
+          "require('node:fs').rmSync(process.argv[1], { recursive: true, force: true })",
+          join(first.artifactRepositoryPath, '.open-next'),
+        ], repoRoot),
+        runConcurrentChild('zip', ['-X', '-q', 'open-next-build.zip', ...inputs], secondBuildRoot),
+      ])
+
+      expect(cleanup).toEqual({ code: 0, stderr: '' })
+      expect(archive).toEqual({ code: 0, stderr: '' })
+      expect(existsSync(join(first.artifactRepositoryPath, '.open-next'))).toBe(false)
+      expect(Object.fromEntries(inputs.map((path) => [
+        path,
+        sha256(readFileSync(join(secondBuildRoot, path))),
+      ]))).toEqual(identities)
+      expect(execFileSync('unzip', ['-Z1', join(secondBuildRoot, 'open-next-build.zip')], { encoding: 'utf8' })
+        .trim().split(/\r?\n/u).filter(Boolean)).toEqual(inputs)
+      expect(execFileSync('git', ['status', '--porcelain=v1', '-uall'], { cwd: repoRoot, encoding: 'utf8' }))
+        .toBe(checkoutStatus)
+      expect(execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoRoot, encoding: 'utf8' }).trim())
+        .toBe(checkoutTree)
+      expect(checkoutOwnedPaths.some((path) => existsSync(path))).toBe(false)
+    } finally {
+      removeFakePrepareArtifactRepository(first)
+      removeFakePrepareArtifactRepository(second)
     }
   }, 15_000)
 
@@ -1458,6 +1821,8 @@ describe('Issue #23 Delivery Preparation', () => {
   })
 
   it('keeps only the configured direct archive out of file_tree while binding it separately', () => {
+    let archiveBytes = Buffer.alloc(0)
+    let archiveEntries: string[] = []
     const result = prepareFixture(baseConfig(), {
       buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
         fixtureBuild(repositoryPath, options)
@@ -1466,12 +1831,15 @@ describe('Issue #23 Delivery Preparation', () => {
         mkdirSync(dirname(nestedArchive), { recursive: true })
         writeFileSync(nestedArchive, 'nested deployable bytes\n')
       },
+      inspectArtifactRepository: (repositoryPath, prepared) => {
+        const path = join(repositoryPath, prepared.value.artifact.archive.path)
+        archiveBytes = readFileSync(path)
+        archiveEntries = execFileSync('unzip', ['-Z1', path], { encoding: 'utf8' })
+          .trim().split(/\r?\n/u).filter(Boolean)
+      },
     })
     const paths = result.value.artifact.file_tree.files.map((file) => file.path)
     const archivePath = result.value.artifact.archive.path
-    const archiveBytes = readFileSync(join(repoRoot, archivePath))
-    const archiveEntries = execFileSync('unzip', ['-Z1', join(repoRoot, archivePath)], { encoding: 'utf8' })
-      .trim().split(/\r?\n/u).filter(Boolean)
 
     expect(paths).not.toContain(archivePath)
     expect(paths).toContain('.open-next/nested/open-next-build.zip')
@@ -1483,6 +1851,7 @@ describe('Issue #23 Delivery Preparation', () => {
   })
 
   it('excludes generated private files from archive membership', () => {
+    let archiveEntries: string[] = []
     const result = prepareFixture(baseConfig(), {
       buildRunner: (repositoryPath: string, options: Parameters<typeof fixtureBuild>[1]) => {
         fixtureBuild(repositoryPath, options)
@@ -1490,13 +1859,15 @@ describe('Issue #23 Delivery Preparation', () => {
         mkdirSync(privateDirectory, { recursive: true })
         writeFileSync(join(privateDirectory, 'secret.txt'), 'private fixture\n')
       },
+      inspectArtifactRepository: (repositoryPath, prepared) => {
+        archiveEntries = execFileSync(
+          'unzip',
+          ['-Z1', join(repositoryPath, prepared.value.artifact.archive.path)],
+          { encoding: 'utf8' },
+        ).trim().split(/\r?\n/u).filter(Boolean)
+      },
     })
     const paths = result.value.artifact.file_tree.files.map((file) => file.path)
-    const archiveEntries = execFileSync(
-      'unzip',
-      ['-Z1', join(repoRoot, '.open-next/open-next-build.zip')],
-      { encoding: 'utf8' },
-    ).trim().split(/\r?\n/u).filter(Boolean)
 
     expect(paths).not.toContain('.open-next/private/secret.txt')
     expect(archiveEntries).not.toContain('private/secret.txt')
@@ -1575,10 +1946,26 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(thrown?.message).toMatch(/symbolic link/u)
   })
 
+  it('fails closed when the exact Wrangler config Worker or D1 target differs', { timeout: 15_000 }, () => {
+    const wrongWorker = baseConfig()
+    wrongWorker.target.worker_name = 'different-worker'
+    expect(() => prepareFixture(wrongWorker)).toThrow(/Wrangler config Worker name.*target/u)
+
+    const wrongD1 = baseConfig()
+    wrongD1.target.d1_database_id = 'different-d1-id'
+    wrongD1.target.baseline.d1_database_id = 'different-d1-id'
+    expect(() => prepareFixture(wrongD1)).toThrow(/Wrangler config DB identity.*target/u)
+  })
+
   it('binds generated deployable bytes and final config bytes, not the committed source tree', () => {
-    const result = prepareFixture(baseConfig())
-    const archiveBytes = readFileSync(join(repoRoot, '.open-next/open-next-build.zip'))
-    const workerBytes = readFileSync(join(repoRoot, '.open-next/worker.js'))
+    let archiveBytes = Buffer.alloc(0)
+    let workerBytes = Buffer.alloc(0)
+    const result = prepareFixture(baseConfig(), {
+      inspectArtifactRepository: (repositoryPath, prepared) => {
+        archiveBytes = readFileSync(join(repositoryPath, prepared.value.artifact.archive.path))
+        workerBytes = readFileSync(join(repositoryPath, prepared.value.artifact.worker.path))
+      },
+    })
     const configBytes = readFileSync(join(repoRoot, 'wrangler.toml'))
     const paths = result.value.artifact.file_tree.files.map((file) => file.path)
 
@@ -1768,6 +2155,17 @@ describe('Issue #23 Delivery Preparation', () => {
     expect(result.value.policy.overall_timeout_seconds).toBe(5400)
   })
 
+  it('requires the delivery smoke credential slot and exact smoke scope', { timeout: 15_000 }, () => {
+    const missing = baseConfig()
+    missing.policy.authorization.credential_slots = missing.policy.authorization.credential_slots
+      .filter((slot) => slot.name !== 'delivery_smoke_admin')
+    expect(() => prepareFixture(missing)).toThrow(/delivery_smoke_admin|credential.*canonical|required/u)
+
+    const wrongScope = baseConfig()
+    wrongScope.policy.authorization.credential_slots[1].scopes = ['admin:write']
+    expect(() => prepareFixture(wrongScope)).toThrow(/admin:smoke|credential.*canonical|required/u)
+  })
+
   it('fails closed when a fixed stage policy is mutated', () => {
     const mutated = baseConfig()
     const stages: Array<{ name: string; timeout_seconds: number }> = mutated.policy.stages.map(
@@ -1777,6 +2175,20 @@ describe('Issue #23 Delivery Preparation', () => {
     Reflect.set(mutated.policy, 'stages', stages)
 
     expect(() => prepareFixture(mutated)).toThrow(/fixed Issue #23 order and timeouts/u)
+  })
+
+  it('rejects retired or missing entry bindings before producing a manifest', { timeout: 10_000 }, () => {
+    const retiredExecute = baseConfig()
+    retiredExecute.preparation.execute_entry.path = 'scripts/issue-23-delivery-prepare.mjs'
+    expect(() => prepareFixture(retiredExecute)).toThrow(/formal delivery entry/u)
+
+    const alternateUpload = baseConfig()
+    alternateUpload.preparation.worker_upload_entry.path = 'scripts/issue-23-delivery-prepare.mjs'
+    expect(() => prepareFixture(alternateUpload)).toThrow(/private Worker upload entry/u)
+
+    const missingUpload = baseConfig()
+    Reflect.deleteProperty(missingUpload.preparation, 'worker_upload_entry')
+    expect(() => prepareFixture(missingUpload)).toThrow(/worker_upload_entry.*required/u)
   })
 
   it('rejects unknown fields and material secret, SQL, or private-path input', () => {
@@ -1798,9 +2210,13 @@ describe('Issue #23 Delivery Preparation', () => {
   })
 
   it('rejects a repository symlink whose target is outside the canonical root', () => {
+    const checkout = canonicalCheckoutSnapshot()
+    expectCanonicalCheckoutUntouched(checkout)
     const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-symlink-'))
+    const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
+    const repositoryPath = artifactFixture.artifactRepositoryPath
     const externalPath = join(directory, 'operator-material.bin')
-    const linkPath = join(repoRoot, 'tests', 'scripts', '.issue-23-external-link.bin')
+    const linkPath = join(repositoryPath, 'tests', 'scripts', '.issue-23-external-link.bin')
     const externalBytes = Buffer.from('private operator material\n', 'utf8')
     writeFileSync(externalPath, externalBytes)
     symlinkSync(externalPath, linkPath)
@@ -1811,7 +2227,7 @@ describe('Issue #23 Delivery Preparation', () => {
 
       let thrown: Error | undefined
       try {
-        prepareFixture(config)
+        prepareFixture(config, { repositoryPath })
       } catch (error) {
         thrown = error as Error
       }
@@ -1821,17 +2237,20 @@ describe('Issue #23 Delivery Preparation', () => {
       expect(thrown?.message).not.toContain(sha256(externalBytes))
       expect(thrown?.message).not.toContain(String(externalBytes.length))
     } finally {
-      rmSync(linkPath, { force: true })
+      removeFakePrepareArtifactRepository(artifactFixture)
       rmSync(directory, { recursive: true, force: true })
+      expectCanonicalCheckoutUntouched(checkout)
     }
   })
 
   it('rejects a repository catalog-directory symlink before external catalog bytes drive preparation', () => {
     const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-catalog-symlink-'))
+    const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
+    const repositoryPath = artifactFixture.artifactRepositoryPath
     const externalCatalogDirectory = join(directory, 'catalog')
     const externalCatalogPath = join(externalCatalogDirectory, 'catalog.json')
     const reachedPath = join(externalCatalogDirectory, 'reached')
-    const linkPath = join(repoRoot, 'tests', 'scripts', '.issue-23-external-catalog-directory')
+    const linkPath = join(repositoryPath, 'tests', 'scripts', '.issue-23-external-catalog-directory')
     const runnerPath = 'tests/scripts/.issue-23-external-catalog-runner.mjs'
     const catalog = {
       format: 'blogman-migration-catalog/v1',
@@ -1845,7 +2264,7 @@ describe('Issue #23 Delivery Preparation', () => {
 
     mkdirSync(externalCatalogDirectory, { recursive: true })
     writeFileSync(externalCatalogPath, catalogBytes)
-    writeFileSync(join(repoRoot, runnerPath), `
+    writeFileSync(join(repositoryPath, runnerPath), `
       import { appendFileSync, readFileSync } from 'node:fs'
       import { join } from 'node:path'
       const args = process.argv.slice(2)
@@ -1858,13 +2277,13 @@ describe('Issue #23 Delivery Preparation', () => {
     try {
       const config = baseConfig()
       config.migration.runner.path = runnerPath
-      config.migration.runner.sha256 = sha256(readFileSync(join(repoRoot, runnerPath)))
+      config.migration.runner.sha256 = sha256(readFileSync(join(repositoryPath, runnerPath)))
       config.migration.catalog.path = 'tests/scripts/.issue-23-external-catalog-directory'
       config.migration.catalog.sha256 = sha256(catalogBytes)
 
       let thrown: Error | undefined
       try {
-        prepareFixture(config)
+        prepareFixture(config, { repositoryPath })
       } catch (error) {
         thrown = error as Error
       }
@@ -1873,17 +2292,20 @@ describe('Issue #23 Delivery Preparation', () => {
       expect(thrown?.message).toMatch(/escapes repository/u)
     } finally {
       rmSync(linkPath, { force: true })
-      rmSync(join(repoRoot, runnerPath), { force: true })
+      rmSync(join(repositoryPath, runnerPath), { force: true })
+      removeFakePrepareArtifactRepository(artifactFixture)
       rmSync(directory, { recursive: true, force: true })
     }
   })
 
   it('rejects a repository catalog-directory symlink before building local rehearsal argv', () => {
     const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-rehearsal-catalog-symlink-'))
+    const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
+    const repositoryPath = artifactFixture.artifactRepositoryPath
     const reachedPath = join(directory, 'reached')
-    const linkPath = join(repoRoot, 'tests', 'scripts', '.issue-23-rehearsal-catalog-directory')
+    const linkPath = join(repositoryPath, 'tests', 'scripts', '.issue-23-rehearsal-catalog-directory')
     const runnerPath = 'tests/scripts/.issue-23-rehearsal-catalog-runner.mjs'
-    writeFileSync(join(repoRoot, runnerPath), `
+    writeFileSync(join(repositoryPath, runnerPath), `
       import { appendFileSync } from 'node:fs'
       appendFileSync(${JSON.stringify(reachedPath)}, JSON.stringify(process.argv.slice(2)))
       process.stdout.write(JSON.stringify({ state: 'current' }))
@@ -1894,7 +2316,7 @@ describe('Issue #23 Delivery Preparation', () => {
       let thrown: Error | undefined
       try {
         runLocalRehearsalForTestsOnly({
-          repositoryPath: repoRoot,
+          repositoryPath,
           runnerPath,
           migrationCatalogPath: 'tests/scripts/.issue-23-rehearsal-catalog-directory',
           manifestDraftSha256: hash('a'),
@@ -1907,7 +2329,8 @@ describe('Issue #23 Delivery Preparation', () => {
       expect(thrown?.message).toMatch(/escapes repository/u)
     } finally {
       rmSync(linkPath, { force: true })
-      rmSync(join(repoRoot, runnerPath), { force: true })
+      rmSync(join(repositoryPath, runnerPath), { force: true })
+      removeFakePrepareArtifactRepository(artifactFixture)
       rmSync(directory, { recursive: true, force: true })
     }
   })
@@ -2110,7 +2533,6 @@ describe('Issue #23 Delivery Preparation', () => {
 
     const adapter = { calls: 0 }
     prepareFixture(baseConfig(), {
-      repositoryPath: repoRoot,
       productionWriteAdapter: adapter,
       rehearsalRunner: () => {
         invocations += 1
@@ -2141,17 +2563,7 @@ describe('Issue #23 Delivery Preparation', () => {
       execFileSync('git', ['clone', '--local', repoRoot, fixtureRepo])
       execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/nardinmarcus/blogman.git'], { cwd: fixtureRepo })
       const copiedPaths = [
-        'scripts/issue-23-delivery-prepare.mjs',
-        'scripts/issue-23-delivery-entry.mjs',
-        'scripts/issue-23-delivery-formal-fault-harness.mjs',
-        'scripts/issue-23-delivery-formal-context.mjs',
-        'scripts/issue-23-delivery-rehearsal.mjs',
-        'scripts/issue-23-delivery-d1-child.mjs',
-        'scripts/issue-23-delivery-d1-contracts.mjs',
-        'scripts/issue-23-delivery-d1-stages.mjs',
-        'scripts/issue-23-delivery-d1-transport.mjs',
-        'scripts/issue-23-delivery-worker-transport.mjs',
-        'scripts/issue-23-delivery-worker-stages.mjs',
+        ...FORMAL_EXECUTION_CLOSURE_PATHS,
         'schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
       ]
       for (const path of copiedPaths) copyFileSync(join(repoRoot, path), join(fixtureRepo, path))
@@ -2255,80 +2667,92 @@ exec wrangler "$@"
   ))
 
   it.runIf(process.platform === 'darwin')('[F1] binds repeatable real OpenNext 1.19.10 outputs on target macOS', { timeout: 8 * 60_000 }, () => {
-    const realConfig = baseConfig()
-    realConfig.artifact.file_tree.files[0].path = '.open-next/assets/BUILD_ID'
-    const snapshotRoot = mkdtempSync(join('/tmp', 'blogman-s3w23-f1.'))
-    const handlerPaths = [
-      '.open-next/middleware/handler.mjs',
-      '.open-next/server-functions/default/handler.mjs',
-      '.open-next/server-functions/default/handler.mjs.meta.json',
-    ]
+    const checkout = canonicalCheckoutSnapshot()
+    expectCanonicalCheckoutUntouched(checkout)
+    try {
+      return withIsolatedRepositoryFixture((repositoryPath) => {
+        const realConfig = baseConfig()
+        realConfig.artifact.file_tree.files[0].path = '.open-next/assets/BUILD_ID'
+        const snapshotRoot = mkdtempSync(join('/tmp', 'blogman-s3w23-f1.'))
+        const handlerPaths = [
+          '.open-next/middleware/handler.mjs',
+          '.open-next/server-functions/default/handler.mjs',
+          '.open-next/server-functions/default/handler.mjs.meta.json',
+        ]
 
-    const captureRun = (run: number) => {
-      rmSync(join(repoRoot, '.next'), { recursive: true, force: true })
-      rmSync(join(repoRoot, '.open-next'), { recursive: true, force: true })
-      const result = prepareFixture(realConfig, { buildRunner: undefined })
-      const fileMap = buildFileMap(result)
-      const jsBytes = Object.fromEntries(
-        fileMap
-          .filter(({ path }) => path.endsWith('.js') || path.endsWith('.mjs'))
-          .map(({ path }) => [path, readFileSync(join(repoRoot, path))]),
-      )
-      const snapshot = {
-        run,
-        manifest: { bytes: result.bytes.byteLength, sha256: result.sha256 },
-        artifact: result.value.artifact,
-        handlerFiles: handlerPaths.map((path) => fileMap.find((file) => file.path === path)),
-        fileMap,
-      }
-      writeFileSync(join(snapshotRoot, `run${run}.json`), `${JSON.stringify(snapshot, null, 2)}\n`)
-      writeFileSync(join(snapshotRoot, `run${run}-file-map.json`), `${JSON.stringify(fileMap, null, 2)}\n`)
-      return { result, fileMap, snapshot, jsBytes }
-    }
-
-    const first = captureRun(1)
-    const second = captureRun(2)
-    const generatedRuntimeDependencyFiles = first.result.value.artifact.file_tree.files
-      .filter(({ path }) => path.startsWith('.open-next/server-functions/default/node_modules/'))
-      .map(({ path }) => path)
-    const archiveEntries = execFileSync(
-      'unzip',
-      ['-Z1', join(repoRoot, first.result.value.artifact.archive.path)],
-      { encoding: 'utf8' },
-    ).trim().split(/\r?\n/u).filter(Boolean)
-    expect(generatedRuntimeDependencyFiles.length).toBeGreaterThan(0)
-    for (const path of generatedRuntimeDependencyFiles) {
-      expect(archiveEntries).toContain(path.slice('.open-next/'.length))
-    }
-    const diff = fileMapDiff(first.fileMap, second.fileMap)
-    const firstChangedPath = diff.changed.find(({ path }) =>
-      path.endsWith('.js') || path.endsWith('.mjs'),
-    )?.path
-    const firstChangedByte = firstChangedPath
-      ? {
-          path: firstChangedPath,
-          detail: firstChangedByteContext(first.jsBytes[firstChangedPath], second.jsBytes[firstChangedPath]),
+        const captureRun = (run: number) => {
+          rmSync(join(repositoryPath, '.next'), { recursive: true, force: true })
+          rmSync(join(repositoryPath, '.open-next'), { recursive: true, force: true })
+          const result = prepareFixture(realConfig, {
+            repositoryPath,
+            buildRunner: undefined,
+            verifyGeneratedResolverLinks: true,
+          })
+          const fileMap = buildFileMap(repositoryPath, result)
+          const jsBytes = Object.fromEntries(
+            fileMap
+              .filter(({ path }) => path.endsWith('.js') || path.endsWith('.mjs'))
+              .map(({ path }) => [path, readFileSync(join(repositoryPath, path))]),
+          )
+          const snapshot = {
+            run,
+            manifest: { bytes: result.bytes.byteLength, sha256: result.sha256 },
+            artifact: result.value.artifact,
+            handlerFiles: handlerPaths.map((path) => fileMap.find((file) => file.path === path)),
+            fileMap,
+          }
+          writeFileSync(join(snapshotRoot, `run${run}.json`), `${JSON.stringify(snapshot, null, 2)}\n`)
+          writeFileSync(join(snapshotRoot, `run${run}-file-map.json`), `${JSON.stringify(fileMap, null, 2)}\n`)
+          return { result, fileMap, snapshot, jsBytes }
         }
-      : null
-    const report = {
-      format: 'blogman-s3w23-f1/v1',
-      snapshotRoot,
-      runs: [first.snapshot, second.snapshot],
-      diff,
-      equalityAssertionsPerformed: false,
-    }
-    writeFileSync(join(snapshotRoot, 'diff-manifest.json'), `${JSON.stringify(diff, null, 2)}\n`)
-    writeFileSync(join(snapshotRoot, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
 
-    expect(diff, JSON.stringify({ diff, firstChangedByte })).toEqual({
-      added: [],
-      removed: [],
-      changed: [],
-    })
-    expect(first.fileMap).toEqual(second.fileMap)
-    expect(first.result.bytes).toEqual(second.result.bytes)
-    expect(first.result.sha256).toBe(second.result.sha256)
-    expect(first.snapshot.handlerFiles).toEqual(second.snapshot.handlerFiles)
+        const first = captureRun(1)
+        const second = captureRun(2)
+        const generatedRuntimeDependencyFiles = first.result.value.artifact.file_tree.files
+          .filter(({ path }) => path.startsWith('.open-next/server-functions/default/node_modules/'))
+          .map(({ path }) => path)
+        const archiveEntries = execFileSync(
+          'unzip',
+          ['-Z1', join(repositoryPath, first.result.value.artifact.archive.path)],
+          { encoding: 'utf8' },
+        ).trim().split(/\r?\n/u).filter(Boolean)
+        expect(generatedRuntimeDependencyFiles.length).toBeGreaterThan(0)
+        for (const path of generatedRuntimeDependencyFiles) {
+          expect(archiveEntries).toContain(path.slice('.open-next/'.length))
+        }
+        const diff = fileMapDiff(first.fileMap, second.fileMap)
+        const firstChangedPath = diff.changed.find(({ path }) =>
+          path.endsWith('.js') || path.endsWith('.mjs'),
+        )?.path
+        const firstChangedByte = firstChangedPath
+          ? {
+              path: firstChangedPath,
+              detail: firstChangedByteContext(first.jsBytes[firstChangedPath], second.jsBytes[firstChangedPath]),
+            }
+          : null
+        const report = {
+          format: 'blogman-s3w23-f1/v1',
+          snapshotRoot,
+          runs: [first.snapshot, second.snapshot],
+          diff,
+          equalityAssertionsPerformed: false,
+        }
+        writeFileSync(join(snapshotRoot, 'diff-manifest.json'), `${JSON.stringify(diff, null, 2)}\n`)
+        writeFileSync(join(snapshotRoot, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
+
+        expect(diff, JSON.stringify({ diff, firstChangedByte })).toEqual({
+          added: [],
+          removed: [],
+          changed: [],
+        })
+        expect(first.fileMap).toEqual(second.fileMap)
+        expect(first.result.bytes).toEqual(second.result.bytes)
+        expect(first.result.sha256).toBe(second.result.sha256)
+        expect(first.snapshot.handlerFiles).toEqual(second.snapshot.handlerFiles)
+      }, { materializeDarwinDependencies: true })
+    } finally {
+      expectCanonicalCheckoutUntouched(checkout)
+    }
   })
 
   it('F1 reports first changed byte context for bounded synthetic buffers', () => {
@@ -2364,7 +2788,9 @@ exec wrangler "$@"
 
   it('reports the formal command timeout instead of a generic apply failure', () => {
     const runnerPath = 'tests/scripts/.issue-23-timeout-runner.mjs'
-    writeFileSync(join(repoRoot, runnerPath), `
+    const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
+    const repositoryPath = artifactFixture.artifactRepositoryPath
+    writeFileSync(join(repositoryPath, runnerPath), `
       const command = process.argv[2]
       if (command === 'catalog') {
         process.stdout.write(JSON.stringify({ migrations: [1, 2, 3, 4, 5, 6].map((number) => ({ number })) }))
@@ -2377,19 +2803,21 @@ exec wrangler "$@"
 
     try {
       expect(() => runLocalRehearsalForTestsOnly({
-        repositoryPath: repoRoot,
+        repositoryPath,
         runnerPath,
         manifestDraftSha256: hash('a'),
         childTimeoutMs: 100,
       })).toThrow(/timed out/u)
     } finally {
-      rmSync(join(repoRoot, runnerPath), { force: true })
+      removeFakePrepareArtifactRepository(artifactFixture)
     }
   })
 
   it('fails closed when one supervisor output stream exceeds its independent bound', () => {
     const runnerPath = 'tests/scripts/.issue-23-output-runner.mjs'
-    writeFileSync(join(repoRoot, runnerPath), `
+    const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
+    const repositoryPath = artifactFixture.artifactRepositoryPath
+    writeFileSync(join(repositoryPath, runnerPath), `
       const command = process.argv[2]
       if (command === 'catalog') {
         process.stdout.write(JSON.stringify({ migrations: [1, 2, 3, 4, 5, 6].map((number) => ({ number })), padding: 'x'.repeat(4096) }))
@@ -2402,20 +2830,22 @@ exec wrangler "$@"
 
     try {
       expect(() => runLocalRehearsalForTestsOnly({
-        repositoryPath: repoRoot,
+        repositoryPath,
         runnerPath,
         manifestDraftSha256: hash('a'),
         maxOutputBytes: 1024,
       })).toThrow(/output exceeded/u)
     } finally {
-      rmSync(join(repoRoot, runnerPath), { force: true })
+      removeFakePrepareArtifactRepository(artifactFixture)
     }
   })
 
   it('rejects a command that leaves a descendant able to recreate disposable state', () => {
     const runnerPath = 'tests/scripts/.issue-23-recreate-runner.mjs'
+    const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
+    const repositoryPath = artifactFixture.artifactRepositoryPath
     const stateCapturePath = join(mkdtempSync(join(tmpdir(), 'blogman-issue-88-recreate-capture-')), 'state-path')
-    writeFileSync(join(repoRoot, runnerPath), `
+    writeFileSync(join(repositoryPath, runnerPath), `
       import { spawn } from 'node:child_process'
       import { join } from 'node:path'
       import { writeFileSync } from 'node:fs'
@@ -2436,7 +2866,7 @@ exec wrangler "$@"
 
     try {
       expect(() => runLocalRehearsalForTestsOnly({
-        repositoryPath: repoRoot,
+        repositoryPath,
         runnerPath,
         manifestDraftSha256: hash('a'),
         environment: { BLOGMAN_ISSUE_88_STATE_CAPTURE: stateCapturePath },
@@ -2447,7 +2877,7 @@ exec wrangler "$@"
       expect(existsSync(join(statePath, 'escaped'))).toBe(false)
     } finally {
       const capturedStatePath = existsSync(stateCapturePath) ? readFileSync(stateCapturePath, 'utf8') : ''
-      rmSync(join(repoRoot, runnerPath), { force: true })
+      removeFakePrepareArtifactRepository(artifactFixture)
       rmSync(dirname(stateCapturePath), { recursive: true, force: true })
       if (capturedStatePath) rmSync(capturedStatePath, { recursive: true, force: true })
     }
@@ -2456,6 +2886,8 @@ exec wrangler "$@"
   it('cleans a descendant on rehearsal timeout and blocks its network attempt', () => {
     const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-88-descendant-'))
     const runnerPath = 'tests/scripts/.issue-23-descendant-runner.mjs'
+    const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
+    const repositoryPath = artifactFixture.artifactRepositoryPath
     const probeBase = join(directory, 'probe')
     const runner = `
       import { spawn } from 'node:child_process'
@@ -2477,12 +2909,12 @@ exec wrangler "$@"
         process.stdout.write(JSON.stringify({ state: 'current' }))
       }
     `
-    writeFileSync(join(repoRoot, runnerPath), runner)
+    writeFileSync(join(repositoryPath, runnerPath), runner)
     const adapter = { calls: 0 }
 
     try {
       expect(() => runLocalRehearsalForTestsOnly({
-        repositoryPath: repoRoot,
+        repositoryPath,
         runnerPath,
         manifestDraftSha256: hash('a'),
         productionWriteAdapter: adapter,
@@ -2503,7 +2935,7 @@ exec wrangler "$@"
       expect(readFileSync(`${probeBase}.network`, 'utf8')).toBe('blocked')
       expect(adapter.calls).toBe(0)
     } finally {
-      rmSync(join(repoRoot, runnerPath), { force: true })
+      removeFakePrepareArtifactRepository(artifactFixture)
       rmSync(directory, { recursive: true, force: true })
     }
   })

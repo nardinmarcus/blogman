@@ -79,6 +79,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: npm run test:run -- tests/scripts/issue-92-formal-rehearsal.test.ts --reporter=verbose
 
+      - name: Run Darwin canonical-overlap durability regression
+        env:
+          CI: true
+          NEXT_TELEMETRY_DISABLED: '1'
+        run: npm run test:run -- tests/scripts/issue-23-delivery-durability.test.ts -t 'case-equivalent canonical namespace alias' --reporter=verbose
+
   verify-migrations:
     runs-on: ubuntu-latest
     timeout-minutes: 55

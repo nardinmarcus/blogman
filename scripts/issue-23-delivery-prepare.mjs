@@ -7,6 +7,7 @@ import { runLocalRehearsal } from './issue-23-delivery-rehearsal.mjs'
 import { hashD1ArtifactDirectory } from './issue-23-delivery-d1-contracts.mjs'
 import { buildFormalRuntimeReceipt } from './issue-23-delivery-formal-runtime.mjs'
 import { currentFormalRehearsalContext } from './issue-23-delivery-formal-context.mjs'
+import { formalExecutionClosureSha256 } from './issue-23-delivery-execution-closure.mjs'
 
 const MANIFEST_SCHEMA_URL = new URL(
   '../schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json',
@@ -99,14 +100,18 @@ const CONFIG_CI_SCHEMA = Object.freeze({
     expected_head_sha: MANIFEST_SCHEMA.properties.ci.properties.head_sha,
   },
 })
+const REQUIRED_CREDENTIAL_SLOTS = Object.freeze([
+  Object.freeze({ name: 'cloudflare_delivery', scopes: Object.freeze(['account:read', 'd1:write', 'workers:write']) }),
+  Object.freeze({ name: 'delivery_smoke_admin', scopes: Object.freeze(['admin:smoke']) }),
+])
 const FIXED_SMOKE_CONTRACT = Object.freeze({
   requests: Object.freeze([
     Object.freeze({ path: '/api/search', status: 200 }),
     Object.freeze({ path: '/api/settings/appearance', status: 200 }),
-    Object.freeze({ path: '/api/settings/tokens', status: 200 }),
-    Object.freeze({ path: '/api/settings/ai-provider', status: 200 }),
-    Object.freeze({ path: '/api/settings/ai-generators', status: 200 }),
-    Object.freeze({ path: '/api/admin/articles/__blogman_smoke_absent__', status: 404 }),
+    Object.freeze({ path: '/api/admin/tokens', status: 200 }),
+    Object.freeze({ path: '/api/admin/ai-provider', status: 200 }),
+    Object.freeze({ path: '/api/admin/ai-post-generators', status: 200 }),
+    Object.freeze({ path: '/api/admin/posts/__blogman_smoke_absent__', status: 404 }),
   ]),
   admin_credential_slot: 'delivery_smoke_admin',
 })
@@ -411,11 +416,18 @@ function canonicalExpectedReconciliationBytes(value) {
 function resolveCanonicalD1Facts(repositoryPath, target, toolchain, repository) {
   const canonicalConfig = resolveFile(repositoryPath, CANONICAL_D1_PATHS.config, 'canonical D1 config', true)
   const configText = readFileSync(resolve(repositoryPath, CANONICAL_D1_PATHS.config), 'utf8')
+  const topLevelConfig = configText.split(/^\s*\[/mu, 1)[0]
+  const configWorkerName = topLevelConfig.match(/^\s*name\s*=\s*["']([^"']+)["']\s*$/mu)?.[1]
+  if (configWorkerName !== target.worker_name) fail('canonical Wrangler config Worker name does not match target.worker_name')
   const d1Sections = [...configText.matchAll(/\[\[d1_databases\]\]([\s\S]*?)(?=\n\[|$)/gu)]
-  const database = d1Sections
-    .map(([, section]) => section.match(/^binding\s*=\s*["']([^"']+)["']/mu)?.[1])
-    .find((binding) => binding === 'DB')
-  if (!database) fail('canonical D1 config does not bind DB')
+  const databaseSection = d1Sections.find(([, section]) => (
+    section.match(/^binding\s*=\s*["']([^"']+)["']/mu)?.[1] === 'DB'
+  ))?.[1]
+  const database = databaseSection ? 'DB' : undefined
+  const configD1DatabaseId = databaseSection?.match(/^database_id\s*=\s*["']([^"']+)["']/mu)?.[1]
+  if (!database || configD1DatabaseId !== target.d1_database_id) {
+    fail('canonical Wrangler config DB identity does not match target.d1_database_id')
+  }
 
   const canonicalReset = resolveFile(repositoryPath, CANONICAL_D1_PATHS.reset, 'canonical D1 reset SQL')
   const canonicalRunner = resolveFile(repositoryPath, CANONICAL_D1_PATHS.runner, 'canonical D1 migration runner')
@@ -1002,6 +1014,22 @@ function resolveCiFacts(repositoryPath, config, repository) {
 }
 
 function resolveFormalCiFacts(repositoryPath, config, repository) {
+  if (process.env.BLOGMAN_RUN_FORMAL_REHEARSAL === '1') {
+    if (process.env.BLOGMAN_FORMAL_REHEARSAL_EXPECTED_COMMIT !== repository.commit
+      || config.ci.expected_head_sha !== repository.commit) {
+      fail('formal rehearsal expected commit does not match the checked-out candidate')
+    }
+    return {
+      provider: 'github-actions',
+      workflow: config.ci.workflow,
+      run_id: 1,
+      attempt: 1,
+      event: 'push',
+      head_sha: repository.commit,
+      tree: repository.tree,
+      conclusion: 'in_progress-test-evidence',
+    }
+  }
   const runId = process.env.GITHUB_RUN_ID
   const attempt = process.env.GITHUB_RUN_ATTEMPT
   const event = process.env.GITHUB_EVENT_NAME
@@ -1158,7 +1186,15 @@ function resolveFacts(config, {
   const preparation = {
     ...config.preparation,
     prepare_entry: resolveFile(repositoryPath, config.preparation.prepare_entry.path, 'prepare entry'),
-    execute_entry: resolveFile(repositoryPath, config.preparation.execute_entry.path, 'execute entry'),
+    execute_entry: {
+      path: config.preparation.execute_entry.path,
+      sha256: formalExecutionClosureSha256(repositoryPath),
+    },
+    worker_upload_entry: resolveFile(
+      repositoryPath,
+      config.preparation.worker_upload_entry.path,
+      'Worker upload entry',
+    ),
     manifest_schema: resolveFile(repositoryPath, config.preparation.manifest_schema.path, 'manifest schema'),
   }
   const ci = {
@@ -1334,13 +1370,17 @@ function assertManifestRelationships(manifest, policy = PRODUCTION_MANIFEST_POLI
     || manifest.ci.evidence_class !== policy.ciEvidenceClass) {
     fail('ci evidence classification is invalid')
   }
-  if (manifest.preparation.execute_entry.path !== 'scripts/phase-b-sequence.mjs') {
-    fail('preparation.execute_entry must bind the canonical upload lifecycle')
+  if (manifest.preparation.execute_entry.path !== 'scripts/issue-23-delivery-entry.mjs') {
+    fail('preparation.execute_entry must bind the formal delivery entry')
+  }
+  if (manifest.preparation.worker_upload_entry.path !== 'scripts/issue-23-delivery-worker-upload.mjs') {
+    fail('preparation.worker_upload_entry must bind the private Worker upload entry')
   }
 
   const publicPaths = [
     ['preparation.prepare_entry.path', manifest.preparation.prepare_entry.path],
     ['preparation.execute_entry.path', manifest.preparation.execute_entry.path],
+    ['preparation.worker_upload_entry.path', manifest.preparation.worker_upload_entry.path],
     ['preparation.manifest_schema.path', manifest.preparation.manifest_schema.path],
     ['ci.workflow', manifest.ci.workflow],
     ['artifact.archive.path', manifest.artifact.archive.path],
@@ -1415,6 +1455,14 @@ function assertManifestRelationships(manifest, policy = PRODUCTION_MANIFEST_POLI
     || manifest.target.baseline.traffic[0].version_id !== manifest.target.baseline.version_id
     || manifest.target.baseline.traffic[0].percentage !== 100) {
     fail('target.baseline.traffic must bind one 100% baseline version')
+  }
+
+  const credentialSlots = manifest.policy.authorization.credential_slots.map((slot) => ({
+    name: slot.name,
+    scopes: [...slot.scopes].sort(),
+  }))
+  if (!jsonEqual(credentialSlots, REQUIRED_CREDENTIAL_SLOTS)) {
+    fail('policy.authorization credential slots are not canonical; delivery_smoke_admin requires admin:smoke')
   }
 
   if (!jsonEqual(manifest.policy.stages, DEFAULT_STAGE_POLICY)) {

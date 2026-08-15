@@ -5,7 +5,6 @@ import {
   d1StageBindingsSha256,
   parseStrictJson,
 } from './issue-23-delivery-d1-contracts.mjs'
-import { getD1TransportProvenance } from './issue-23-delivery-d1-transport.mjs'
 
 export { D1_STAGE_TIMEOUT_MS }
 
@@ -48,14 +47,22 @@ const BINDING_KEYS = Object.freeze([
   'rollout_safety_sha256',
   'expected_reconciliation_path',
   'expected_reconciliation_sha256',
+  'manifest_sha256',
+  'authorization_sha256',
+  'attempt_id',
   'candidate_id',
   'evidence_class',
   'migrations',
 ])
 const TRANSPORT_FAILURE_OUTCOMES = Object.freeze({
+  formal_failure: ['NON_PASS', 'formal_rehearsal_forced_failure'],
+  formal_drift: ['NON_PASS', 'Manifest Drift'],
   timeout: ['TIMEOUT', 'timeout'],
+  overall_timeout: ['TIMEOUT', 'overall_timeout'],
   nonzero: ['ERROR', 'nonzero'],
   malformed: ['ERROR', 'malformed'],
+  manifest_drift: ['NON_PASS', 'Manifest Drift'],
+  permission_insufficient: ['NON_PASS', 'cloudflare_permission_insufficient'],
   uncertain: ['UNCERTAIN', 'uncertain'],
 })
 
@@ -212,6 +219,10 @@ function normalizeBindings(value) {
     .includes(value.evidence_class)) {
     fail('bindings.evidence_class is invalid')
   }
+  const attemptBound = ['production', 'formal-rehearsal-test-evidence'].includes(value.evidence_class)
+  for (const field of ['manifest_sha256', 'authorization_sha256', 'attempt_id']) {
+    if (attemptBound || value[field] !== null) assertHash(value[field], `bindings.${field}`)
+  }
   if (!Array.isArray(value.migrations) || value.migrations.length !== 6) {
     fail('bindings.migrations must contain exactly six entries')
   }
@@ -287,20 +298,37 @@ function readTransportResponse(response, stage, elapsedMs) {
   return { stdout: response.stdout, durationMs: operationDurationMs }
 }
 
+function actualElapsed(state) {
+  if (state.monotonicMs === undefined) return {
+    stage: state.durationMs,
+    overall: state.overallElapsedMs,
+  }
+  const overall = state.monotonicMs()
+  return { stage: overall - state.stageStartedMs, overall }
+}
+
+function assertActualDeadline(state, timeoutMs, completion = false) {
+  const actual = actualElapsed(state)
+  if (completion ? actual.overall > D1_OVERALL_TIMEOUT_MS : actual.overall >= D1_OVERALL_TIMEOUT_MS) {
+    throw stageFailure('TIMEOUT', 'overall_timeout', Math.max(1, actual.stage))
+  }
+  if (completion ? actual.stage > timeoutMs : actual.stage >= timeoutMs) {
+    throw stageFailure('TIMEOUT', 'timeout', Math.max(1, actual.stage))
+  }
+  return actual
+}
+
 function callOperation({ bindings, transport, stage, operation }, state) {
   const timeoutMs = D1_STAGE_TIMEOUT_MS[stage]
-  if (state.durationMs >= timeoutMs) throw stageFailure('TIMEOUT', 'timeout', state.durationMs)
-  if (state.overallElapsedMs >= D1_OVERALL_TIMEOUT_MS) {
-    throw stageFailure('TIMEOUT', 'overall_timeout', state.durationMs)
-  }
+  const actual = assertActualDeadline(state, timeoutMs)
   let response
   try {
     response = transport.execute(requestFor(
       bindings,
       stage,
       operation,
-      state.durationMs,
-      state.overallElapsedMs,
+      actual.stage,
+      actual.overall,
     ))
   } catch (error) {
     if (error instanceof StageFailure) throw error
@@ -316,15 +344,18 @@ function callOperation({ bindings, transport, stage, operation }, state) {
   }
   state.durationMs += result.durationMs
   state.overallElapsedMs += result.durationMs
-  if (state.overallElapsedMs > D1_OVERALL_TIMEOUT_MS) {
-    throw stageFailure('TIMEOUT', 'overall_timeout', state.durationMs)
-  }
+  const after = actualElapsed(state)
+  state.durationMs = Math.max(state.durationMs, after.stage)
+  state.overallElapsedMs = Math.max(state.overallElapsedMs, after.overall)
+  assertActualDeadline(state, timeoutMs, true)
   return result.stdout
 }
 
 function parseOperationOutput(stdout, state, parser, classification) {
   try {
-    return parser(stdout)
+    const value = parser(stdout)
+    assertActualDeadline(state, state.timeoutMs, true)
+    return value
   } catch (error) {
     if (error instanceof StageFailure) {
       error.durationMs = state.durationMs
@@ -539,8 +570,8 @@ function parseReconciliation(stdout) {
   throw stageFailure('NON_PASS', 'reconciliation_drift')
 }
 
-function runD1Identity(bindings, transport, overallElapsedMs) {
-  const state = { durationMs: 0, overallElapsedMs }
+function runD1Identity(bindings, transport, overallElapsedMs, clock = {}) {
+  const state = { durationMs: 0, overallElapsedMs, ...clock }
   const stdout = callOperation({
     bindings,
     transport,
@@ -551,8 +582,8 @@ function runD1Identity(bindings, transport, overallElapsedMs) {
   return state.durationMs
 }
 
-function runReset(bindings, transport, overallElapsedMs) {
-  const state = { durationMs: 0, overallElapsedMs }
+function runReset(bindings, transport, overallElapsedMs, clock = {}) {
+  const state = { durationMs: 0, overallElapsedMs, ...clock }
   const stdout = callOperation({
     bindings,
     transport,
@@ -563,8 +594,8 @@ function runReset(bindings, transport, overallElapsedMs) {
   return state.durationMs
 }
 
-function runEmptyProof(bindings, transport, overallElapsedMs) {
-  const state = { durationMs: 0, overallElapsedMs }
+function runEmptyProof(bindings, transport, overallElapsedMs, clock = {}) {
+  const state = { durationMs: 0, overallElapsedMs, ...clock }
   const stdout = callOperation({
     bindings,
     transport,
@@ -575,8 +606,8 @@ function runEmptyProof(bindings, transport, overallElapsedMs) {
   return state.durationMs
 }
 
-function runMigrations(bindings, transport, overallElapsedMs) {
-  const state = { durationMs: 0, overallElapsedMs }
+function runMigrations(bindings, transport, overallElapsedMs, clock = {}) {
+  const state = { durationMs: 0, overallElapsedMs, ...clock }
   const catalog = callOperation({
     bindings,
     transport,
@@ -618,8 +649,8 @@ function runMigrations(bindings, transport, overallElapsedMs) {
   return state.durationMs
 }
 
-function runReconciliation(bindings, transport, overallElapsedMs) {
-  const state = { durationMs: 0, overallElapsedMs }
+function runReconciliation(bindings, transport, overallElapsedMs, clock = {}) {
+  const state = { durationMs: 0, overallElapsedMs, ...clock }
   const stdout = callOperation({
     bindings,
     transport,
@@ -638,22 +669,39 @@ const STAGE_RUNNERS = Object.freeze({
   reconciliation: runReconciliation,
 })
 
-export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0 }) {
+export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, monotonic_ms, initial_stage_started_ms }) {
   if (!Number.isSafeInteger(elapsed_ms) || elapsed_ms < 0 || elapsed_ms > D1_OVERALL_TIMEOUT_MS) {
     fail('elapsed_ms is invalid')
   }
+  if (monotonic_ms !== undefined && typeof monotonic_ms !== 'function') fail('monotonic_ms is invalid')
+  if (initial_stage_started_ms !== undefined
+    && (!Number.isSafeInteger(initial_stage_started_ms) || initial_stage_started_ms < 0)) {
+    fail('initial_stage_started_ms is invalid')
+  }
   const bindings = normalizeBindings(rawBindings)
   validateTransport(transport)
-  const provenance = getD1TransportProvenance(transport)
   const bindingSha256 = d1StageBindingsSha256(bindings)
-  const bindingMismatch = provenance !== undefined
-    && provenance.bindings_sha256 !== bindingSha256
+  const bindingMismatch = transport.bindings_sha256 !== undefined
+    && transport.bindings_sha256 !== bindingSha256
   const stageCounts = Object.fromEntries(D1_STAGE_ORDER.map((stage) => [stage, 0]))
   const stageDurations = Object.fromEntries(D1_STAGE_ORDER.map((stage) => [stage, 0]))
   const trace = []
   let elapsedMs = elapsed_ms
+  let firstStage = true
 
   for (const stage of D1_STAGE_ORDER) {
+    // The first Stage clock may be seeded by the caller so Stage-owned setup
+    // (closure recheck, materialization, binding derivation, transport
+    // construction) is accounted inside the Stage duration and its child budget.
+    const stageStarted = firstStage && initial_stage_started_ms !== undefined
+      ? initial_stage_started_ms
+      : monotonic_ms?.() ?? elapsedMs
+    firstStage = false
+    if (stageStarted >= D1_OVERALL_TIMEOUT_MS) {
+      stageCounts[stage] += 1
+      trace.push({ stage, outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: 1 })
+      break
+    }
     stageCounts[stage] += 1
     let outcome = 'PASS'
     let classification
@@ -663,13 +711,19 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0 }
       if (elapsedMs >= D1_OVERALL_TIMEOUT_MS) {
         throw stageFailure('TIMEOUT', 'overall_timeout')
       }
-      durationMs = STAGE_RUNNERS[stage](bindings, transport, elapsedMs)
+      durationMs = STAGE_RUNNERS[stage](bindings, transport, stageStarted, {
+        monotonicMs: monotonic_ms,
+        stageStartedMs: stageStarted,
+        timeoutMs: D1_STAGE_TIMEOUT_MS[stage],
+      })
+      const measuredDuration = monotonic_ms === undefined ? durationMs : monotonic_ms() - stageStarted
+      durationMs = Math.max(durationMs, measuredDuration)
       assertNonNegativeInteger(durationMs, `${stage} duration`)
+      if ((monotonic_ms?.() ?? elapsedMs + durationMs) >= D1_OVERALL_TIMEOUT_MS) {
+        throw stageFailure('TIMEOUT', 'overall_timeout', durationMs)
+      }
       if (durationMs > D1_STAGE_TIMEOUT_MS[stage]) {
         throw stageFailure('TIMEOUT', 'timeout', durationMs)
-      }
-      if (elapsedMs + durationMs > D1_OVERALL_TIMEOUT_MS) {
-        throw stageFailure('TIMEOUT', 'overall_timeout', durationMs)
       }
       elapsedMs += durationMs
     } catch (error) {
@@ -695,19 +749,12 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0 }
 
   const terminal = trace.at(-1)
   if (!terminal) fail('D1 stage contract did not execute')
-  const evidenceProvenance = provenance ?? Object.freeze({
-    source: 'untrusted-test-transport',
-    production: false,
-  })
-  // Production evidence may only come from a production-sourced transport.
-  // Non-production transports (including formal rehearsal) keep their source label.
-  if (evidenceProvenance.production === true && evidenceProvenance.source !== 'production') {
-    fail('production D1 transport provenance source is invalid')
-  }
-  if (evidenceProvenance.production !== true && evidenceProvenance.source === 'production') {
-    fail('non-production D1 transport must not claim production source')
-  }
-  const production = evidenceProvenance.production === true
+  // Public/test-facing stage runners can only emit non-production evidence.
+  // Production promotion belongs exclusively to execute's private real-adapter path.
+  const evidenceSource = ['production', 'formal-rehearsal-test-evidence'].includes(bindings.evidence_class)
+    ? 'stage-runner-non-production'
+    : bindings.evidence_class
+  const production = false
   const traceSha256 = sha256(canonicalBytes(trace))
   const value = {
     format: 'blogman-issue-23-d1-stages/v1',
@@ -717,11 +764,14 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0 }
     stage_counts: stageCounts,
     stage_durations_ms: stageDurations,
     evidence: {
-      source: evidenceProvenance.source,
+      source: evidenceSource,
       production,
       promotable: production && terminal.outcome === 'PASS',
       bindings_sha256: bindingSha256,
       wrangler_sha256: bindings.wrangler_sha256,
+      manifest_sha256: bindings.manifest_sha256,
+      authorization_sha256: bindings.authorization_sha256,
+      attempt_id: bindings.attempt_id,
       account_id: bindings.account_id,
       d1_database_id: bindings.d1_database_id,
       config_sha256: bindings.config_sha256,

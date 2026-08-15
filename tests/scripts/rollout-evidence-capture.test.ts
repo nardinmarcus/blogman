@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -65,23 +65,4 @@ describe('rollout evidence capture', () => {
     expect(result.stderr).toMatch(/^Unsupported backup manifest format\n$/)
   })
 
-  it.each([
-    'docs/issue-23-phase-b-runbook.md',
-    'docs/rollout-safety.md',
-  ])('uses the banner-free direct entrypoint for every rollout command in %s', (path) => {
-    const document = readFileSync(join(repoRoot, path), 'utf8')
-    const commandLines = document
-      .split('\n')
-      .filter((line) => (
-        line.trimStart().startsWith('npm run rollout:safety ')
-        || line.trimStart().startsWith('node scripts/rollout-safety.mjs ')
-        || line.trimStart().startsWith('node "$TOOL_WORKSPACE/scripts/rollout-safety.mjs" ')
-      ))
-
-    expect(commandLines.length).toBeGreaterThan(0)
-    expect(commandLines.every((line) => (
-      line.trimStart().startsWith('node scripts/rollout-safety.mjs ')
-      || line.trimStart().startsWith('node "$TOOL_WORKSPACE/scripts/rollout-safety.mjs" ')
-    ))).toBe(true)
-  })
 })

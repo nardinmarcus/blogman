@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process'
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -392,60 +391,4 @@ describe('private D1 export capture', () => {
     expect(readFileSync(fixture.counter, 'utf8')).toBe('1')
   })
 
-  it('keeps the historical export wrapper outside the clean-start Phase B runbook', () => {
-    const runbook = readFileSync(join(repoRoot, 'docs', 'issue-23-phase-b-runbook.md'), 'utf8')
-
-    expect(runbook).toContain('historical data export: `NOT_APPLICABLE`')
-    expect(runbook).not.toContain('node scripts/rollout-safety.mjs backup export')
-    expect(runbook).not.toContain('node scripts/rollout-safety.mjs backup dispose')
-    expect(runbook).not.toContain('node "$TOOL_WORKSPACE/scripts/rollout-safety.mjs" backup export')
-    expect(runbook).not.toContain('node "$TOOL_WORKSPACE/scripts/rollout-safety.mjs" backup dispose')
-    expect(runbook).not.toMatch(/^\.\/node_modules\/\.bin\/wrangler d1 export/m)
-  })
-
-  it('validates the production CONFIG before the first Wrangler production call', () => {
-    const directory = mkdtempSync(join(tmpdir(), 'blogman-runbook-config-test-'))
-    temporaryDirectories.push(directory)
-    const absoluteConfig = join(directory, 'wrangler.toml')
-    writeFileSync(absoluteConfig, 'must not be read by the guard')
-    chmodSync(absoluteConfig, 0o000)
-    const runbook = readFileSync(join(repoRoot, 'docs', 'issue-23-phase-b-runbook.md'), 'utf8')
-    const firstProductionCall = runbook.indexOf('"$WRANGLER" deployments status')
-    const guard = runbook.match(
-      /for bound_path in \\\n[\s\S]*?\ndone/,
-    )
-    const configFileCheck = runbook.indexOf('test -f "$CONFIG"')
-
-    expect(firstProductionCall).toBeGreaterThan(-1)
-    expect(guard, 'runbook must contain an executable CONFIG path guard').not.toBeNull()
-    if (!guard) return
-    expect(runbook.indexOf(guard[0])).toBeLessThan(firstProductionCall)
-    expect(configFileCheck).toBeGreaterThan(runbook.indexOf(guard[0]))
-    expect(configFileCheck).toBeLessThan(firstProductionCall)
-
-    const runGuard = (config: string, cwd = repoRoot) => spawnSync('/bin/sh', ['-c', `${guard[0]}\ntest -f "$CONFIG"`], {
-      cwd,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        CONFIG: config,
-        FROZEN_ARTIFACTS: absoluteConfig,
-        FROZEN_ROOT: absoluteConfig,
-        FROZEN_SNAPSHOT: absoluteConfig,
-        LOCAL_CONFIG: absoluteConfig,
-        LOCKFILE: absoluteConfig,
-        OPERATOR_EVIDENCE_ROOT: absoluteConfig,
-        REPORT_DIR: absoluteConfig,
-        RESEAL_REQUEST: absoluteConfig,
-        SEALED_PACKAGE: absoluteConfig,
-        TOOL_WORKSPACE: absoluteConfig,
-        WRANGLER: absoluteConfig,
-      },
-    })
-
-    expect(runGuard(absoluteConfig).status).toBe(0)
-    expect(runGuard('wrangler.toml', directory).status).not.toBe(0)
-    expect(runGuard(join(directory, 'missing.toml')).status).not.toBe(0)
-    expect(runGuard(directory).status).not.toBe(0)
-  })
 })

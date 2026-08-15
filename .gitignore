@@ -47,3 +47,6 @@ next-env.d.ts
 skills/
 wrangler.local.toml
 worker-configuration.d.ts
+
+# Issue #23 durable terminal evidence runtime
+/.issue-23-delivery/

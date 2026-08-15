@@ -1,16 +1,19 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { platform } from 'node:os'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { platform, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import * as deliveryEntry from '../../scripts/issue-23-delivery-entry.mjs'
 import { runFormalRehearsal } from '../../scripts/issue-23-delivery-formal-rehearsal.mjs'
 import { runInFormalRehearsalContext } from '../../scripts/issue-23-delivery-formal-context.mjs'
 
 const REPOSITORY_ROOT = process.cwd()
 const IS_MACOS = platform() === 'darwin'
-const IS_MACOS_CI_GATE = IS_MACOS && process.env.GITHUB_ACTIONS === 'true'
+const RUN_EXACT_FORMAL_REHEARSAL = process.env.BLOGMAN_RUN_FORMAL_REHEARSAL === '1'
+const IS_MACOS_CI_GATE = IS_MACOS && (
+  process.env.GITHUB_ACTIONS === 'true' || RUN_EXACT_FORMAL_REHEARSAL
+)
 const BOUNDED_FORMAL_PATH_TIMEOUT_MS = 240_000
 const SHA256 = /^[a-f0-9]{64}$/u
 const ALL_STAGES = [
@@ -38,6 +41,23 @@ function declaredFile(path: string) {
   return { path, sha256: sha256(readFileSync(join(REPOSITORY_ROOT, path))) }
 }
 
+function authorizationRecord(manifestSha256: string, authorizationId: string) {
+  const bytes = Buffer.from(`${JSON.stringify({
+    format: 'blogman-issue-23-authorization/v1',
+    authorization_id: `issue23-authorization-${sha256(authorizationId)}`,
+    manifest_sha256: manifestSha256,
+    decision: 'approve',
+  }, null, 2)}\n`, 'utf8')
+  return { bytes, sha256: sha256(bytes) }
+}
+
+function stableFormalOperations(operations: Array<Record<string, unknown>>) {
+  return JSON.parse(JSON.stringify(operations).replace(
+    /\/[^"\s]*blogman-issue-23-execute-expected-[^"\s]*\/expected-reconciliation\.json/gu,
+    '<disposable-expected-reconciliation>',
+  ))
+}
+
 function formalConfig() {
   const commit = repositoryFact(['rev-parse', 'HEAD'])
   const tree = repositoryFact(['rev-parse', 'HEAD^{tree}'])
@@ -51,7 +71,8 @@ function formalConfig() {
   return {
     preparation: {
       prepare_entry: declaredFile('scripts/issue-23-delivery-prepare.mjs'),
-      execute_entry: declaredFile('scripts/phase-b-sequence.mjs'),
+      execute_entry: declaredFile('scripts/issue-23-delivery-entry.mjs'),
+      worker_upload_entry: declaredFile('scripts/issue-23-delivery-worker-upload.mjs'),
       manifest_schema: declaredFile('schemas/issue-23-delivery/blogman-issue-23-canonical-frozen-manifest-v1.schema.json'),
     },
     repository: {
@@ -105,13 +126,13 @@ function formalConfig() {
     },
     target: {
       account_id: 'formal-account',
-      d1_database_id: 'formal-d1',
-      worker_name: 'blogman-formal',
+      d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
+      worker_name: 'blogman',
       origin: 'https://formal.example.test',
       baseline: {
         deployment_id: 'formal-deployment',
         version_id: 'formal-version',
-        d1_database_id: 'formal-d1',
+        d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
         traffic: [{ version_id: 'formal-version', percentage: 100 }],
       },
     },
@@ -119,7 +140,10 @@ function formalConfig() {
       authorization: {
         manifest_binding: 'manifest_sha256',
         one_shot: true,
-        credential_slots: [{ name: 'cloudflare_delivery', scopes: ['account:read', 'workers:write', 'd1:write'] }],
+        credential_slots: [
+          { name: 'cloudflare_delivery', scopes: ['account:read', 'workers:write', 'd1:write'] },
+          { name: 'delivery_smoke_admin', scopes: ['admin:smoke'] },
+        ],
       },
       stages: [
         { name: 'authorization_accept', timeout_seconds: 30 },
@@ -157,14 +181,66 @@ function formalConfig() {
 }
 
 describe('Issue #92 formal rehearsal public path', () => {
+  let repeatedFormalRuns: ReturnType<typeof runFormalRehearsal>[] = []
+
+  beforeAll(() => {
+    if (!IS_MACOS_CI_GATE) return
+    if (RUN_EXACT_FORMAL_REHEARSAL) {
+      expect(process.env.BLOGMAN_FORMAL_REHEARSAL_EXPECTED_COMMIT).toBe(
+        repositoryFact(['rev-parse', 'HEAD']),
+      )
+    }
+    expect(existsSync(join(REPOSITORY_ROOT, '.issue-23-delivery'))).toBe(false)
+    repeatedFormalRuns = [runFormalRehearsal(formalConfig()), runFormalRehearsal(formalConfig())]
+  }, BOUNDED_FORMAL_PATH_TIMEOUT_MS * 2)
+
   it('exposes no public attempt/options wrapper or adapter injection surface', () => {
     expect(runFormalRehearsal.length).toBe(1)
     expect(deliveryEntry).not.toHaveProperty('runFormalRehearsalAttempt')
     expect(() => runFormalRehearsal({} as never, {} as never)).toThrow(/exactly one config/u)
   })
 
-  it.skipIf(!IS_MACOS_CI_GATE)('runs public prepare(config) then public execute(manifest, authorization) through the exact no-network formal gate', { timeout: BOUNDED_FORMAL_PATH_TIMEOUT_MS }, () => {
-    const result = runFormalRehearsal(formalConfig())
+  it('requires a test-owned ROOT and rejects caller-supplied sink facades', () => {
+    const sinkRoot = mkdtempSync(join(tmpdir(), 'blogman-issue-23-formal-root-contract-'))
+    try {
+      expect(runInFormalRehearsalContext({
+        sink: [],
+        deliverySinkRoot: sinkRoot,
+        clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
+      }, () => 'accepted')).toBe('accepted')
+      expect(() => runInFormalRehearsalContext({
+        sink: [],
+        deliverySink: {
+          consumeAuthorization() { throw new Error('facade must not run') },
+          persistTerminalResult() { throw new Error('facade must not run') },
+          readTerminalEvidence() { throw new Error('facade must not run') },
+        },
+        clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
+      }, () => null)).toThrow(/test-owned ROOT|formal context/u)
+    } finally {
+      rmSync(sinkRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('allocates and validates the formal ROOT before constructing its sink', () => {
+    const source = readFileSync(join(REPOSITORY_ROOT, 'scripts/issue-23-delivery-entry.mjs'), 'utf8')
+    expect(source).toContain("mkdtempSync(join(tmpdir(), 'blogman-issue-23-formal-sink-'))")
+    expect(source).not.toContain("mkdtempSync(join(ENTRY_REPO_ROOT, '.issue-23-formal-sink-'))")
+    const canonicalRootRejection = source.indexOf('isCanonicalProductionAuthorityRoot(sinkRoot)')
+    const sinkConstruction = source.indexOf('createTestDeliverySink(sinkRoot)')
+    expect(canonicalRootRejection).toBeGreaterThan(-1)
+    expect(sinkConstruction).toBeGreaterThan(canonicalRootRejection)
+  })
+
+  it.skipIf(!IS_MACOS_CI_GATE)('runs two identical public rehearsals through isolated durable sinks and leaves no sink residue', () => {
+    const [first, result] = repeatedFormalRuns
+
+    expect(first.terminal.value.outcome).toBe('PASS')
+    expect(result.terminal.value.outcome).toBe('PASS')
+    expect(first.terminal.value.evidence).toMatchObject({ production: false, promotable: false })
+    expect(result.terminal.value.evidence).toMatchObject({ production: false, promotable: false })
+    expect(existsSync(join(REPOSITORY_ROOT, '.issue-23-delivery'))).toBe(false)
+    expect(readdirSync(REPOSITORY_ROOT).filter((name) => name.startsWith('.issue-23-formal-sink-'))).toEqual([])
 
     expect(result.manifest.bytes).toEqual(expect.any(Uint8Array))
     expect(result.manifest.sha256).toMatch(SHA256)
@@ -197,22 +273,31 @@ describe('Issue #92 formal rehearsal public path', () => {
     for (const stage of ALL_STAGES) expect(result.terminal.value.stage_counts[stage]).toBe(1)
     expect(result.operations).toContainEqual(expect.objectContaining({
       adapter: 'd1', operation: 'clean_start_reset', command: expect.arrayContaining(['d1', 'execute', 'DB', '--remote']),
+      env_keys: expect.arrayContaining(['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID']),
     }))
     expect(result.operations).toContainEqual(expect.objectContaining({
       adapter: 'worker', operation: 'version_traffic_verification.deploy', argv: expect.arrayContaining(['versions', 'deploy']),
+      env_keys: expect.arrayContaining(['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID']),
     }))
     expect(result.operations).toContainEqual(expect.objectContaining({
-      adapter: 'worker', operation: 'smoke_control_t0.smoke', argv: expect.arrayContaining(['--request', 'GET']),
+      adapter: 'worker', operation: 'smoke_control_t0.smoke',
+      argv: expect.arrayContaining(['--disable', '--config', '-', '--request', 'GET']),
+      stdin_sha256: expect.stringMatching(SHA256),
+      stdin_bytes: expect.any(Number),
+      env_keys: expect.not.arrayContaining(['CLOUDFLARE_API_TOKEN', 'DELIVERY_SMOKE_ADMIN']),
     }))
+    const smokeOperation = result.operations.find((operation) => (
+      operation.adapter === 'worker' && operation.operation === 'smoke_control_t0.smoke'
+    ))
+    expect(smokeOperation?.argv?.slice(0, 4)).toEqual(['/usr/bin/curl', '--disable', '--config', '-'])
+    expect(smokeOperation?.env_keys).not.toContain('HOME')
     expect(() => deliveryEntry.validateProductionTerminalEvidence(result.terminal))
       .toThrow(/production terminal evidence/u)
 
-    const productionAuthorization = {
-      format: 'blogman-issue-23-authorization/v1',
-      authorization_id: `formal-manifest-production-policy-${result.manifest.sha256.slice(0, 12)}`,
-      manifest_sha256: result.manifest.sha256,
-      decision: 'approve',
-    }
+    const productionAuthorization = authorizationRecord(
+      result.manifest.sha256,
+      `formal-manifest-production-policy-${result.manifest.sha256.slice(0, 12)}`,
+    )
     expect(() => deliveryEntry.execute(result.manifest, productionAuthorization))
       .toThrow(/ci evidence|d1 evidence|production/u)
 
@@ -225,43 +310,124 @@ describe('Issue #92 formal rehearsal public path', () => {
       mutate(value)
       const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
       const manifest = { value, bytes, sha256: sha256(bytes) }
-      const authorization = {
-        format: 'blogman-issue-23-authorization/v1',
-        authorization_id: `formal-manifest-mutation-${manifest.sha256.slice(0, 12)}`,
-        manifest_sha256: manifest.sha256,
-        decision: 'approve',
+      const authorization = authorizationRecord(
+        manifest.sha256,
+        `formal-manifest-mutation-${manifest.sha256.slice(0, 12)}`,
+      )
+      const sinkRoot = mkdtempSync(join(tmpdir(), 'blogman-issue-23-formal-sink-'))
+      try {
+        expect(() => runInFormalRehearsalContext({
+          sink: [],
+          deliverySinkRoot: sinkRoot,
+          clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
+        }, () => deliveryEntry.execute(manifest, authorization)))
+          .toThrow(/formal test manifest|manifest format|ci\.conclusion|classification/u)
+      } finally {
+        rmSync(sinkRoot, { recursive: true, force: true })
       }
-      expect(() => runInFormalRehearsalContext({ sink: [] }, () => (
-        deliveryEntry.execute(manifest, authorization)
-      ))).toThrow(/formal test manifest|manifest format|ci\.conclusion|classification/u)
+    }
+
+    const promotedValue = structuredClone(result.manifest.value) as Record<string, unknown>
+    Object.assign(promotedValue.ci as Record<string, unknown>, {
+      conclusion: 'success', evidence_class: 'production-ci-evidence',
+    })
+    Object.assign(promotedValue.d1 as Record<string, unknown>, {
+      evidence_class: 'production',
+    })
+    const promotedBytes = Buffer.from(`${JSON.stringify(promotedValue, null, 2)}\n`, 'utf8')
+    const promotedManifest = { value: promotedValue, bytes: promotedBytes, sha256: sha256(promotedBytes) }
+    const promotedAuthorization = authorizationRecord(
+      promotedManifest.sha256,
+      `formal-coordinated-promotion-${promotedManifest.sha256.slice(0, 12)}`,
+    )
+    const promotionSinkRoot = mkdtempSync(join(tmpdir(), 'blogman-issue-23-formal-sink-'))
+    try {
+      expect(() => runInFormalRehearsalContext({
+        sink: [],
+        deliverySinkRoot: promotionSinkRoot,
+        clock: { wallTimeMilliseconds: () => 0, monotonicNanoseconds: () => 0n },
+      }, () => deliveryEntry.execute(promotedManifest, promotedAuthorization)))
+        .toThrow(/formal test manifest|ci\.conclusion|classification/u)
+      expect(readdirSync(promotionSinkRoot).flatMap((name) => readdirSync(join(promotionSinkRoot, name))))
+        .toEqual([])
+    } finally {
+      rmSync(promotionSinkRoot, { recursive: true, force: true })
     }
   })
 
-  it.skipIf(!IS_MACOS_CI_GATE)('covers a module-owned fail-closed live-precondition fault through the same public call graph', { timeout: BOUNDED_FORMAL_PATH_TIMEOUT_MS }, async () => {
-    const { runFormalFaultHarnessForTestsOnly } = await import('../../scripts/issue-23-delivery-formal-fault-harness.mjs')
-    const result = runFormalFaultHarnessForTestsOnly('live_preconditions', () => runFormalRehearsal(formalConfig()))
+  describe.runIf(IS_MACOS_CI_GATE)('formal public fault matrix', () => {
+    const cases = ALL_STAGES.flatMap((stage) => (
+      ['failure', 'timeout', 'malformed', 'drift', 'uncertainty'] as const
+    ).map((kind) => ({ stage, kind })))
+    const expectedOutcome = {
+      failure: 'NON_PASS',
+      timeout: 'TIMEOUT',
+      malformed: 'ERROR',
+      drift: 'NON_PASS',
+      uncertainty: 'UNCERTAIN',
+    } as const
 
-    expect(result.terminal.value).toMatchObject({
-      outcome: 'NON_PASS',
-      first_terminal_stage: 'live_preconditions',
-      failure: { classification: 'formal_rehearsal_forced_live_precondition_failure' },
-      mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
+    it.each(cases)('$stage terminalizes $kind once through public prepare/execute', async (fault) => {
+      const { runFormalFaultHarnessForTestsOnly } = await import('../../scripts/issue-23-delivery-formal-fault-harness.mjs')
+      const manifest = repeatedFormalRuns[0].manifest
+      const run = () => {
+        const sinkRoot = mkdtempSync(join(tmpdir(), 'blogman-issue-23-formal-sink-'))
+        const operations: Array<Record<string, unknown>> = []
+        try {
+          const context = Object.freeze({
+            sink: operations,
+            deliverySinkRoot: sinkRoot,
+            clock: Object.freeze({
+              wallTimeMilliseconds: () => 0,
+              monotonicNanoseconds: () => 0n,
+            }),
+          })
+          const terminal = runFormalFaultHarnessForTestsOnly(fault, () => (
+            runInFormalRehearsalContext(context, () => deliveryEntry.execute(
+              manifest,
+              authorizationRecord(manifest.sha256, `formal-matrix-${fault.stage}-${fault.kind}`),
+            ))
+          ))
+          return { terminal, operations }
+        } finally {
+          rmSync(sinkRoot, { recursive: true, force: true })
+        }
+      }
+      const first = run()
+      const repeated = run()
+      const terminalIndex = ALL_STAGES.indexOf(fault.stage)
+
+      expect(stableFormalOperations(repeated.operations)).toEqual(stableFormalOperations(first.operations))
+      expect(repeated.terminal.value).toMatchObject({
+        outcome: first.terminal.value.outcome,
+        first_terminal_stage: first.terminal.value.first_terminal_stage,
+        failure: first.terminal.value.failure,
+        stage_counts: first.terminal.value.stage_counts,
+        mutation_counts: first.terminal.value.mutation_counts,
+        evidence: {
+          source: first.terminal.value.evidence.source,
+          production: first.terminal.value.evidence.production,
+          promotable: first.terminal.value.evidence.promotable,
+        },
+      })
+      expect(first.terminal.value).toMatchObject({
+        outcome: expectedOutcome[fault.kind],
+        first_terminal_stage: fault.stage,
+        mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
+        evidence: {
+          source: 'formal-rehearsal-test-evidence',
+          production: false,
+          promotable: false,
+        },
+      })
+      if (fault.kind === 'drift') {
+        expect(first.terminal.value.failure).toEqual({ classification: 'Manifest Drift' })
+      }
+      for (const [index, stage] of ALL_STAGES.entries()) {
+        expect(first.terminal.value.stage_counts[stage]).toBe(index <= terminalIndex ? 1 : 0)
+      }
+      expect(JSON.stringify(first)).not.toMatch(/DELIVERY_SMOKE_ADMIN|blogman_admin=/u)
     })
-    expect(result.terminal.value.stage_counts).toEqual({
-      authorization_accept: 1,
-      live_preconditions: 1,
-      d1_identity: 0,
-      clean_start_reset: 0,
-      empty_d1_proof: 0,
-      migrations_001_006: 0,
-      reconciliation: 0,
-      worker_deploy: 0,
-      version_traffic_verification: 0,
-      smoke_control_t0: 0,
-    })
-    expect(result.operations).toEqual([
-      expect.objectContaining({ adapter: 'worker', operation: 'live_preconditions.deployment_status' }),
-    ])
   })
 
   it.skipIf(IS_MACOS)('does not substitute Linux ordinary verification for the macOS exact gate', () => {

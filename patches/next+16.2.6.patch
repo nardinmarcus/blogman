@@ -453,3 +453,95 @@ diff --git a/node_modules/next/dist/esm/build/webpack/plugins/flight-manifest-pl
              const pagePath = pageName.replace(/%5F/g, '_');
              const pageBundlePath = normalizePagePath(pagePath.slice('app'.length));
              compilation.emitAsset('server/app' + pageBundlePath + '_' + CLIENT_REFERENCE_MANIFEST + '.js', new sources.RawSource(`globalThis.__RSC_MANIFEST=(globalThis.__RSC_MANIFEST||{});globalThis.__RSC_MANIFEST[${JSON.stringify(pagePath.slice('app'.length))}]=${json};`));
+diff --git a/node_modules/next/dist/build/webpack-config.js b/node_modules/next/dist/build/webpack-config.js
+index e17015f..5e4a820 100644
+--- a/node_modules/next/dist/build/webpack-config.js
++++ b/node_modules/next/dist/build/webpack-config.js
+@@ -73,6 +73,7 @@ const _entries = require("./entries");
+ const _log = /*#__PURE__*/ _interop_require_wildcard(require("./output/log"));
+ const _config = require("./webpack/config");
+ const _forcecompleteruntime = /*#__PURE__*/ _interop_require_default(require("./webpack/plugins/force-complete-runtime"));
++const _canonicalapprenderexternalmoduleidsplugin = require("./webpack/plugins/canonical-app-render-external-module-ids-plugin");
+ const _middlewareplugin = /*#__PURE__*/ _interop_require_wildcard(require("./webpack/plugins/middleware-plugin"));
+ const _buildmanifestplugin = /*#__PURE__*/ _interop_require_default(require("./webpack/plugins/build-manifest-plugin"));
+ const _jsconfigpathsplugin = require("./webpack/plugins/jsconfig-paths-plugin");
+@@ -1597,6 +1598,7 @@ async function getBaseWebpackConfig(dir, { buildId, encryptionKey, config, compi
+             //
+             // TODO: Rspack currently does not support the hooks and chunk methods required by ForceCompleteRuntimePlugin.
+             dev && !isRspack && new _forcecompleteruntime.default(),
++            isNodeServer && !isRspack && new _canonicalapprenderexternalmoduleidsplugin.CanonicalAppRenderExternalModuleIdsPlugin(),
+             // Handle deferred entries - must be added early to intercept entry processing
+             !isRspack && ((_config_experimental_deferredEntries = config.experimental.deferredEntries) == null ? void 0 : _config_experimental_deferredEntries.length) && deferredEntrypoints && new _deferredentriesplugin.DeferredEntriesPlugin({
+                 dev,
+diff --git a/node_modules/next/dist/build/webpack/plugins/canonical-app-render-external-module-ids-plugin.js b/node_modules/next/dist/build/webpack/plugins/canonical-app-render-external-module-ids-plugin.js
+new file mode 100644
+index 0000000..5615e57
+--- /dev/null
++++ b/node_modules/next/dist/build/webpack/plugins/canonical-app-render-external-module-ids-plugin.js
+@@ -0,0 +1,25 @@
++"use strict";
++Object.defineProperty(exports, "__esModule", {
++    value: true
++});
++Object.defineProperty(exports, "CanonicalAppRenderExternalModuleIdsPlugin", {
++    enumerable: true,
++    get: function() {
++        return CanonicalAppRenderExternalModuleIdsPlugin;
++    }
++});
++const PLUGIN_NAME = 'CanonicalAppRenderExternalModuleIdsPlugin';
++const APP_RENDER_EXTERNAL_REQUEST = /^next\/dist\/server\/app-render\/[^/]+\.external\.js$/u;
++class CanonicalAppRenderExternalModuleIdsPlugin {
++    apply(compiler) {
++        compiler.hooks.compilation.tap(PLUGIN_NAME, (compilation)=>{
++            compilation.hooks.beforeModuleIds.tap(PLUGIN_NAME, (modules)=>{
++                for (const module of modules){
++                    if (module.constructor.name !== 'ExternalModule') continue;
++                    if (typeof module.request !== 'string' || !APP_RENDER_EXTERNAL_REQUEST.test(module.request)) continue;
++                    module.userRequest = module.request;
++                }
++            });
++        });
++    }
++}
+diff --git a/node_modules/next/dist/esm/build/webpack-config.js b/node_modules/next/dist/esm/build/webpack-config.js
+index 637af37..9129303 100644
+--- a/node_modules/next/dist/esm/build/webpack-config.js
++++ b/node_modules/next/dist/esm/build/webpack-config.js
+@@ -15,6 +15,7 @@ import { finalizeEntrypoint } from './entries';
+ import * as Log from './output/log';
+ import { buildConfiguration } from './webpack/config';
+ import ForceCompleteRuntimePlugin from './webpack/plugins/force-complete-runtime';
++import { CanonicalAppRenderExternalModuleIdsPlugin } from './webpack/plugins/canonical-app-render-external-module-ids-plugin';
+ import MiddlewarePlugin, { getEdgePolyfilledModules, handleWebpackExternalForEdgeRuntime } from './webpack/plugins/middleware-plugin';
+ import BuildManifestPlugin from './webpack/plugins/build-manifest-plugin';
+ import { JsConfigPathsPlugin } from './webpack/plugins/jsconfig-paths-plugin';
+@@ -1493,6 +1494,7 @@ export default async function getBaseWebpackConfig(dir, { buildId, encryptionKey
+             //
+             // TODO: Rspack currently does not support the hooks and chunk methods required by ForceCompleteRuntimePlugin.
+             dev && !isRspack && new ForceCompleteRuntimePlugin(),
++            isNodeServer && !isRspack && new CanonicalAppRenderExternalModuleIdsPlugin(),
+             // Handle deferred entries - must be added early to intercept entry processing
+             !isRspack && ((_config_experimental_deferredEntries = config.experimental.deferredEntries) == null ? void 0 : _config_experimental_deferredEntries.length) && deferredEntrypoints && new DeferredEntriesPlugin({
+                 dev,
+diff --git a/node_modules/next/dist/esm/build/webpack/plugins/canonical-app-render-external-module-ids-plugin.js b/node_modules/next/dist/esm/build/webpack/plugins/canonical-app-render-external-module-ids-plugin.js
+new file mode 100644
+index 0000000..104ba2f
+--- /dev/null
++++ b/node_modules/next/dist/esm/build/webpack/plugins/canonical-app-render-external-module-ids-plugin.js
+@@ -0,0 +1,15 @@
++const PLUGIN_NAME = 'CanonicalAppRenderExternalModuleIdsPlugin';
++const APP_RENDER_EXTERNAL_REQUEST = /^next\/dist\/server\/app-render\/[^/]+\.external\.js$/u;
++export class CanonicalAppRenderExternalModuleIdsPlugin {
++    apply(compiler) {
++        compiler.hooks.compilation.tap(PLUGIN_NAME, (compilation)=>{
++            compilation.hooks.beforeModuleIds.tap(PLUGIN_NAME, (modules)=>{
++                for (const module of modules){
++                    if (module.constructor.name !== 'ExternalModule') continue;
++                    if (typeof module.request !== 'string' || !APP_RENDER_EXTERNAL_REQUEST.test(module.request)) continue;
++                    module.userRequest = module.request;
++                }
++            });
++        });
++    }
++}

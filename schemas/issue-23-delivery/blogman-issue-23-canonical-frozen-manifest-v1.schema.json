@@ -24,7 +24,7 @@
     "preparation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["prepare_entry", "execute_entry", "manifest_schema"],
+      "required": ["prepare_entry", "execute_entry", "worker_upload_entry", "manifest_schema"],
       "properties": {
         "prepare_entry": {
           "type": "object",
@@ -42,6 +42,21 @@
           }
         },
         "execute_entry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "worker_upload_entry": {
           "type": "object",
           "additionalProperties": false,
           "required": ["path", "sha256"],

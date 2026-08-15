@@ -16,14 +16,10 @@ import {
   parseStrictJson,
   parseWranglerWhoamiResponse,
 } from './issue-23-delivery-d1-contracts.mjs'
-import {
-  D1ChildError,
-  runBoundedChild,
-} from './issue-23-delivery-d1-child.mjs'
+import { D1ChildError, runBoundedChild } from './issue-23-delivery-d1-child.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const wranglerPath = realpathSync(join(repoRoot, 'node_modules', '.bin', 'wrangler'))
-const transportCapabilities = new WeakMap()
 
 const canonicalPaths = Object.freeze({
   reset: join(repoRoot, 'db', 'issue-23-clean-start-reset.sql'),
@@ -36,8 +32,11 @@ export const D1_TRANSPORT_TIMEOUT_MS = 300_000
 export const D1_TRANSPORT_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 export const D1_TRANSPORT_FAILURE_CLASSIFICATIONS = Object.freeze({
   TIMEOUT: 'timeout',
+  OVERALL_TIMEOUT: 'overall_timeout',
   NONZERO: 'nonzero',
   MALFORMED: 'malformed',
+  MANIFEST_DRIFT: 'manifest_drift',
+  PERMISSION: 'permission_insufficient',
   UNCERTAIN: 'uncertain',
 })
 
@@ -59,6 +58,9 @@ const TRANSPORT_CONFIG_KEYS = Object.freeze([
   'rollout_safety_sha256',
   'expected_reconciliation_path',
   'expected_reconciliation_sha256',
+  'manifest_sha256',
+  'authorization_sha256',
+  'attempt_id',
   'candidate_id',
   'evidence_class',
   'migrations',
@@ -165,7 +167,7 @@ function assertSafeFilesystemEntry(path, type, label) {
 function assertCanonicalPath(path, canonicalPath, label) {
   assertAbsolutePath(path, label)
   if (path !== canonicalPath) fail(`${label} must be the canonical path`)
-  assertSafeFilesystemEntry(path, 'file', label)
+  return assertSafeFilesystemEntry(path, 'file', label)
 }
 
 function sha256(bytes) {
@@ -233,8 +235,12 @@ function validateConfig(config) {
   ].includes(config.evidence_class)) {
     fail('evidence_class is invalid')
   }
+  const attemptBound = ['production', 'formal-rehearsal-test-evidence'].includes(config.evidence_class)
+  for (const field of ['manifest_sha256', 'authorization_sha256', 'attempt_id']) {
+    if (attemptBound || config[field] !== null) assertHash(config[field], field)
+  }
   if (config.mode === 'remote'
-    && !['production', 'formal-rehearsal-test-evidence'].includes(config.evidence_class)) {
+    && !attemptBound) {
     fail('remote transport requires production evidence')
   }
   if (!Array.isArray(config.migrations) || config.migrations.length !== 6) {
@@ -281,28 +287,38 @@ function assertPersistIdentity(path, expectedIdentity) {
   return actualIdentity
 }
 
-function validateBoundArtifactsOrThrow(config, expectedPersistIdentity = null) {
+function validateBoundArtifactsOrThrow(config, expectedIdentity = null, classification = D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED) {
   try {
-    return validateBoundArtifacts(config, expectedPersistIdentity)
+    return validateBoundArtifacts(config, expectedIdentity)
   } catch {
-    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED)
+    throw new D1TransportError(classification)
   }
 }
 
-function validateBoundArtifacts(config, expectedPersistIdentity = null) {
-  assertSafeFilesystemEntry(wranglerPath, 'file', 'Wrangler executable')
+function boundIdentity(metadata) {
+  return Object.freeze({
+    dev: metadata.dev,
+    ino: metadata.ino,
+    mode: metadata.mode & 0o777,
+    size: metadata.size,
+  })
+}
+
+function validateBoundArtifacts(config, expectedIdentity = null) {
+  const artifacts = {}
+  artifacts.wrangler = boundIdentity(assertSafeFilesystemEntry(wranglerPath, 'file', 'Wrangler executable'))
   if (sha256(readFileSync(wranglerPath)) !== config.wrangler_sha256) {
     fail('Wrangler executable hash drifted')
   }
-  assertSafeFilesystemEntry(config.config_path, 'file', 'bound Wrangler config')
+  artifacts.config = boundIdentity(assertSafeFilesystemEntry(config.config_path, 'file', 'bound Wrangler config'))
   if (sha256(readFileSync(config.config_path)) !== config.config_sha256) {
     fail('bound Wrangler config hash drifted')
   }
-  assertCanonicalPath(config.reset_sql_path, canonicalPaths.reset, 'bound reset SQL')
+  artifacts.reset = boundIdentity(assertCanonicalPath(config.reset_sql_path, canonicalPaths.reset, 'bound reset SQL'))
   if (sha256(readFileSync(config.reset_sql_path)) !== config.reset_sql_sha256) {
     fail('bound reset SQL hash drifted')
   }
-  assertCanonicalPath(config.migration_runner_path, canonicalPaths.runner, 'bound migration runner')
+  artifacts.runner = boundIdentity(assertCanonicalPath(config.migration_runner_path, canonicalPaths.runner, 'bound migration runner'))
   if (sha256(readFileSync(config.migration_runner_path)) !== config.migration_runner_sha256) {
     fail('bound migration runner hash drifted')
   }
@@ -310,25 +326,37 @@ function validateBoundArtifacts(config, expectedPersistIdentity = null) {
   if (config.migration_catalog_path !== canonicalPaths.catalog) {
     fail('bound migration catalog must be canonical')
   }
+  artifacts.catalog = boundIdentity(assertSafeFilesystemEntry(
+    config.migration_catalog_path,
+    'directory',
+    'bound migration catalog',
+  ))
   if (hashD1ArtifactDirectory(config.migration_catalog_path) !== config.migration_catalog_sha256) {
     fail('bound migration catalog hash drifted')
   }
-  assertCanonicalPath(config.rollout_safety_path, canonicalPaths.rolloutSafety, 'bound rollout safety')
+  artifacts.rolloutSafety = boundIdentity(assertCanonicalPath(config.rollout_safety_path, canonicalPaths.rolloutSafety, 'bound rollout safety'))
   if (sha256(readFileSync(config.rollout_safety_path)) !== config.rollout_safety_sha256) {
     fail('bound rollout safety hash drifted')
   }
-  assertSafeFilesystemEntry(config.expected_reconciliation_path, 'file', 'bound expected reconciliation')
+  artifacts.expectedReconciliation = boundIdentity(assertSafeFilesystemEntry(
+    config.expected_reconciliation_path,
+    'file',
+    'bound expected reconciliation',
+  ))
   if (sha256(readFileSync(config.expected_reconciliation_path)) !== config.expected_reconciliation_sha256) {
     fail('bound expected reconciliation hash drifted')
   }
   validateExpectedReconciliation(config.expected_reconciliation_path)
-  if (config.mode === 'local') {
-    const persistIdentity = expectedPersistIdentity === null
+  const persist = config.mode === 'local'
+    ? expectedIdentity === null
       ? assertPrivatePersistDirectory(config.persist_path)
-      : assertPersistIdentity(config.persist_path, expectedPersistIdentity)
-    return persistIdentity
+      : assertPersistIdentity(config.persist_path, expectedIdentity.persist)
+    : null
+  if (expectedIdentity !== null
+    && JSON.stringify(artifacts) !== JSON.stringify(expectedIdentity.artifacts)) {
+    fail('bound artifact identity drifted')
   }
-  return null
+  return Object.freeze({ artifacts: Object.freeze(artifacts), persist })
 }
 
 function validateRequest(request) {
@@ -351,13 +379,28 @@ function validateRequest(request) {
   })
 }
 
+function deadlineBudget(request, spentMs = 0, actualOverallElapsedMs = request.overall_elapsed_ms + spentMs) {
+  const overallElapsedMs = Math.max(request.overall_elapsed_ms + spentMs, actualOverallElapsedMs)
+  const stageStartedMs = request.overall_elapsed_ms - request.elapsed_ms
+  const stageElapsedMs = overallElapsedMs - stageStartedMs
+  const overallRemainingMs = 5_400_000 - overallElapsedMs
+  const stageRemainingMs = request.timeout_ms - stageElapsedMs
+  if (overallRemainingMs <= 0) {
+    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.OVERALL_TIMEOUT, stageElapsedMs)
+  }
+  if (stageRemainingMs <= 0) {
+    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT, stageElapsedMs)
+  }
+  return Object.freeze({
+    timeout_ms: Math.min(stageRemainingMs, overallRemainingMs),
+    timeout_classification: overallRemainingMs <= stageRemainingMs
+      ? D1_TRANSPORT_FAILURE_CLASSIFICATIONS.OVERALL_TIMEOUT
+      : D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT,
+  })
+}
+
 function remainingTimeout(request, spentMs = 0) {
-  const timeout = Math.min(
-    request.timeout_ms - request.elapsed_ms - spentMs,
-    5_400_000 - request.overall_elapsed_ms - spentMs,
-  )
-  if (timeout <= 0) throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT)
-  return timeout
+  return deadlineBudget(request, spentMs).timeout_ms
 }
 
 function d1Arguments(config, suffix) {
@@ -396,12 +439,23 @@ function buildD1Command(config, request) {
   })
 }
 
-function runBounded(executable, args, timeoutMs) {
+function runBounded(
+  executable,
+  args,
+  timeoutMs,
+  environment = process.env,
+  timeoutClassification = D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT,
+) {
   try {
-    return runBoundedChild(executable, args, timeoutMs, D1_TRANSPORT_MAX_OUTPUT_BYTES, repoRoot)
+    return runBoundedChild(executable, args, timeoutMs, D1_TRANSPORT_MAX_OUTPUT_BYTES, repoRoot, environment)
   } catch (error) {
     if (error instanceof D1ChildError) {
-      throw new D1TransportError(error.classification, error.durationMs)
+      throw new D1TransportError(
+        error.classification === D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT
+          ? timeoutClassification
+          : error.classification,
+        error.durationMs,
+      )
     }
     throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.UNCERTAIN)
   }
@@ -432,16 +486,23 @@ function parseLocalIdentity(stdout) {
 function parseRemoteIdentity(stdout, expectedDatabaseId) {
   try {
     parseRemoteD1InfoResponse(stdout, expectedDatabaseId)
-  } catch {
-    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED)
+  } catch (error) {
+    throw new D1TransportError(error?.code === 'DELIVERY_DATABASE_MISMATCH'
+      ? D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MANIFEST_DRIFT
+      : D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED)
   }
 }
 
 function parseRemoteWhoami(stdout, expectedAccountId) {
   try {
     parseWranglerWhoamiResponse(stdout, expectedAccountId)
-  } catch {
-    throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED)
+  } catch (error) {
+    const classification = error?.code === 'DELIVERY_PERMISSION_INSUFFICIENT'
+      ? D1_TRANSPORT_FAILURE_CLASSIFICATIONS.PERMISSION
+      : error?.code === 'DELIVERY_ACCOUNT_MISMATCH'
+        ? D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MANIFEST_DRIFT
+        : D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MALFORMED
+    throw new D1TransportError(classification)
   }
 }
 
@@ -521,33 +582,78 @@ function rolloutSafetyCommand(config) {
 
 export { hashD1ArtifactDirectory }
 
-export function createD1Transport(config) {
-  if (arguments.length !== 1) fail('createD1Transport accepts exactly one config argument')
+export const D1_COMMAND_CONTRACT = Object.freeze({
+  repoRoot,
+  wranglerPath,
+  fail,
+  validateConfig,
+  validateBoundArtifactsOrThrow,
+  deadlineBudget,
+  validateRequest,
+  buildD1Command,
+  buildRemoteWhoamiCommand,
+  identityResponse,
+  canonicalRunnerCommand,
+  rolloutSafetyCommand,
+})
+
+function createLocalD1TransportImplementation(config, childEnvironment, monotonicMs) {
+  if (arguments.length < 1 || arguments.length > 3
+    || (childEnvironment !== undefined && Object.getPrototypeOf(childEnvironment) !== null)
+    || (monotonicMs !== undefined && typeof monotonicMs !== 'function')) {
+    fail('local transport rejects unsupported adapter overrides')
+  }
+  const privateEnvironment = childEnvironment ?? process.env
   const normalizedConfig = validateConfig(config)
-  const persistIdentity = validateBoundArtifactsOrThrow(normalizedConfig)
+  const frozenBoundIdentity = validateBoundArtifactsOrThrow(normalizedConfig)
   const bindingsSha256 = d1StageBindingsSha256(normalizedConfig)
+
+  function budgetFor(request, spentMs = 0) {
+    let actualOverallElapsedMs = request.overall_elapsed_ms + spentMs
+    if (monotonicMs !== undefined) {
+      const measured = monotonicMs()
+      if (!Number.isSafeInteger(measured) || measured < 0) fail('internal monotonic clock is invalid')
+      actualOverallElapsedMs = Math.max(actualOverallElapsedMs, measured)
+    }
+    return deadlineBudget(request, spentMs, actualOverallElapsedMs)
+  }
+
+  function runRequestBounded(executable, args, request, spentMs = 0) {
+    const budget = budgetFor(request, spentMs)
+    return runBounded(
+      executable,
+      args,
+      budget.timeout_ms,
+      privateEnvironment,
+      budget.timeout_classification,
+    )
+  }
 
   function execute(request) {
     if (arguments.length !== 1) fail('execute accepts exactly one request argument')
     const normalizedRequest = validateRequest(request)
-    validateBoundArtifactsOrThrow(normalizedConfig, persistIdentity)
-    const timeoutMs = remainingTimeout(normalizedRequest)
+    validateBoundArtifactsOrThrow(
+      normalizedConfig,
+      frozenBoundIdentity,
+      D1_TRANSPORT_FAILURE_CLASSIFICATIONS.MANIFEST_DRIFT,
+    )
     if (normalizedRequest.operation === 'd1_identity'
       || normalizedRequest.operation === 'clean_start_reset'
       || normalizedRequest.operation === 'empty_d1_proof') {
       const command = buildD1Command(normalizedConfig, normalizedRequest)
       if (normalizedRequest.operation !== 'd1_identity') {
-        return runBounded(command.executable, command.args, timeoutMs)
+        return runRequestBounded(command.executable, command.args, normalizedRequest)
       }
-      const infoCommand = runBounded(command.executable, command.args, timeoutMs)
+      const infoCommand = runRequestBounded(command.executable, command.args, normalizedRequest)
       if (infoCommand.stderr !== '') return identityResponse(normalizedConfig, infoCommand)
       if (normalizedConfig.mode === 'local') return identityResponse(normalizedConfig, infoCommand)
       let whoamiCommand
       try {
-        whoamiCommand = runBounded(
+        whoamiCommand = runRequestBounded(
           wranglerPath,
           buildRemoteWhoamiCommand(normalizedConfig),
-          remainingTimeout(normalizedRequest, infoCommand.duration_ms),
+          normalizedRequest,
+          infoCommand.duration_ms,
         )
       } catch (error) {
         if (error instanceof D1TransportError) {
@@ -561,35 +667,35 @@ export function createD1Transport(config) {
       return identityResponse(normalizedConfig, infoCommand, whoamiCommand)
     }
     if (normalizedRequest.operation === 'migration_catalog') {
-      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'catalog'), timeoutMs)
+      return runRequestBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'catalog'), normalizedRequest)
     }
     if (normalizedRequest.operation === 'migration_plan') {
-      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'plan'), timeoutMs)
+      return runRequestBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'plan'), normalizedRequest)
     }
     if (normalizedRequest.operation === 'migration_apply') {
-      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'apply'), timeoutMs)
+      return runRequestBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'apply'), normalizedRequest)
     }
     if (normalizedRequest.operation === 'migration_verify') {
-      return runBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'verify'), timeoutMs)
+      return runRequestBounded(process.execPath, canonicalRunnerCommand(normalizedConfig, 'verify'), normalizedRequest)
     }
     if (normalizedRequest.operation === 'reconciliation') {
-      return runBounded(process.execPath, rolloutSafetyCommand(normalizedConfig), timeoutMs)
+      return runRequestBounded(process.execPath, rolloutSafetyCommand(normalizedConfig), normalizedRequest)
     }
     fail('operation is not supported')
   }
 
-  const transport = Object.freeze({ execute })
-  transportCapabilities.set(transport, Object.freeze({
-    source: normalizedConfig.mode === 'remote' ? 'production' : 'local-non-production',
-    production: normalizedConfig.mode === 'remote',
+  return Object.freeze({
+    execute,
     bindings_sha256: bindingsSha256,
-    wrangler_sha256: normalizedConfig.wrangler_sha256,
-  }))
-  return transport
+  })
 }
 
-export function getD1TransportProvenance(transport) {
-  return transportCapabilities.get(transport)
+export function createLocalD1Transport(config, childEnvironment, monotonicMs) {
+  if (config?.mode !== 'local'
+    || !['local-non-production', 'test-non-production', 'synthetic-non-production'].includes(config.evidence_class)) {
+    fail('local transport requires structurally nonproduction local evidence')
+  }
+  return createLocalD1TransportImplementation(config, childEnvironment, monotonicMs)
 }
 
 const REHEARSAL_D1_STAGE_BY_OPERATION = Object.freeze({
@@ -677,7 +783,7 @@ export const FORMAL_REHEARSAL_D1_EVIDENCE_SOURCE = 'formal-rehearsal-test-eviden
  * It replaces command I/O only: it never starts a process, opens a network
  * connection, or writes outside the disposable local preparation rehearsal.
  */
-export function createRehearsalD1Transport(bindings, sink) {
+export function createRehearsalD1Transport(bindings, sink, fault = null, childEnvironment = {}) {
   const normalizedBindings = validateConfig(bindings)
   const bindingsSha256 = d1StageBindingsSha256(normalizedBindings)
   function commandFor(request) {
@@ -699,15 +805,25 @@ export function createRehearsalD1Transport(bindings, sink) {
   function execute(request) {
     const command = commandFor(request)
     const stage = REHEARSAL_D1_STAGE_BY_OPERATION[request.operation]
-    if (sink) sink.push({ adapter: 'd1', operation: request.operation, stage, command: command.args })
+    if (sink) sink.push({
+      adapter: 'd1', operation: request.operation, stage, command: command.args,
+      env_keys: Object.keys(childEnvironment).sort(),
+    })
+    if (fault?.stage === stage) {
+      if (fault.kind === 'failure') throw new D1TransportError('formal_failure', 1)
+      if (fault.kind === 'drift') throw new D1TransportError('formal_drift', 1)
+      if (fault.kind === 'timeout') {
+        return { status: 0, stdout: '', stderr: '', duration_ms: 1, timed_out: true }
+      }
+      if (fault.kind === 'malformed') {
+        return { status: 0, stdout: '{', stderr: '', duration_ms: 1 }
+      }
+      return { status: 0, stdout: '', stderr: '', duration_ms: 1, signal: 'SIGKILL' }
+    }
     return { status: 0, stdout: rehearsalD1Stdout(request.operation, normalizedBindings), stderr: '', duration_ms: 1 }
   }
-  const transport = Object.freeze({ execute })
-  transportCapabilities.set(transport, Object.freeze({
-    source: FORMAL_REHEARSAL_D1_EVIDENCE_SOURCE,
-    production: false,
+  return Object.freeze({
+    execute,
     bindings_sha256: bindingsSha256,
-    wrangler_sha256: bindings.wrangler_sha256,
-  }))
-  return transport
+  })
 }
