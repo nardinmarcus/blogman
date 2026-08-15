@@ -19,7 +19,7 @@ import {
   writeSync,
 } from 'node:fs'
 import { platform, tmpdir, userInfo } from 'node:os'
-import { dirname, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   CANONICAL_MANIFEST_FORMAT,
@@ -426,7 +426,7 @@ function buildDeliverySinkOwnership() {
 
   function trustedCanonicalAncestorIdentity(path, label) {
     const identity = canonicalDirectoryIdentity(path, label)
-    if ((identity.mode & 0o002) !== 0) fail(`${label} is a world-writable authority ancestor`)
+    if ((identity.mode & 0o022) !== 0) fail(`${label} is a group- or world-writable authority ancestor`)
     return identity
   }
 
@@ -721,20 +721,106 @@ function buildDeliverySinkOwnership() {
     })
   }
 
+  function isSameOrDescendant(root, candidate) {
+    const path = relative(root, candidate)
+    return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path))
+  }
+
+  function overlapsCanonicalAuthority(path) {
+    return isSameOrDescendant(PRODUCTION_AUTHORITY_ROOT, path)
+      || isSameOrDescendant(path, PRODUCTION_AUTHORITY_ROOT)
+  }
+
+  function prospectiveRealPath(path) {
+    let existing = path
+    const suffix = []
+    while (true) {
+      try {
+        lstatSync(existing)
+        break
+      } catch (error) {
+        if (error?.code !== 'ENOENT') fail('test-only sink path is unavailable')
+        const parent = dirname(existing)
+        if (parent === existing) fail('test-only sink path is unavailable')
+        suffix.unshift(basename(existing))
+        existing = parent
+      }
+    }
+    try {
+      return resolve(realpathSync(existing), ...suffix)
+    } catch {
+      fail('test-only sink path is unavailable')
+    }
+  }
+
+  function rejectCanonicalAuthorityOverlap(path) {
+    if (overlapsCanonicalAuthority(path)) {
+      fail('test-only sink refuses canonical production authority overlap')
+    }
+  }
+
   function createTestDeliverySink(root) {
     if (typeof root !== 'string') fail('explicit test-only sink root is required')
     const requestedRoot = resolve(root)
-    if (requestedRoot === PRODUCTION_AUTHORITY_ROOT) {
-      fail('test-only sink refuses the canonical production root')
-    }
+    rejectCanonicalAuthorityOverlap(requestedRoot)
+    rejectCanonicalAuthorityOverlap(prospectiveRealPath(requestedRoot))
     mkdirSync(dirname(requestedRoot), { recursive: true, mode: 0o700 })
     createDirectory(requestedRoot, 'sink root')
     const resolvedRoot = realpathSync(requestedRoot)
-    if (resolvedRoot === PRODUCTION_AUTHORITY_ROOT) {
-      fail('test-only sink refuses the canonical production root')
-    }
+    rejectCanonicalAuthorityOverlap(resolvedRoot)
     const rootIdentity = secureDirectoryIdentity(resolvedRoot, 'sink root')
     return deliverySink(resolvedRoot, rootIdentity)
+  }
+
+  function existingDeliveryReader(resolvedRoot, rootIdentity, ancestors) {
+    const directories = Object.freeze(Object.fromEntries(['authorizations', 'records', 'terminals'].map((name) => {
+      const path = join(resolvedRoot, name)
+      return [name, Object.freeze({ path, identity: secureCanonicalDirectoryIdentity(path, `${name} directory`) })]
+    })))
+    const assertReaderIdentity = () => {
+      for (const entry of ancestors) {
+        assertDirectoryIdentity(entry.path, entry.identity, entry.label, canonicalDirectoryIdentity)
+      }
+      assertDirectoryIdentity(resolvedRoot, rootIdentity, 'sink root', secureCanonicalDirectoryIdentity)
+      for (const [name, entry] of Object.entries(directories)) {
+        assertDirectoryIdentity(entry.path, entry.identity, `${name} directory`, secureCanonicalDirectoryIdentity)
+      }
+    }
+    return Object.freeze({
+      readTerminalEvidence(terminalSha256) {
+        assertReaderIdentity()
+        const result = readTerminalEvidence(resolvedRoot, terminalSha256)
+        assertReaderIdentity()
+        return result
+      },
+    })
+  }
+
+  function canonicalDeliveryReader() {
+    const ancestors = []
+    let path = PRODUCTION_AUTHORITY_HOME
+    ancestors.push(Object.freeze({
+      path,
+      label: 'authority home',
+      identity: trustedCanonicalAncestorIdentity(path, 'authority home'),
+    }))
+    for (const name of ['.local', 'state', 'blogman', 'issue-23-production-authority-v1']) {
+      path = join(path, name)
+      const label = `authority ${name} directory`
+      const trustedSubtree = name === 'blogman' || name === 'issue-23-production-authority-v1'
+      ancestors.push(Object.freeze({
+        path,
+        label,
+        identity: trustedSubtree
+          ? secureCanonicalDirectoryIdentity(path, label)
+          : trustedCanonicalAncestorIdentity(path, label),
+      }))
+    }
+    if (path !== PRODUCTION_AUTHORITY_ROOT || realpathSync(path) !== PRODUCTION_AUTHORITY_ROOT) {
+      fail('production authority resolved outside its canonical lexical root')
+    }
+    const rootIdentity = secureCanonicalDirectoryIdentity(PRODUCTION_AUTHORITY_ROOT, 'sink root')
+    return existingDeliveryReader(PRODUCTION_AUTHORITY_ROOT, rootIdentity, ancestors)
   }
 
   function canonicalDeliverySink() {
@@ -770,6 +856,7 @@ function buildDeliverySinkOwnership() {
   return Object.freeze({
     DeliverySinkDeadlineError,
     createTestDeliverySink,
+    canonicalDeliveryReader,
     canonicalDeliverySink,
     isCanonicalProductionAuthorityRoot: (path) => resolve(path) === PRODUCTION_AUTHORITY_ROOT,
   })
@@ -778,6 +865,7 @@ function buildDeliverySinkOwnership() {
 const {
   DeliverySinkDeadlineError,
   createTestDeliverySink,
+  canonicalDeliveryReader,
   canonicalDeliverySink,
   isCanonicalProductionAuthorityRoot,
 } = buildDeliverySinkOwnership()
@@ -3134,7 +3222,7 @@ export function validateProductionTerminalEvidence(result) {
   }
   let receipts
   try {
-    receipts = canonicalDeliverySink().readTerminalEvidence(result.sha256)
+    receipts = canonicalDeliveryReader().readTerminalEvidence(result.sha256)
   } catch {
     fail('production terminal evidence is malformed')
   }

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -92,7 +93,11 @@ import {
 } from '../../scripts/issue-23-delivery-execution-closure.mjs'
 import { runInFormalRehearsalContext } from '../../scripts/issue-23-delivery-formal-context.mjs'
 import { DeliverySinkDeadlineError } from '../../scripts/issue-23-delivery-evidence-sink.mjs'
-import { isolatedAuthorityChildEnvironment, TEST_AUTHORITY_ROOT } from '../helpers/issue-23-authority-isolation'
+import {
+  isolatedAuthorityChildEnvironment,
+  TEST_AUTHORITY_HOME,
+  TEST_AUTHORITY_ROOT,
+} from '../helpers/issue-23-authority-isolation'
 
 const AUTHORIZATION_FORMAT = 'blogman-issue-23-authorization/v1'
 const MANIFEST_FORMAT = 'blogman-issue-23-canonical-frozen-manifest/v1'
@@ -726,6 +731,42 @@ describe('Issue #90 formal entry fan-in', () => {
     configureWorker()
   })
   afterAll(() => rmSync(DURABLE_SINK_ROOT, { recursive: true, force: true }))
+  it.each([0o770, 0o775])('rejects group-writable authority ancestor mode %s before canonical publication', (mode) => {
+    const local = join(TEST_AUTHORITY_HOME, '.local')
+    const state = join(local, 'state')
+    const blogman = join(state, 'blogman')
+    mkdirSync(blogman, { recursive: true, mode: 0o700 })
+    chmodSync(local, 0o755)
+    chmodSync(state, mode)
+    chmodSync(blogman, 0o700)
+    configureD1()
+    const prepared = actualPreparedManifest()
+
+    try {
+      expect(() => execute(prepared, authorizationFor(prepared, `group-writable-${mode.toString(8)}`)))
+        .toThrow(/group- or world-writable authority ancestor/u)
+      expect(existsSync(DURABLE_SINK_ROOT)).toBe(false)
+    } finally {
+      chmodSync(state, 0o755)
+    }
+  })
+
+  it('allows owner-writable 0755 authority ancestors', () => {
+    const local = join(TEST_AUTHORITY_HOME, '.local')
+    const state = join(local, 'state')
+    const blogman = join(state, 'blogman')
+    mkdirSync(blogman, { recursive: true, mode: 0o700 })
+    chmodSync(local, 0o755)
+    chmodSync(state, 0o755)
+    chmodSync(blogman, 0o700)
+    configureD1()
+    const prepared = actualPreparedManifest()
+    const authorization = authorizationFor(prepared, 'safe-authority-0755')
+
+    expect(execute(prepared, authorization).value.finalized).toBe(true)
+    expect(existsSync(join(DURABLE_SINK_ROOT, 'authorizations', `${authorization.sha256}.json`))).toBe(true)
+  })
+
   it('rejects missing-d1 and d1-only wrappers before Authorization or adapter selection', () => {
     configureD1()
     const complete = manifest()

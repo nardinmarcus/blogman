@@ -970,11 +970,36 @@ try {
   })
 })
 
+function canonicalCheckoutSnapshot() {
+  const paths = [
+    '.next',
+    '.open-next',
+    'tests/scripts/.issue-23-external-link.bin',
+  ]
+  return {
+    status: execFileSync('git', ['status', '--porcelain=v1', '-uall'], { cwd: repoRoot, encoding: 'utf8' }),
+    tree: execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoRoot, encoding: 'utf8' }).trim(),
+    present: Object.fromEntries(paths.map((path) => {
+      try {
+        lstatSync(join(repoRoot, path))
+        return [path, true]
+      } catch {
+        return [path, false]
+      }
+    })),
+  }
+}
+
+function expectCanonicalCheckoutUntouched(before: ReturnType<typeof canonicalCheckoutSnapshot>) {
+  expect(Object.values(before.present).some(Boolean)).toBe(false)
+  expect(canonicalCheckoutSnapshot()).toEqual(before)
+}
+
 function expectPreArchiveFailure(callback: () => unknown) {
-  const checkoutOutputs = [join(repoRoot, '.next'), join(repoRoot, '.open-next')]
-  expect(checkoutOutputs.some((path) => existsSync(path))).toBe(false)
+  const checkout = canonicalCheckoutSnapshot()
+  expectCanonicalCheckoutUntouched(checkout)
   expect(callback).toThrow()
-  expect(checkoutOutputs.some((path) => existsSync(path))).toBe(false)
+  expectCanonicalCheckoutUntouched(checkout)
 }
 
 function readPatchContract(relativePath: string) {
@@ -2185,6 +2210,8 @@ describe('Issue #23 Delivery Preparation', () => {
   })
 
   it('rejects a repository symlink whose target is outside the canonical root', () => {
+    const checkout = canonicalCheckoutSnapshot()
+    expectCanonicalCheckoutUntouched(checkout)
     const directory = mkdtempSync(join(tmpdir(), 'blogman-issue-23-symlink-'))
     const artifactFixture = createFakePrepareArtifactRepository(baseConfig())
     const repositoryPath = artifactFixture.artifactRepositoryPath
@@ -2212,6 +2239,7 @@ describe('Issue #23 Delivery Preparation', () => {
     } finally {
       removeFakePrepareArtifactRepository(artifactFixture)
       rmSync(directory, { recursive: true, force: true })
+      expectCanonicalCheckoutUntouched(checkout)
     }
   })
 
@@ -2505,7 +2533,6 @@ describe('Issue #23 Delivery Preparation', () => {
 
     const adapter = { calls: 0 }
     prepareFixture(baseConfig(), {
-      repositoryPath: repoRoot,
       productionWriteAdapter: adapter,
       rehearsalRunner: () => {
         invocations += 1
@@ -2640,86 +2667,92 @@ exec wrangler "$@"
   ))
 
   it.runIf(process.platform === 'darwin')('[F1] binds repeatable real OpenNext 1.19.10 outputs on target macOS', { timeout: 8 * 60_000 }, () => {
-    return withIsolatedRepositoryFixture((repositoryPath) => {
-      const realConfig = baseConfig()
-      realConfig.artifact.file_tree.files[0].path = '.open-next/assets/BUILD_ID'
-      const snapshotRoot = mkdtempSync(join('/tmp', 'blogman-s3w23-f1.'))
-      const handlerPaths = [
-        '.open-next/middleware/handler.mjs',
-        '.open-next/server-functions/default/handler.mjs',
-        '.open-next/server-functions/default/handler.mjs.meta.json',
-      ]
+    const checkout = canonicalCheckoutSnapshot()
+    expectCanonicalCheckoutUntouched(checkout)
+    try {
+      return withIsolatedRepositoryFixture((repositoryPath) => {
+        const realConfig = baseConfig()
+        realConfig.artifact.file_tree.files[0].path = '.open-next/assets/BUILD_ID'
+        const snapshotRoot = mkdtempSync(join('/tmp', 'blogman-s3w23-f1.'))
+        const handlerPaths = [
+          '.open-next/middleware/handler.mjs',
+          '.open-next/server-functions/default/handler.mjs',
+          '.open-next/server-functions/default/handler.mjs.meta.json',
+        ]
 
-      const captureRun = (run: number) => {
-        rmSync(join(repositoryPath, '.next'), { recursive: true, force: true })
-        rmSync(join(repositoryPath, '.open-next'), { recursive: true, force: true })
-        const result = prepareFixture(realConfig, {
-          repositoryPath,
-          buildRunner: undefined,
-          verifyGeneratedResolverLinks: true,
-        })
-        const fileMap = buildFileMap(repositoryPath, result)
-        const jsBytes = Object.fromEntries(
-          fileMap
-            .filter(({ path }) => path.endsWith('.js') || path.endsWith('.mjs'))
-            .map(({ path }) => [path, readFileSync(join(repositoryPath, path))]),
-        )
-        const snapshot = {
-          run,
-          manifest: { bytes: result.bytes.byteLength, sha256: result.sha256 },
-          artifact: result.value.artifact,
-          handlerFiles: handlerPaths.map((path) => fileMap.find((file) => file.path === path)),
-          fileMap,
-        }
-        writeFileSync(join(snapshotRoot, `run${run}.json`), `${JSON.stringify(snapshot, null, 2)}\n`)
-        writeFileSync(join(snapshotRoot, `run${run}-file-map.json`), `${JSON.stringify(fileMap, null, 2)}\n`)
-        return { result, fileMap, snapshot, jsBytes }
-      }
-
-      const first = captureRun(1)
-      const second = captureRun(2)
-      const generatedRuntimeDependencyFiles = first.result.value.artifact.file_tree.files
-        .filter(({ path }) => path.startsWith('.open-next/server-functions/default/node_modules/'))
-        .map(({ path }) => path)
-      const archiveEntries = execFileSync(
-        'unzip',
-        ['-Z1', join(repositoryPath, first.result.value.artifact.archive.path)],
-        { encoding: 'utf8' },
-      ).trim().split(/\r?\n/u).filter(Boolean)
-      expect(generatedRuntimeDependencyFiles.length).toBeGreaterThan(0)
-      for (const path of generatedRuntimeDependencyFiles) {
-        expect(archiveEntries).toContain(path.slice('.open-next/'.length))
-      }
-      const diff = fileMapDiff(first.fileMap, second.fileMap)
-      const firstChangedPath = diff.changed.find(({ path }) =>
-        path.endsWith('.js') || path.endsWith('.mjs'),
-      )?.path
-      const firstChangedByte = firstChangedPath
-        ? {
-            path: firstChangedPath,
-            detail: firstChangedByteContext(first.jsBytes[firstChangedPath], second.jsBytes[firstChangedPath]),
+        const captureRun = (run: number) => {
+          rmSync(join(repositoryPath, '.next'), { recursive: true, force: true })
+          rmSync(join(repositoryPath, '.open-next'), { recursive: true, force: true })
+          const result = prepareFixture(realConfig, {
+            repositoryPath,
+            buildRunner: undefined,
+            verifyGeneratedResolverLinks: true,
+          })
+          const fileMap = buildFileMap(repositoryPath, result)
+          const jsBytes = Object.fromEntries(
+            fileMap
+              .filter(({ path }) => path.endsWith('.js') || path.endsWith('.mjs'))
+              .map(({ path }) => [path, readFileSync(join(repositoryPath, path))]),
+          )
+          const snapshot = {
+            run,
+            manifest: { bytes: result.bytes.byteLength, sha256: result.sha256 },
+            artifact: result.value.artifact,
+            handlerFiles: handlerPaths.map((path) => fileMap.find((file) => file.path === path)),
+            fileMap,
           }
-        : null
-      const report = {
-        format: 'blogman-s3w23-f1/v1',
-        snapshotRoot,
-        runs: [first.snapshot, second.snapshot],
-        diff,
-        equalityAssertionsPerformed: false,
-      }
-      writeFileSync(join(snapshotRoot, 'diff-manifest.json'), `${JSON.stringify(diff, null, 2)}\n`)
-      writeFileSync(join(snapshotRoot, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
+          writeFileSync(join(snapshotRoot, `run${run}.json`), `${JSON.stringify(snapshot, null, 2)}\n`)
+          writeFileSync(join(snapshotRoot, `run${run}-file-map.json`), `${JSON.stringify(fileMap, null, 2)}\n`)
+          return { result, fileMap, snapshot, jsBytes }
+        }
 
-      expect(diff, JSON.stringify({ diff, firstChangedByte })).toEqual({
-        added: [],
-        removed: [],
-        changed: [],
-      })
-      expect(first.fileMap).toEqual(second.fileMap)
-      expect(first.result.bytes).toEqual(second.result.bytes)
-      expect(first.result.sha256).toBe(second.result.sha256)
-      expect(first.snapshot.handlerFiles).toEqual(second.snapshot.handlerFiles)
-    }, { materializeDarwinDependencies: true })
+        const first = captureRun(1)
+        const second = captureRun(2)
+        const generatedRuntimeDependencyFiles = first.result.value.artifact.file_tree.files
+          .filter(({ path }) => path.startsWith('.open-next/server-functions/default/node_modules/'))
+          .map(({ path }) => path)
+        const archiveEntries = execFileSync(
+          'unzip',
+          ['-Z1', join(repositoryPath, first.result.value.artifact.archive.path)],
+          { encoding: 'utf8' },
+        ).trim().split(/\r?\n/u).filter(Boolean)
+        expect(generatedRuntimeDependencyFiles.length).toBeGreaterThan(0)
+        for (const path of generatedRuntimeDependencyFiles) {
+          expect(archiveEntries).toContain(path.slice('.open-next/'.length))
+        }
+        const diff = fileMapDiff(first.fileMap, second.fileMap)
+        const firstChangedPath = diff.changed.find(({ path }) =>
+          path.endsWith('.js') || path.endsWith('.mjs'),
+        )?.path
+        const firstChangedByte = firstChangedPath
+          ? {
+              path: firstChangedPath,
+              detail: firstChangedByteContext(first.jsBytes[firstChangedPath], second.jsBytes[firstChangedPath]),
+            }
+          : null
+        const report = {
+          format: 'blogman-s3w23-f1/v1',
+          snapshotRoot,
+          runs: [first.snapshot, second.snapshot],
+          diff,
+          equalityAssertionsPerformed: false,
+        }
+        writeFileSync(join(snapshotRoot, 'diff-manifest.json'), `${JSON.stringify(diff, null, 2)}\n`)
+        writeFileSync(join(snapshotRoot, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
+
+        expect(diff, JSON.stringify({ diff, firstChangedByte })).toEqual({
+          added: [],
+          removed: [],
+          changed: [],
+        })
+        expect(first.fileMap).toEqual(second.fileMap)
+        expect(first.result.bytes).toEqual(second.result.bytes)
+        expect(first.result.sha256).toBe(second.result.sha256)
+        expect(first.snapshot.handlerFiles).toEqual(second.snapshot.handlerFiles)
+      }, { materializeDarwinDependencies: true })
+    } finally {
+      expectCanonicalCheckoutUntouched(checkout)
+    }
   })
 
   it('F1 reports first changed byte context for bounded synthetic buffers', () => {

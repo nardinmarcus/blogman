@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, linkSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -14,6 +14,13 @@ import {
 
 const temporaryDirectories: string[] = []
 const sinkModuleUrl = pathToFileURL(join(process.cwd(), 'scripts/issue-23-delivery-evidence-sink.mjs')).href
+const entryModuleUrl = pathToFileURL(join(process.cwd(), 'scripts/issue-23-delivery-entry.mjs')).href
+
+function exportedLocalNames(source: string) {
+  return [...source.matchAll(/\bexport\s*\{([^}]*)\}/gs)].flatMap((match) => (
+    match[1].split(',').map((specifier) => specifier.trim().split(/\s+as\s+/u)[0].trim()).filter(Boolean)
+  ))
+}
 
 function record(value: Record<string, unknown>) {
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
@@ -162,7 +169,7 @@ describe('Issue #23 durable delivery records', () => {
       'createTestDeliverySink',
     ])
     expect(() => deliverySinkModule.createTestDeliverySink(TEST_AUTHORITY_ROOT))
-      .toThrow(/canonical production root/u)
+      .toThrow(/canonical production (?:root|authority overlap)/u)
 
     const internalModule = join(process.cwd(), 'scripts/issue-23-delivery-evidence-sink-internal.mjs')
     expect(existsSync(internalModule)).toBe(false)
@@ -175,6 +182,89 @@ describe('Issue #23 durable delivery records', () => {
       const source = readFileSync(join(process.cwd(), 'scripts', name), 'utf8')
       expect(source, name).not.toMatch(/export\s+(?:const|function|class)\s+(?:canonicalProduction|createCanonicalProduction|repositoryDeliverySink)/u)
     }
+
+    const entrySource = readFileSync(join(process.cwd(), 'scripts/issue-23-delivery-entry.mjs'), 'utf8')
+    const privateAuthorityLocals = ['canonicalDeliveryReader', 'canonicalDeliverySink', 'isCanonicalProductionAuthorityRoot']
+    for (const localName of privateAuthorityLocals) expect(exportedLocalNames(entrySource)).not.toContain(localName)
+    for (const mutation of [
+      'export { canonicalDeliverySink }',
+      'export { canonicalDeliverySink as deliveryAuthority }',
+    ]) {
+      expect(exportedLocalNames(`${entrySource}\n${mutation}\n`)).toContain('canonicalDeliverySink')
+    }
+  })
+
+  it.each([
+    ['exact', (canonicalRoot: string) => canonicalRoot],
+    ['descendant', (canonicalRoot: string) => join(canonicalRoot, 'test-sink')],
+    ['ancestor', (_canonicalRoot: string, blogmanRoot: string) => blogmanRoot],
+    ['resolved descendant', (canonicalRoot: string, _blogmanRoot: string, aliasRoot: string) => (
+      join(aliasRoot, canonicalRoot.split('/').at(-1)!, 'test-sink')
+    )],
+  ])('rejects a test sink with %s canonical namespace overlap before canonical mutation', (_label, requestedRoot) => {
+    const parent = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-23-overlap-')))
+    temporaryDirectories.push(parent)
+    const home = join(parent, 'home')
+    const local = join(home, '.local')
+    const state = join(local, 'state')
+    const blogmanRoot = join(state, 'blogman')
+    const canonicalRoot = join(blogmanRoot, 'issue-23-production-authority-v1')
+    const aliasRoot = join(parent, 'blogman-alias')
+    mkdirSync(blogmanRoot, { recursive: true, mode: 0o700 })
+    for (const path of [home, local, state, blogmanRoot]) chmodSync(path, 0o700)
+    symlinkSync(blogmanRoot, aliasRoot)
+    const root = requestedRoot(canonicalRoot, blogmanRoot, aliasRoot)
+
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { createTestDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
+      try {
+        createTestDeliverySink(${JSON.stringify(root)})
+        process.exitCode = 2
+      } catch (error) {
+        if (!/canonical|overlap/u.test(error instanceof Error ? error.message : String(error))) process.exitCode = 3
+      }
+    `], { encoding: 'utf8', env: isolatedAuthorityChildEnvironment({ BLOGMAN_TEST_AUTHORITY_HOME: home }) })
+
+    expect(child.status, child.stderr).toBe(0)
+    expect(existsSync(canonicalRoot)).toBe(false)
+  })
+
+  it('permits a test sink disjoint from the canonical authority namespace', () => {
+    const parent = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-23-disjoint-')))
+    temporaryDirectories.push(parent)
+    const home = join(parent, 'home')
+    const root = join(parent, 'test-sink')
+    mkdirSync(home, { mode: 0o700 })
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { createTestDeliverySink } from ${JSON.stringify(sinkModuleUrl)}
+      createTestDeliverySink(${JSON.stringify(root)})
+    `], { encoding: 'utf8', env: isolatedAuthorityChildEnvironment({ BLOGMAN_TEST_AUTHORITY_HOME: home }) })
+
+    expect(child.status, child.stderr).toBe(0)
+    expect(existsSync(join(root, 'authorizations'))).toBe(true)
+  })
+
+  it('validates absent production evidence without creating the canonical authority namespace', () => {
+    const parent = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-23-read-only-validation-')))
+    temporaryDirectories.push(parent)
+    const home = join(parent, 'home')
+    const canonicalRoot = join(home, '.local', 'state', 'blogman', 'issue-23-production-authority-v1')
+    mkdirSync(home, { mode: 0o700 })
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { createHash } from 'node:crypto'
+      import { validateProductionTerminalEvidence } from ${JSON.stringify(entryModuleUrl)}
+      const bytes = Buffer.from('{}\\n')
+      try {
+        validateProductionTerminalEvidence({ value: {}, bytes, sha256: createHash('sha256').update(bytes).digest('hex') })
+        process.exitCode = 2
+      } catch (error) {
+        if (!/production terminal evidence/u.test(error instanceof Error ? error.message : String(error))) process.exitCode = 3
+      }
+    `], { encoding: 'utf8', env: isolatedAuthorityChildEnvironment({ BLOGMAN_TEST_AUTHORITY_HOME: home }) })
+
+    expect(child.status, child.stderr).toBe(0)
+    expect(existsSync(join(home, '.local'))).toBe(false)
+    expect(existsSync(canonicalRoot)).toBe(false)
   })
 
   it('accepts a benign embedded task path while rejecting credential tokens and arbitrary Authorization fields', () => {
