@@ -1514,7 +1514,7 @@ describe('Issue #23 Delivery Preparation', () => {
     const source = readFileSync(join(repoRoot, 'scripts', 'issue-23-delivery-prepare.mjs'), 'utf8')
     const result = prepareFixture(baseConfig())
 
-    expect(source).toContain("import { hashD1ArtifactDirectory } from './issue-23-delivery-d1-contracts.mjs'")
+    expect(source).toContain("import { hashD1ArtifactDirectory, comparePathSegments } from './issue-23-delivery-d1-contracts.mjs'")
     expect(source).not.toMatch(/function hashD1ArtifactDirectory/u)
     expect(result.value.d1.migration_catalog_sha256)
       .toBe(contractHashD1ArtifactDirectory(join(repoRoot, 'db', 'ledger-migrations')))
