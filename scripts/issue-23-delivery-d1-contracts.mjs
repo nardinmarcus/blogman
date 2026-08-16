@@ -201,6 +201,7 @@ const REMOTE_D1_INFO_VARIANTS = Object.freeze([
 const WHOAMI_TOP_LEVEL_KEYS = Object.freeze({
   withEmail: Object.freeze(['accounts', 'authType', 'email', 'loggedIn', 'tokenPermissions']),
   withoutEmail: Object.freeze(['accounts', 'authType', 'loggedIn', 'tokenPermissions']),
+  envToken: Object.freeze(['accounts', 'authType', 'loggedIn']),
 })
 const WHOAMI_AUTH_TYPES = Object.freeze([
   'Account API Token',
@@ -208,6 +209,14 @@ const WHOAMI_AUTH_TYPES = Object.freeze([
   'OAuth Token',
   'User API Token',
 ])
+const WHOAMI_API_TOKEN_AUTH_TYPES = Object.freeze([
+  'User API Token',
+  'Account API Token',
+])
+// wrangler whoami --json builds the env-token (CLOUDFLARE_API_TOKEN) result without
+// tokenPermissions (the OAuth login scope cache only) or email (requires /user read;
+// delivery tokens are scoped to the account), so only these API-token auth types can
+// produce the env-token three-key shape.
 const ACCOUNT_KEYS = Object.freeze([
   'created_on',
   'id',
@@ -406,16 +415,23 @@ export function parseWranglerWhoamiResponse(stdout, expectedAccountId) {
   try {
     const response = parseStrictJson(stdout)
     if (!isPlainRecord(response)) throw new Error('object expected')
-    const keys = Object.hasOwn(response, 'email')
-      ? WHOAMI_TOP_LEVEL_KEYS.withEmail
-      : WHOAMI_TOP_LEVEL_KEYS.withoutEmail
+    const envTokenShape = !Object.hasOwn(response, 'tokenPermissions')
+    const keys = envTokenShape
+      ? WHOAMI_TOP_LEVEL_KEYS.envToken
+      : Object.hasOwn(response, 'email')
+        ? WHOAMI_TOP_LEVEL_KEYS.withEmail
+        : WHOAMI_TOP_LEVEL_KEYS.withoutEmail
     assertExactKeys(response, keys)
     if (response.loggedIn !== true || !WHOAMI_AUTH_TYPES.includes(response.authType)) {
       throw new Error('invalid authentication state')
     }
+    if (envTokenShape && !WHOAMI_API_TOKEN_AUTH_TYPES.includes(response.authType)) {
+      throw new Error('unsupported credential shape')
+    }
     if (Object.hasOwn(response, 'email')) assertString(response.email)
-    if (!Array.isArray(response.accounts) || !Array.isArray(response.tokenPermissions)
-      || response.tokenPermissions.some((permission) => typeof permission !== 'string')) {
+    const tokenPermissions = response.tokenPermissions ?? []
+    if (!Array.isArray(response.accounts) || !Array.isArray(tokenPermissions)
+      || tokenPermissions.some((permission) => typeof permission !== 'string')) {
       throw new Error('invalid account response')
     }
     for (const account of response.accounts) {
@@ -441,7 +457,13 @@ export function parseWranglerWhoamiResponse(stdout, expectedAccountId) {
       error.code = 'DELIVERY_ACCOUNT_MISMATCH'
       throw error
     }
-    if (!REQUIRED_DELIVERY_TOKEN_PERMISSIONS.every((permission) => response.tokenPermissions.includes(permission))) {
+    // The env-token shape carries no runtime scope proof (no tokenPermissions); the
+    // required scopes are asserted before delivery by the production authority gate
+    // (the manifest cloudflare_delivery credential slot must declare exactly
+    // account:read + d1:write + workers:write), and the Cloudflare API enforces them on
+    // every delivery mutation. The account-match above remains the identity/drift defense.
+    if (!envTokenShape
+      && !REQUIRED_DELIVERY_TOKEN_PERMISSIONS.every((permission) => tokenPermissions.includes(permission))) {
       const error = new Error('delivery token permissions are insufficient')
       error.code = 'DELIVERY_PERMISSION_INSUFFICIENT'
       throw error
