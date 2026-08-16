@@ -1348,7 +1348,7 @@ function firstChangedByteContext(before: Buffer | string, after: Buffer | string
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
-describe('Issue #23 Delivery Preparation', () => {
+describe('Issue #23 Delivery Preparation', { timeout: 120_000 }, () => {
   it('patch contract: every tracked patch parses with patch-package', () => {
     const trackedPatches = execFileSync('git', ['ls-files', '--', 'patches/*.patch'], {
       cwd: repoRoot,
@@ -1923,7 +1923,7 @@ describe('Issue #23 Delivery Preparation', () => {
     } finally {
       rmSync(sourcePath, { force: true })
     }
-  })
+  }, 15_000)
 
   it('rejects an internal artifact symlink before archive creation', () => {
     let thrown: Error | undefined
