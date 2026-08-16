@@ -49,3 +49,7 @@ Every invocation is represented by one immutable Terminal Result bound to the ex
 A finalized PASS may advance only through the separately authorized acceptance process. NON_PASS, ERROR, TIMEOUT, UNCERTAIN, or a consumed invocation without a finalized Terminal Result is terminal for that lineage. Preserve its evidence and open a separate read-only adjudication task; do not retry or repair the attempt.
 
 Historical pre-interface schemas and evidence remain inspectable only through `npm run issue-23:audit`. Audit output is read-only, non-promotable, and cannot be converted into a Canonical Frozen Manifest, Authorization, Terminal Result, or execution input.
+
+## CI attempt-1 gate note
+
+`resolveCiFacts` accepts only a completed, successful, attempt-1 push run whose `head_sha` equals the frozen `repository.commit`. A GitHub "re-run" produces attempt 2 and is rejected by design (the manifest schema pins `ci.attempt: 1`); `workflow_dispatch` is also out of the accepted event set. Therefore, when a main push CI run fails on an environment flake (observed: a heavyweight prepare test exceeding its 15s per-test timeout under CI load while the same content passes on the PR branch and other jobs), the recovery path is a successor commit on main — never a re-run. Keep successor commits meaningful (documentation of the flake counts); do not use empty commits to cycle CI.
