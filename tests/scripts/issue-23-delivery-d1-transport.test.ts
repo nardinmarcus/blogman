@@ -503,6 +503,37 @@ describe('Issue #90 D1 transport', () => {
     )).toThrow()
   })
 
+  it('accepts the live env-token Wrangler whoami variant (issue #144)', () => {
+    const whoami = readFileSync(
+      join(repoRoot, 'tests', 'fixtures', 'issue-90', 'wrangler-4.86.0-whoami-env-token.json'),
+      'utf8',
+    )
+
+    expect(parseWranglerWhoamiResponse(whoami, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).toMatchObject({
+      loggedIn: true,
+    })
+    // the env-token shape keeps the account-match identity/drift defense
+    expect(() => parseWranglerWhoamiResponse(
+      whoami.replace('"id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"', '"id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"'),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    )).toThrowError(expect.objectContaining({ code: 'DELIVERY_ACCOUNT_MISMATCH' }))
+    // a tokenPermissions key smuggled into the env-token shape still must satisfy the permission contract
+    expect(() => parseWranglerWhoamiResponse(
+      whoami.replace('"loggedIn": true', '"loggedIn": true, "tokenPermissions": []'),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    )).toThrowError(expect.objectContaining({ code: 'DELIVERY_PERMISSION_INSUFFICIENT' }))
+    // the env-token shape is exact: any extra key is rejected
+    expect(() => parseWranglerWhoamiResponse(
+      whoami.replace('"loggedIn": true', '"loggedIn": true, "email": "forged@example.invalid"'),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    )).toThrow()
+    // the env-token shape never carries OAuth authentication
+    expect(() => parseWranglerWhoamiResponse(
+      whoami.replace('"authType": "User API Token"', '"authType": "OAuth Token"'),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    )).toThrow()
+  })
+
   it('rejects escaped duplicate keys before JSON.parse', () => {
     expect(() => parseStrictJson('{"account_id":"a","\\u0061ccount_id":"b"}')).toThrow()
   })
