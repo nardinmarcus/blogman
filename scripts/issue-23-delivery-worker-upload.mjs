@@ -622,7 +622,7 @@ function copyUploadSourceSnapshot(source, destination, archive = undefined) {
 function collectUploadSourceSnapshotProof(directory) {
   requireCanonicalDirectory(directory, 0o500)
   requireCanonicalDirectory(dirname(directory), 0o700)
-  const entries = []
+  const collected = []
   const identities = []
   const parent = dirname(directory)
   const parentDescriptor = openSync(
@@ -667,7 +667,7 @@ function collectUploadSourceSnapshotProof(directory) {
             const stable = stableRegularFileBytes(entryPath)
             if ((stable.stat.mode & 0o777n) !== 0o400n) throw new Error()
             identities.push(identityEntry(relativePath, 'file', stable.stat))
-            entries.push({
+            collected.push({
               path: relativePath,
               bytes: stable.bytes.byteLength,
               sha256: sha256Bytes(stable.bytes),
@@ -703,7 +703,18 @@ function collectUploadSourceSnapshotProof(directory) {
   } finally {
     closeSync(parentDescriptor)
   }
-  return snapshotProof(entries, identities)
+  // Issue #135: emit the file list in the frozen full-path code-unit order
+  // (matching prepare's `.sort()` of full relative paths), not the
+  // per-directory DFS emission order. The walk stays depth-first because the
+  // per-directory before/after identity re-checks above compare readdir
+  // snapshots of the same directory and are structurally safe; only the
+  // proof's file order must agree with the frozen tree (snapshot_tree_sha256
+  // is compared against the frozen artifact sha256 at the worker_deploy
+  // acceptance boundary).
+  return snapshotProof(
+    collected.sort((left, right) => comparePathSegments(left.path, right.path)),
+    identities,
+  )
 }
 
 function verifyUploadSourceSnapshot(directory, expectedTreeSha256, expectedIdentitySha256) {
