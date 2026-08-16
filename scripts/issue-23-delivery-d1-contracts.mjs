@@ -177,6 +177,25 @@ const REMOTE_D1_INFO_VARIANTS = Object.freeze([
     sizeKey: 'database_size',
     metrics: false,
   }),
+  Object.freeze({
+    keys: Object.freeze([
+      'created_at',
+      'database_size',
+      'jurisdiction',
+      'name',
+      'num_tables',
+      'read_queries_24h',
+      'read_replication',
+      'running_in_region',
+      'rows_read_24h',
+      'rows_written_24h',
+      'uuid',
+      'write_queries_24h',
+    ]),
+    sizeKey: 'database_size',
+    metrics: true,
+    location: true,
+  }),
 ])
 
 const WHOAMI_TOP_LEVEL_KEYS = Object.freeze({
@@ -365,6 +384,10 @@ export function parseRemoteD1InfoResponse(stdout, expectedDatabaseId) {
       ]) assertNonNegativeInteger(response[field])
     } else if (response.version !== 'alpha') {
       throw new Error('unsupported D1 info version')
+    }
+    if (variant.location) {
+      assertNullableString(response.jurisdiction)
+      assertString(response.running_in_region)
     }
     return response
   } catch (error) {
