@@ -445,6 +445,37 @@ describe('Issue #90 D1 transport', () => {
     )).toThrow()
   })
 
+  it('accepts the live jurisdiction-bearing Wrangler D1 info variant (issue #141)', () => {
+    const info = readFileSync(
+      join(repoRoot, 'tests', 'fixtures', 'issue-90', 'wrangler-4.86.0-d1-info-jurisdiction.json'),
+      'utf8',
+    )
+
+    expect(parseRemoteD1InfoResponse(info, '11111111-2222-4333-8444-555555555555')).toMatchObject({
+      jurisdiction: null,
+      running_in_region: 'APAC',
+      read_queries_24h: 12,
+      write_queries_24h: 7,
+    })
+    // jurisdiction is nullable string: a non-null string is accepted.
+    expect(() => parseRemoteD1InfoResponse(
+      info.replace('"jurisdiction": null', '"jurisdiction": "WEUR"'),
+      '11111111-2222-4333-8444-555555555555',
+    )).not.toThrow()
+    expect(() => parseRemoteD1InfoResponse(
+      info.replace('"jurisdiction": null', '"jurisdiction": 7'),
+      '11111111-2222-4333-8444-555555555555',
+    )).toThrow()
+    expect(() => parseRemoteD1InfoResponse(
+      info.replace('"running_in_region": "APAC"', '"running_in_region": 7'),
+      '11111111-2222-4333-8444-555555555555',
+    )).toThrow()
+    expect(() => parseRemoteD1InfoResponse(
+      info.replace('"running_in_region": "APAC"', '"running_in_region": "APAC", "\\u0072unning_in_region": "forged"'),
+      '11111111-2222-4333-8444-555555555555',
+    )).toThrow()
+  })
+
   it('accepts the pinned Wrangler whoami fixture and rejects unsupported key/type variants', () => {
     const whoami = readFileSync(
       join(repoRoot, 'tests', 'fixtures', 'issue-90', 'wrangler-4.86.0-whoami.json'),

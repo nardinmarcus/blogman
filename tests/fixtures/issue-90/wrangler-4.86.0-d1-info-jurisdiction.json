@@ -1,0 +1,16 @@
+{
+  "uuid": "11111111-2222-4333-8444-555555555555",
+  "name": "DB",
+  "created_at": "2026-08-12T00:00:00.000Z",
+  "num_tables": 6,
+  "running_in_region": "APAC",
+  "read_replication": {
+    "mode": "disabled"
+  },
+  "jurisdiction": null,
+  "database_size": 4096,
+  "read_queries_24h": 12,
+  "rows_read_24h": 34,
+  "rows_written_24h": 56,
+  "write_queries_24h": 7
+}
