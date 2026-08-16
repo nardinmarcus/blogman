@@ -497,6 +497,11 @@ describe('Issue #90 D1 transport', () => {
       whoami.replace('"api_access_enabled": true', '"api_access_enabled": "true"'),
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     )).toThrow()
+    // the OAuth (with-email) variant keeps the strict boolean assertion: null is rejected
+    expect(() => parseWranglerWhoamiResponse(
+      whoami.replace('"api_access_enabled": true', '"api_access_enabled": null'),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    )).toThrow()
     expect(() => parseWranglerWhoamiResponse(
       whoami.replace('"loggedIn": true', '"loggedIn": true, "\\u006coggedIn": false'),
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -517,9 +522,23 @@ describe('Issue #90 D1 transport', () => {
       whoami.replace('"id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"', '"id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"'),
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     )).toThrowError(expect.objectContaining({ code: 'DELIVERY_ACCOUNT_MISMATCH' }))
-    // a tokenPermissions key smuggled into the env-token shape still must satisfy the permission contract
+    // the env-token live shape reports api_access_enabled as null, but an explicit boolean remains valid
+    expect(parseWranglerWhoamiResponse(
+      whoami.replace('"api_access_enabled": null', '"api_access_enabled": true'),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    )).toMatchObject({ loggedIn: true })
+    // the env-token variant still rejects any non-boolean non-null api_access_enabled
     expect(() => parseWranglerWhoamiResponse(
-      whoami.replace('"loggedIn": true', '"loggedIn": true, "tokenPermissions": []'),
+      whoami.replace('"api_access_enabled": null', '"api_access_enabled": "true"'),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    )).toThrow()
+    // a tokenPermissions key smuggled into the env-token shape still must satisfy the permission
+    // contract: with shape-consistent boolean settings the forged variant is classified as the
+    // strict (non-env-token) variant, so the empty permission list must trip DELIVERY_PERMISSION_INSUFFICIENT.
+    expect(() => parseWranglerWhoamiResponse(
+      whoami
+        .replace('"loggedIn": true', '"loggedIn": true, "tokenPermissions": []')
+        .replace('"api_access_enabled": null', '"api_access_enabled": true'),
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     )).toThrowError(expect.objectContaining({ code: 'DELIVERY_PERMISSION_INSUFFICIENT' }))
     // the env-token shape is exact: any extra key is rejected
