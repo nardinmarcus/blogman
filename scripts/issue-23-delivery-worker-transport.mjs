@@ -71,7 +71,15 @@ function validateArtifactSource(bindings) {
     || hash(Buffer.from(JSON.stringify(bindings.artifact_file_tree_files))) !== bindings.artifact_file_tree_sha256) {
     throw new WorkerTransportError('NON_PASS', 'Manifest Drift')
   }
-  const actual = []
+  // Issue #135: collect the walk's files and emit them in the frozen
+  // full-path code-unit order. The walk itself stays depth-first (per-directory
+  // sorted segments) because that is what the frozen-tree invariant relies on
+  // for structure; only the emission order must match prepare's `.sort()` of
+  // full relative paths, which diverges from DFS order whenever a directory
+  // name is a strict prefix of a sibling followed by '-' (e.g. editor/ai vs
+  // editor/ai-actions: '-' 0x2D sorts before '/' 0x2F, but the segment name
+  // 'ai' sorts before 'ai-actions').
+  const collected = []
   const visit = (directory, prefix = '') => {
     for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => comparePathSegments(left.name, right.name))) {
       const path = join(directory, entry.name)
@@ -79,8 +87,8 @@ function validateArtifactSource(bindings) {
       if (path === archivePath) continue
       if (entry.isSymbolicLink()) throw new Error('symlink')
       if (entry.isDirectory()) visit(path, relative)
-      else if (entry.isFile()) actual.push({
-        path: `.open-next/${relative}`,
+      else if (entry.isFile()) collected.push({
+        path: relative,
         sha256: hash(readFileSync(path)),
         bytes: statSync(path).size,
       })
@@ -95,6 +103,9 @@ function validateArtifactSource(bindings) {
   } catch {
     throw new WorkerTransportError('NON_PASS', 'Manifest Drift')
   }
+  const actual = collected
+    .sort((left, right) => comparePathSegments(left.path, right.path))
+    .map((file) => ({ path: `.open-next/${file.path}`, sha256: file.sha256, bytes: file.bytes }))
   const sourceFiles = bindings.artifact_file_tree_files.filter((file) => file.path.startsWith('.open-next/'))
   if (JSON.stringify(actual) !== JSON.stringify(sourceFiles)) {
     throw new WorkerTransportError('NON_PASS', 'Manifest Drift')
