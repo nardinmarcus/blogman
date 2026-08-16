@@ -194,10 +194,12 @@ function queryResponse(results: unknown[]) {
 }
 
 function resetResponse() {
+  // issue #150: aligned with the live 4.86.0 remote import envelope — its meta
+  // carries duration alongside the frozen numerics.
   return jsonResponse([{
     success: true,
     finalBookmark: 'reset-bookmark',
-    meta: { rows_read: 0, rows_written: 1, size_after: 1 },
+    meta: { duration: 0.25, rows_read: 0, rows_written: 1, size_after: 1 },
     results: [{
       'Total queries executed': 1,
       'Rows read': 0,

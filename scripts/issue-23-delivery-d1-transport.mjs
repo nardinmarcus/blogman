@@ -117,6 +117,15 @@ function assertExactKeys(value, keys, label) {
   }
 }
 
+// Issue #150: Wrangler response envelopes and their meta objects may carry
+// upstream-added harmless keys; only the frozen semantic keys are required.
+function assertRequiredKeys(value, keys, label) {
+  if (!isPlainRecord(value)) fail(`${label} must be an object`)
+  if (keys.some((key) => !Reflect.ownKeys(value).includes(key))) {
+    fail(`${label} is missing required fields`)
+  }
+}
+
 function assertSafeToken(value, label) {
   if (typeof value !== 'string' || value.length === 0 || value.length > 256 || !SAFE_TOKEN.test(value)) {
     fail(`${label} is invalid`)
@@ -468,10 +477,13 @@ function parseLocalIdentity(stdout) {
       throw new Error('invalid identity response')
     }
     const envelope = response[0]
-    assertExactKeys(envelope, ['meta', 'results', 'success'], 'D1 identity response')
-    assertExactKeys(envelope.meta, ['duration'], 'D1 identity metadata')
-    if (envelope.success !== true || envelope.meta.duration < 0
-      || !Number.isSafeInteger(envelope.meta.duration)
+    // Issue #150: the envelope and its meta tolerate upstream-added keys; the
+    // local duration statistic may also be fractional.
+    assertRequiredKeys(envelope, ['meta', 'results', 'success'], 'D1 identity response')
+    assertRequiredKeys(envelope.meta, ['duration'], 'D1 identity metadata')
+    if (envelope.success !== true
+      || typeof envelope.meta.duration !== 'number' || !Number.isFinite(envelope.meta.duration)
+      || envelope.meta.duration < 0
       || !Array.isArray(envelope.results) || envelope.results.length !== 1) {
       throw new Error('invalid identity response')
     }
@@ -720,7 +732,16 @@ function rehearsalD1Stdout(operation, bindings) {
   if (operation === 'clean_start_reset') {
     return JSON.stringify([{
       finalBookmark: `blogman-rehearsal-reset-${bindings.candidate_id}`,
-      meta: { rows_read: 0, rows_written: 0, size_after: 1_000_000 },
+      // Issue #150: mirrors the live 4.86.0 remote import meta, which carries
+      // duration (float) alongside the frozen numerics.
+      meta: {
+        duration: 0.25,
+        changes: 0,
+        last_row_id: 0,
+        rows_read: 0,
+        rows_written: 0,
+        size_after: 1_000_000,
+      },
       results: [{
         'Database size (MB)': '1.00',
         'Rows read': 0,
@@ -731,7 +752,27 @@ function rehearsalD1Stdout(operation, bindings) {
     }])
   }
   if (operation === 'empty_d1_proof') {
-    return JSON.stringify([{ meta: { duration: 0 }, results: [], success: true }])
+    // Issue #150: mirrors the live-captured remote query meta (13 keys, float
+    // duration) so formal rehearsal exercises the production parser shape.
+    return JSON.stringify([{
+      meta: {
+        served_by: 'blogman-rehearsal-primary',
+        served_by_region: 'REHEARSAL',
+        served_by_colo: 'REH',
+        served_by_primary: true,
+        timings: { sql_duration_ms: 0.05 },
+        duration: 0.05,
+        changes: 0,
+        last_row_id: 0,
+        changed_db: false,
+        size_after: 16_384,
+        rows_read: 0,
+        rows_written: 0,
+        total_attempts: 1,
+      },
+      results: [],
+      success: true,
+    }])
   }
   if (operation === 'migration_catalog') {
     return JSON.stringify({

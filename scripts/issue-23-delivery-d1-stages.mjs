@@ -82,6 +82,18 @@ function assertExactKeys(value, keys, label) {
   }
 }
 
+// Issue #150: Wrangler response envelopes and their `meta` objects are partly
+// upstream-controlled (the Cloudflare D1 API adds harmless keys such as
+// duration/changes/last_row_id/served_by over time), so envelope assertions
+// require the frozen semantic keys and tolerate upstream additions. Drift
+// defense stays on the required fields' values, asserted by the callers.
+function assertRequiredKeys(value, keys, label) {
+  if (!isRecord(value)) fail(`${label} must be an object`)
+  if (keys.some((key) => !Reflect.ownKeys(value).includes(key))) {
+    fail(`${label} is missing required fields`)
+  }
+}
+
 function assertSafeString(value, label) {
   if (typeof value !== 'string' || value.length === 0 || /[\u0000\r\n]/u.test(value)) {
     fail(`${label} must be a non-empty single-line string`)
@@ -104,6 +116,10 @@ function assertHash(value, label) {
 
 function assertNonNegativeInteger(value, label) {
   if (!Number.isSafeInteger(value) || value < 0) fail(`${label} is invalid`)
+}
+
+function assertNonNegativeNumber(value, label) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) fail(`${label} is invalid`)
 }
 
 function sha256(bytes) {
@@ -384,30 +400,35 @@ function parseQueryEnvelope(stdout, label) {
     throw stageFailure('ERROR', 'malformed')
   }
   const envelope = value[0]
-  assertExactKeys(envelope, ['meta', 'results', 'success'], `${label} response`)
-  if (envelope.success !== true || !Array.isArray(envelope.results)) {
+  assertRequiredKeys(envelope, ['meta', 'results', 'success'], `${label} response`)
+  if (envelope.success !== true || !Array.isArray(envelope.results) || !isRecord(envelope.meta)) {
     throw stageFailure('ERROR', 'malformed')
   }
-  assertExactKeys(envelope.meta, ['duration'], `${label} metadata`)
-  assertNonNegativeInteger(envelope.meta.duration, `${label} duration`)
+  // Issue #150: live remote query meta carries served_by*/timings/changes/
+  // last_row_id/changed_db/size_after/rows_*/total_attempts with a float
+  // duration; only the duration statistic is semantically asserted.
+  assertNonNegativeNumber(envelope.meta.duration, `${label} duration`)
   return envelope.results
 }
 
 function parseResetEnvelope(envelope) {
-  assertExactKeys(envelope, ['finalBookmark', 'meta', 'results', 'success'], 'reset response')
-  if (envelope.success !== true || typeof envelope.finalBookmark !== 'string'
+  // Issue #150: the remote file-import envelope's meta carries duration (and
+  // the same upstream key family as query meta); the frozen numerics stay
+  // required and cross-checked against the summary row below.
+  assertRequiredKeys(envelope, ['finalBookmark', 'meta', 'results', 'success'], 'reset response')
+  if (envelope.success !== true || !isRecord(envelope.meta) || typeof envelope.finalBookmark !== 'string'
     || envelope.finalBookmark.length === 0 || envelope.finalBookmark.trim() !== envelope.finalBookmark) {
     throw stageFailure('ERROR', 'reset_response_invalid')
   }
-  assertExactKeys(envelope.meta, ['rows_read', 'rows_written', 'size_after'], 'reset response metadata')
+  assertRequiredKeys(envelope.meta, ['rows_read', 'rows_written', 'size_after'], 'reset response metadata')
   assertNonNegativeInteger(envelope.meta.rows_read, 'reset rows read')
   assertNonNegativeInteger(envelope.meta.rows_written, 'reset rows written')
   assertNonNegativeInteger(envelope.meta.size_after, 'reset size')
-  if (!Array.isArray(envelope.results) || envelope.results.length !== 1) {
+  if (!Array.isArray(envelope.results) || envelope.results.length !== 1 || !isRecord(envelope.results[0])) {
     throw stageFailure('ERROR', 'reset_response_invalid')
   }
   const row = envelope.results[0]
-  assertExactKeys(row, [
+  assertRequiredKeys(row, [
     'Database size (MB)',
     'Rows read',
     'Rows written',
