@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, utimesSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { runLocalRehearsal } from './issue-23-delivery-rehearsal.mjs'
-import { hashD1ArtifactDirectory } from './issue-23-delivery-d1-contracts.mjs'
+import { hashD1ArtifactDirectory, comparePathSegments } from './issue-23-delivery-d1-contracts.mjs'
 import { buildFormalRuntimeReceipt } from './issue-23-delivery-formal-runtime.mjs'
 import { currentFormalRehearsalContext } from './issue-23-delivery-formal-context.mjs'
 import { formalExecutionClosureSha256 } from './issue-23-delivery-execution-closure.mjs'
@@ -527,7 +527,7 @@ function enumerateBuildFiles(repositoryPath) {
     } catch {
       fail('final OpenNext artifact directory could not be read')
     }
-    for (const entry of entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))) {
+    for (const entry of entries.sort((left, right) => comparePathSegments(left.name, right.name))) {
       const path = prefix ? `${prefix}/${entry.name}` : entry.name
       const absolute = join(directory, entry.name)
       if (entry.isDirectory()) {
@@ -685,7 +685,7 @@ function verifyGeneratedRuntimeDependencyTree(buildRoot, functionRoot, dependenc
     } catch {
       fail('OpenNext generated runtime dependency tree could not be read')
     }
-    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    for (const entry of entries.sort((left, right) => comparePathSegments(left.name, right.name))) {
       const path = join(directory, entry.name)
       const relativePath = `${prefix}/${entry.name}`
       let metadata
@@ -1661,7 +1661,7 @@ function scanApplicationSource(repositoryPath, relativePath, seenSource) {
   } catch {
     fail(`application source evidence ${relativePath} is unreadable`)
   }
-  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+  for (const entry of entries.sort((left, right) => comparePathSegments(left.name, right.name))) {
     const childPath = join(relativePath, entry.name)
     if (entry.isSymbolicLink()) fail(`application source evidence ${childPath} is unexpected`)
     if (entry.isDirectory()) {

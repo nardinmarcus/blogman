@@ -25,6 +25,25 @@ export const D1_CANONICAL_MIGRATION_NAMES = Object.freeze([
 
 const D1_CATALOG_NUL = Buffer.from([0])
 
+/**
+ * Shared artifact path ordering comparator (byte/code-unit order, locale- and
+ * ICU-version independent).
+ *
+ * Issue #132: prepare freezes `artifact.file_tree.files` in code-unit order
+ * (segment walk + default `.sort()`), and its self-check re-derives the same
+ * order. Transport/upload live validation previously used `localeCompare`,
+ * which diverges from code-unit order on punctuation-weighted pairs (e.g.
+ * `assets/BUILD_ID` vs `assets/_next/static/x.js`), so a perfectly frozen
+ * Next.js artifact could never pass live preconditions. Every ordering point
+ * that derives from or compares against the frozen tree must use this
+ * comparator. Because `/` (0x2F) sorts before every other valid artifact path
+ * character, code-unit comparison of full paths is consistent with a
+ * depth-first walk that orders each directory's segments code-unit-wise.
+ */
+export function comparePathSegments(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
 function assertCatalogEntry(path, type, label) {
   let metadata
   try {

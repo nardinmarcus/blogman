@@ -20,6 +20,7 @@ import {
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { verifyBuildDirectory } from './issue-23-build-proof.mjs'
+import { comparePathSegments } from './issue-23-delivery-d1-contracts.mjs'
 
 const sha256 = /^[a-f0-9]{64}$/
 const shellSafeAbsolutePath = /^\/[A-Za-z0-9._/-]+$/
@@ -578,7 +579,7 @@ function copyUploadSourceSnapshot(source, destination, archive = undefined) {
 
   const visit = (sourceDirectory, destinationDirectory, relativeDirectory = '') => {
     const before = requireCanonicalDirectory(sourceDirectory)
-    const names = readdirSync(sourceDirectory).sort((left, right) => left.localeCompare(right))
+    const names = readdirSync(sourceDirectory).sort(comparePathSegments)
     for (const name of names) {
       const sourcePath = join(sourceDirectory, name)
       const destinationPath = join(destinationDirectory, name)
@@ -608,7 +609,7 @@ function copyUploadSourceSnapshot(source, destination, archive = undefined) {
     }
     const after = requireCanonicalDirectory(sourceDirectory)
     if (before.dev !== after.dev || before.ino !== after.ino
-      || JSON.stringify(readdirSync(sourceDirectory).sort((left, right) => left.localeCompare(right)))
+      || JSON.stringify(readdirSync(sourceDirectory).sort(comparePathSegments))
         !== JSON.stringify(names)) {
       throw new Error()
     }
@@ -653,7 +654,7 @@ function collectUploadSourceSnapshotProof(directory) {
           throw new Error()
         }
         identities.push(identityEntry(relativeDirectory || '.', 'directory', before))
-        const names = readdirSync(path).sort((left, right) => left.localeCompare(right))
+        const names = readdirSync(path).sort(comparePathSegments)
         for (const name of names) {
           const entryPath = join(path, name)
           const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name
@@ -679,7 +680,7 @@ function collectUploadSourceSnapshotProof(directory) {
         const currentAfter = lstatSync(path, { bigint: true })
         if (!sameIdentity(before, after)
           || !sameIdentity(after, currentAfter)
-          || JSON.stringify(readdirSync(path).sort((left, right) => left.localeCompare(right)))
+          || JSON.stringify(readdirSync(path).sort(comparePathSegments))
             !== JSON.stringify(names)) {
           throw new Error()
         }

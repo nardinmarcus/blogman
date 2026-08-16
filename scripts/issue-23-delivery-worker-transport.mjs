@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync, chmodSync, lstatSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { D1ChildError } from './issue-23-delivery-d1-child.mjs'
-import { parseStrictJson } from './issue-23-delivery-d1-contracts.mjs'
+import { parseStrictJson, comparePathSegments } from './issue-23-delivery-d1-contracts.mjs'
 import { WorkerTransportError } from './issue-23-delivery-worker-stages.mjs'
 
 const OVERALL_TIMEOUT_MS = 5400000
@@ -67,13 +67,13 @@ function validateArtifactSource(bindings) {
   }
   if (!Array.isArray(bindings.artifact_file_tree_files)
     || !bindings.artifact_file_tree_files.every(artifactFile)
-    || JSON.stringify(bindings.artifact_file_tree_files) !== JSON.stringify([...bindings.artifact_file_tree_files].sort((left, right) => left.path.localeCompare(right.path)))
+    || JSON.stringify(bindings.artifact_file_tree_files) !== JSON.stringify([...bindings.artifact_file_tree_files].sort((left, right) => comparePathSegments(left.path, right.path)))
     || hash(Buffer.from(JSON.stringify(bindings.artifact_file_tree_files))) !== bindings.artifact_file_tree_sha256) {
     throw new WorkerTransportError('NON_PASS', 'Manifest Drift')
   }
   const actual = []
   const visit = (directory, prefix = '') => {
-    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => comparePathSegments(left.name, right.name))) {
       const path = join(directory, entry.name)
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name
       if (path === archivePath) continue
