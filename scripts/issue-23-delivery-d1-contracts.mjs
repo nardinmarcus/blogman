@@ -443,7 +443,15 @@ export function parseWranglerWhoamiResponse(stdout, expectedAccountId) {
       assertExactKeys(account.settings, ACCOUNT_SETTINGS_KEYS)
       assertNullableString(account.settings.abuse_contact_email)
       assertNullableString(account.settings.access_approval_expiry)
-      for (const field of ['api_access_enabled', 'enforce_twofactor', 'oauth_app_access_enabled']) {
+      // The env-token (CLOUDFLARE_API_TOKEN) shape reports api_access_enabled as null;
+      // scoped delivery tokens cannot read /user, so the account-settings endpoint emits
+      // null for it. OAuth/API-key variants carry a real boolean and stay strict here.
+      const apiAccessEnabled = account.settings.api_access_enabled
+      if (envTokenShape ? apiAccessEnabled !== null && typeof apiAccessEnabled !== 'boolean'
+        : typeof apiAccessEnabled !== 'boolean') {
+        throw new Error('invalid account setting')
+      }
+      for (const field of ['enforce_twofactor', 'oauth_app_access_enabled']) {
         if (typeof account.settings[field] !== 'boolean') throw new Error('invalid account setting')
       }
       assertExactKeys(account.legacy_flags, ['enterprise_zone_quota'])
