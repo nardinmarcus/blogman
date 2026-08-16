@@ -1,0 +1,22 @@
+[
+  {
+    "results": [
+      {
+        "Total queries executed": 15,
+        "Rows read": 0,
+        "Rows written": 0,
+        "Database size (MB)": "0.02"
+      }
+    ],
+    "success": true,
+    "finalBookmark": "00000085-0000000a-0004b8a2-8e6b4d0d5f2dd942",
+    "meta": {
+      "duration": 21.35,
+      "changes": 0,
+      "last_row_id": 0,
+      "size_after": 16384,
+      "rows_read": 0,
+      "rows_written": 0
+    }
+  }
+]

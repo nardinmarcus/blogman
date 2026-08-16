@@ -147,62 +147,6 @@ export function d1StageBindingsSha256(bindings) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
-const REMOTE_D1_INFO_VARIANTS = Object.freeze([
-  Object.freeze({
-    keys: Object.freeze([
-      'created_at',
-      'database_size',
-      'name',
-      'num_tables',
-      'read_queries_24h',
-      'read_replication',
-      'rows_read_24h',
-      'rows_written_24h',
-      'uuid',
-      'write_queries_24h',
-    ]),
-    sizeKey: 'database_size',
-    metrics: true,
-  }),
-  Object.freeze({
-    keys: Object.freeze([
-      'created_at',
-      'database_size',
-      'name',
-      'num_tables',
-      'read_replication',
-      'uuid',
-      'version',
-    ]),
-    sizeKey: 'database_size',
-    metrics: false,
-  }),
-  Object.freeze({
-    keys: Object.freeze([
-      'created_at',
-      'database_size',
-      'jurisdiction',
-      'name',
-      'num_tables',
-      'read_queries_24h',
-      'read_replication',
-      'running_in_region',
-      'rows_read_24h',
-      'rows_written_24h',
-      'uuid',
-      'write_queries_24h',
-    ]),
-    sizeKey: 'database_size',
-    metrics: true,
-    location: true,
-  }),
-])
-
-const WHOAMI_TOP_LEVEL_KEYS = Object.freeze({
-  withEmail: Object.freeze(['accounts', 'authType', 'email', 'loggedIn', 'tokenPermissions']),
-  withoutEmail: Object.freeze(['accounts', 'authType', 'loggedIn', 'tokenPermissions']),
-  envToken: Object.freeze(['accounts', 'authType', 'loggedIn']),
-})
 const WHOAMI_AUTH_TYPES = Object.freeze([
   'Account API Token',
   'Global API Key',
@@ -216,23 +160,7 @@ const WHOAMI_API_TOKEN_AUTH_TYPES = Object.freeze([
 // wrangler whoami --json builds the env-token (CLOUDFLARE_API_TOKEN) result without
 // tokenPermissions (the OAuth login scope cache only) or email (requires /user read;
 // delivery tokens are scoped to the account), so only these API-token auth types can
-// produce the env-token three-key shape.
-const ACCOUNT_KEYS = Object.freeze([
-  'created_on',
-  'id',
-  'legacy_flags',
-  'name',
-  'settings',
-  'type',
-])
-const ACCOUNT_SETTINGS_KEYS = Object.freeze([
-  'abuse_contact_email',
-  'access_approval_expiry',
-  'api_access_enabled',
-  'enforce_twofactor',
-  'oauth_app_access_enabled',
-])
-const ACCOUNT_QUOTA_KEYS = Object.freeze(['available', 'current', 'maximum'])
+// produce the env-token shape.
 
 function isPlainRecord(value) {
   return value !== null
@@ -241,11 +169,13 @@ function isPlainRecord(value) {
     && Object.getPrototypeOf(value) === Object.prototype
 }
 
-function assertExactKeys(value, keys) {
+// Issue #150: Wrangler passes upstream responses through with only light
+// reshaping, so response objects tolerate upstream-added harmless keys while
+// the frozen semantic keys stay required and value-asserted by the callers.
+function assertRequiredKeys(value, keys) {
   if (!isPlainRecord(value)) throw new Error('object expected')
-  const actual = Object.keys(value)
-  if (actual.length !== keys.length || keys.some((key) => !actual.includes(key))) {
-    throw new Error('unsupported fields')
+  if (keys.some((key) => !Object.hasOwn(value, key))) {
+    throw new Error('missing required fields')
   }
 }
 
@@ -357,21 +287,16 @@ export function parseStrictJson(json) {
   return JSON.parse(json)
 }
 
-function validRemoteD1InfoVariant(response) {
-  return REMOTE_D1_INFO_VARIANTS.find((variant) => {
-    const keys = Object.keys(response)
-    return keys.length === variant.keys.length && variant.keys.every((key) => keys.includes(key))
-  })
-}
-
 export function parseRemoteD1InfoResponse(stdout, expectedDatabaseId) {
   try {
     const response = parseStrictJson(stdout)
     if (!isPlainRecord(response)) throw new Error('object expected')
-    const variant = validRemoteD1InfoVariant(response)
-    if (!variant) throw new Error('unsupported D1 info variant')
+    // Issue #150: variant recognition is replaced by required semantic keys
+    // plus conditional asserts, so upstream-added D1 info fields (jurisdiction,
+    // running_in_region, future metrics) can no longer fail the parser. The
+    // identity and shape defenses below stay strict.
     assertString(response.created_at)
-    assertNonNegativeInteger(response[variant.sizeKey])
+    assertNonNegativeInteger(response.database_size)
     assertString(response.name)
     assertNonNegativeInteger(response.num_tables)
     assertString(response.uuid)
@@ -380,24 +305,24 @@ export function parseRemoteD1InfoResponse(stdout, expectedDatabaseId) {
       error.code = 'DELIVERY_DATABASE_MISMATCH'
       throw error
     }
-    assertExactKeys(response.read_replication, ['mode'])
+    if (!isPlainRecord(response.read_replication)) throw new Error('read replication expected')
+    assertString(response.read_replication.mode)
     if (!['auto', 'disabled'].includes(response.read_replication.mode)) {
       throw new Error('unsupported read replication mode')
     }
-    if (variant.metrics) {
-      for (const field of [
-        'read_queries_24h',
-        'rows_read_24h',
-        'rows_written_24h',
-        'write_queries_24h',
-      ]) assertNonNegativeInteger(response[field])
-    } else if (response.version !== 'alpha') {
+    for (const field of [
+      'read_queries_24h',
+      'rows_read_24h',
+      'rows_written_24h',
+      'write_queries_24h',
+    ]) {
+      if (Object.hasOwn(response, field)) assertNonNegativeInteger(response[field])
+    }
+    if (Object.hasOwn(response, 'version') && response.version !== 'alpha') {
       throw new Error('unsupported D1 info version')
     }
-    if (variant.location) {
-      assertNullableString(response.jurisdiction)
-      assertString(response.running_in_region)
-    }
+    if (Object.hasOwn(response, 'jurisdiction')) assertNullableString(response.jurisdiction)
+    if (Object.hasOwn(response, 'running_in_region')) assertString(response.running_in_region)
     return response
   } catch (error) {
     if (error?.code === 'DELIVERY_DATABASE_MISMATCH') throw error
@@ -416,12 +341,10 @@ export function parseWranglerWhoamiResponse(stdout, expectedAccountId) {
     const response = parseStrictJson(stdout)
     if (!isPlainRecord(response)) throw new Error('object expected')
     const envTokenShape = !Object.hasOwn(response, 'tokenPermissions')
-    const keys = envTokenShape
-      ? WHOAMI_TOP_LEVEL_KEYS.envToken
-      : Object.hasOwn(response, 'email')
-        ? WHOAMI_TOP_LEVEL_KEYS.withEmail
-        : WHOAMI_TOP_LEVEL_KEYS.withoutEmail
-    assertExactKeys(response, keys)
+    // Issue #150: every level requires its frozen semantic keys and tolerates
+    // upstream-added harmless keys; the identity/permission/value assertions
+    // below are the drift defense and stay strict.
+    assertRequiredKeys(response, ['loggedIn', 'authType', 'accounts'])
     if (response.loggedIn !== true || !WHOAMI_AUTH_TYPES.includes(response.authType)) {
       throw new Error('invalid authentication state')
     }
@@ -435,14 +358,18 @@ export function parseWranglerWhoamiResponse(stdout, expectedAccountId) {
       throw new Error('invalid account response')
     }
     for (const account of response.accounts) {
-      assertExactKeys(account, ACCOUNT_KEYS)
-      assertString(account.created_on)
+      assertRequiredKeys(account, ['id', 'name', 'type', 'settings', 'legacy_flags'])
+      if (Object.hasOwn(account, 'created_on')) assertString(account.created_on)
       assertString(account.id)
       assertString(account.name)
       if (account.type !== 'standard') throw new Error('unsupported account type')
-      assertExactKeys(account.settings, ACCOUNT_SETTINGS_KEYS)
-      assertNullableString(account.settings.abuse_contact_email)
-      assertNullableString(account.settings.access_approval_expiry)
+      if (!isPlainRecord(account.settings)) throw new Error('account settings expected')
+      if (Object.hasOwn(account.settings, 'abuse_contact_email')) {
+        assertNullableString(account.settings.abuse_contact_email)
+      }
+      if (Object.hasOwn(account.settings, 'access_approval_expiry')) {
+        assertNullableString(account.settings.access_approval_expiry)
+      }
       // The env-token (CLOUDFLARE_API_TOKEN) shape reports api_access_enabled as null;
       // scoped delivery tokens cannot read /user, so the account-settings endpoint emits
       // null for it. OAuth/API-key variants carry a real boolean and stay strict here.
@@ -454,10 +381,13 @@ export function parseWranglerWhoamiResponse(stdout, expectedAccountId) {
       for (const field of ['enforce_twofactor', 'oauth_app_access_enabled']) {
         if (typeof account.settings[field] !== 'boolean') throw new Error('invalid account setting')
       }
-      assertExactKeys(account.legacy_flags, ['enterprise_zone_quota'])
-      assertExactKeys(account.legacy_flags.enterprise_zone_quota, ACCOUNT_QUOTA_KEYS)
-      for (const value of Object.values(account.legacy_flags.enterprise_zone_quota)) {
-        assertNonNegativeInteger(value)
+      if (!isPlainRecord(account.legacy_flags)) throw new Error('legacy flags expected')
+      if (Object.hasOwn(account.legacy_flags, 'enterprise_zone_quota')) {
+        const quota = account.legacy_flags.enterprise_zone_quota
+        if (!isPlainRecord(quota)) throw new Error('enterprise zone quota expected')
+        for (const value of Object.values(quota)) {
+          assertNonNegativeInteger(value)
+        }
       }
     }
     if (response.accounts.filter((account) => account.id === expectedAccountId).length !== 1) {

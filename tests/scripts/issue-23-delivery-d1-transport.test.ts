@@ -541,11 +541,12 @@ describe('Issue #90 D1 transport', () => {
         .replace('"api_access_enabled": null', '"api_access_enabled": true'),
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     )).toThrowError(expect.objectContaining({ code: 'DELIVERY_PERMISSION_INSUFFICIENT' }))
-    // the env-token shape is exact: any extra key is rejected
-    expect(() => parseWranglerWhoamiResponse(
-      whoami.replace('"loggedIn": true', '"loggedIn": true, "email": "forged@example.invalid"'),
+    // issue #150: upstream-added top-level keys on the env-token shape (e.g. a
+    // future email field) are tolerated; the drift defenses still hold below.
+    expect(parseWranglerWhoamiResponse(
+      whoami.replace('"loggedIn": true', '"loggedIn": true, "email": "upstream@example.invalid"'),
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-    )).toThrow()
+    )).toMatchObject({ loggedIn: true })
     // the env-token shape never carries OAuth authentication
     expect(() => parseWranglerWhoamiResponse(
       whoami.replace('"authType": "User API Token"', '"authType": "OAuth Token"'),

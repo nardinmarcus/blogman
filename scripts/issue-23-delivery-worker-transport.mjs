@@ -171,8 +171,11 @@ function childFailure(error, timeoutClassification = 'stage_timeout') {
 
 function parseDeployment(stdout, version, d1_database_id, duration_ms = 1) {
   const value = parseJson(stdout, 'deployment_status', duration_ms)
+  // Issue #150: upstream-added keys on the deployment or its version entries
+  // are tolerated; the 100%-traffic binding to the delivered version stays.
   if (!record(value) || !safeId(value.id) || !Array.isArray(value.versions)
-    || value.versions.length !== 1 || !exact(value.versions[0], ['version_id', 'percentage'])
+    || value.versions.length !== 1 || !record(value.versions[0])
+    || !Object.hasOwn(value.versions[0], 'version_id') || !Object.hasOwn(value.versions[0], 'percentage')
     || value.versions[0].version_id !== version || value.versions[0].percentage !== 100) {
     throw new WorkerTransportError('NON_PASS', 'version_traffic_mismatch', duration_ms)
   }
