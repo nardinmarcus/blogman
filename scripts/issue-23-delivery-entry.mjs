@@ -1152,7 +1152,7 @@ const SMOKE_CREDENTIAL_ENV = 'DELIVERY_SMOKE_ADMIN'
 const CLOUDFLARE_TOKEN_ENV = 'CLOUDFLARE_API_TOKEN'
 const CLOUDFLARE_ACCOUNT_ENV = 'CLOUDFLARE_ACCOUNT_ID'
 const CLOUDFLARE_TOKEN_PATTERN = /^[A-Za-z0-9._~-]{8,512}$/u
-const CLOUDFLARE_SCOPES = Object.freeze(['account:read', 'd1:write', 'workers:write'])
+const CLOUDFLARE_SCOPES = Object.freeze(['account:read', 'd1:write', 'r2:write', 'workers:write'])
 const CHILD_ENV_ALLOWLIST = Object.freeze(['HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR'])
 const SMOKE_CREDENTIAL_PATTERN = /^[A-Za-z0-9._~-]+$/u
 const CANONICAL_MANIFEST_ROOT_KEYS = [
@@ -1194,7 +1194,7 @@ const CANONICAL_MANIFEST_OBSERVATIONS = Object.freeze([
   'rehearsal.receipt_sha256',
 ])
 const REQUIRED_CREDENTIAL_SLOTS = Object.freeze([
-  Object.freeze({ name: 'cloudflare_delivery', scopes: Object.freeze(['account:read', 'd1:write', 'workers:write']) }),
+  Object.freeze({ name: 'cloudflare_delivery', scopes: Object.freeze(['account:read', 'd1:write', 'r2:write', 'workers:write']) }),
   Object.freeze({ name: 'delivery_smoke_admin', scopes: Object.freeze(['admin:smoke']) }),
 ])
 const CANONICAL_MANIFEST_EVIDENCE_EXCLUSIONS = Object.freeze([
@@ -2748,6 +2748,7 @@ function workerBindings(manifest, expectedReconciliationPath, identity, smokeCre
     artifact_file_tree_files: manifest.artifact.file_tree.files,
     artifact_sha256: manifest.artifact.file_tree.sha256,
     candidate_id: manifest.repository.commit, worker_name: manifest.target.worker_name, d1_database_id: manifest.target.d1_database_id,
+    account_id: manifest.d1.account_id,
     rollout_safety_path: resolve(ENTRY_REPO_ROOT, manifest.d1.rollout_safety_path), rollout_safety_sha256: manifest.d1.rollout_safety_sha256,
     expected_reconciliation_path: expectedReconciliationPath,
     expected_reconciliation_sha256: manifest.d1.expected_reconciliation_sha256,
@@ -2968,6 +2969,7 @@ function createProductionWorkerTransport(bindings, environments = { cloudflare: 
     'npm_path', 'npm_sha256', 'open_next_path', 'open_next_sha256', 'working_directory',
     'curl_path', 'curl_sha256', 'package_json_path',
     'package_json_sha256', 'lockfile_path', 'lockfile_sha256', 'database', 'origin', 'smoke', 'baseline',
+    'account_id',
   ]) if (!Object.hasOwn(bindings, key)) worker.fail(`${key} is required`)
   for (const key of [
     'config_path', 'artifact_archive_path', 'artifact_source_path', 'rollout_safety_path',
@@ -2981,6 +2983,7 @@ function createProductionWorkerTransport(bindings, environments = { cloudflare: 
     'node_sha256', 'npm_sha256', 'open_next_sha256', 'curl_sha256', 'package_json_sha256', 'lockfile_sha256',
   ]) worker.assertHash(bindings[key], key)
   if (!/^[a-f0-9]{40}$/u.test(bindings.candidate_id) || !worker.safeId(bindings.worker_name) || !worker.safeId(bindings.d1_database_id)
+    || !worker.safeId(bindings.account_id)
     || typeof bindings.smoke_admin_credential !== 'string'
     || !/^[A-Za-z0-9._~-]+$/u.test(bindings.smoke_admin_credential)
     || !worker.safeId(bindings.database) || typeof bindings.origin !== 'string' || !Array.isArray(bindings.smoke?.requests)
@@ -3058,6 +3061,27 @@ function createProductionWorkerTransport(bindings, environments = { cloudflare: 
     return result.duration_ms
   }
 
+  // Issue #154: read-only R2 capability probe answered before any D1 mutation
+  // stage. The delivery token travels only through the curl stdin config, never
+  // argv; a 403 scope gap fails closed with the credential classification.
+  function r2Probe(request, spent) {
+    const command = worker.r2ProbeCommand(bindings)
+    const token = environments.cloudflare[CLOUDFLARE_TOKEN_ENV]
+    if (typeof token !== 'string' || !CLOUDFLARE_TOKEN_PATTERN.test(token)) {
+      throw new WorkerTransportError('ERROR', 'cloudflare_auth_unavailable', 1)
+    }
+    const result = invoke(
+      command.executable,
+      command.args,
+      request,
+      spent,
+      environments.cloudflare,
+      worker.r2ProbeStdin(token),
+    )
+    worker.parseR2ProbeResponse(result.stdout, result.duration_ms)
+    return result.duration_ms
+  }
+
   function livePreconditions(elapsed_ms = 0) {
     if (!Number.isSafeInteger(elapsed_ms) || elapsed_ms < 0 || elapsed_ms >= worker.OVERALL_TIMEOUT_MS) {
       return { outcome: 'TIMEOUT', classification: 'overall_timeout', duration_ms: 1 }
@@ -3070,7 +3094,8 @@ function createProductionWorkerTransport(bindings, environments = { cloudflare: 
         throw new WorkerTransportError('NON_PASS', 'Manifest Drift', baseline.duration_ms)
       }
       const identityDuration = d1Identity(request, baseline.duration_ms)
-      return { outcome: 'PASS', duration_ms: baseline.duration_ms + identityDuration }
+      const probeDuration = r2Probe(request, baseline.duration_ms + identityDuration)
+      return { outcome: 'PASS', duration_ms: baseline.duration_ms + identityDuration + probeDuration }
     } catch (error) {
       const failure = error instanceof WorkerTransportError
         ? error
@@ -3093,15 +3118,22 @@ function createProductionWorkerTransport(bindings, environments = { cloudflare: 
         const before = join(root, 'before.json')
         const after = join(root, 'after.json')
         const proof = join(root, 'proof.json')
+        const childStdout = join(root, 'upload-child-stdout.log')
+        const childStderr = join(root, 'upload-child-stderr.log')
         const destination = join(root, 'source')
-        for (const path of [output, before, after, proof]) writeFileSync(path, '', { mode: 0o600 })
+        for (const path of [output, before, after, proof, childStdout, childStderr]) writeFileSync(path, '', { mode: 0o600 })
         const command = worker.uploadCommand(bindings, { destination, before, after, proof })
         const result = invoke(
           command.executable,
           command.args,
           request,
           0,
-          { ...environments.cloudflare, WRANGLER_OUTPUT_FILE_PATH: output },
+          {
+            ...environments.cloudflare,
+            WRANGLER_OUTPUT_FILE_PATH: output,
+            UPLOAD_STDOUT_FILE_PATH: childStdout,
+            UPLOAD_STDERR_FILE_PATH: childStderr,
+          },
         )
         return worker.response(parseJson(result.stdout, 'upload_acceptance', result.duration_ms), result.duration_ms)
       } finally {

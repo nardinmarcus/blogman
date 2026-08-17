@@ -28,6 +28,7 @@
     "account:Account Settings:read",
     "account:D1:read",
     "account:D1:write",
+    "account:Workers R2 Storage:write",
     "account:Workers Scripts:write"
   ]
 }

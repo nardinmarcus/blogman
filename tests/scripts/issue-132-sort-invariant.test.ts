@@ -354,7 +354,7 @@ function divergenceBaseConfig() {
         manifest_binding: 'manifest_sha256',
         one_shot: true,
         credential_slots: [
-          { name: 'cloudflare_delivery', scopes: ['account:read', 'workers:write', 'd1:write'] },
+          { name: 'cloudflare_delivery', scopes: ['account:read', 'workers:write', 'd1:write', 'r2:write'] },
           { name: 'delivery_smoke_admin', scopes: ['admin:smoke'] },
         ],
       },

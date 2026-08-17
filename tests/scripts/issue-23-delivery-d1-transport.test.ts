@@ -489,6 +489,16 @@ describe('Issue #90 D1 transport', () => {
       whoami.replace('"account:Workers Scripts:write"', '"account:Workers Scripts:read"'),
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     )).toThrowError(expect.objectContaining({ code: 'DELIVERY_PERMISSION_INSUFFICIENT' }))
+    // issue #154: the R2 storage write capability is required for the worker upload binding
+    // verification (GET /accounts/{id}/r2/buckets); a read-only variant is insufficient.
+    expect(() => parseWranglerWhoamiResponse(
+      whoami.replace('"account:Workers R2 Storage:write"', '"account:Workers R2 Storage:read"'),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    )).toThrowError(expect.objectContaining({ code: 'DELIVERY_PERMISSION_INSUFFICIENT' }))
+    expect(() => parseWranglerWhoamiResponse(
+      whoami.replace('    "account:Workers R2 Storage:write",\n', ''),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    )).toThrowError(expect.objectContaining({ code: 'DELIVERY_PERMISSION_INSUFFICIENT' }))
     expect(() => parseWranglerWhoamiResponse(
       whoami.replace('"id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"', '"id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"'),
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',

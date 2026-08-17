@@ -25,6 +25,7 @@ import { comparePathSegments } from './issue-23-delivery-d1-contracts.mjs'
 const sha256 = /^[a-f0-9]{64}$/
 const shellSafeAbsolutePath = /^\/[A-Za-z0-9._/-]+$/
 const uploadOperationId = /^issue-23-[a-f0-9]{40}-upload-1$/
+const MAX_UPLOAD_CHILD_OUTPUT_BYTES = 64 * 1024
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -426,6 +427,15 @@ function captureHeldEvidence(held, requireNonempty = false) {
   return state.bytes
 }
 
+function boundedUploadChildOutput(bytes) {
+  const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes ?? '')
+  // spawnSync maxBuffer truncation can overshoot by up to one drained chunk;
+  // the held evidence bound is enforced here, at the capture boundary.
+  return buffer.length > MAX_UPLOAD_CHILD_OUTPUT_BYTES
+    ? buffer.subarray(0, MAX_UPLOAD_CHILD_OUTPUT_BYTES)
+    : buffer
+}
+
 function verifyHeldEvidence(held) {
   const state = evidenceState(held)
   if (!held.expected
@@ -753,6 +763,8 @@ async function runUploadSourceLifecycle({
     || !sha256.test(expectedConfigSha256 || '')) throw new Error()
   const reportDirectory = dirname(destination)
   const uploadOutputPath = process.env.WRANGLER_OUTPUT_FILE_PATH
+  const uploadStdoutPath = process.env.UPLOAD_STDOUT_FILE_PATH
+  const uploadStderrPath = process.env.UPLOAD_STDERR_FILE_PATH
   const held = []
   const evidence = []
   const workingIdentity = executionDirectoryIdentity(workingDirectory)
@@ -776,6 +788,10 @@ async function runUploadSourceLifecycle({
     evidence.push(buildEvidence)
     const uploadEvidence = holdEvidenceFile(uploadOutputPath, reportDirectory)
     evidence.push(uploadEvidence)
+    const stdoutEvidence = holdEvidenceFile(uploadStdoutPath, reportDirectory)
+    evidence.push(stdoutEvidence)
+    const stderrEvidence = holdEvidenceFile(uploadStderrPath, reportDirectory)
+    evidence.push(stderrEvidence)
 
     if (heldFileSha256(heldConfig) !== expectedConfigSha256) throw new Error()
     const configuredAssetsDirectory = await bindUploadAssetsDirectory(config, source)
@@ -804,6 +820,8 @@ async function runUploadSourceLifecycle({
     writeHeldEvidence(beforeEvidence, snapshotProofBytes('created', before, destination))
     captureHeldEvidence(afterEvidence)
     captureHeldEvidence(uploadEvidence)
+    captureHeldEvidence(stdoutEvidence)
+    captureHeldEvidence(stderrEvidence)
     for (const path of held) verifyHeldPath(path)
     for (const file of evidence) verifyHeldEvidence(file)
     await verifyConfigBinding()
@@ -830,8 +848,15 @@ async function runUploadSourceLifecycle({
     ], {
       cwd: workingDirectory,
       env: uploadEnvironment,
-      stdio: ['ignore', 'ignore', 'ignore'],
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: MAX_UPLOAD_CHILD_OUTPUT_BYTES,
     })
+    // Issue #154: keep the upload child stdout/stderr as bounded held evidence
+    // (previously stdio-ignore, leaving a nonzero exit undiagnosable). The raw
+    // bytes stay in the private report directory; only their identities enter
+    // the acceptance object, following the manifest evidence exclusions.
+    writeHeldEvidence(stdoutEvidence, boundedUploadChildOutput(upload.stdout))
+    writeHeldEvidence(stderrEvidence, boundedUploadChildOutput(upload.stderr))
 
     assertExecutionDirectoryIdentity(workingDirectory, workingIdentity)
     captureHeldEvidence(uploadEvidence, true)
@@ -867,6 +892,8 @@ async function runUploadSourceLifecycle({
       snapshot_proof_after_sha256: sha256Bytes(afterEvidence.expected.bytes),
       build_directory_proof_sha256: sha256Bytes(buildEvidence.expected.bytes),
       wrangler_output_sha256: sha256Bytes(uploadEvidence.expected.bytes),
+      upload_stdout_sha256: sha256Bytes(stdoutEvidence.expected.bytes),
+      upload_stderr_sha256: sha256Bytes(stderrEvidence.expected.bytes),
     })
   } finally {
     for (const file of evidence.reverse()) closeSync(file.descriptor)

@@ -101,7 +101,7 @@ const CONFIG_CI_SCHEMA = Object.freeze({
   },
 })
 const REQUIRED_CREDENTIAL_SLOTS = Object.freeze([
-  Object.freeze({ name: 'cloudflare_delivery', scopes: Object.freeze(['account:read', 'd1:write', 'workers:write']) }),
+  Object.freeze({ name: 'cloudflare_delivery', scopes: Object.freeze(['account:read', 'd1:write', 'r2:write', 'workers:write']) }),
   Object.freeze({ name: 'delivery_smoke_admin', scopes: Object.freeze(['admin:smoke']) }),
 ])
 const FIXED_SMOKE_CONTRACT = Object.freeze({

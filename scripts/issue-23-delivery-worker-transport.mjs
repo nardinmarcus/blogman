@@ -237,6 +237,28 @@ function smokeCommand(bindings, url) {
 function smokeStdin(credential) {
   return Buffer.from(`header = "Cookie: blogman_admin=${credential}"\n`, 'utf8')
 }
+// Issue #154: read-only R2 capability probe. The Wrangler upload binding
+// verification calls GET /accounts/{id}/r2/buckets; a delivery token without
+// the Workers R2 Storage write scope receives HTTP 403 (errors[0].code 10000)
+// there. The probe is answered before any D1 mutation stage runs, so the
+// scope gap terminalizes live_preconditions instead of burning a deploy.
+function r2ProbeCommand(bindings) {
+  return Object.freeze({ executable: bindings.curl_path, args: Object.freeze([
+    '--disable', '--config', '-', '--request', 'GET', '--silent', '--show-error',
+    '--output', '/dev/null', '--write-out', '%{http_code}',
+    `https://api.cloudflare.com/client/v4/accounts/${bindings.account_id}/r2/buckets`,
+  ]) })
+}
+function r2ProbeStdin(token) {
+  return Buffer.from(`header = "Authorization: Bearer ${token}"\n`, 'utf8')
+}
+function parseR2ProbeResponse(stdout, duration_ms = 1) {
+  if (stdout === '200') return null
+  if (stdout === '403') {
+    throw new WorkerTransportError('NON_PASS', 'cloudflare_permission_insufficient', duration_ms)
+  }
+  throw new WorkerTransportError('UNCERTAIN', 'live_preconditions_uncertain', duration_ms)
+}
 function controlsCommand(bindings) {
   return Object.freeze({ executable: bindings.node_path, args: Object.freeze([
     bindings.rollout_safety_path, 'rollout', 'controls-status', '--database', bindings.database,
@@ -288,6 +310,9 @@ export const WORKER_COMMAND_CONTRACT = Object.freeze({
   versionDeployCommand,
   smokeCommand,
   smokeStdin,
+  r2ProbeCommand,
+  r2ProbeStdin,
+  parseR2ProbeResponse,
   controlsCommand,
   reconciliationCommand,
   uploadCommand,
@@ -349,7 +374,13 @@ export function createRehearsalWorkerTransport(bindings, sink, fault = null, env
     if (deployment.deployment_id !== bindings.baseline.deployment_id) return { outcome: 'NON_PASS', classification: 'Manifest Drift', duration_ms: 1 }
     const identity = record('live_preconditions.d1_identity', d1IdentityCommand(bindings), d1Raw)
     parseD1Identity(identity.stdout, bindings.d1_database_id, identity.duration_ms)
-    return { outcome: 'PASS', duration_ms: baseline.duration_ms + identity.duration_ms }
+    const probeStdin = r2ProbeStdin(environments.cloudflare.CLOUDFLARE_API_TOKEN ?? '')
+    const probe = record('live_preconditions.r2_probe', r2ProbeCommand(bindings), '200', {
+      stdin_sha256: hash(probeStdin),
+      stdin_bytes: probeStdin.byteLength,
+    })
+    parseR2ProbeResponse(parseJson(probe.stdout, 'live_preconditions', probe.duration_ms), probe.duration_ms)
+    return { outcome: 'PASS', duration_ms: baseline.duration_ms + identity.duration_ms + probe.duration_ms }
   }
 
   function execute(request) {
@@ -365,6 +396,7 @@ export function createRehearsalWorkerTransport(bindings, sink, fault = null, env
         config_sha256: bindings.config_sha256, snapshot_tree_sha256: bindings.artifact_sha256,
         snapshot_identity_sha256: 'a'.repeat(64), snapshot_proof_before_sha256: 'b'.repeat(64), snapshot_proof_after_sha256: 'c'.repeat(64),
         build_directory_proof_sha256: 'd'.repeat(64), wrangler_output_sha256: 'e'.repeat(64),
+        upload_stdout_sha256: 'f'.repeat(64), upload_stderr_sha256: '7'.repeat(64),
       })
       return forcedResponse(request) ?? recorded
     }

@@ -116,6 +116,8 @@ function uploadSourceLifecycleFixture(
   const proofAfter = join(reportDirectory, 'upload-source-snapshot-after.json')
   const buildProof = join(reportDirectory, 'upload-build-directory-proof.json')
   const uploadOutput = join(reportDirectory, 'upload-private.jsonl')
+  const uploadChildStdout = join(reportDirectory, 'upload-child-stdout.log')
+  const uploadChildStderr = join(reportDirectory, 'upload-child-stderr.log')
   const counter = join(directory, 'upload-count.txt')
   const fakeBin = join(directory, 'fake-bin')
   const archive = join(source, 'open-next-build.zip')
@@ -129,7 +131,7 @@ function uploadSourceLifecycleFixture(
   const configBytes = `[assets]\ndirectory = ${JSON.stringify(join(source, 'assets'))}\n`
   writeFileSync(config, configBytes)
   const configSha256 = createHash('sha256').update(configBytes).digest('hex')
-  for (const path of [proofBefore, proofAfter, buildProof, uploadOutput]) {
+  for (const path of [proofBefore, proofAfter, buildProof, uploadOutput, uploadChildStdout, uploadChildStderr]) {
     writeFileSync(path, '')
     chmodSync(path, 0o600)
   }
@@ -156,6 +158,8 @@ function uploadSourceLifecycleFixture(
     reportDirectory,
     source,
     top,
+    uploadChildStderr,
+    uploadChildStdout,
     uploadOutput,
   }
 }
@@ -210,6 +214,8 @@ function runCurrentUploadLifecycle(
       ...process.env,
       PATH: `${fixture.fakeBin}${delimiter}${process.env.PATH}`,
       WRANGLER_OUTPUT_FILE_PATH: fixture.uploadOutput,
+      UPLOAD_STDOUT_FILE_PATH: fixture.uploadChildStdout,
+      UPLOAD_STDERR_FILE_PATH: fixture.uploadChildStderr,
       UPLOAD_COUNTER: fixture.counter,
       ...environment,
     },
@@ -590,6 +596,8 @@ fs.chmodSync(process.env.SNAPSHOT_ROOT, 0o500)
     const proofAfter = join(reportDirectory, 'upload-source-snapshot-after.json')
     const buildProof = join(reportDirectory, 'upload-build-directory-proof.json')
     const uploadOutput = join(reportDirectory, 'upload-private.jsonl')
+    const uploadChildStdout = join(reportDirectory, 'upload-child-stdout.log')
+    const uploadChildStderr = join(reportDirectory, 'upload-child-stderr.log')
     const forwardedArgs = join(snapshot.directory, 'forwarded-lifecycle-args.json')
     const operatorDirectory = join(snapshot.directory, 'operator')
     const config = join(operatorDirectory, 'wrangler.toml')
@@ -597,7 +605,7 @@ fs.chmodSync(process.env.SNAPSHOT_ROOT, 0o500)
     mkdirSync(operatorDirectory)
     writeFileSync(config, `[assets]\ndirectory = ${JSON.stringify(join(snapshot.source, 'assets'))}\n`)
     const configSha256 = createHash('sha256').update(readFileSync(config)).digest('hex')
-    for (const path of [proofBefore, proofAfter, buildProof, uploadOutput, forwardedArgs]) {
+    for (const path of [proofBefore, proofAfter, buildProof, uploadOutput, uploadChildStdout, uploadChildStderr, forwardedArgs]) {
       writeFileSync(path, '')
       chmodSync(path, 0o600)
     }
@@ -640,6 +648,8 @@ process.stdout.write('OpenNext upload log\\n')
         ...process.env,
         PATH: `${fakeBin}${delimiter}${process.env.PATH}`,
         WRANGLER_OUTPUT_FILE_PATH: uploadOutput,
+        UPLOAD_STDOUT_FILE_PATH: uploadChildStdout,
+        UPLOAD_STDERR_FILE_PATH: uploadChildStderr,
         FORWARDED_ARGS: forwardedArgs,
       },
     })
@@ -648,7 +658,11 @@ process.stdout.write('OpenNext upload log\\n')
       format: 'blogman-upload-source-lifecycle-acceptance/v1',
       state: 'accepted',
       version_id: 'fixture-version',
+      upload_stdout_sha256: createHash('sha256').update('OpenNext upload log\n').digest('hex'),
+      upload_stderr_sha256: createHash('sha256').update('').digest('hex'),
     })
+    expect(readFileSync(uploadChildStdout, 'utf8')).toBe('OpenNext upload log\n')
+    expect(readFileSync(uploadChildStderr, 'utf8')).toBe('')
     expect(JSON.parse(readFileSync(forwardedArgs, 'utf8'))).toEqual({
       argv: [
         'upload', '-c', config, '--', join(snapshot.destination, 'worker.js'),
@@ -668,6 +682,68 @@ process.stdout.write('OpenNext upload log\\n')
       tree_sha256: before.tree_sha256,
       identity_sha256: before.identity_sha256,
     })
+  })
+
+  it('captures the upload child stdout and stderr into held evidence on a nonzero exit', () => {
+    const fixture = uploadSourceLifecycleFixture()
+    writeFileSync(join(fixture.fakeBin, 'npm'), `#!/usr/bin/env node
+process.stdout.write('OpenNext upload progress\\n')
+process.stderr.write('wrangler GET /accounts/account-id/r2/buckets failed: 10000 Authentication error\\n')
+process.exitCode = 9
+`)
+    chmodSync(join(fixture.fakeBin, 'npm'), 0o755)
+
+    const lifecycle = runCurrentUploadLifecycle(fixture)
+
+    expect(lifecycle).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+    })
+    expect(readFileSync(fixture.uploadChildStdout, 'utf8')).toBe('OpenNext upload progress\n')
+    expect(readFileSync(fixture.uploadChildStderr, 'utf8'))
+      .toBe('wrangler GET /accounts/account-id/r2/buckets failed: 10000 Authentication error\n')
+    expect(readFileSync(fixture.proofAfter, 'utf8')).toBe('')
+  })
+
+  it('bounds the captured upload child output at the frozen evidence limit', () => {
+    const fixture = uploadSourceLifecycleFixture()
+    writeFileSync(join(fixture.fakeBin, 'npm'), `#!/usr/bin/env node
+process.stderr.write('E'.repeat(256 * 1024))
+process.exitCode = 9
+`)
+    chmodSync(join(fixture.fakeBin, 'npm'), 0o755)
+
+    const lifecycle = runCurrentUploadLifecycle(fixture)
+
+    expect(lifecycle.status).toBe(1)
+    expect(statSync(fixture.uploadChildStderr).size).toBeGreaterThan(0)
+    expect(statSync(fixture.uploadChildStderr).size).toBeLessThanOrEqual(64 * 1024)
+    expect(statSync(fixture.uploadChildStdout).size).toBe(0)
+  })
+
+  it('hashes the captured upload child output into the acceptance evidence on success', () => {
+    const fixture = uploadSourceLifecycleFixture()
+    writeFileSync(join(fixture.fakeBin, 'npm'), `#!/usr/bin/env node
+const fs = require('node:fs')
+process.stdout.write('OpenNext upload log\\n')
+process.stderr.write('experimental warning: asset metadata\\n')
+fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
+  type: 'version-upload', version: 1, version_id: 'fixture-version',
+}) + '\\n')
+`)
+    chmodSync(join(fixture.fakeBin, 'npm'), 0o755)
+
+    const lifecycle = runCurrentUploadLifecycle(fixture)
+
+    expect(lifecycle.status, lifecycle.stderr).toBe(0)
+    const acceptance = JSON.parse(lifecycle.stdout)
+    expect(acceptance.upload_stdout_sha256)
+      .toBe(createHash('sha256').update('OpenNext upload log\n').digest('hex'))
+    expect(acceptance.upload_stderr_sha256)
+      .toBe(createHash('sha256').update('experimental warning: asset metadata\n').digest('hex'))
+    expect(acceptance.wrangler_output_sha256).toMatch(/^[a-f0-9]{64}$/u)
+    expect(acceptance.version_id).toBe('fixture-version')
   })
 
   it('excludes only the direct configured archive and retains a nested same-basename file', () => {
@@ -739,13 +815,15 @@ process.stdout.write('OpenNext upload log\\n')
     const proofAfter = join(reportDirectory, 'upload-source-snapshot-after.json')
     const buildProof = join(reportDirectory, 'upload-build-directory-proof.json')
     const uploadOutput = join(reportDirectory, 'upload-private.jsonl')
+    const uploadChildStdout = join(reportDirectory, 'upload-child-stdout.log')
+    const uploadChildStderr = join(reportDirectory, 'upload-child-stderr.log')
     const operatorDirectory = join(snapshot.directory, 'operator')
     const config = join(operatorDirectory, 'wrangler.toml')
     const fakeBin = join(snapshot.directory, 'report-swap-fake-bin')
     mkdirSync(operatorDirectory)
     writeFileSync(config, `[assets]\ndirectory = ${JSON.stringify(join(snapshot.source, 'assets'))}\n`)
     const configSha256 = createHash('sha256').update(readFileSync(config)).digest('hex')
-    for (const path of [capturedUpload, proofBefore, proofAfter, buildProof, uploadOutput]) {
+    for (const path of [capturedUpload, proofBefore, proofAfter, buildProof, uploadOutput, uploadChildStdout, uploadChildStderr]) {
       writeFileSync(path, '')
       chmodSync(path, 0o600)
     }
@@ -793,6 +871,8 @@ fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
         ...process.env,
         PATH: `${fakeBin}${delimiter}${process.env.PATH}`,
         WRANGLER_OUTPUT_FILE_PATH: uploadOutput,
+        UPLOAD_STDOUT_FILE_PATH: uploadChildStdout,
+        UPLOAD_STDERR_FILE_PATH: uploadChildStderr,
         REPORT_DIRECTORY: reportDirectory,
         SAVED_REPORT_DIRECTORY: savedReportDirectory,
         SNAPSHOT_ROOT: snapshot.destination,
