@@ -33,6 +33,8 @@ function acceptedUpload(version = 'version-new') {
     snapshot_proof_after_sha256: 'f'.repeat(64),
     build_directory_proof_sha256: '0'.repeat(64),
     wrangler_output_sha256: 'b'.repeat(64),
+    upload_stdout_sha256: '8'.repeat(64),
+    upload_stderr_sha256: '9'.repeat(64),
   })
 }
 
@@ -49,7 +51,7 @@ describe('Issue #91 worker suffix', () => {
   it('binds uploaded version, 100% traffic, smoke, controls, and all five reconciliation dimensions', () => {
     const version = 'version-new'; const deployment = 'deployment-new'
     const result = runWorkerStages({ bindings, transport: transport([
-      response({ format: 'blogman-upload-source-lifecycle-acceptance/v1', state: 'accepted', upload_operation_id: `issue-23-${identity.candidate_id}-upload-1`, version_id: version, config_sha256: 'c'.repeat(64), snapshot_tree_sha256: 'a'.repeat(64), snapshot_identity_sha256: 'd'.repeat(64), snapshot_proof_before_sha256: 'e'.repeat(64), snapshot_proof_after_sha256: 'f'.repeat(64), build_directory_proof_sha256: '0'.repeat(64), wrangler_output_sha256: 'b'.repeat(64) }),
+      response({ format: 'blogman-upload-source-lifecycle-acceptance/v1', state: 'accepted', upload_operation_id: `issue-23-${identity.candidate_id}-upload-1`, version_id: version, config_sha256: 'c'.repeat(64), snapshot_tree_sha256: 'a'.repeat(64), snapshot_identity_sha256: 'd'.repeat(64), snapshot_proof_before_sha256: 'e'.repeat(64), snapshot_proof_after_sha256: 'f'.repeat(64), build_directory_proof_sha256: '0'.repeat(64), wrangler_output_sha256: 'b'.repeat(64), upload_stdout_sha256: '8'.repeat(64), upload_stderr_sha256: '9'.repeat(64) }),
       response({ deployment_id: deployment, version_id: version, d1_database_id: 'd1-id', traffic: [{ version_id: version, percentage: 100 }] }),
       response({ before: { deployment_id: deployment, version_id: version, d1_database_id: 'd1-id', traffic: [{ version_id: version, percentage: 100 }] }, after: { deployment_id: deployment, version_id: version, d1_database_id: 'd1-id', traffic: [{ version_id: version, percentage: 100 }] }, checks: Object.fromEntries(smoke.requests.map(({ path, status }) => [path, status])), controls: { producer: 'disabled', authority: 'disabled', executors: { scheduled: 'disabled' } }, reconciliation: { state: 'matched', checks: { schema: 'matched', migration_ledger: 'matched', post_count: 'matched', post_status: 'matched', post_content: 'matched' } } }),
     ]) })
@@ -115,7 +117,7 @@ describe('Issue #91 worker suffix', () => {
 
   it.each([
     ['malformed', { status: 0, stderr: '', stdout: '{', duration_ms: 1 }, 'ERROR', 'worker_response_malformed'],
-    ['timeout', response({ format: 'blogman-upload-source-lifecycle-acceptance/v1', state: 'accepted', upload_operation_id: `issue-23-${identity.candidate_id}-upload-1`, version_id: 'version-new', config_sha256: 'c'.repeat(64), snapshot_tree_sha256: 'a'.repeat(64), snapshot_identity_sha256: 'd'.repeat(64), snapshot_proof_before_sha256: 'e'.repeat(64), snapshot_proof_after_sha256: 'f'.repeat(64), build_directory_proof_sha256: '0'.repeat(64), wrangler_output_sha256: 'b'.repeat(64) }, 600001), 'TIMEOUT', 'stage_timeout'],
+    ['timeout', response({ format: 'blogman-upload-source-lifecycle-acceptance/v1', state: 'accepted', upload_operation_id: `issue-23-${identity.candidate_id}-upload-1`, version_id: 'version-new', config_sha256: 'c'.repeat(64), snapshot_tree_sha256: 'a'.repeat(64), snapshot_identity_sha256: 'd'.repeat(64), snapshot_proof_before_sha256: 'e'.repeat(64), snapshot_proof_after_sha256: 'f'.repeat(64), build_directory_proof_sha256: '0'.repeat(64), wrangler_output_sha256: 'b'.repeat(64), upload_stdout_sha256: '8'.repeat(64), upload_stderr_sha256: '9'.repeat(64) }, 600001), 'TIMEOUT', 'stage_timeout'],
     ['invalid upload contract', response({ format: 'wrong', state: 'accepted', version_id: 'version-new', wrangler_output_sha256: 'b'.repeat(64) }), 'ERROR', 'upload_contract_invalid'],
   ])('terminalizes %s with no suffix retry', (_name, first, outcome, classification) => {
     const result = runWorkerStages({ bindings, transport: transport([first]) })

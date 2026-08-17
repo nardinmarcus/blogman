@@ -164,7 +164,7 @@ function policy() {
       manifest_binding: 'manifest_sha256',
       one_shot: true,
       credential_slots: [
-        { name: 'cloudflare_delivery', scopes: ['account:read', 'workers:write', 'd1:write'] },
+        { name: 'cloudflare_delivery', scopes: ['account:read', 'workers:write', 'd1:write', 'r2:write'] },
         { name: 'delivery_smoke_admin', scopes: ['admin:smoke'] },
       ],
     },
@@ -1428,6 +1428,55 @@ describe('Issue #90 formal entry fan-in', () => {
       outcome: 'NON_PASS', first_terminal_stage: 'live_preconditions',
       failure: { classification: 'Manifest Drift' }, mutation_counts: { attempted: 0, confirmed: 0 },
     })
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+  })
+
+  it('terminalizes the R2 capability scope gap at live_preconditions before any D1 mutation', () => {
+    configureD1()
+    createWorkerTransportMock.mockReturnValue({
+      livePreconditions: () => ({
+        outcome: 'NON_PASS',
+        classification: 'cloudflare_permission_insufficient',
+        duration_ms: 1,
+      }),
+      execute() {},
+    })
+    const prepared = manifest()
+
+    const result = execute(prepared, authorizationFor(prepared, 'fan-in-r2-scope-gap'))
+
+    expect(result.value).toMatchObject({
+      authorization_consumed: true,
+      outcome: 'NON_PASS',
+      first_terminal_stage: 'live_preconditions',
+      failure: { classification: 'cloudflare_permission_insufficient' },
+      stage_counts: {
+        d1_identity: 0,
+        clean_start_reset: 0,
+        empty_d1_proof: 0,
+        migrations_001_006: 0,
+        reconciliation: 0,
+        worker_deploy: 0,
+        version_traffic_verification: 0,
+        smoke_control_t0: 0,
+      },
+      mutation_counts: { production_writes: 0, attempted: 0, confirmed: 0 },
+    })
+    expect(createD1TransportMock).not.toHaveBeenCalled()
+    expect(runD1StagesMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects a cloudflare_delivery credential slot that omits the r2 scope before Authorization consumption', () => {
+    configureD1()
+    const value = structuredClone(manifest().value) as ManifestValue
+    value.policy.authorization.credential_slots[0].scopes = ['account:read', 'workers:write', 'd1:write']
+    const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
+    const prepared = { value, bytes, sha256: hash(bytes) }
+    const authorization = authorizationFor(prepared, 'fan-in-missing-r2-scope')
+
+    expect(() => execute(prepared, authorization)).toThrow(/credential slots are not canonical/u)
+    expect(existsSync(join(DURABLE_SINK_ROOT, 'authorizations', `${authorization.sha256}.json`))).toBe(false)
+    expect(createWorkerTransportMock).not.toHaveBeenCalled()
     expect(createD1TransportMock).not.toHaveBeenCalled()
   })
 

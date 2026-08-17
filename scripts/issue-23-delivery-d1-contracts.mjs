@@ -333,6 +333,7 @@ export function parseRemoteD1InfoResponse(stdout, expectedDatabaseId) {
 const REQUIRED_DELIVERY_TOKEN_PERMISSIONS = Object.freeze([
   'account:Account Settings:read',
   'account:D1:write',
+  'account:Workers R2 Storage:write',
   'account:Workers Scripts:write',
 ])
 
@@ -398,8 +399,9 @@ export function parseWranglerWhoamiResponse(stdout, expectedAccountId) {
     // The env-token shape carries no runtime scope proof (no tokenPermissions); the
     // required scopes are asserted before delivery by the production authority gate
     // (the manifest cloudflare_delivery credential slot must declare exactly
-    // account:read + d1:write + workers:write), and the Cloudflare API enforces them on
-    // every delivery mutation. The account-match above remains the identity/drift defense.
+    // account:read + d1:write + r2:write + workers:write), and the Cloudflare API
+    // enforces them on every delivery mutation. The account-match above remains
+    // the identity/drift defense.
     if (!envTokenShape
       && !REQUIRED_DELIVERY_TOKEN_PERMISSIONS.every((permission) => tokenPermissions.includes(permission))) {
       const error = new Error('delivery token permissions are insufficient')

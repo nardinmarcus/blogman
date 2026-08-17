@@ -9,6 +9,7 @@ const UPLOAD_KEYS = Object.freeze([
   'format', 'state', 'upload_operation_id', 'version_id', 'config_sha256',
   'snapshot_tree_sha256', 'snapshot_identity_sha256', 'snapshot_proof_before_sha256',
   'snapshot_proof_after_sha256', 'build_directory_proof_sha256', 'wrangler_output_sha256',
+  'upload_stdout_sha256', 'upload_stderr_sha256',
 ])
 const EVIDENCE_HASHES = Object.freeze([
   'upload_acceptance_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256',
@@ -169,6 +170,7 @@ export function runWorkerStages({ bindings, transport, elapsed_ms = 0, monotonic
           'config_sha256', 'snapshot_tree_sha256', 'snapshot_identity_sha256',
           'snapshot_proof_before_sha256', 'snapshot_proof_after_sha256',
           'build_directory_proof_sha256', 'wrangler_output_sha256',
+          'upload_stdout_sha256', 'upload_stderr_sha256',
         ].every((key) => sha256(parsed.value[key]))
         || parsed.value.config_sha256 !== bindings.config_sha256
         || parsed.value.snapshot_tree_sha256 !== bindings.artifact_sha256) {
