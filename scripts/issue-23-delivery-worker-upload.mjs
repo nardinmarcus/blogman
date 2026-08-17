@@ -14,6 +14,7 @@ import {
   readSync,
   readdirSync,
   realpathSync,
+  statSync,
   writeFileSync,
   writeSync,
 } from 'node:fs'
@@ -26,6 +27,98 @@ const sha256 = /^[a-f0-9]{64}$/
 const shellSafeAbsolutePath = /^\/[A-Za-z0-9._/-]+$/
 const uploadOperationId = /^issue-23-[a-f0-9]{40}-upload-1$/
 const MAX_UPLOAD_CHILD_OUTPUT_BYTES = 64 * 1024
+const UPLOAD_CHILD_FAILURE_FORMAT = 'blogman-upload-child-failure/v1'
+// Issue #158: the opennext upload chain spawns bash internally (wrangler); the
+// manifest-bound toolchain directories alone cannot resolve it. The bound
+// directories stay authoritative (node/npm resolve first, no shadowing) and the
+// system bin directories are appended only to satisfy the system shell lookup.
+const SYSTEM_UPLOAD_BIN_DIRECTORIES = ['/usr/bin', '/bin']
+
+/**
+ * Issue #158: build the upload child PATH. The manifest-bound toolchain
+ * directories (npm bin, node bin) come first so node/npm resolve against the
+ * frozen identities; the system bin directories are appended so bash (spawned
+ * internally by opennext/wrangler) and other system tools resolve in the
+ * restricted delivery environment.
+ */
+export function uploadToolchainPath(npmBinDirectory, nodeDirectory) {
+  const systemDirectories = SYSTEM_UPLOAD_BIN_DIRECTORIES.filter((directory) => {
+    try {
+      return statSync(directory).isDirectory()
+    } catch {
+      return false
+    }
+  })
+  return [...new Set([npmBinDirectory, nodeDirectory, ...systemDirectories])].join(delimiter)
+}
+
+function writeAllBytes(descriptor, bytes) {
+  let offset = 0
+  while (offset < bytes.length) {
+    offset += writeSync(descriptor, bytes, offset, bytes.length - offset, offset)
+  }
+}
+
+// Issue #158: the bounded upload child output lands hash-named in a durable
+// upload evidence directory (the authority-root sink in production) on success
+// AND failure, so the failure path leaves retrievable diagnostics after the
+// transport temp tree is cleaned. Write-once: an existing file must match the
+// exact bytes (identical content deduplicates by construction).
+function writeDurableUploadChildEvidence(directory, boundedStdout, boundedStderr) {
+  if (!isAbsolute(directory) || directory !== resolve(directory)) {
+    throw new Error()
+  }
+  const entries = [[boundedStdout, 'stdout'], [boundedStderr, 'stderr']]
+  for (const [bytes, suffix] of entries) {
+    const path = join(directory, `${sha256Bytes(bytes)}.${suffix}`)
+    let descriptor
+    let created = false
+    try {
+      descriptor = openSync(
+        path,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600,
+      )
+      created = true
+      writeAllBytes(descriptor, bytes)
+      fsyncSync(descriptor)
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error
+      const existing = stableRegularFileBytes(path)
+      if (!existing.bytes.equals(bytes)) throw new Error()
+      continue
+    } finally {
+      if (descriptor !== undefined) closeSync(descriptor)
+    }
+    if (created) {
+      const written = stableRegularFileBytes(path)
+      if (!written.bytes.equals(bytes)) throw new Error()
+    }
+  }
+}
+
+// Transient receipt of the durable upload child evidence hashes. Written into
+// the transport temp tree before the lifecycle fails; the transport reads it
+// before cleanup so the Worker stage receipt can carry the durable references.
+function writeUploadChildFailure(path, failure) {
+  if (!isAbsolute(path) || path !== resolve(path) || !shellSafeAbsolutePath.test(path)) {
+    throw new Error()
+  }
+  const bytes = Buffer.from(`${JSON.stringify(failure)}\n`)
+  const descriptor = openSync(
+    path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    0o600,
+  )
+  try {
+    writeAllBytes(descriptor, bytes)
+    fsyncSync(descriptor)
+  } finally {
+    closeSync(descriptor)
+  }
+  const written = stableRegularFileBytes(path)
+  if (!written.bytes.equals(bytes)) throw new Error()
+}
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -765,6 +858,8 @@ async function runUploadSourceLifecycle({
   const uploadOutputPath = process.env.WRANGLER_OUTPUT_FILE_PATH
   const uploadStdoutPath = process.env.UPLOAD_STDOUT_FILE_PATH
   const uploadStderrPath = process.env.UPLOAD_STDERR_FILE_PATH
+  const uploadEvidenceDirectory = process.env.UPLOAD_EVIDENCE_DIR
+  const uploadFailurePath = process.env.UPLOAD_FAILURE_PATH
   const held = []
   const evidence = []
   const workingIdentity = executionDirectoryIdentity(workingDirectory)
@@ -835,7 +930,7 @@ async function runUploadSourceLifecycle({
     assertExecutionDirectoryIdentity(workingDirectory, workingIdentity)
     const uploadEnvironment = {
       ...process.env,
-      PATH: [...new Set([npmBinDirectory, dirname(nodePath)])].join(delimiter),
+      PATH: uploadToolchainPath(npmBinDirectory, dirname(nodePath)),
       npm_execpath: npmPath,
       npm_node_execpath: nodePath,
     }
@@ -855,8 +950,41 @@ async function runUploadSourceLifecycle({
     // (previously stdio-ignore, leaving a nonzero exit undiagnosable). The raw
     // bytes stay in the private report directory; only their identities enter
     // the acceptance object, following the manifest evidence exclusions.
-    writeHeldEvidence(stdoutEvidence, boundedUploadChildOutput(upload.stdout))
-    writeHeldEvidence(stderrEvidence, boundedUploadChildOutput(upload.stderr))
+    const boundedStdout = boundedUploadChildOutput(upload.stdout)
+    const boundedStderr = boundedUploadChildOutput(upload.stderr)
+    writeHeldEvidence(stdoutEvidence, boundedStdout)
+    writeHeldEvidence(stderrEvidence, boundedStderr)
+    // Issue #158: the bounded output also lands hash-named in the durable
+    // upload evidence directory (success or failure) so the failure path keeps
+    // retrievable diagnostics after the transport temp tree is cleaned. The
+    // hashes below are the durable references kept in the acceptance and
+    // Worker stage receipt evidence.
+    if (uploadEvidenceDirectory !== undefined) {
+      writeDurableUploadChildEvidence(
+        uploadEvidenceDirectory,
+        boundedStdout,
+        boundedStderr,
+      )
+    }
+    // A failed upload child is terminal: the remaining validation gates cannot
+    // retroactively change the outcome, and the held upload output would be
+    // empty (its capture requires nonempty bytes). Persist the durable
+    // evidence hashes as a transient failure receipt so the transport carries
+    // the references into the Worker stage receipt before the temp tree is
+    // cleaned; the diagnostics themselves are already durable.
+    if (upload.error || upload.status !== 0) {
+      if (uploadFailurePath !== undefined) {
+        writeUploadChildFailure(uploadFailurePath, {
+          format: UPLOAD_CHILD_FAILURE_FORMAT,
+          child_error: upload.error?.code ?? null,
+          child_signal: upload.signal ?? null,
+          child_status: upload.status ?? null,
+          upload_stdout_sha256: sha256Bytes(boundedStdout),
+          upload_stderr_sha256: sha256Bytes(boundedStderr),
+        })
+      }
+      throw new Error()
+    }
 
     assertExecutionDirectoryIdentity(workingDirectory, workingIdentity)
     captureHeldEvidence(uploadEvidence, true)
@@ -875,7 +1003,6 @@ async function runUploadSourceLifecycle({
     await verifyConfigBinding()
     for (const path of held) verifyHeldPath(path)
     for (const file of evidence) verifyHeldEvidence(file)
-    if (upload.error || upload.status !== 0) throw new Error()
     const versionId = acceptedVersionId(uploadEvidence.expected.bytes)
     writeHeldEvidence(afterEvidence, snapshotProofBytes('matched', after, destination))
     for (const path of held) verifyHeldPath(path)

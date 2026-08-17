@@ -67,7 +67,11 @@ describe('Issue #91 worker suffix', () => {
         ...identity,
       },
     })
-    expect(JSON.stringify(result.value)).not.toMatch(/stdout|stderr|token|cookie|private/i)
+    expect(JSON.stringify(result.value)).not.toMatch(/token|cookie|private/i)
+    // Issue #158: only the bounded upload child evidence HASHES (durable
+    // references) reach the receipt; raw adapter output never escapes.
+    expect(result.value.evidence.hashes.upload_stdout_sha256).toBe('8'.repeat(64))
+    expect(result.value.evidence.hashes.upload_stderr_sha256).toBe('9'.repeat(64))
   })
 
   it('ignores caller-forged production provenance on the public stage runner', () => {
@@ -234,5 +238,54 @@ describe('Issue #91 worker suffix', () => {
       stage_counts: counts,
     })
     expect(calls).toBe(responses.length)
+  })
+
+  it('carries bounded upload child evidence hashes into the failure receipt', () => {
+    const error = new WorkerTransportError('ERROR', 'worker_adapter_nonzero', 1)
+    error.upload_stdout_sha256 = 'a1'.repeat(32)
+    error.upload_stderr_sha256 = 'b2'.repeat(32)
+    const failing = { execute: () => { throw error } }
+
+    const result = runWorkerStages({ bindings, transport: failing })
+
+    expect(result.value).toMatchObject({
+      outcome: 'ERROR',
+      first_terminal_stage: 'worker_deploy',
+      failure: { classification: 'worker_adapter_nonzero' },
+      mutation_counts: { attempted: 1, confirmed: 0 },
+    })
+    expect(result.value.evidence.hashes).toEqual({
+      upload_acceptance_sha256: null,
+      upload_stdout_sha256: 'a1'.repeat(32),
+      upload_stderr_sha256: 'b2'.repeat(32),
+      version_traffic_sha256: null,
+      smoke_control_t0_sha256: null,
+    })
+  })
+
+  it('references the bounded upload child evidence hashes in the success receipt', () => {
+    const result = runWorkerStages({
+      bindings,
+      transport: transport([
+        acceptedUpload(),
+        acceptedTraffic(),
+        response({
+          before: { deployment_id: 'deployment-new', version_id: 'version-new', d1_database_id: 'd1-id', traffic: [{ version_id: 'version-new', percentage: 100 }] },
+          after: { deployment_id: 'deployment-new', version_id: 'version-new', d1_database_id: 'd1-id', traffic: [{ version_id: 'version-new', percentage: 100 }] },
+          checks: Object.fromEntries(smoke.requests.map(({ path, status }) => [path, status])),
+          controls: { producer: 'disabled', authority: 'disabled', executors: { scheduled: 'disabled' } },
+          reconciliation: { state: 'matched', checks: { schema: 'matched', migration_ledger: 'matched', post_count: 'matched', post_status: 'matched', post_content: 'matched' } },
+        }),
+      ]),
+    })
+
+    expect(result.value).toMatchObject({ outcome: 'PASS' })
+    expect(result.value.evidence.hashes).toEqual({
+      upload_acceptance_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      upload_stdout_sha256: '8'.repeat(64),
+      upload_stderr_sha256: '9'.repeat(64),
+      version_traffic_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      smoke_control_t0_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    })
   })
 })

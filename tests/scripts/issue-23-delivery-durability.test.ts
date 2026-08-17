@@ -61,7 +61,7 @@ const d1HashNames = [
   'migration_runner_sha256', 'migration_catalog_sha256', 'rollout_safety_sha256',
   'expected_reconciliation_sha256', 'trace_sha256',
 ]
-const workerHashNames = ['upload_acceptance_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256']
+const workerHashNames = ['upload_acceptance_sha256', 'upload_stdout_sha256', 'upload_stderr_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256']
 
 function exactD1Record(manifest: ReturnType<typeof record>, authorization: ReturnType<typeof record>, attemptId: string, outcome = 'ERROR') {
   const terminalIndex = outcome === 'PASS' ? d1Stages.length - 1 : 0
@@ -490,6 +490,59 @@ describe('Issue #23 durable delivery records', () => {
       .toThrow(/Worker evidence schema contains unsupported fields/u)
     expect(readdirSync(join(root, 'records'))).toEqual([])
     expect(readdirSync(join(root, 'terminals'))).toEqual([])
+  })
+
+  it('persists a failed worker receipt whose upload child evidence hashes point into the durable upload evidence directory', () => {
+    const root = mkdtempSync(join(tmpdir(), 'blogman-issue-23-worker-upload-evidence-'))
+    temporaryDirectories.push(root)
+    const sink = createTestDeliverySink(root)
+    const manifest = record({
+      format: 'blogman-issue-23-canonical-frozen-manifest/v1',
+      repository: { commit: 'c'.repeat(40) },
+    })
+    const authorization = record({ ...authorizationRecord().value, manifest_sha256: manifest.sha256 })
+    const attemptId = derivedAttemptId(manifest.sha256, authorization.sha256)
+    const evidenceDirectory = sink.uploadEvidenceDirectory()
+    const stdoutSha = createHash('sha256').update('OpenNext upload progress\n').digest('hex')
+    const stderrSha = createHash('sha256').update('wrangler Authentication error\n').digest('hex')
+    writeFileSync(join(evidenceDirectory, `${stdoutSha}.stdout`), 'OpenNext upload progress\n', { mode: 0o600 })
+    writeFileSync(join(evidenceDirectory, `${stderrSha}.stderr`), 'wrangler Authentication error\n', { mode: 0o600 })
+    const worker = exactWorkerRecord(manifest, authorization, attemptId)
+    const receipt = record({
+      ...worker.value,
+      evidence: {
+        ...worker.value.evidence,
+        hashes: {
+          upload_acceptance_sha256: null,
+          upload_stdout_sha256: stdoutSha,
+          upload_stderr_sha256: stderrSha,
+          version_traffic_sha256: null,
+          smoke_control_t0_sha256: null,
+        },
+      },
+    })
+    const terminal = exactTerminalRecord(manifest, authorization, {
+      attemptId,
+      firstStage: 'worker_deploy',
+      classification: 'worker_adapter_error',
+      worker: receipt,
+    })
+    sink.consumeAuthorization(authorization)
+
+    expect(sink.persistTerminalResult({ terminal, manifest, d1: null, worker: receipt })).toBe(terminal.sha256)
+
+    const recovered = sink.readTerminalEvidence(terminal.sha256)
+    expect(recovered.worker!.value.evidence.hashes).toMatchObject({
+      upload_acceptance_sha256: null,
+      upload_stdout_sha256: stdoutSha,
+      upload_stderr_sha256: stderrSha,
+    })
+    // Retrievable diagnostics: the receipt references resolve to the durable
+    // upload evidence files under the sink root.
+    expect(readFileSync(join(evidenceDirectory, `${stdoutSha}.stdout`), 'utf8'))
+      .toBe('OpenNext upload progress\n')
+    expect(readFileSync(join(evidenceDirectory, `${stderrSha}.stderr`), 'utf8'))
+      .toBe('wrangler Authentication error\n')
   })
 
   it('rejects Terminal mutation counts that contradict D1 and Worker sidecars', () => {
