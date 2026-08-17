@@ -664,7 +664,7 @@ function d1Result(failedStage: string | null = null) {
 }
 
 function workerResult(identity: Record<string, string>) {
-  const value = { format: 'blogman-issue-23-worker-stages/v1', outcome: 'ERROR', first_terminal_stage: 'worker_deploy', failure: { classification: 'worker_adapter_error' }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, mutation_counts: { attempted: 1, confirmed: 0 }, evidence: { source: 'stage-runner-non-production', production: false, promotable: false, manifest_sha256: identity.manifest_sha256, authorization_sha256: identity.authorization_sha256, attempt_id: identity.attempt_id, candidate_id: identity.candidate_id, hashes: { upload_acceptance_sha256: null, version_traffic_sha256: null, smoke_control_t0_sha256: null } }, finalized: true }
+  const value = { format: 'blogman-issue-23-worker-stages/v1', outcome: 'ERROR', first_terminal_stage: 'worker_deploy', failure: { classification: 'worker_adapter_error' }, stage_counts: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, stage_durations_ms: { worker_deploy: 1, version_traffic_verification: 0, smoke_control_t0: 0 }, mutation_counts: { attempted: 1, confirmed: 0 }, evidence: { source: 'stage-runner-non-production', production: false, promotable: false, manifest_sha256: identity.manifest_sha256, authorization_sha256: identity.authorization_sha256, attempt_id: identity.attempt_id, candidate_id: identity.candidate_id, hashes: { upload_acceptance_sha256: null, upload_stdout_sha256: null, upload_stderr_sha256: null, version_traffic_sha256: null, smoke_control_t0_sha256: null } }, finalized: true }
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
   return { value, bytes, sha256: hash(bytes) }
 }
@@ -682,8 +682,8 @@ function passingWorkerResult(identity: Record<string, string>) {
       attempt_id: identity.attempt_id,
       candidate_id: identity.candidate_id,
       hashes: {
-        upload_acceptance_sha256: '1'.repeat(64), version_traffic_sha256: '2'.repeat(64),
-        smoke_control_t0_sha256: '3'.repeat(64),
+        upload_acceptance_sha256: '1'.repeat(64), upload_stdout_sha256: 'a'.repeat(64), upload_stderr_sha256: 'b'.repeat(64),
+        version_traffic_sha256: '2'.repeat(64), smoke_control_t0_sha256: '3'.repeat(64),
       },
     },
     finalized: true,

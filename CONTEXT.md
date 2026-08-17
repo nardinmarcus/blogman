@@ -39,3 +39,7 @@ _Avoid_: Success marker, mutable status, console log
 **Production Evidence**:
 Evidence produced by real adapters during the single authorized Delivery Attempt and bound through the Terminal Result to its exact manifest.
 _Avoid_: Test fixture, synthetic rehearsal, screen state
+
+**Upload Child Evidence**:
+Bounded (64 KiB cap) stdout/stderr captured from the single upload child of the authorized Worker deploy, persisted hash-named (sha256.stdout / sha256.stderr) under the durable sink's `upload-evidence/` directory on success and failure. The acceptance and Worker stage receipt keep only the hash references — never the raw bytes.
+_Avoid_: Transport temp tree storage, raw output in canonical records, unbounded captures

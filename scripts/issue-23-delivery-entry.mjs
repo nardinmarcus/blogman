@@ -85,7 +85,8 @@ function buildDeliverySinkOwnership() {
     'expected_reconciliation_sha256', 'trace_sha256',
   ])
   const WORKER_EVIDENCE_HASHES = Object.freeze([
-    'upload_acceptance_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256',
+    'upload_acceptance_sha256', 'upload_stdout_sha256', 'upload_stderr_sha256',
+    'version_traffic_sha256', 'smoke_control_t0_sha256',
   ])
   const FAILURE_CLASSIFICATIONS_BY_OUTCOME = Object.freeze({
     TIMEOUT: new Set(['overall_timeout', 'stage_timeout', 'timeout']),
@@ -725,6 +726,18 @@ function buildDeliverySinkOwnership() {
         const result = readTerminalEvidence(resolvedRoot, terminalSha256)
         assertSinkIdentity()
         return result
+      },
+      // Issue #158: durable upload child evidence directory under the sink
+      // root (authority root in production, test-owned temp root in rehearsal).
+      // The upload lifecycle persists bounded hash-named child stdout/stderr
+      // files here on success AND failure so the failure path leaves
+      // retrievable diagnostics after the transport temp tree is cleaned.
+      uploadEvidenceDirectory() {
+        assertSinkIdentity()
+        const path = join(resolvedRoot, 'upload-evidence')
+        const identity = createDirectory(path, 'upload evidence directory')
+        assertDirectoryIdentity(path, identity, 'upload evidence directory')
+        return path
       },
     })
   }
@@ -2495,7 +2508,8 @@ const D1_EVIDENCE_HASHES = Object.freeze([
   'trace_sha256',
 ])
 const WORKER_EVIDENCE_HASHES = Object.freeze([
-  'upload_acceptance_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256',
+  'upload_acceptance_sha256', 'upload_stdout_sha256', 'upload_stderr_sha256',
+  'version_traffic_sha256', 'smoke_control_t0_sha256',
 ])
 const WORKER_EVIDENCE_IDENTITIES = Object.freeze([
   'manifest_sha256', 'authorization_sha256', 'attempt_id', 'candidate_id',
@@ -2552,6 +2566,8 @@ function preWorkerOverallTimeoutResult(evidencePolicy, identity) {
       ...identity,
       hashes: {
         upload_acceptance_sha256: null,
+        upload_stdout_sha256: null,
+        upload_stderr_sha256: null,
         version_traffic_sha256: null,
         smoke_control_t0_sha256: null,
       },
@@ -2589,6 +2605,8 @@ function malformedWorkerResult(evidencePolicy, identity) {
       ...identity,
       hashes: {
         upload_acceptance_sha256: null,
+        upload_stdout_sha256: null,
+        upload_stderr_sha256: null,
         version_traffic_sha256: null,
         smoke_control_t0_sha256: null,
       },
@@ -2676,13 +2694,26 @@ function normalizeWorkerResult(result, evidencePolicy, identity) {
   }
   const terminalIndex = value.outcome === 'PASS' ? WORKER_RESULT_STAGES.length - 1
     : WORKER_RESULT_STAGES.indexOf(value.first_terminal_stage)
+  const childEvidenceHashes = ['upload_stdout_sha256', 'upload_stderr_sha256']
+  const orderedEvidenceHashes = WORKER_EVIDENCE_HASHES.filter((name) => !childEvidenceHashes.includes(name))
   if (terminalIndex < 0
     || WORKER_RESULT_STAGES.some((stage, index) => value.stage_counts[stage] !== (index <= terminalIndex ? 1 : 0))
-    || WORKER_EVIDENCE_HASHES.some((name, index) => (
-      index < terminalIndex ? !/^[a-f0-9]{64}$/u.test(value.evidence.hashes[name])
-        : index === terminalIndex && value.outcome === 'PASS' ? !/^[a-f0-9]{64}$/u.test(value.evidence.hashes[name])
-          : value.evidence.hashes[name] !== null
-    ))) return malformed()
+    // Issue #158: the bounded upload child evidence references are null-or-hash
+    // because the failure path may end before any child ran, but once the
+    // upload acceptance exists the successful upload child output hashes must
+    // be present too (they are part of the acceptance object).
+    || !childEvidenceHashes.every((name) => (
+      value.evidence.hashes[name] === null || /^[a-f0-9]{64}$/u.test(value.evidence.hashes[name])
+    ))
+    || (value.evidence.hashes.upload_acceptance_sha256 !== null
+      && !childEvidenceHashes.every((name) => /^[a-f0-9]{64}$/u.test(value.evidence.hashes[name])))
+    || orderedEvidenceHashes.some((name) => {
+      const index = orderedEvidenceHashes.indexOf(name)
+      const hash = value.evidence.hashes[name]
+      return index < terminalIndex ? !/^[a-f0-9]{64}$/u.test(hash)
+        : index === terminalIndex && value.outcome === 'PASS' ? !/^[a-f0-9]{64}$/u.test(hash)
+          : hash !== null
+    })) return malformed()
   if (value.outcome === 'PASS') {
     if (value.first_terminal_stage !== null || value.failure !== null
       || value.mutation_counts.attempted !== 2 || value.mutation_counts.confirmed !== 2) {
@@ -2954,6 +2985,31 @@ function createProductionD1Transport(config, childEnvironment, monotonicMs) {
 
 const worker = WORKER_COMMAND_CONTRACT
 
+// Issue #158: reads the transient upload child failure receipt left by the
+// lifecycle in the transport temp tree. Returns the durable upload evidence
+// references or null when the receipt is absent or malformed (the durable
+// evidence files themselves remain authoritative for diagnostics).
+function readUploadFailureDiagnostic(path) {
+  let bytes
+  let value
+  try {
+    bytes = readFileSync(path)
+    value = parseStrictJson(bytes.toString('utf8'))
+  } catch {
+    return null
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  if (value.format !== 'blogman-upload-child-failure/v1'
+    || !/^[a-f0-9]{64}$/u.test(value.upload_stdout_sha256)
+    || !/^[a-f0-9]{64}$/u.test(value.upload_stderr_sha256)) {
+    return null
+  }
+  return {
+    upload_stdout_sha256: value.upload_stdout_sha256,
+    upload_stderr_sha256: value.upload_stderr_sha256,
+  }
+}
+
 function createProductionWorkerTransport(bindings, environments = { cloudflare: process.env, smoke: process.env }, monotonicMs = () => 0) {
   if (typeof worker.createTransportForTestsOnly === 'function') {
     return worker.createTransportForTestsOnly(bindings, environments, monotonicMs)
@@ -3113,6 +3169,13 @@ function createProductionWorkerTransport(bindings, environments = { cloudflare: 
     if (request.operation === 'worker_deploy') {
       const root = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-91-upload-')))
       chmodSync(root, 0o700)
+      // Issue #158: the upload lifecycle persists bounded child stdout/stderr
+      // into the durable sink under the authority root (success or failure) and
+      // leaves a transient failure receipt with their hashes in this temp tree
+      // when the child fails; the hashes ride the error into the Worker stage
+      // receipt before the temp tree is cleaned here.
+      const uploadFailurePath = join(root, 'upload-failure.json')
+      const uploadEvidenceDirectory = executionDeliverySink().uploadEvidenceDirectory()
       try {
         const output = join(root, 'upload.jsonl')
         const before = join(root, 'before.json')
@@ -3133,9 +3196,25 @@ function createProductionWorkerTransport(bindings, environments = { cloudflare: 
             WRANGLER_OUTPUT_FILE_PATH: output,
             UPLOAD_STDOUT_FILE_PATH: childStdout,
             UPLOAD_STDERR_FILE_PATH: childStderr,
+            UPLOAD_EVIDENCE_DIR: uploadEvidenceDirectory,
+            UPLOAD_FAILURE_PATH: uploadFailurePath,
           },
         )
         return worker.response(parseJson(result.stdout, 'upload_acceptance', result.duration_ms), result.duration_ms)
+      } catch (error) {
+        if (error instanceof WorkerTransportError) {
+          try {
+            const diagnostic = readUploadFailureDiagnostic(uploadFailurePath)
+            if (diagnostic !== null) {
+              error.upload_stdout_sha256 = diagnostic.upload_stdout_sha256
+              error.upload_stderr_sha256 = diagnostic.upload_stderr_sha256
+            }
+          } catch {
+            // The durable evidence files themselves are the authoritative
+            // diagnostics; the transient receipt is best-effort.
+          }
+        }
+        throw error
       } finally {
         worker.removeTransportTree(root)
       }

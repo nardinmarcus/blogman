@@ -12,7 +12,8 @@ const UPLOAD_KEYS = Object.freeze([
   'upload_stdout_sha256', 'upload_stderr_sha256',
 ])
 const EVIDENCE_HASHES = Object.freeze([
-  'upload_acceptance_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256',
+  'upload_acceptance_sha256', 'upload_stdout_sha256', 'upload_stderr_sha256',
+  'version_traffic_sha256', 'smoke_control_t0_sha256',
 ])
 const EVIDENCE_IDENTITY_FIELDS = Object.freeze([
   'manifest_sha256', 'authorization_sha256', 'attempt_id', 'candidate_id',
@@ -26,11 +27,16 @@ function safeId(value) { return typeof value === 'string' && /^[A-Za-z0-9._-]+$/
 function sha256(value) { return typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value) }
 
 export class WorkerTransportError extends Error {
-  constructor(outcome = 'UNCERTAIN', classification = 'worker_adapter_uncertain', duration_ms = 1) {
+  constructor(outcome = 'UNCERTAIN', classification = 'worker_adapter_uncertain', duration_ms = 1, uploadStdoutSha256 = null, uploadStderrSha256 = null) {
     super('worker transport failed')
     this.outcome = ['NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(outcome) ? outcome : 'UNCERTAIN'
     this.classification = classification
     this.duration_ms = Number.isSafeInteger(duration_ms) && duration_ms > 0 ? duration_ms : 1
+    // Issue #158: the durable upload child evidence references ride the error
+    // so the failure receipt can keep them retrievable after the temp tree is
+    // cleaned; only well-formed sha256 references are accepted.
+    if (sha256(uploadStdoutSha256)) this.upload_stdout_sha256 = uploadStdoutSha256
+    if (sha256(uploadStderrSha256)) this.upload_stderr_sha256 = uploadStderrSha256
   }
 }
 
@@ -43,6 +49,15 @@ function terminal(trace, evidenceHashes, mutation_counts, identity) {
   // Public/test-facing stage runners can only emit non-production evidence.
   // Production promotion belongs exclusively to execute's private real-adapter path.
   const production = false
+  const hashes = { ...evidenceHashes }
+  // Issue #158: on the failure path the bounded upload child references arrive
+  // on the terminal trace entry (when the child actually ran); on the success
+  // path they were copied from the acceptance record. Later-stage failures keep
+  // the worker_deploy references already accumulated from the acceptance.
+  if (last.outcome !== 'PASS') {
+    if (last.upload_stdout_sha256 !== undefined) hashes.upload_stdout_sha256 = last.upload_stdout_sha256
+    if (last.upload_stderr_sha256 !== undefined) hashes.upload_stderr_sha256 = last.upload_stderr_sha256
+  }
   const value = {
     format: 'blogman-issue-23-worker-stages/v1', outcome: last.outcome,
     first_terminal_stage: last.outcome === 'PASS' ? null : last.stage,
@@ -55,7 +70,7 @@ function terminal(trace, evidenceHashes, mutation_counts, identity) {
       production,
       promotable: production && last.outcome === 'PASS',
       ...identity,
-      hashes: evidenceHashes,
+      hashes,
     },
     finalized: true,
   }
@@ -86,7 +101,12 @@ function transportResult(transport, request) {
     if (parsed) return parsed
   } catch (error) {
     if (error instanceof WorkerTransportError) {
-      return { failure: { outcome: error.outcome, classification: error.classification }, duration_ms: error.duration_ms }
+      const failure = { outcome: error.outcome, classification: error.classification }
+      // Issue #158: carry the durable upload child evidence references through
+      // the failure so the receipt can keep them retrievable.
+      if (error.upload_stdout_sha256 !== undefined) failure.upload_stdout_sha256 = error.upload_stdout_sha256
+      if (error.upload_stderr_sha256 !== undefined) failure.upload_stderr_sha256 = error.upload_stderr_sha256
+      return { failure, duration_ms: error.duration_ms }
     }
   }
   return { failure: { outcome: 'UNCERTAIN', classification: 'worker_adapter_uncertain' }, duration_ms: 1 }
@@ -180,6 +200,11 @@ export function runWorkerStages({ bindings, transport, elapsed_ms = 0, monotonic
       version = parsed.value.version_id
       mutation_counts.confirmed += 1
       evidenceHashes.upload_acceptance_sha256 = hash(bytes(parsed.value))
+      // Issue #158: the acceptance object already binds the bounded upload child
+      // stdout/stderr hashes; mirror them onto the receipt evidence so the
+      // durable upload evidence files stay referenced on the success path too.
+      evidenceHashes.upload_stdout_sha256 = parsed.value.upload_stdout_sha256
+      evidenceHashes.upload_stderr_sha256 = parsed.value.upload_stderr_sha256
     } else if (stage === 'version_traffic_verification') {
       if (!deploymentMatches(parsed.value, version, bindings.d1_database_id)) {
         trace.push({ stage, outcome: 'NON_PASS', classification: 'version_traffic_mismatch', duration_ms: parsed.duration_ms })

@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
+import { uploadToolchainPath } from '../../scripts/issue-23-delivery-worker-upload.mjs'
 const temporaryDirectories: string[] = []
 const sharedTemporaryDirectory = realpathSync('/tmp')
 const crossRootTemporaryDirectory = realpathSync(
@@ -670,7 +671,7 @@ process.stdout.write('OpenNext upload log\\n')
         '--assets', join(snapshot.destination, 'assets'),
       ],
       cwd: process.cwd(),
-      path: `${fakeBin}${delimiter}${dirname(process.execPath)}`,
+      path: `${fakeBin}${delimiter}${dirname(process.execPath)}${delimiter}/usr/bin${delimiter}/bin`,
     })
     const before = JSON.parse(readFileSync(proofBefore, 'utf8')) as UploadSourceSnapshotProof
       & { state: string }
@@ -704,6 +705,108 @@ process.exitCode = 9
     expect(readFileSync(fixture.uploadChildStderr, 'utf8'))
       .toBe('wrangler GET /accounts/account-id/r2/buckets failed: 10000 Authentication error\n')
     expect(readFileSync(fixture.proofAfter, 'utf8')).toBe('')
+  })
+
+  it('appends system bin directories after the bound upload toolchain in PATH order', () => {
+    const boundNpmBin = '/repo/node_modules/.bin'
+    const boundNodeBin = '/repo/node/bin'
+
+    const path = uploadToolchainPath(boundNpmBin, boundNodeBin)
+    const segments = path.split(delimiter)
+
+    // The manifest-bound toolchain stays authoritative: its directories precede
+    // every system bin directory, so node/npm cannot be shadowed by /usr/bin:/bin.
+    expect(segments.slice(0, 2)).toEqual([boundNpmBin, boundNodeBin])
+    expect(segments).toContain('/usr/bin')
+    expect(segments).toContain('/bin')
+    expect(segments.indexOf('/usr/bin')).toBeGreaterThan(segments.indexOf(boundNodeBin))
+    expect(segments.indexOf('/bin')).toBeGreaterThan(segments.indexOf(boundNodeBin))
+    // De-duplicated while preserving first-occurrence order.
+    expect(new Set(segments).size).toBe(segments.length)
+  })
+
+  it('resolves bash from the constructed upload PATH but not from the bound-only PATH', () => {
+    const boundNpmBin = join(sharedTemporaryDirectory, `blogman-bash-resolve-${process.pid}`)
+    mkdirSync(boundNpmBin)
+    temporaryDirectories.push(boundNpmBin)
+    const boundNodeBin = dirname(process.execPath)
+    const boundOnly = [boundNpmBin, boundNodeBin].join(delimiter)
+    const withSystemBins = uploadToolchainPath(boundNpmBin, boundNodeBin)
+
+    // Restricted PATH reproduces the diagnosed restricted environment: bash is
+    // not under the bound toolchain directories, so the child cannot spawn it.
+    const restricted = spawnSync('bash', ['-c', 'exit 0'], {
+      env: { HOME: tmpdir(), LC_ALL: 'C', PATH: boundOnly },
+    })
+    expect(restricted.error?.code).toBe('ENOENT')
+
+    // The constructed upload PATH appends /usr/bin:/bin, so bash resolves.
+    const resolved = spawnSync('bash', ['-c', 'exit 0'], {
+      env: { HOME: tmpdir(), LC_ALL: 'C', PATH: withSystemBins },
+    })
+    expect(resolved.error).toBeUndefined()
+    expect(resolved.status).toBe(0)
+  })
+
+  it('persists bounded upload child stdout/stderr into the durable evidence directory on failure', () => {
+    const fixture = uploadSourceLifecycleFixture()
+    const durableDir = join(fixture.directory, 'durable-upload-evidence')
+    mkdirSync(durableDir, { mode: 0o700 })
+    const failurePath = join(fixture.reportDirectory, 'upload-child-failure.json')
+    writeFileSync(join(fixture.fakeBin, 'npm'), `#!/usr/bin/env node
+process.stdout.write('OpenNext upload progress\\n')
+process.stderr.write('wrangler GET /accounts/account-id/r2/buckets failed: 10000 Authentication error\\n')
+process.exitCode = 9
+`)
+    chmodSync(join(fixture.fakeBin, 'npm'), 0o755)
+
+    const lifecycle = runCurrentUploadLifecycle(fixture, {
+      UPLOAD_EVIDENCE_DIR: durableDir,
+      UPLOAD_FAILURE_PATH: failurePath,
+    })
+
+    expect(lifecycle).toMatchObject({
+      status: 1,
+      stdout: '',
+      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+    })
+    const stdoutBytes = Buffer.from('OpenNext upload progress\n')
+    const stderrBytes = Buffer.from(
+      'wrangler GET /accounts/account-id/r2/buckets failed: 10000 Authentication error\n',
+    )
+    const stdoutSha = createHash('sha256').update(stdoutBytes).digest('hex')
+    const stderrSha = createHash('sha256').update(stderrBytes).digest('hex')
+    expect(readFileSync(join(durableDir, `${stdoutSha}.stdout`))).toEqual(stdoutBytes)
+    expect(readFileSync(join(durableDir, `${stderrSha}.stderr`))).toEqual(stderrBytes)
+    const failure = JSON.parse(readFileSync(failurePath, 'utf8'))
+    expect(failure).toMatchObject({
+      format: 'blogman-upload-child-failure/v1',
+      child_status: 9,
+      upload_stdout_sha256: stdoutSha,
+      upload_stderr_sha256: stderrSha,
+    })
+  })
+
+  it('persists bounded upload child stdout/stderr into the durable evidence directory on success', () => {
+    const fixture = uploadSourceLifecycleFixture()
+    const durableDir = join(fixture.directory, 'durable-upload-evidence-success')
+    mkdirSync(durableDir, { mode: 0o700 })
+    installCountingUpload(fixture)
+
+    const lifecycle = runCurrentUploadLifecycle(fixture, {
+      UPLOAD_EVIDENCE_DIR: durableDir,
+    })
+
+    expect(lifecycle.status, lifecycle.stderr).toBe(0)
+    const acceptance = JSON.parse(lifecycle.stdout)
+    expect(acceptance.upload_stdout_sha256).toMatch(/^[a-f0-9]{64}$/u)
+    expect(acceptance.upload_stderr_sha256).toMatch(/^[a-f0-9]{64}$/u)
+    expect(readdirSync(durableDir).sort()).toEqual([
+      `${acceptance.upload_stderr_sha256}.stderr`,
+      `${acceptance.upload_stdout_sha256}.stdout`,
+    ])
+    expect(readFileSync(join(durableDir, `${acceptance.upload_stdout_sha256}.stdout`)).byteLength).toBe(0)
+    expect(readFileSync(join(durableDir, `${acceptance.upload_stderr_sha256}.stderr`)).byteLength).toBe(0)
   })
 
   it('bounds the captured upload child output at the frozen evidence limit', () => {
