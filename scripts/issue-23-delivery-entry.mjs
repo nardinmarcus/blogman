@@ -3073,15 +3073,27 @@ function readUploadFailureDiagnostic(path) {
     return null
   }
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
-  if (value.format !== 'blogman-upload-child-failure/v1'
-    || !/^[a-f0-9]{64}$/u.test(value.upload_stdout_sha256)
-    || !/^[a-f0-9]{64}$/u.test(value.upload_stderr_sha256)) {
-    return null
+  if (value.format === 'blogman-upload-child-failure/v1') {
+    if (!/^[a-f0-9]{64}$/u.test(value.upload_stdout_sha256)
+      || !/^[a-f0-9]{64}$/u.test(value.upload_stderr_sha256)) {
+      return null
+    }
+    return {
+      upload_stdout_sha256: value.upload_stdout_sha256,
+      upload_stderr_sha256: value.upload_stderr_sha256,
+    }
   }
-  return {
-    upload_stdout_sha256: value.upload_stdout_sha256,
-    upload_stderr_sha256: value.upload_stderr_sha256,
+  // Issue #168: a preflight/child wrapper failure writes a record with null
+  // upload child references and its own stack summary; the diagnostic exposes
+  // the nulls so the receipt stays symmetric with the observed wall.
+  if (value.format === 'blogman-upload-wrapper-failure/v1'
+    && (value.stage === 'preflight' || value.stage === 'child')) {
+    return {
+      upload_stdout_sha256: null,
+      upload_stderr_sha256: null,
+    }
   }
+  return null
 }
 
 function createProductionWorkerTransport(bindings, environments = { cloudflare: process.env, smoke: process.env }, monotonicMs = () => 0) {

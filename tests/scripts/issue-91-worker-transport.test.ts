@@ -121,3 +121,30 @@ describe('Issue #154 R2 read-only pre-burn probe contract', () => {
     expect(JSON.stringify(probe)).not.toMatch(/formal-cloudflare-placeholder/u)
   })
 })
+
+// Issue #168: the supervisor-captured bounded wrapper stderr rides the
+// D1ChildError; the adapter must carry its sha256 identity onto the
+// WorkerStageError so the stage receipt can reference the durable bytes.
+describe('Issue #168 wrapper stderr sidecar on child failure', () => {
+  it('maps a nonzero wrapper child error to worker_adapter_nonzero with wrapper_stderr_sha256', async () => {
+    const { D1ChildError } = await import('../../scripts/issue-23-delivery-d1-child.mjs')
+    const error = new D1ChildError('nonzero', 5, {
+      stdout: 'upload log line\n',
+      stderr: 'wrapper failure stack summary\n',
+    })
+    const mapped = transport.WORKER_COMMAND_CONTRACT.childFailure(error)
+    expect(mapped).toBeInstanceOf(WorkerTransportError)
+    expect(mapped.outcome).toBe('ERROR')
+    expect(mapped.classification).toBe('worker_adapter_nonzero')
+    expect(mapped.duration_ms).toBe(5)
+    expect(mapped.wrapper_stderr_sha256).toBe(hash(Buffer.from('wrapper failure stack summary\n')))
+  })
+
+  it('drops the sidecar when the wrapper stderr is empty', async () => {
+    const { D1ChildError } = await import('../../scripts/issue-23-delivery-d1-child.mjs')
+    const error = new D1ChildError('nonzero', 3, { stdout: '', stderr: '' })
+    const mapped = transport.WORKER_COMMAND_CONTRACT.childFailure(error)
+    expect(mapped.classification).toBe('worker_adapter_nonzero')
+    expect(mapped.wrapper_stderr_sha256).toBeUndefined()
+  })
+})

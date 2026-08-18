@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, dirname, join, resolve } from 'node:path'
+import { delimiter, dirname, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { uploadToolchainPath } from '../../scripts/issue-23-delivery-worker-upload.mjs'
@@ -221,6 +221,88 @@ function runCurrentUploadLifecycle(
       ...environment,
     },
   })
+}
+
+// Issue #168: production-isomorphic fixture. The real frozen artifact contains
+// scoped-package directories ('@opentelemetry/api') and Next.js route-directory
+// names ('[slug]', '(protected)', '[...key]'); this fixture seeds them into the
+// source tree and reseals the archive so the frozen archive contains them too.
+function seedArtifactRouteDirectories(source: string) {
+  const scoped = join(source, 'server-functions', 'node_modules', '@opentelemetry', 'api')
+  const dynamic = join(source, 'assets', '_next', 'static', 'chunks', 'app', '[slug]')
+  const grouped = join(source, 'assets', '_next', 'static', 'chunks', 'app', 'admin', '(protected)', 'posts')
+  for (const directory of [scoped, dynamic, grouped]) mkdirSync(directory, { recursive: true })
+  writeFileSync(join(scoped, 'index.js'), 'sealed scoped exporter\n')
+  writeFileSync(join(dynamic, 'page.js'), 'sealed dynamic page\n')
+  writeFileSync(join(grouped, 'page.js'), 'sealed grouped page\n')
+  return { scoped, dynamic, grouped }
+}
+
+function uploadSourceLifecycleArtifactFixture() {
+  const fixture = uploadSourceLifecycleFixture()
+  seedArtifactRouteDirectories(fixture.source)
+  rmSync(fixture.archive, { force: true })
+  // The production sealed archive contains file entries only (no directory
+  // entries); enumerate relative file paths and zip them explicitly so the
+  // archived path set matches the frozen artifact grammar.
+  const files: string[] = []
+  const visit = (directory: string) => {
+    for (const name of readdirSync(directory).sort()) {
+      const path = join(directory, name)
+      const stat = lstatSync(path)
+      if (stat.isDirectory()) visit(path)
+      else if (stat.isFile()) files.push(relative(fixture.source, path))
+    }
+  }
+  visit(fixture.source)
+  const zipped = spawnSync('/usr/bin/zip', [
+    '-X', '-q', fixture.archive, ...files,
+  ], { cwd: fixture.source, encoding: 'utf8' })
+  expect(zipped.status, zipped.stderr).toBe(0)
+  fixture.archiveSha256 = createHash('sha256').update(readFileSync(fixture.archive)).digest('hex')
+  return fixture
+}
+
+// Issue #168: the entry projects the child environment from an allowlist
+// (HOME/LANG/LC_ALL/PATH/TMPDIR + the Cloudflare overrides) -- everything else
+// is stripped. Mirror that exactly for the production-isomorphic harness runs.
+function projectedLifecycleEnv(fixture: ReturnType<typeof uploadSourceLifecycleFixture>, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const allowlist = ['HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR']
+  return Object.assign(Object.create(null), Object.fromEntries(
+    allowlist.filter((name) => typeof process.env[name] === 'string')
+      .map((name) => [name, process.env[name]]),
+  ), {
+    WRANGLER_OUTPUT_FILE_PATH: fixture.uploadOutput,
+    UPLOAD_STDOUT_FILE_PATH: fixture.uploadChildStdout,
+    UPLOAD_STDERR_FILE_PATH: fixture.uploadChildStderr,
+    UPLOAD_COUNTER: fixture.counter,
+    ...extra,
+  })
+}
+
+function assertWrapperFailureRecord(lifecycle: ReturnType<typeof spawnSync>, receipt: string, evidence: string, stage: string) {
+  const stderr = typeof lifecycle.stderr === 'string' ? lifecycle.stderr : String(lifecycle.stderr)
+  const lines = stderr.split('\n')
+  const recordLine = lines.find((line) => line.includes('blogman-upload-wrapper-failure/v1'))
+  expect(recordLine).toBeDefined()
+  const record = JSON.parse(recordLine as string) as {
+    format: string
+    stage: string
+    error: { name: string | null; message: string | null; stack: string | null }
+    upload_stdout_sha256: string | null
+    upload_stderr_sha256: string | null
+  }
+  expect(record.format).toBe('blogman-upload-wrapper-failure/v1')
+  expect(record.stage).toBe(stage)
+  expect(record.error.stack).toMatch(/[A-Za-z]/)
+  expect(record.upload_stdout_sha256).toBeNull()
+  expect(record.upload_stderr_sha256).toBeNull()
+  const receiptBytes = readFileSync(receipt, 'utf8')
+  expect(JSON.parse(receiptBytes)).toEqual(record)
+  const files = readdirSync(evidence).sort()
+  expect(files).toEqual([`${createHash('sha256').update(receiptBytes).digest('hex')}.wrapper-failure`])
+  expect(readFileSync(join(evidence, files[0]), 'utf8')).toBe(receiptBytes)
+  return record
 }
 
 function uploadAssetsFixture(configAssetsDirectory: string) {
@@ -699,7 +781,7 @@ process.exitCode = 9
     expect(lifecycle).toMatchObject({
       status: 1,
       stdout: '',
-      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+      stderr: expect.stringContaining('Invalid Issue #23 upload source lifecycle'),
     })
     expect(readFileSync(fixture.uploadChildStdout, 'utf8')).toBe('OpenNext upload progress\n')
     expect(readFileSync(fixture.uploadChildStderr, 'utf8'))
@@ -768,7 +850,7 @@ process.exitCode = 9
     expect(lifecycle).toMatchObject({
       status: 1,
       stdout: '',
-      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+      stderr: expect.stringContaining('Invalid Issue #23 upload source lifecycle'),
     })
     const stdoutBytes = Buffer.from('OpenNext upload progress\n')
     const stderrBytes = Buffer.from(
@@ -883,7 +965,7 @@ fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
     expect(lifecycle).toMatchObject({
       status: 1,
       stdout: '',
-      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+      stderr: expect.stringContaining('Invalid Issue #23 upload source lifecycle'),
     })
     expect(readFileSync(fixture.counter, 'utf8')).toBe('0')
   })
@@ -901,7 +983,7 @@ fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
     expect(lifecycle).toMatchObject({
       status: 1,
       stdout: '',
-      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+      stderr: expect.stringContaining('Invalid Issue #23 upload source lifecycle'),
     })
     expect(readFileSync(fixture.counter, 'utf8')).toBe('0')
   })
@@ -986,7 +1068,7 @@ fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
     expect(lifecycle).toMatchObject({
       status: 1,
       stdout: '',
-      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+      stderr: expect.stringContaining('Invalid Issue #23 upload source lifecycle'),
     })
     expect(JSON.parse(readFileSync(capturedUpload, 'utf8'))).toEqual({
       worker: 'malicious parent worker\n',
@@ -1041,7 +1123,7 @@ fs.renameSync(process.env.SAVED_TOP, process.env.SWAPPABLE_TOP)
     expect(lifecycle).toMatchObject({
       status: 1,
       stdout: '',
-      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+      stderr: expect.stringContaining('Invalid Issue #23 upload source lifecycle'),
     })
     expect(readFileSync(fixture.proofAfter, 'utf8')).toBe('')
     expect(readFileSync(fixture.uploadOutput, 'utf8')).toContain('malicious-version')
@@ -1095,7 +1177,7 @@ fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
     expect(lifecycle).toMatchObject({
       status: 1,
       stdout: '',
-      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+      stderr: expect.stringContaining('Invalid Issue #23 upload source lifecycle'),
     })
     expect(readFileSync(fixture.counter, 'utf8')).toBe('0')
     expect(readFileSync(fixture.proofAfter, 'utf8')).toBe('')
@@ -1110,7 +1192,7 @@ fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
     expect(lifecycle).toMatchObject({
       status: 1,
       stdout: '',
-      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+      stderr: expect.stringContaining('Invalid Issue #23 upload source lifecycle'),
     })
     expect(readFileSync(fixture.counter, 'utf8')).toBe('0')
   })
@@ -1124,7 +1206,7 @@ fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
     expect(lifecycle).toMatchObject({
       status: 1,
       stdout: '',
-      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+      stderr: expect.stringContaining('Invalid Issue #23 upload source lifecycle'),
     })
     expect(readFileSync(fixture.counter, 'utf8')).toBe('0')
   })
@@ -1162,7 +1244,7 @@ writeFileSync(process.env.MUTATION_MARKER, 'mutated\\n')
     expect(lifecycle).toMatchObject({
       status: 1,
       stdout: '',
-      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+      stderr: expect.stringContaining('Invalid Issue #23 upload source lifecycle'),
     })
     expect(readFileSync(fixture.counter, 'utf8')).toBe('0')
     mutation.unref()
@@ -1182,7 +1264,7 @@ writeFileSync(process.env.MUTATION_MARKER, 'mutated\\n')
     expect(lifecycle).toMatchObject({
       status: 1,
       stdout: '',
-      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+      stderr: expect.stringContaining('Invalid Issue #23 upload source lifecycle'),
     })
     expect(readFileSync(fixture.counter, 'utf8')).toBe('0')
   })
@@ -1212,7 +1294,7 @@ process.stdout.write(JSON.stringify({
     expect(lifecycle).toMatchObject({
       status: 1,
       stdout: '',
-      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+      stderr: expect.stringContaining('Invalid Issue #23 upload source lifecycle'),
     })
     expect(readFileSync(fixture.counter, 'utf8')).toBe('0')
     expect(existsSync(spoofedHelperMarker)).toBe(false)
@@ -1268,7 +1350,7 @@ for (const versionId of ['first-version', 'second-version']) {
     expect(lifecycle).toMatchObject({
       status: 1,
       stdout: '',
-      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+      stderr: expect.stringContaining('Invalid Issue #23 upload source lifecycle'),
     })
     expect(readFileSync(fixture.counter, 'utf8')).toBe('1')
   })
@@ -1290,7 +1372,7 @@ for (const versionId of ['fixture-version', '']) {
     expect(lifecycle).toMatchObject({
       status: 1,
       stdout: '',
-      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+      stderr: expect.stringContaining('Invalid Issue #23 upload source lifecycle'),
     })
     expect(readFileSync(fixture.counter, 'utf8')).toBe('1')
   })
@@ -1313,8 +1395,108 @@ for (const versionId of ['', ' invalid ']) {
     expect(lifecycle).toMatchObject({
       status: 1,
       stdout: '',
-      stderr: 'Invalid Issue #23 upload source lifecycle\n',
+      stderr: expect.stringContaining('Invalid Issue #23 upload source lifecycle'),
     })
+  })
+
+  // Issue #168: the seventh production attempt failed inside the wrapper
+  // preflight with upload-evidence empty because the real frozen artifact tree
+  // contains route-group directories ('[slug]', '(protected)') and scoped
+  // packages ('@opentelemetry') that the argv-facing shell-safe path rule
+  // rejected. This test reproduces the production shape (projected child env +
+  // archive sealed with those directories) and guards the fix: the lifecycle
+  // must accept the tree and complete offline against the intercepted spawn.
+  it('accepts a source tree with route groups and scoped packages under a projected environment without network (Issue #168)', () => {
+    const fixture = uploadSourceLifecycleArtifactFixture()
+    installCountingUpload(fixture)
+    const evidence = join(fixture.directory, 'projected-evidence')
+    const receipt = join(fixture.directory, 'projected-failure.json')
+    mkdirSync(evidence, { mode: 0o700 })
+
+    const lifecycle = spawnSync(process.execPath, [
+      workerUploadPath,
+      'run-upload-source-lifecycle',
+      ...lifecycleToolchainArgs(fixture.fakeBin, realpathSync(process.cwd())),
+      '--config', fixture.config,
+      '--source', fixture.source,
+      '--destination', fixture.destination,
+      '--operation-id', `issue-23-${'a'.repeat(40)}-upload-1`,
+      '--proof-before', fixture.proofBefore,
+      '--proof-after', fixture.proofAfter,
+      '--archive', fixture.archive,
+      '--archive-sha256', fixture.archiveSha256,
+      '--build-proof', fixture.buildProof,
+      '--expected-config-sha256', fixture.configSha256,
+    ], {
+      cwd: realpathSync(process.cwd()),
+      encoding: 'utf8',
+      env: projectedLifecycleEnv(fixture, {
+        UPLOAD_EVIDENCE_DIR: evidence,
+        UPLOAD_FAILURE_PATH: receipt,
+        CLOUDFLARE_API_TOKEN: 'repro-placeholder-token-not-a-credential',
+        CLOUDFLARE_ACCOUNT_ID: 'repro-placeholder-account',
+      }),
+    })
+
+    expect(lifecycle.status, lifecycle.stderr).toBe(0)
+    expect(lifecycle.stderr).toBe('')
+    expect(JSON.parse(lifecycle.stdout)).toMatchObject({
+      format: 'blogman-upload-source-lifecycle-acceptance/v1',
+      state: 'accepted',
+      version_id: 'fixture-version',
+    })
+    expect(readFileSync(fixture.counter, 'utf8')).toBe('1')
+    const emptySha = createHash('sha256').update('').digest('hex')
+    expect(readdirSync(evidence).sort()).toEqual([
+      `${emptySha}.stderr`,
+      `${emptySha}.stdout`,
+    ])
+    expect(existsSync(receipt)).toBe(false)
+  })
+
+  // Issue #168: when the wrapper itself fails in preflight, its stderr (and the
+  // durable sink) must leak the failing stage and stack instead of collapsing
+  // to a bare nonzero exit -- the missing diagnostics that kept five attempts
+  // behind the same wall.
+  it('persists a wrapper-failure record with stage and stack on a projected preflight failure (Issue #168)', () => {
+    const fixture = uploadSourceLifecycleFixture()
+    installCountingUpload(fixture)
+    const evidence = join(fixture.directory, 'wrapper-evidence')
+    const receipt = join(fixture.directory, 'wrapper-failure.json')
+    mkdirSync(evidence, { mode: 0o700 })
+
+    const lifecycle = spawnSync(process.execPath, [
+      workerUploadPath,
+      'run-upload-source-lifecycle',
+      ...lifecycleToolchainArgs(fixture.fakeBin, realpathSync(process.cwd())),
+      '--config', fixture.config,
+      '--source', fixture.source,
+      '--destination', fixture.destination,
+      '--operation-id', `issue-23-${'a'.repeat(40)}-upload-1`,
+      '--proof-before', fixture.proofBefore,
+      '--proof-after', fixture.proofAfter,
+      '--archive', fixture.archive,
+      '--archive-sha256', fixture.archiveSha256,
+      '--build-proof', fixture.buildProof,
+      // Deliberately wrong config identity: the preflight config gate throws.
+      '--expected-config-sha256', '0'.repeat(64),
+    ], {
+      cwd: realpathSync(process.cwd()),
+      encoding: 'utf8',
+      env: projectedLifecycleEnv(fixture, {
+        UPLOAD_EVIDENCE_DIR: evidence,
+        UPLOAD_FAILURE_PATH: receipt,
+        CLOUDFLARE_API_TOKEN: 'repro-placeholder-token-not-a-credential',
+        CLOUDFLARE_ACCOUNT_ID: 'repro-placeholder-account',
+      }),
+    })
+
+    expect(lifecycle.status).toBe(1)
+    expect(lifecycle.stdout).toBe('')
+    expect(existsSync(receipt)).toBe(true)
+    const record = assertWrapperFailureRecord(lifecycle, receipt, evidence, 'preflight')
+    expect(record.error.message).toBe('')
+    expect(record.error.name).toBe('Error')
   })
 
 })

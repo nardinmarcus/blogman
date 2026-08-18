@@ -244,6 +244,7 @@ describe('Issue #91 worker suffix', () => {
     const error = new WorkerTransportError('ERROR', 'worker_adapter_nonzero', 1)
     error.upload_stdout_sha256 = 'a1'.repeat(32)
     error.upload_stderr_sha256 = 'b2'.repeat(32)
+    error.wrapper_stderr_sha256 = 'c3'.repeat(32)
     const failing = { execute: () => { throw error } }
 
     const result = runWorkerStages({ bindings, transport: failing })
@@ -258,6 +259,7 @@ describe('Issue #91 worker suffix', () => {
       upload_acceptance_sha256: null,
       upload_stdout_sha256: 'a1'.repeat(32),
       upload_stderr_sha256: 'b2'.repeat(32),
+      wrapper_stderr_sha256: 'c3'.repeat(32),
       version_traffic_sha256: null,
       smoke_control_t0_sha256: null,
     })
@@ -284,8 +286,49 @@ describe('Issue #91 worker suffix', () => {
       upload_acceptance_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
       upload_stdout_sha256: '8'.repeat(64),
       upload_stderr_sha256: '9'.repeat(64),
+      wrapper_stderr_sha256: null,
       version_traffic_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
       smoke_control_t0_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
     })
+  })
+})
+
+// Issue #168: the wrapper stderr sidecar (supervisor-captured bounded bytes)
+// must land in the terminal receipt evidence hashes on the failure path so the
+// durable wrapper failure bytes stay referenced after the temp tree is gone.
+describe('Issue #168 wrapper stderr sidecar in the worker stage receipt', () => {
+  it('carries wrapper_stderr_sha256 into the failure receipt evidence', () => {
+    const error = new WorkerTransportError('ERROR', 'worker_adapter_nonzero', 1)
+    error.wrapper_stderr_sha256 = 'd4'.repeat(32)
+    const result = runWorkerStages({ bindings, transport: { execute: () => { throw error } } })
+
+    expect(result.value).toMatchObject({
+      outcome: 'ERROR',
+      first_terminal_stage: 'worker_deploy',
+      failure: { classification: 'worker_adapter_nonzero' },
+    })
+    expect(result.value.evidence.hashes.wrapper_stderr_sha256).toBe('d4'.repeat(32))
+    expect(result.value.evidence.hashes.upload_stdout_sha256).toBeNull()
+    expect(result.value.evidence.hashes.upload_stderr_sha256).toBeNull()
+  })
+
+  it('keeps wrapper_stderr_sha256 null on the success receipt', () => {
+    const result = runWorkerStages({
+      bindings,
+      transport: transport([
+        acceptedUpload(),
+        acceptedTraffic(),
+        response({
+          before: { deployment_id: 'deployment-new', version_id: 'version-new', d1_database_id: 'd1-id', traffic: [{ version_id: 'version-new', percentage: 100 }] },
+          after: { deployment_id: 'deployment-new', version_id: 'version-new', d1_database_id: 'd1-id', traffic: [{ version_id: 'version-new', percentage: 100 }] },
+          checks: Object.fromEntries(smoke.requests.map(({ path, status }) => [path, status])),
+          controls: { producer: 'disabled', authority: 'disabled', executors: { scheduled: 'disabled' } },
+          reconciliation: { state: 'matched', checks: { schema: 'matched', migration_ledger: 'matched', post_count: 'matched', post_status: 'matched', post_content: 'matched' } },
+        }),
+      ]),
+    })
+
+    expect(result.value).toMatchObject({ outcome: 'PASS' })
+    expect(result.value.evidence.hashes.wrapper_stderr_sha256).toBeNull()
   })
 })

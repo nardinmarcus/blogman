@@ -162,9 +162,22 @@ function removeTransportTree(root) {
 function childFailure(error, timeoutClassification = 'stage_timeout') {
   if (error instanceof D1ChildError) {
     const duration = Math.max(1, error.durationMs)
-    if (error.classification === 'timeout') return new WorkerTransportError('TIMEOUT', timeoutClassification, duration)
-    if (error.classification === 'nonzero') return new WorkerTransportError('ERROR', 'worker_adapter_nonzero', duration)
-    return new WorkerTransportError('UNCERTAIN', 'worker_adapter_uncertain', duration)
+    let result
+    if (error.classification === 'timeout') {
+      result = new WorkerTransportError('TIMEOUT', timeoutClassification, duration)
+    } else if (error.classification === 'nonzero') {
+      result = new WorkerTransportError('ERROR', 'worker_adapter_nonzero', duration)
+    } else {
+      result = new WorkerTransportError('UNCERTAIN', 'worker_adapter_uncertain', duration)
+    }
+    // Issue #168: the supervisor-captured wrapper stderr (bounded) is carried
+    // as its sha256 identity so the Worker stage receipt can reference the
+    // durable wrapper failure bytes without embedding raw output.
+    if (typeof error.stderr === 'string' && error.stderr.length > 0) {
+      const bounded = Buffer.from(error.stderr).subarray(0, MAX_OUTPUT_BYTES)
+      result.wrapper_stderr_sha256 = hash(bounded)
+    }
+    return result
   }
   return new WorkerTransportError('UNCERTAIN', 'worker_adapter_uncertain', 1)
 }

@@ -13,7 +13,7 @@ const UPLOAD_KEYS = Object.freeze([
 ])
 const EVIDENCE_HASHES = Object.freeze([
   'upload_acceptance_sha256', 'upload_stdout_sha256', 'upload_stderr_sha256',
-  'version_traffic_sha256', 'smoke_control_t0_sha256',
+  'wrapper_stderr_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256',
 ])
 const EVIDENCE_IDENTITY_FIELDS = Object.freeze([
   'manifest_sha256', 'authorization_sha256', 'attempt_id', 'candidate_id',
@@ -57,6 +57,10 @@ function terminal(trace, evidenceHashes, mutation_counts, identity) {
   if (last.outcome !== 'PASS') {
     if (last.upload_stdout_sha256 !== undefined) hashes.upload_stdout_sha256 = last.upload_stdout_sha256
     if (last.upload_stderr_sha256 !== undefined) hashes.upload_stderr_sha256 = last.upload_stderr_sha256
+    // Issue #168: the wrapper's own stderr identity (the supervisor-captured
+    // bounded bytes containing the wrapper-failure record) rides the terminal
+    // receipt so the failure bytes stay referenced after the temp tree is gone.
+    if (last.wrapper_stderr_sha256 !== undefined) hashes.wrapper_stderr_sha256 = last.wrapper_stderr_sha256
   }
   const value = {
     format: 'blogman-issue-23-worker-stages/v1', outcome: last.outcome,
@@ -106,6 +110,7 @@ function transportResult(transport, request) {
       // the failure so the receipt can keep them retrievable.
       if (error.upload_stdout_sha256 !== undefined) failure.upload_stdout_sha256 = error.upload_stdout_sha256
       if (error.upload_stderr_sha256 !== undefined) failure.upload_stderr_sha256 = error.upload_stderr_sha256
+      if (error.wrapper_stderr_sha256 !== undefined) failure.wrapper_stderr_sha256 = error.wrapper_stderr_sha256
       return { failure, duration_ms: error.duration_ms }
     }
   }
