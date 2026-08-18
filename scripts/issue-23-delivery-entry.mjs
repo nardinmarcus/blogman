@@ -107,11 +107,11 @@ function buildDeliverySinkOwnership() {
   ])
   const DELIVERY_STAGES = Object.freeze([
     'authorization_accept', 'live_preconditions', 'd1_identity', 'clean_start_reset',
-    'empty_d1_proof', 'migrations_001_006', 'reconciliation', 'worker_deploy',
+    'empty_d1_proof', 'migrations_001_007', 'reconciliation', 'worker_deploy',
     'version_traffic_verification', 'smoke_control_t0',
   ])
   const D1_STAGES = Object.freeze([
-    'd1_identity', 'clean_start_reset', 'empty_d1_proof', 'migrations_001_006', 'reconciliation',
+    'd1_identity', 'clean_start_reset', 'empty_d1_proof', 'migrations_001_007', 'reconciliation',
   ])
   const WORKER_STAGES = Object.freeze(['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'])
   const D1_EVIDENCE_FIELDS = Object.freeze([
@@ -339,7 +339,7 @@ function buildDeliverySinkOwnership() {
       || value.mutation_counts.production_writes !== value.mutation_counts.confirmed
       || value.mutation_counts.confirmed > value.mutation_counts.attempted
       || value.mutation_counts.attempted > (
-        value.stage_counts.clean_start_reset + value.stage_counts.migrations_001_006
+        value.stage_counts.clean_start_reset + value.stage_counts.migrations_001_007
         + value.stage_counts.worker_deploy + value.stage_counts.version_traffic_verification
       )) {
       fail('terminal result mutation evidence is contradictory')
@@ -624,11 +624,11 @@ function buildDeliverySinkOwnership() {
     if (terminal.evidence.production !== true) return { production_writes: 0, attempted: 0, confirmed: 0 }
     const d1Attempted = d1 === null
       ? 0
-      : d1.stage_counts.clean_start_reset + d1.stage_counts.migrations_001_006
+      : d1.stage_counts.clean_start_reset + d1.stage_counts.migrations_001_007
     const d1TerminalIndex = d1 === null ? -1 : D1_STAGES.indexOf(d1.first_terminal_stage)
     const d1Confirmed = d1 === null ? 0 : d1.outcome === 'PASS'
       ? 2
-      : d1TerminalIndex > D1_STAGES.indexOf('migrations_001_006') ? 2
+      : d1TerminalIndex > D1_STAGES.indexOf('migrations_001_007') ? 2
         : d1TerminalIndex > D1_STAGES.indexOf('clean_start_reset') ? 1 : 0
     const attempted = d1Attempted + (worker?.mutation_counts.attempted ?? 0)
     const confirmed = d1Confirmed + (worker?.mutation_counts.confirmed ?? 0)
@@ -1120,7 +1120,7 @@ const DELIVERY_STAGE_POLICY = Object.freeze([
   Object.freeze({ name: 'd1_identity', timeout_seconds: 120 }),
   Object.freeze({ name: 'clean_start_reset', timeout_seconds: 300 }),
   Object.freeze({ name: 'empty_d1_proof', timeout_seconds: 300 }),
-  Object.freeze({ name: 'migrations_001_006', timeout_seconds: 2100 }),
+  Object.freeze({ name: 'migrations_001_007', timeout_seconds: 2100 }),
   Object.freeze({ name: 'reconciliation', timeout_seconds: 300 }),
   Object.freeze({ name: 'worker_deploy', timeout_seconds: 600 }),
   Object.freeze({ name: 'version_traffic_verification', timeout_seconds: 300 }),
@@ -1132,7 +1132,7 @@ const PRODUCTION_D1_STAGES = Object.freeze([
   'd1_identity',
   'clean_start_reset',
   'empty_d1_proof',
-  'migrations_001_006',
+  'migrations_001_007',
   'reconciliation',
 ])
 const PRODUCTION_D1_MIGRATION_NAMES = Object.freeze([
@@ -1142,6 +1142,7 @@ const PRODUCTION_D1_MIGRATION_NAMES = Object.freeze([
   '004_complete_historical_text_ai_schema',
   '005_fix_posts_fts_sync',
   '006_add_rollout_safety_controls',
+  '007_seed_rollout_executor',
 ])
 const PRODUCTION_D1_CANONICAL_PATHS = Object.freeze({
   config_path: 'wrangler.toml',
@@ -1422,13 +1423,13 @@ function validateCanonicalManifestSchema(value, policy = PRODUCTION_MANIFEST_POL
   schemaPath(value.migration.catalog.path, 'manifest migration.catalog.path')
   schemaSha256(value.migration.catalog.sha256, 'manifest migration.catalog.sha256')
   if (!Array.isArray(value.migration.catalog.migrations)
-    || value.migration.catalog.migrations.length < 6
-    || value.migration.catalog.migrations.length > 6) {
+    || value.migration.catalog.migrations.length < 7
+    || value.migration.catalog.migrations.length > 7) {
     fail('manifest migration.catalog.migrations is invalid')
   }
   value.migration.catalog.migrations.forEach((migration, index) => {
     schemaRecord(migration, ['id', 'path', 'sha256'], `manifest migration.catalog.migrations[${index}]`)
-    schemaString(migration.id, `manifest migration.catalog.migrations[${index}].id`, /^00[1-6]$/u)
+    schemaString(migration.id, `manifest migration.catalog.migrations[${index}].id`, /^00[1-7]$/u)
     schemaPath(migration.path, `manifest migration.catalog.migrations[${index}].path`)
     schemaSha256(migration.sha256, `manifest migration.catalog.migrations[${index}].sha256`)
   })
@@ -1685,8 +1686,8 @@ function assertCanonicalManifestRelationships(manifest, policy = PRODUCTION_MANI
   }
 
   const migrationIds = manifest.migration.catalog.migrations.map((migration) => migration.id)
-  if (!sameJsonValue(migrationIds, ['001', '002', '003', '004', '005', '006'])) {
-    fail('manifest migration.catalog.migrations must contain 001 through 006 in order')
+  if (!sameJsonValue(migrationIds, ['001', '002', '003', '004', '005', '006', '007'])) {
+    fail('manifest migration.catalog.migrations must contain 001 through 007 in order')
   }
 
   if (manifest.d1.mode !== 'remote' || manifest.d1.evidence_class !== policy.d1EvidenceClass) {
@@ -3512,11 +3513,11 @@ function runLivePreconditions(manifest, d1, identity, credentials, elapsed_ms = 
 function reconciledProductionMutationCounts(d1Value, workerValue) {
   const d1Attempted = d1Value === null
     ? 0
-    : d1Value.stage_counts.clean_start_reset + d1Value.stage_counts.migrations_001_006
+    : d1Value.stage_counts.clean_start_reset + d1Value.stage_counts.migrations_001_007
   const d1TerminalIndex = d1Value === null ? -1 : PRODUCTION_D1_STAGES.indexOf(d1Value.first_terminal_stage)
   const d1Confirmed = d1Value === null ? 0 : d1Value.outcome === 'PASS'
     ? 2
-    : d1TerminalIndex > PRODUCTION_D1_STAGES.indexOf('migrations_001_006') ? 2
+    : d1TerminalIndex > PRODUCTION_D1_STAGES.indexOf('migrations_001_007') ? 2
       : d1TerminalIndex > PRODUCTION_D1_STAGES.indexOf('clean_start_reset') ? 1 : 0
   const attempted = d1Attempted + (workerValue?.mutation_counts.attempted ?? 0)
   const confirmed = d1Confirmed + (workerValue?.mutation_counts.confirmed ?? 0)

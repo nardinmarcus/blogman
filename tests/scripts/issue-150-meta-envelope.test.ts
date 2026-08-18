@@ -32,6 +32,7 @@ const MIGRATIONS = [
   { number: 4, name: '004_complete_historical_text_ai_schema', checksum: '12afd5f8171987b638692a564335165018d198ff8c7e5a706b0738c024c3d2fc' },
   { number: 5, name: '005_fix_posts_fts_sync', checksum: 'f6fde6db01e2fbaa967580ed707cded98f4eb7e36ab47707fc2ffc3d5e710441' },
   { number: 6, name: '006_add_rollout_safety_controls', checksum: '8179bc9795619d44b7b01affeb0bb591b95af69c0b4a8399474a8ce4778ac551' },
+  { number: 7, name: '007_seed_rollout_executor', checksum: '282038f800f031de9716c07e2566f1a3efcd8ba8013cec9bf4e918a2a660c02d' },
 ]
 
 const temporaryDirectories: string[] = []

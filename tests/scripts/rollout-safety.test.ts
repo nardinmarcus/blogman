@@ -345,7 +345,7 @@ VALUES ('extra-post', 'Extra', 'extra private content', '<p>extra private conten
     expectDrift(compare(), ['post_content'])
   })
 
-  it('adds auditable rollout controls through one additive ledger migration and keeps repeated apply idempotent', { timeout: 180_000 }, () => {
+  it('seeds the scheduled executor and keeps repeated apply idempotent across ledger migrations', { timeout: 180_000 }, () => {
     const persistTo = temporaryDirectory('blogman-rollout-controls-')
     const first = applyLedger(persistTo)
     expect(first.status, first.stderr).toBe(0)
@@ -365,11 +365,37 @@ ORDER BY name
       { name: 'rollout_controls', type: 'table' },
     ])
     expect(queryD1(persistTo, 'SELECT number, name FROM migration_ledger ORDER BY number').at(-1))
-      .toEqual({ number: 6, name: '006_add_rollout_safety_controls' })
+      .toEqual({ number: 7, name: '007_seed_rollout_executor' })
+    expect(queryD1(persistTo, `
+SELECT control_key, control_kind, desired_enabled, candidate_id, evidence_sha256, evidence_state, actor, reason
+FROM rollout_controls
+ORDER BY control_key
+`)).toEqual([
+      {
+        control_key: 'executor:scheduled',
+        control_kind: 'executor',
+        desired_enabled: 0,
+        candidate_id: '0000000000000000000000000000000000000000',
+        evidence_sha256: 'ebdb386f8d60260232e81a4c130ea53c8e190aab4ade87d8ef9dc9221fe9f61c',
+        evidence_state: 'verified',
+        actor: 'migrations:seed',
+        reason: 'Seed executor:scheduled disabled for clean-start rollouts',
+      },
+    ])
+    // controls-status shape: captureReadOnlyControls is the exact code path the
+    // rollout controls-status command uses, just backed by this local persist D1.
+    expect(captureReadOnlyControls({
+      query: (sql: string, evidenceName: string) => queryD1(persistTo, sql),
+    })).toEqual({
+      state: 'captured',
+      producer: 'disabled',
+      authority: 'disabled',
+      executors: { scheduled: 'disabled' },
+    })
 
     const repeated = applyLedger(persistTo)
     expect(repeated.status, repeated.stderr).toBe(0)
-    expect(queryD1(persistTo, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 6 }])
+    expect(queryD1(persistTo, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 7 }])
     expect(queryD1(persistTo, 'SELECT COUNT(*) AS count FROM rollout_control_events')).toEqual([{ count: 0 }])
   })
 

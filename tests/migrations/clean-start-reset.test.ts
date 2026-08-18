@@ -106,6 +106,7 @@ describe('Issue #23 clean-start reset', () => {
         { number: 4, action: 'apply' },
         { number: 5, action: 'apply' },
         { number: 6, action: 'apply' },
+        { number: 7, action: 'apply' },
       ],
     })
 

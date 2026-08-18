@@ -52,10 +52,10 @@ function derivedAttemptId(manifestSha256: string, authorizationSha256: string) {
 
 const deliveryStages = [
   'authorization_accept', 'live_preconditions', 'd1_identity', 'clean_start_reset',
-  'empty_d1_proof', 'migrations_001_006', 'reconciliation', 'worker_deploy',
+  'empty_d1_proof', 'migrations_001_007', 'reconciliation', 'worker_deploy',
   'version_traffic_verification', 'smoke_control_t0',
 ]
-const d1Stages = ['d1_identity', 'clean_start_reset', 'empty_d1_proof', 'migrations_001_006', 'reconciliation']
+const d1Stages = ['d1_identity', 'clean_start_reset', 'empty_d1_proof', 'migrations_001_007', 'reconciliation']
 const d1HashNames = [
   'bindings_sha256', 'wrangler_sha256', 'config_sha256', 'reset_sql_sha256',
   'migration_runner_sha256', 'migration_catalog_sha256', 'rollout_safety_sha256',
@@ -129,7 +129,7 @@ function exactTerminalRecord(
   const d1 = options.d1 ?? null
   const worker = options.worker ?? null
   const d1Attempted = d1 === null ? 0
-    : Number(d1.value.stage_counts.clean_start_reset) + Number(d1.value.stage_counts.migrations_001_006)
+    : Number(d1.value.stage_counts.clean_start_reset) + Number(d1.value.stage_counts.migrations_001_007)
   const d1Confirmed = d1?.value.outcome === 'PASS' ? 2 : 0
   const workerMutations = worker?.value.mutation_counts as { attempted?: number; confirmed?: number } | undefined
   const confirmed = d1Confirmed + (workerMutations?.confirmed ?? 0)

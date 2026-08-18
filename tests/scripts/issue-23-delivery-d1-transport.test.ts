@@ -50,6 +50,7 @@ const MIGRATIONS = [
   { number: 4, name: '004_complete_historical_text_ai_schema', checksum: '12afd5f8171987b638692a564335165018d198ff8c7e5a706b0738c024c3d2fc' },
   { number: 5, name: '005_fix_posts_fts_sync', checksum: 'f6fde6db01e2fbaa967580ed707cded98f4eb7e36ab47707fc2ffc3d5e710441' },
   { number: 6, name: '006_add_rollout_safety_controls', checksum: '8179bc9795619d44b7b01affeb0bb591b95af69c0b4a8399474a8ce4778ac551' },
+  { number: 7, name: '007_seed_rollout_executor', checksum: '282038f800f031de9716c07e2566f1a3efcd8ba8013cec9bf4e918a2a660c02d' },
 ]
 
 function sha256File(path: string): string {
@@ -145,7 +146,7 @@ afterEach(() => {
 
 describe('Issue #90 D1 transport', () => {
   it('uses one exact actual-NUL catalog tree framing across D1 contracts and transport', () => {
-    const expected = '4713f17de5d32b512ab7d5611474a9605576b3f612fd056b355759e96270e32c'
+    const expected = '9b0b163f976b50a0d504e79df9fd60ebce8655206d87355860ad8a3cf504bea4'
 
     expect(contractHashD1ArtifactDirectory(catalogPath)).toBe(expected)
     expect(transportHashD1ArtifactDirectory(catalogPath)).toBe(expected)
@@ -217,8 +218,8 @@ describe('Issue #90 D1 transport', () => {
     const { config } = createConfig()
     const environment = Object.assign(Object.create(null), process.env)
 
-    const stageExpired = createLocalD1Transport(config, environment, () => D1_STAGE_TIMEOUT_MS.migrations_001_006)
-    expect(() => stageExpired.execute(request('migration_catalog', 'migrations_001_006')))
+    const stageExpired = createLocalD1Transport(config, environment, () => D1_STAGE_TIMEOUT_MS.migrations_001_007)
+    expect(() => stageExpired.execute(request('migration_catalog', 'migrations_001_007')))
       .toThrowError(expect.objectContaining({ classification: 'timeout' }))
 
     const overallExpired = createLocalD1Transport(config, environment, () => 5_400_000)
@@ -230,7 +231,7 @@ describe('Issue #90 D1 transport', () => {
     const { config } = createConfig()
     const transport = createLocalD1Transport(config)
 
-    const catalog = transport.execute(request('migration_catalog', 'migrations_001_006'))
+    const catalog = transport.execute(request('migration_catalog', 'migrations_001_007'))
     const catalogValue = JSON.parse(catalog.stdout)
     expect(catalogValue).toMatchObject({ format: 'blogman-migration-catalog/v1' })
     expect(catalogValue.migrations[0]).toMatchObject({
@@ -244,7 +245,7 @@ describe('Issue #90 D1 transport', () => {
       sql: 'DROP TABLE secrets',
     })).toThrow(/unsupported|operation/u)
     expect(() => transport.execute({
-      ...request('migration_apply', 'migrations_001_006'),
+      ...request('migration_apply', 'migrations_001_007'),
       migration_runner_path: '/tmp/alternate-runner.mjs',
     })).toThrow(/unsupported|operation/u)
   })

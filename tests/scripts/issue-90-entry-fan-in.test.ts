@@ -68,7 +68,7 @@ vi.mock('../../scripts/issue-23-delivery-d1-transport.mjs', async (importOrigina
   }
 })
 vi.mock('../../scripts/issue-23-delivery-d1-stages.mjs', () => ({
-  D1_STAGE_ORDER: ['d1_identity', 'clean_start_reset', 'empty_d1_proof', 'migrations_001_006', 'reconciliation'],
+  D1_STAGE_ORDER: ['d1_identity', 'clean_start_reset', 'empty_d1_proof', 'migrations_001_007', 'reconciliation'],
   runD1Stages: runD1StagesMock,
 }))
 vi.mock('../../scripts/issue-23-delivery-worker-transport.mjs', async (importOriginal) => {
@@ -190,7 +190,7 @@ function policy() {
       { name: 'd1_identity', timeout_seconds: 120 },
       { name: 'clean_start_reset', timeout_seconds: 300 },
       { name: 'empty_d1_proof', timeout_seconds: 300 },
-      { name: 'migrations_001_006', timeout_seconds: 2100 },
+      { name: 'migrations_001_007', timeout_seconds: 2100 },
       { name: 'reconciliation', timeout_seconds: 300 },
       { name: 'worker_deploy', timeout_seconds: 600 },
       { name: 'version_traffic_verification', timeout_seconds: 300 },
@@ -290,6 +290,7 @@ function d1Binding(overrides: Record<string, unknown> = {}) {
       { number: 4, name: '004_complete_historical_text_ai_schema', checksum: HASH },
       { number: 5, name: '005_fix_posts_fts_sync', checksum: HASH },
       { number: 6, name: '006_add_rollout_safety_controls', checksum: HASH },
+      { number: 7, name: '007_seed_rollout_executor', checksum: HASH },
     ],
     ...overrides,
   }
@@ -373,6 +374,7 @@ function manifest(overrides: Record<string, unknown> = {}) {
           { id: '004', path: 'db/ledger-migrations/004_complete_historical_text_ai_schema.sql', sha256: HASH },
           { id: '005', path: 'db/ledger-migrations/005_fix_posts_fts_sync.sql', sha256: HASH },
           { id: '006', path: 'db/ledger-migrations/006_add_rollout_safety_controls.sql', sha256: HASH },
+          { id: '007', path: 'db/ledger-migrations/007_seed_rollout_executor.sql', sha256: HASH },
         ],
       },
       historical_data_disposition: {
@@ -652,7 +654,7 @@ function d1Result(failedStage: string | null = null) {
     'd1_identity',
     'clean_start_reset',
     'empty_d1_proof',
-    'migrations_001_006',
+    'migrations_001_007',
     'reconciliation',
   ]
   const terminal = failedStage ?? null
@@ -1477,7 +1479,7 @@ describe('Issue #90 formal entry fan-in', () => {
         d1_identity: 0,
         clean_start_reset: 0,
         empty_d1_proof: 0,
-        migrations_001_006: 0,
+        migrations_001_007: 0,
         reconciliation: 0,
         worker_deploy: 0,
         version_traffic_verification: 0,
