@@ -310,6 +310,10 @@
               "type": "string",
               "pattern": "^[a-f0-9]{64}$"
             },
+            "delivery_snapshot_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
             "complete": {
               "const": true
             },

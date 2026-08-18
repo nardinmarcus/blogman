@@ -1347,6 +1347,7 @@ function firstChangedByteContext(before: Buffer | string, after: Buffer | string
 }
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+const workerUploadPath = join(repoRoot, 'scripts', 'issue-23-delivery-worker-upload.mjs')
 
 describe('Issue #23 Delivery Preparation', { timeout: 120_000 }, () => {
   it('patch contract: every tracked patch parses with patch-package', () => {
@@ -1818,6 +1819,65 @@ describe('Issue #23 Delivery Preparation', { timeout: 120_000 }, () => {
     expect(result.value.artifact.file_tree.complete).toBe(true)
     expect(paths.length).toBeGreaterThan(baseConfig().artifact.file_tree.files.length)
     expect(paths).toContain('.open-next/assets/index.html')
+  })
+
+  // Issue #179: the worker_deploy acceptance contract compares the upload
+  // wrapper's destination snapshot proof (tree_sha256 over the real .open-next
+  // walk minus archive, unprefixed paths, JSON.stringify(entries)+'\n' with
+  // entries [{path,bytes,sha256}] sorted by comparePathSegments) against the
+  // frozen manifest. This replays that proof through the actual Worker upload
+  // entry CLI and requires the frozen delivery_snapshot_sha256 to be
+  // byte-for-byte isomorphic with it.
+  it('freezes delivery_snapshot_sha256 isomorphic with the Worker upload-source snapshot proof', () => {
+    let snapshotTreeSha256: string | null = null
+    const result = prepareFixture(baseConfig(), {
+      inspectArtifactRepository: (repositoryPath, prepared) => {
+        const directory = realpathSync(mkdtempSync(join(
+          tmpdir(),
+          'blogman-issue-179-snapshot-',
+        )))
+        try {
+          const source = join(directory, 'snapshot-repository', '.open-next')
+          cpSync(join(repositoryPath, '.open-next'), source, {
+            recursive: true,
+            verbatimSymlinks: true,
+          })
+          // The wrapper destination skips the sealed archive; replay the same
+          // exclusion so the proof covers exactly the delivery domain.
+          rmSync(join(source, 'open-next-build.zip'), { force: true })
+          const destination = join(directory, 'private-evidence', 'upload-source-snapshot')
+          mkdirSync(dirname(destination), { recursive: true })
+          chmodSync(dirname(destination), 0o700)
+          const created = spawnSync(process.execPath, [
+            workerUploadPath, 'create-upload-source-snapshot',
+            '--source', source, '--destination', destination,
+          ], { encoding: 'utf8' })
+          expect(created.status, created.stderr).toBe(0)
+          const proof = JSON.parse(created.stdout) as { tree_sha256: string; file_count: number }
+          const deliveryEntries = prepared.value.artifact.file_tree.files
+            .filter((file) => file.path !== 'wrangler.toml')
+          expect(proof.file_count).toBe(deliveryEntries.length)
+          snapshotTreeSha256 = proof.tree_sha256
+        } finally {
+          // The wrapper seals the snapshot (0o500 dirs / 0o400 files); make it
+          // removable before cleanup.
+          const makeRemovable = (path: string) => {
+            const stat = lstatSync(path)
+            if (!stat.isSymbolicLink() && stat.isDirectory()) {
+              chmodSync(path, 0o700)
+              for (const name of readdirSync(path)) makeRemovable(join(path, name))
+            } else if (!stat.isSymbolicLink()) {
+              chmodSync(path, 0o600)
+            }
+          }
+          makeRemovable(directory)
+          rmSync(directory, { recursive: true, force: true })
+        }
+      },
+    })
+
+    expect(snapshotTreeSha256).not.toBeNull()
+    expect(result.value.artifact.file_tree.delivery_snapshot_sha256).toBe(snapshotTreeSha256)
   })
 
   it('keeps only the configured direct archive out of file_tree while binding it separately', () => {

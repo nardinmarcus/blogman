@@ -198,7 +198,7 @@ export function runWorkerStages({ bindings, transport, elapsed_ms = 0, monotonic
           'upload_stdout_sha256', 'upload_stderr_sha256',
         ].every((key) => sha256(parsed.value[key]))
         || parsed.value.config_sha256 !== bindings.config_sha256
-        || parsed.value.snapshot_tree_sha256 !== bindings.artifact_sha256) {
+        || parsed.value.snapshot_tree_sha256 !== bindings.delivery_snapshot_sha256) {
         trace.push({ stage, outcome: 'ERROR', classification: 'upload_contract_invalid', duration_ms: parsed.duration_ms })
         break
       }

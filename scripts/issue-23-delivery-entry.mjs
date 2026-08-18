@@ -1395,8 +1395,9 @@ function validateCanonicalManifestSchema(value, policy = PRODUCTION_MANIFEST_POL
   schemaRecord(value.artifact, ['archive', 'worker', 'file_tree'], 'manifest artifact')
   validateManifestReference(value.artifact.archive, 'manifest artifact.archive', true)
   validateManifestReference(value.artifact.worker, 'manifest artifact.worker', true)
-  schemaRecord(value.artifact.file_tree, ['sha256', 'complete', 'files'], 'manifest artifact.file_tree')
+  schemaRecord(value.artifact.file_tree, ['sha256', 'delivery_snapshot_sha256', 'complete', 'files'], 'manifest artifact.file_tree')
   schemaSha256(value.artifact.file_tree.sha256, 'manifest artifact.file_tree.sha256')
+  schemaSha256(value.artifact.file_tree.delivery_snapshot_sha256, 'manifest artifact.file_tree.delivery_snapshot_sha256')
   if (value.artifact.file_tree.complete !== true) fail('manifest artifact.file_tree.complete is invalid')
   if (!Array.isArray(value.artifact.file_tree.files) || value.artifact.file_tree.files.length < 1) {
     fail('manifest artifact.file_tree.files is invalid')
@@ -1792,6 +1793,7 @@ const CANONICAL_MANIFEST_ORDER = {
     worker: { path: null, sha256: null, bytes: null },
     file_tree: {
       sha256: null,
+      delivery_snapshot_sha256: null,
       complete: null,
       files: { path: null, sha256: null, bytes: null },
     },
@@ -2837,6 +2839,7 @@ function workerBindings(manifest, expectedReconciliationPath, identity, smokeCre
     artifact_file_tree_sha256: manifest.artifact.file_tree.sha256,
     artifact_file_tree_files: manifest.artifact.file_tree.files,
     artifact_sha256: manifest.artifact.file_tree.sha256,
+    delivery_snapshot_sha256: manifest.artifact.file_tree.delivery_snapshot_sha256,
     candidate_id: manifest.repository.commit, worker_name: manifest.target.worker_name, d1_database_id: manifest.target.d1_database_id,
     account_id: manifest.d1.account_id,
     rollout_safety_path: resolve(ENTRY_REPO_ROOT, manifest.d1.rollout_safety_path), rollout_safety_sha256: manifest.d1.rollout_safety_sha256,
@@ -3116,7 +3119,7 @@ export function createProductionWorkerTransport(
   for (const key of [
     'manifest_sha256', 'authorization_sha256', 'attempt_id', 'smoke_admin_credential',
     'config_path', 'config_sha256', 'artifact_archive_path', 'artifact_archive_sha256',
-    'artifact_source_path', 'artifact_file_tree_sha256', 'artifact_file_tree_files', 'artifact_sha256',
+    'artifact_source_path', 'artifact_file_tree_sha256', 'artifact_file_tree_files', 'artifact_sha256', 'delivery_snapshot_sha256',
     'candidate_id', 'worker_name', 'd1_database_id', 'rollout_safety_path', 'rollout_safety_sha256',
     'expected_reconciliation_path', 'expected_reconciliation_sha256', 'worker_upload_entry_path',
     'worker_upload_entry_sha256', 'wrangler_path', 'wrangler_sha256', 'node_path', 'node_sha256',
@@ -3132,7 +3135,7 @@ export function createProductionWorkerTransport(
   ]) worker.assertPath(bindings[key], key)
   for (const key of [
     'manifest_sha256', 'authorization_sha256', 'attempt_id',
-    'config_sha256', 'artifact_archive_sha256', 'artifact_file_tree_sha256', 'artifact_sha256',
+    'config_sha256', 'artifact_archive_sha256', 'artifact_file_tree_sha256', 'artifact_sha256', 'delivery_snapshot_sha256',
     'rollout_safety_sha256', 'expected_reconciliation_sha256', 'worker_upload_entry_sha256', 'wrangler_sha256',
     'node_sha256', 'npm_sha256', 'open_next_sha256', 'curl_sha256', 'package_json_sha256', 'lockfile_sha256',
   ]) worker.assertHash(bindings[key], key)

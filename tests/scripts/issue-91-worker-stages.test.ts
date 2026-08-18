@@ -12,7 +12,7 @@ const identity = {
   attempt_id: '3'.repeat(64),
   candidate_id: 'a'.repeat(40),
 }
-const bindings = { artifact_sha256: 'a'.repeat(64), config_sha256: 'c'.repeat(64), ...identity, d1_database_id: 'd1-id', smoke }
+const bindings = { artifact_sha256: 'a'.repeat(64), config_sha256: 'c'.repeat(64), delivery_snapshot_sha256: 'a'.repeat(64), ...identity, d1_database_id: 'd1-id', smoke }
 
 function transport(responses: unknown[]) {
   let index = 0
