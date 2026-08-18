@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import * as transport from '../../scripts/issue-23-delivery-worker-transport.mjs'
+import { createProductionWorkerTransport } from '../../scripts/issue-23-delivery-entry.mjs'
 import { WorkerTransportError } from '../../scripts/issue-23-delivery-worker-stages.mjs'
 
 const { r2ProbeCommand, r2ProbeStdin, parseR2ProbeResponse } = transport.WORKER_COMMAND_CONTRACT
@@ -146,5 +147,95 @@ describe('Issue #168 wrapper stderr sidecar on child failure', () => {
     const mapped = transport.WORKER_COMMAND_CONTRACT.childFailure(error)
     expect(mapped.classification).toBe('worker_adapter_nonzero')
     expect(mapped.wrapper_stderr_sha256).toBeUndefined()
+  })
+})
+
+// Issue #177: the upload wrapper's bounded stderr is sideband (the wrapper
+// persists child stdout/stderr to durable evidence and its exit-0 acceptance
+// JSON on stdout is authoritative), so a warning-level stderr from tooling the
+// wrapper shells out to (npm build, wrangler) must not flip an otherwise
+// successful upload to UNCERTAIN. Every other command keeps stderr-fatal.
+function forgeWorkerBindings() {
+  const h = 'a'.repeat(64)
+  return {
+    manifest_sha256: h, authorization_sha256: h, attempt_id: h,
+    smoke_admin_credential: 'test-smoke-credential',
+    config_path: '/repo/wrangler.toml', config_sha256: h,
+    artifact_archive_path: '/repo/.open-next/open-next-build.zip', artifact_archive_sha256: h,
+    artifact_source_path: '/repo/.open-next', artifact_file_tree_sha256: h,
+    artifact_file_tree_files: [], artifact_sha256: h,
+    candidate_id: 'c'.repeat(40), worker_name: 'blogman',
+    d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d', account_id: 'account-id',
+    rollout_safety_path: '/repo/scripts/rollout-safety.mjs', rollout_safety_sha256: h,
+    expected_reconciliation_path: '/repo/expected.json', expected_reconciliation_sha256: h,
+    worker_upload_entry_path: '/repo/scripts/issue-23-delivery-worker-upload.mjs', worker_upload_entry_sha256: h,
+    wrangler_path: '/repo/node_modules/.bin/wrangler', wrangler_sha256: h,
+    node_path: '/usr/bin/node', node_sha256: h,
+    npm_path: '/usr/bin/npm', npm_sha256: h,
+    open_next_path: '/repo/node_modules/.bin/opennextjs-cloudflare', open_next_sha256: h,
+    working_directory: '/repo', curl_path: '/usr/bin/curl', curl_sha256: h,
+    package_json_path: '/repo/package.json', package_json_sha256: h,
+    lockfile_path: '/repo/package-lock.json', lockfile_sha256: h,
+    database: 'DB', origin: 'https://blog.example.com',
+    smoke: {
+      requests: transport.WORKER_COMMAND_CONTRACT.SMOKE_PATHS.map(([path, status]) => ({ path, status })),
+    },
+    baseline: {
+      deployment_id: 'deployment-before', version_id: 'version-before',
+      d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d',
+      traffic: [{ version_id: 'version-before', percentage: 100 }],
+    },
+  }
+}
+
+function issue177Transport(childResult: { status: number; stdout: string; stderr: string; duration_ms: number }) {
+  return createProductionWorkerTransport(
+    forgeWorkerBindings(),
+    {
+      cloudflare: { CLOUDFLARE_API_TOKEN: 'test-token', CLOUDFLARE_ACCOUNT_ID: 'account-id' },
+      smoke: {},
+    },
+    () => 0,
+    {
+      skipLocalBindings: true,
+      runBoundedChild: () => childResult,
+    },
+  )
+}
+
+describe('Issue #177 upload invoke stderr gate', () => {
+  it('accepts a warning-stderr, exit-0 upload invoke as success', () => {
+    const upload = issue177Transport({
+      status: 0,
+      stdout: JSON.stringify({ format: 'blogman-upload-wrapper-acceptance/v1', ok: true }),
+      stderr: 'npm warn deprecated some-package: use another\n',
+      duration_ms: 1,
+    })
+
+    const result = upload.execute({
+      operation: 'worker_deploy', stage: 'worker_deploy',
+      timeout_ms: 120000, elapsed_ms: 0, version_id: 'version-x', deployment_id: 'deployment-x',
+    })
+
+    expect(result.status).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      format: 'blogman-upload-wrapper-acceptance/v1', ok: true,
+    })
+  })
+
+  it('keeps stderr fatal for non-upload commands', () => {
+    const transportUnderTest = issue177Transport({
+      status: 0,
+      stdout: '{}',
+      stderr: 'nm warning on a non-upload command\n',
+      duration_ms: 1,
+    })
+
+    expect(() => transportUnderTest.execute({
+      operation: 'version_traffic_verification', stage: 'version_traffic_verification',
+      timeout_ms: 120000, elapsed_ms: 0, version_id: 'version-x', deployment_id: 'deployment-x',
+    })).toThrow(expect.objectContaining({
+      outcome: 'UNCERTAIN', classification: 'worker_adapter_uncertain', duration_ms: 1,
+    }))
   })
 })

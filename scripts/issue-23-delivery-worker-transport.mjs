@@ -314,6 +314,7 @@ export const WORKER_COMMAND_CONTRACT = Object.freeze({
   validateArtifactSource,
   response,
   childFailure,
+  parseJson,
   parseDeployment,
   parseD1Identity,
   parseControls,
