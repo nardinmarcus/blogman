@@ -61,7 +61,7 @@ const d1HashNames = [
   'migration_runner_sha256', 'migration_catalog_sha256', 'rollout_safety_sha256',
   'expected_reconciliation_sha256', 'trace_sha256',
 ]
-const workerHashNames = ['upload_acceptance_sha256', 'upload_stdout_sha256', 'upload_stderr_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256']
+const workerHashNames = ['upload_acceptance_sha256', 'upload_stdout_sha256', 'upload_stderr_sha256', 'wrapper_stderr_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256']
 
 function exactD1Record(manifest: ReturnType<typeof record>, authorization: ReturnType<typeof record>, attemptId: string, outcome = 'ERROR') {
   const terminalIndex = outcome === 'PASS' ? d1Stages.length - 1 : 0
@@ -517,6 +517,7 @@ describe('Issue #23 durable delivery records', () => {
           upload_acceptance_sha256: null,
           upload_stdout_sha256: stdoutSha,
           upload_stderr_sha256: stderrSha,
+          wrapper_stderr_sha256: null,
           version_traffic_sha256: null,
           smoke_control_t0_sha256: null,
         },

@@ -667,6 +667,32 @@ function requireCanonicalDirectory(path, mode) {
   return stat
 }
 
+// Issue #168: the frozen artifact tree legitimately contains scoped-package
+// directories ('@opentelemetry/api', ...) and Next.js route directories
+// ('[slug]', '(protected)', '[...key]') whose names the argv-facing
+// shell-safe absolute-path rule rejects. The recursive walk must validate
+// visited source directories against the frozen artifact path grammar (the
+// same non-empty / non-'.' / non-'..' segment rule the sealed archive itself
+// enforces) instead of the shell-safe rule, which stays authoritative for the
+// top-level bound inputs (config, archive, destination, source root) that can
+// reach argument vectors.
+const ARTIFACT_SOURCE_RELATIVE_PATTERN = /^(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*(?:^|\/)\.(?:\/|$))[^/]+(?:\/[^/]+)*$/
+
+function requireArtifactSourceDirectory(sourceDirectory, source) {
+  if (!isAbsolute(sourceDirectory) || sourceDirectory !== resolve(sourceDirectory)) {
+    throw new Error()
+  }
+  const relativePath = relative(source, sourceDirectory)
+  if (relativePath !== '' && !ARTIFACT_SOURCE_RELATIVE_PATTERN.test(relativePath)) {
+    throw new Error()
+  }
+  const stat = lstatSync(sourceDirectory)
+  if (!stat.isDirectory() || realpathSync(sourceDirectory) !== sourceDirectory) {
+    throw new Error()
+  }
+  return stat
+}
+
 function copyUploadSourceSnapshot(source, destination, archive = undefined) {
   requireCanonicalDirectory(source)
   const sourcePath = resolve(source)
@@ -681,7 +707,7 @@ function copyUploadSourceSnapshot(source, destination, archive = undefined) {
   mkdirSync(destination, { mode: 0o700 })
 
   const visit = (sourceDirectory, destinationDirectory, relativeDirectory = '') => {
-    const before = requireCanonicalDirectory(sourceDirectory)
+    const before = requireArtifactSourceDirectory(sourceDirectory, source)
     const names = readdirSync(sourceDirectory).sort(comparePathSegments)
     for (const name of names) {
       const sourcePath = join(sourceDirectory, name)
@@ -710,7 +736,7 @@ function copyUploadSourceSnapshot(source, destination, archive = undefined) {
         throw new Error()
       }
     }
-    const after = requireCanonicalDirectory(sourceDirectory)
+    const after = requireArtifactSourceDirectory(sourceDirectory, source)
     if (before.dev !== after.dev || before.ino !== after.ino
       || JSON.stringify(readdirSync(sourceDirectory).sort(comparePathSegments))
         !== JSON.stringify(names)) {
@@ -833,7 +859,13 @@ function verifyUploadSourceSnapshot(directory, expectedTreeSha256, expectedIdent
   return proof
 }
 
-async function runUploadSourceLifecycle({
+// Issue #168: the preflight chain (everything before the upload child spawn)
+// runs in a projected child environment against the frozen artifact tree. It
+// is split from the spawn/accept side so the diagnostic harness and tests can
+// drive it with production-isomorphic inputs without any network spawn. The
+// held/evidence descriptors remain open on success (the caller closes them
+// after the spawn work); on failure this function closes what it opened.
+export async function runPreflight({
   archive,
   archiveSha256,
   buildProofPath,
@@ -858,8 +890,6 @@ async function runUploadSourceLifecycle({
   const uploadOutputPath = process.env.WRANGLER_OUTPUT_FILE_PATH
   const uploadStdoutPath = process.env.UPLOAD_STDOUT_FILE_PATH
   const uploadStderrPath = process.env.UPLOAD_STDERR_FILE_PATH
-  const uploadEvidenceDirectory = process.env.UPLOAD_EVIDENCE_DIR
-  const uploadFailurePath = process.env.UPLOAD_FAILURE_PATH
   const held = []
   const evidence = []
   const workingIdentity = executionDirectoryIdentity(workingDirectory)
@@ -934,7 +964,42 @@ async function runUploadSourceLifecycle({
       npm_execpath: npmPath,
       npm_node_execpath: nodePath,
     }
+    return Object.freeze({
+      before,
+      buildProof,
+      held,
+      evidence,
+      uploadEnvironment,
+      workingIdentity,
+      beforeEvidence,
+      afterEvidence,
+      buildEvidence,
+      uploadEvidence,
+      stdoutEvidence,
+      stderrEvidence,
+      verifyConfigBinding,
+    })
+  } catch (error) {
+    for (const file of evidence.reverse()) closeSync(file.descriptor)
+    for (const path of held.reverse()) closeSync(path.descriptor)
+    throw error
+  }
+}
 
+async function runUploadSourceLifecycle(options) {
+  if (!uploadOperationId.test(options.operationId || '')
+    || !sha256.test(options.expectedConfigSha256 || '')) throw new Error()
+  const { nodePath, openNextPath, config, operationId, destination, workingDirectory, archive, archiveSha256, expectedConfigSha256 } = options
+  const uploadEvidenceDirectory = process.env.UPLOAD_EVIDENCE_DIR
+  const uploadFailurePath = process.env.UPLOAD_FAILURE_PATH
+  const staged = await runPreflight(options)
+  uploadStage = 'child'
+  const {
+    before, buildProof, held, evidence, uploadEnvironment, workingIdentity,
+    beforeEvidence, afterEvidence, buildEvidence, uploadEvidence,
+    stdoutEvidence, stderrEvidence, verifyConfigBinding,
+  } = staged
+  try {
     const upload = spawnSync(nodePath, [
       openNextPath, 'upload',
       '-c', config, '--', join(destination, 'worker.js'),
@@ -1028,6 +1093,72 @@ async function runUploadSourceLifecycle({
   }
 }
 
+const UPLOAD_WRAPPER_FAILURE_FORMAT = 'blogman-upload-wrapper-failure/v1'
+const MAX_WRAPPER_FAILURE_TEXT_BYTES = 16 * 1024
+// Issue #168: the CLI catch classifies where the wrapper failed. 'preflight'
+// spans everything before the upload child spawn; 'child' covers the spawn and
+// the post-spawn validation gates.
+let uploadStage = 'preflight'
+
+function boundedWrapperErrorText(text) {
+  const bytes = Buffer.from(text)
+  return bytes.length > MAX_WRAPPER_FAILURE_TEXT_BYTES
+    ? bytes.subarray(0, MAX_WRAPPER_FAILURE_TEXT_BYTES).toString('utf8')
+    : text
+}
+
+// Issue #168: when the wrapper itself fails (preflight throw or post-spawn
+// validation) the CLI persists a wrapper-failure record before exiting: a
+// transient receipt at UPLOAD_FAILURE_PATH (the transport reads it while the
+// temp tree is alive) and a durable content-addressed record in the upload
+// evidence directory that survives the temp tree cleanup. Best-effort: the
+// original lifecycle failure is never masked and the exit path is unchanged.
+function persistWrapperFailure(failurePath, evidenceDirectory, failure) {
+  const bytes = Buffer.from(`${JSON.stringify(failure)}\n`)
+  const durablePath = evidenceDirectory === undefined
+    ? undefined
+    : join(evidenceDirectory, `${sha256Bytes(bytes)}.wrapper-failure`)
+  try {
+    if (failurePath !== undefined) {
+      if (!isAbsolute(failurePath) || failurePath !== resolve(failurePath)
+        || !shellSafeAbsolutePath.test(failurePath)) {
+        throw new Error()
+      }
+      const descriptor = openSync(
+        failurePath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600,
+      )
+      try {
+        writeAllBytes(descriptor, bytes)
+        fsyncSync(descriptor)
+      } finally {
+        closeSync(descriptor)
+      }
+    }
+    if (durablePath !== undefined) {
+      let descriptor
+      try {
+        descriptor = openSync(
+          durablePath,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+          0o600,
+        )
+        writeAllBytes(descriptor, bytes)
+        fsyncSync(descriptor)
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error
+        const existing = stableRegularFileBytes(durablePath)
+        if (!existing.bytes.equals(bytes)) throw new Error()
+      } finally {
+        if (descriptor !== undefined) closeSync(descriptor)
+      }
+    }
+  } catch {
+    // Best-effort: never mask the original failure.
+  }
+}
+
 function isMainModule() {
   return process.argv[1]
     && import.meta.url === pathToFileURL(resolve(process.argv[1])).href
@@ -1076,8 +1207,25 @@ async function runCli() {
         proofAfterPath: process.argv[28],
       })
       process.stdout.write(`${JSON.stringify(acceptance)}\n`)
-    } catch {
+    } catch (error) {
+      const failure = {
+        format: UPLOAD_WRAPPER_FAILURE_FORMAT,
+        stage: uploadStage,
+        error: {
+          name: error?.name ?? null,
+          message: error?.message ?? null,
+          stack: boundedWrapperErrorText(error?.stack ?? String(error ?? '')),
+        },
+        upload_stdout_sha256: null,
+        upload_stderr_sha256: null,
+      }
+      persistWrapperFailure(
+        process.env.UPLOAD_FAILURE_PATH,
+        process.env.UPLOAD_EVIDENCE_DIR,
+        failure,
+      )
       process.stderr.write('Invalid Issue #23 upload source lifecycle\n')
+      process.stderr.write(`${JSON.stringify(failure)}\n`)
       process.exitCode = 1
     }
     return
