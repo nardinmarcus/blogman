@@ -123,7 +123,7 @@ function buildDeliverySinkOwnership() {
   ])
   const WORKER_EVIDENCE_HASHES = Object.freeze([
     'upload_acceptance_sha256', 'upload_stdout_sha256', 'upload_stderr_sha256',
-    'version_traffic_sha256', 'smoke_control_t0_sha256',
+    'wrapper_stderr_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256',
   ])
   const FAILURE_CLASSIFICATIONS_BY_OUTCOME = Object.freeze({
     TIMEOUT: new Set(['overall_timeout', 'stage_timeout', 'timeout']),
@@ -2561,7 +2561,7 @@ const D1_EVIDENCE_HASHES = Object.freeze([
 ])
 const WORKER_EVIDENCE_HASHES = Object.freeze([
   'upload_acceptance_sha256', 'upload_stdout_sha256', 'upload_stderr_sha256',
-  'version_traffic_sha256', 'smoke_control_t0_sha256',
+  'wrapper_stderr_sha256', 'version_traffic_sha256', 'smoke_control_t0_sha256',
 ])
 const WORKER_EVIDENCE_IDENTITIES = Object.freeze([
   'manifest_sha256', 'authorization_sha256', 'attempt_id', 'candidate_id',
@@ -2620,6 +2620,7 @@ function preWorkerOverallTimeoutResult(evidencePolicy, identity) {
         upload_acceptance_sha256: null,
         upload_stdout_sha256: null,
         upload_stderr_sha256: null,
+        wrapper_stderr_sha256: null,
         version_traffic_sha256: null,
         smoke_control_t0_sha256: null,
       },
@@ -2659,6 +2660,7 @@ function malformedWorkerResult(evidencePolicy, identity) {
         upload_acceptance_sha256: null,
         upload_stdout_sha256: null,
         upload_stderr_sha256: null,
+        wrapper_stderr_sha256: null,
         version_traffic_sha256: null,
         smoke_control_t0_sha256: null,
       },
@@ -2747,7 +2749,12 @@ function normalizeWorkerResult(result, evidencePolicy, identity) {
   const terminalIndex = value.outcome === 'PASS' ? WORKER_RESULT_STAGES.length - 1
     : WORKER_RESULT_STAGES.indexOf(value.first_terminal_stage)
   const childEvidenceHashes = ['upload_stdout_sha256', 'upload_stderr_sha256']
-  const orderedEvidenceHashes = WORKER_EVIDENCE_HASHES.filter((name) => !childEvidenceHashes.includes(name))
+  // Issue #168: wrapper_stderr_sha256 is a failure-side diagnostic identity,
+  // not a stage-progress hash; it must stay out of the stage-ordered arithmetic
+  // (acceptance → version_traffic → smoke) that indexes by array position.
+  const orderedEvidenceHashes = WORKER_EVIDENCE_HASHES.filter((name) => (
+    !childEvidenceHashes.includes(name) && name !== 'wrapper_stderr_sha256'
+  ))
   if (terminalIndex < 0
     || WORKER_RESULT_STAGES.some((stage, index) => value.stage_counts[stage] !== (index <= terminalIndex ? 1 : 0))
     // Issue #158: the bounded upload child evidence references are null-or-hash
