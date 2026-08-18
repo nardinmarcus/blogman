@@ -159,7 +159,7 @@ function baseConfig() {
       runner: { path: 'scripts/migrations.mjs', sha256: '643594349a3f70d3bf9a7185c6449065cab497c07582cb92aacddb9dbf934c4d' },
       catalog: {
         path: 'db/ledger-migrations',
-        sha256: '520454add455cfa27e6f37840e665fb2ec9051a4f0bcd2f8452f9451d057e5b9',
+        sha256: 'f0d0b2729f533127cc184bbf644a1aafc74dd736311e1b3f162dc799a2589691',
         migrations: [
           { id: '001', path: 'db/ledger-migrations/001_initial_schema.sql', sha256: 'ce80438c559ff16bfc9909761837ea83b053d33c80616bd8477cee8841d7bfd1' },
           { id: '002', path: 'db/ledger-migrations/002_add_ai_image_configuration.sql', sha256: '20abce1feba8dbf376448a359ba7e96dd11ac8458e097a8538cf67db632133af' },

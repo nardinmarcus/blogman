@@ -1423,13 +1423,13 @@ function validateCanonicalManifestSchema(value, policy = PRODUCTION_MANIFEST_POL
   schemaPath(value.migration.catalog.path, 'manifest migration.catalog.path')
   schemaSha256(value.migration.catalog.sha256, 'manifest migration.catalog.sha256')
   if (!Array.isArray(value.migration.catalog.migrations)
-    || value.migration.catalog.migrations.length < 6
-    || value.migration.catalog.migrations.length > 6) {
+    || value.migration.catalog.migrations.length < 7
+    || value.migration.catalog.migrations.length > 7) {
     fail('manifest migration.catalog.migrations is invalid')
   }
   value.migration.catalog.migrations.forEach((migration, index) => {
     schemaRecord(migration, ['id', 'path', 'sha256'], `manifest migration.catalog.migrations[${index}]`)
-    schemaString(migration.id, `manifest migration.catalog.migrations[${index}].id`, /^00[1-6]$/u)
+    schemaString(migration.id, `manifest migration.catalog.migrations[${index}].id`, /^00[1-7]$/u)
     schemaPath(migration.path, `manifest migration.catalog.migrations[${index}].path`)
     schemaSha256(migration.sha256, `manifest migration.catalog.migrations[${index}].sha256`)
   })
