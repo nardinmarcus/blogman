@@ -1,8 +1,13 @@
 import { createHash } from 'node:crypto'
 import {
+  closeSync,
+  constants,
+  fsyncSync,
   lstatSync,
+  openSync,
   readFileSync,
   realpathSync,
+  writeSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -183,6 +188,77 @@ function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
+function writeAllBytes(descriptor, bytes) {
+  let offset = 0
+  while (offset < bytes.length) {
+    offset += writeSync(descriptor, bytes, offset, bytes.length - offset, offset)
+  }
+}
+
+function regularFileBytes(path) {
+  const metadata = lstatSync(path)
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
+    throw new Error('evidence file is not a regular file')
+  }
+  const bytes = readFileSync(path)
+  const written = lstatSync(path)
+  if (written.ino !== metadata.ino || written.size !== bytes.length) {
+    throw new Error('evidence file mutated during read')
+  }
+  return bytes
+}
+
+/**
+ * Issue #163: durable D1 stage evidence sink (mirror of #159 upload-evidence).
+ * The bounded child stdout/stderr of every D1 stage operation lands O_EXCL
+ * 0600 as `<stage>.<sha256>.stdout` / `<stage>.<sha256>.stderr` inside the
+ * evidence directory; the D1 receipt's stage_evidence hashes address exactly
+ * these files. Write-once with content-verified deduplication: an existing
+ * file must match the exact bytes.
+ */
+export function writeDurableD1Evidence(directory, stage, stdout, stderr) {
+  if (typeof directory !== 'string' || !isAbsolute(directory) || resolve(directory) !== directory
+    || typeof stage !== 'string' || !SAFE_ABSOLUTE_PATH.test(`/${stage}`)) {
+    throw new Error()
+  }
+  for (const [bytes, suffix] of [[Buffer.from(stdout, 'utf8'), 'stdout'], [Buffer.from(stderr, 'utf8'), 'stderr']]) {
+    const path = join(directory, `${stage}.${sha256(bytes)}.${suffix}`)
+    let descriptor
+    let created = false
+    try {
+      descriptor = openSync(
+        path,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600,
+      )
+      created = true
+      writeAllBytes(descriptor, bytes)
+      fsyncSync(descriptor)
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error
+      const existing = regularFileBytes(path)
+      if (!existing.equals(bytes)) throw new Error()
+      continue
+    } finally {
+      if (descriptor !== undefined) closeSync(descriptor)
+    }
+    if (created) {
+      const written = regularFileBytes(path)
+      if (!written.equals(bytes)) throw new Error()
+    }
+  }
+}
+
+// Issue #163: transport-failure evidence. When a bounded child fails, the raw
+// decoded stdout/stderr ride the D1TransportError so the stage runner persists
+// durable byte evidence for the failed operation.
+function attachChildEvidence(error, childError) {
+  if (typeof childError.stdout === 'string' && typeof childError.stderr === 'string') {
+    error.stdout = childError.stdout
+    error.stderr = childError.stderr
+  }
+  return error
+}
 
 function validateExpectedReconciliation(path) {
   const bytes = readFileSync(path)
@@ -459,11 +535,14 @@ function runBounded(
     return runBoundedChild(executable, args, timeoutMs, D1_TRANSPORT_MAX_OUTPUT_BYTES, repoRoot, environment)
   } catch (error) {
     if (error instanceof D1ChildError) {
-      throw new D1TransportError(
-        error.classification === D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT
-          ? timeoutClassification
-          : error.classification,
-        error.durationMs,
+      throw attachChildEvidence(
+        new D1TransportError(
+          error.classification === D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT
+            ? timeoutClassification
+            : error.classification,
+          error.durationMs,
+        ),
+        error,
       )
     }
     throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.UNCERTAIN)

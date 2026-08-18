@@ -72,6 +72,7 @@ function exactD1Record(manifest: ReturnType<typeof record>, authorization: Retur
     failure: outcome === 'PASS' ? null : { classification: 'stage_error' },
     stage_counts: Object.fromEntries(d1Stages.map((stage, index) => [stage, index <= terminalIndex ? 1 : 0])),
     stage_durations_ms: Object.fromEntries(d1Stages.map((stage, index) => [stage, index <= terminalIndex ? 1 : 0])),
+    stage_evidence: {},
     evidence: {
       source: 'production', production: true, promotable: outcome === 'PASS',
       ...Object.fromEntries(d1HashNames.map((name) => [name, 'd'.repeat(64)])),

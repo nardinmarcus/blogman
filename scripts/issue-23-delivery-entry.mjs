@@ -34,6 +34,7 @@ import {
   D1_TRANSPORT_MAX_OUTPUT_BYTES,
   D1TransportError,
   createRehearsalD1Transport,
+  writeDurableD1Evidence,
 } from './issue-23-delivery-d1-transport.mjs'
 import {
   d1StageBindingsSha256,
@@ -50,6 +51,42 @@ import { WorkerTransportError, runWorkerStages } from './issue-23-delivery-worke
 import { formalExecutionClosureSha256 } from './issue-23-delivery-execution-closure.mjs'
 
 const AUTHORIZATION_ID_PATTERN = /^issue23-authorization-[a-f0-9]{64}$/u
+
+// Issue #163: the exact set of D1 stage-runner operations whose raw bounded
+// stdout/stderr identities are recorded in the receipt's `stage_evidence`
+// (and, when a durable evidence directory is configured, written O_EXCL 0600
+// as `<stage>.<sha256>.stdout|stderr` under it).
+const D1_STAGE_RUNNER_OPERATIONS = Object.freeze([
+  'd1_identity',
+  'clean_start_reset',
+  'empty_d1_proof',
+  'migration_catalog',
+  'migration_plan',
+  'migration_apply',
+  'migration_verify',
+  'reconciliation',
+])
+
+// Issue #163: shape-check of the D1 receipt's `stage_evidence` map. Keys must
+// be known stage-runner operations; values carry exactly the two raw-bytes
+// identities. Empty { } is valid (sanitized pre-adapter failures).
+function validStageEvidence(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== 'string' || !D1_STAGE_RUNNER_OPERATIONS.includes(key)) return false
+    const entry = value[key]
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return false
+    const actual = Reflect.ownKeys(entry)
+    if (actual.length !== 2
+      || !Object.hasOwn(entry, 'stdout_sha256')
+      || !Object.hasOwn(entry, 'stderr_sha256')
+      || !/^[a-f0-9]{64}$/u.test(entry.stdout_sha256)
+      || !/^[a-f0-9]{64}$/u.test(entry.stderr_sha256)) {
+      return false
+    }
+  }
+  return true
+}
 
 function buildDeliverySinkOwnership() {
   const PRODUCTION_AUTHORITY_HOME = resolve(userInfo().homedir)
@@ -322,10 +359,11 @@ function buildDeliverySinkOwnership() {
   function assertD1Schema(value) {
     if (!exactKeys(value, [
       'format', 'outcome', 'first_terminal_stage', 'failure', 'stage_counts',
-      'stage_durations_ms', 'evidence', 'finalized',
+      'stage_durations_ms', 'stage_evidence', 'evidence', 'finalized',
     ]) || value.format !== 'blogman-issue-23-d1-stages/v1' || value.finalized !== true
       || !['PASS', 'NON_PASS', 'ERROR', 'TIMEOUT', 'UNCERTAIN'].includes(value.outcome)
-      || !exactKeys(value.evidence, D1_EVIDENCE_FIELDS)) {
+      || !exactKeys(value.evidence, D1_EVIDENCE_FIELDS)
+      || !validStageEvidence(value.stage_evidence)) {
       fail('D1 evidence schema contains unsupported fields')
     }
     assertStageMaps(value.stage_counts, value.stage_durations_ms, D1_STAGES, 'D1 evidence')
@@ -737,6 +775,17 @@ function buildDeliverySinkOwnership() {
         const path = join(resolvedRoot, 'upload-evidence')
         const identity = createDirectory(path, 'upload evidence directory')
         assertDirectoryIdentity(path, identity, 'upload evidence directory')
+        return path
+      },
+      // Issue #163: durable D1 stage evidence directory under the sink root
+      // (authority root in production). The D1 stage runner persists bounded
+      // hash-named raw stdout/stderr per operation here on success AND failure
+      // so any future D1 burn leaves byte-level diagnostics.
+      d1EvidenceDirectory() {
+        assertSinkIdentity()
+        const path = join(resolvedRoot, 'd1-evidence')
+        const identity = createDirectory(path, 'D1 evidence directory')
+        assertDirectoryIdentity(path, identity, 'D1 evidence directory')
         return path
       },
     })
@@ -2329,6 +2378,8 @@ function sanitizedD1Error(
     failure: { classification },
     stage_counts: stageCounts,
     stage_durations_ms: stageDurations,
+    // Issue #163: pre-run sanitized failures carry no stage-runner evidence.
+    stage_evidence: {},
     evidence: {
       source: evidencePolicy.source,
       production: evidencePolicy.production,
@@ -2389,8 +2440,9 @@ function normalizeD1Result(result, evidencePolicy, d1, identity) {
     || !isPlainRecord(value.evidence)
     || !exact(value, [
       'format', 'outcome', 'first_terminal_stage', 'failure', 'stage_counts',
-      'stage_durations_ms', 'evidence', 'finalized',
+      'stage_durations_ms', 'stage_evidence', 'evidence', 'finalized',
     ]) || value.finalized !== true
+    || !validStageEvidence(value.stage_evidence)
     || !exact(value.evidence, [
       'source', 'production', 'promotable', ...D1_EVIDENCE_HASHES,
       'manifest_sha256', 'authorization_sha256', 'attempt_id',
@@ -2876,12 +2928,19 @@ function runProductionD1Bounded(
     )
   } catch (error) {
     if (error instanceof D1ChildError) {
-      throw new D1TransportError(
+      // Issue #163: ride the decoded bounded child bytes onto the transport
+      // error so the stage runner persists durable evidence for failed runs.
+      const transportError = new D1TransportError(
         error.classification === D1_TRANSPORT_FAILURE_CLASSIFICATIONS.TIMEOUT
           ? timeoutClassification
           : error.classification,
         error.durationMs,
       )
+      if (typeof error.stdout === 'string' && typeof error.stderr === 'string') {
+        transportError.stdout = error.stdout
+        transportError.stderr = error.stderr
+      }
+      throw transportError
     }
     throw new D1TransportError(D1_TRANSPORT_FAILURE_CLASSIFICATIONS.UNCERTAIN)
   }
@@ -2900,6 +2959,15 @@ function createProductionD1Transport(config, childEnvironment, monotonicMs) {
   const normalizedConfig = d1.validateConfig(config)
   const frozenBoundIdentity = d1.validateBoundArtifactsOrThrow(normalizedConfig)
   const bindingsSha256 = d1StageBindingsSha256(normalizedConfig)
+
+  // Issue #163: persist the remote whoami child's bounded stdout/stderr into
+  // the durable D1 evidence directory (the stage runner records its own
+  // stage-runner operations; the whoami child is transport-internal).
+  const persistWhoamiEvidence = (stdout, stderr) => {
+    const directory = privateEnvironment.D1_EVIDENCE_DIR
+    if (typeof directory !== 'string') return
+    writeDurableD1Evidence(directory, 'd1_identity', stdout, stderr)
+  }
 
   function budgetFor(request, spentMs = 0) {
     let actualOverallElapsedMs = request.overall_elapsed_ms + spentMs
@@ -2948,12 +3016,18 @@ function createProductionD1Transport(config, childEnvironment, monotonicMs) {
           normalizedRequest,
           infoCommand.duration_ms,
         )
+        persistWhoamiEvidence(whoamiCommand.stdout, whoamiCommand.stderr)
       } catch (error) {
         if (error instanceof D1TransportError) {
-          throw new D1TransportError(
+          const transportError = new D1TransportError(
             error.classification,
             infoCommand.duration_ms + error.durationMs,
           )
+          if (typeof error.stdout === 'string' && typeof error.stderr === 'string') {
+            transportError.stdout = error.stdout
+            transportError.stderr = error.stderr
+          }
+          throw transportError
         }
         throw error
       }
@@ -3279,7 +3353,16 @@ function createProductionWorkerTransport(bindings, environments = { cloudflare: 
 function productionAdapterFactories() {
   return Object.freeze({
     createD1Transport(bindings, environments, monotonicMs) {
-      return createProductionD1Transport(bindings, environments.cloudflare, monotonicMs)
+      // Issue #163: the durable D1 stage evidence directory rides the child
+      // environment so the transport can persist the whoami child evidence.
+      const d1EvidenceDirectory = executionDeliverySink().d1EvidenceDirectory()
+      return createProductionD1Transport(
+        bindings,
+        Object.assign(Object.create(null), environments.cloudflare, {
+          D1_EVIDENCE_DIR: d1EvidenceDirectory,
+        }),
+        monotonicMs,
+      )
     },
     createWorkerTransport(bindings, environments, monotonicMs) {
       return createProductionWorkerTransport(bindings, environments, monotonicMs)
@@ -3586,6 +3669,9 @@ function executeProduction(manifest, authorization) {
               elapsed_ms: d1StageStarted,
               monotonic_ms: attemptClock.elapsedMilliseconds,
               initial_stage_started_ms: d1StageStarted,
+              // Issue #163: durable D1 stage evidence sink (authority root in
+              // production, test-owned sink root in formal rehearsal).
+              d1_evidence_dir: executionDeliverySink().d1EvidenceDirectory(),
             })
             d1Result = adapters.normalizeD1Result(d1Receipt, d1, workerIdentity)
             d1Receipt = d1Result.receipt ?? d1Receipt

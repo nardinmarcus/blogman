@@ -645,6 +645,7 @@ function d1Result(failedStage: string | null = null) {
     failure: failedStage === null ? null : { classification: 'Manifest Drift' },
     stage_counts: counts,
     stage_durations_ms: durations,
+    stage_evidence: {},
     evidence: {
       source: 'stage-runner-non-production',
       production: false,

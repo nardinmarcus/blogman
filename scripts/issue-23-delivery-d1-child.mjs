@@ -40,11 +40,18 @@ const SUPERVISOR_SOURCE = [
 ].join('\n')
 
 export class D1ChildError extends Error {
-  constructor(classification, durationMs = 0) {
+  constructor(classification, durationMs = 0, evidence = null) {
     super(`D1 child ${classification}`)
     this.name = 'D1ChildError'
     this.classification = classification
     this.durationMs = Number.isSafeInteger(durationMs) && durationMs >= 0 ? durationMs : 0
+    // Issue #163: carry the decoded bounded child stdout/stderr on failures so
+    // the transport can persist durable evidence for failed runs. The bytes
+    // never enter error strings or receipts (only their sha256 identities do).
+    if (evidence !== null) {
+      this.stdout = evidence.stdout
+      this.stderr = evidence.stderr
+    }
   }
 }
 
@@ -56,6 +63,19 @@ function decodeUtf8(base64, maxOutputBytes) {
     throw new D1ChildError(D1_CHILD_FAILURE_CLASSIFICATIONS.MALFORMED)
   }
   return text
+}
+
+// Issue #163: best-effort decode of the bounded child output for failure
+// evidence; null when the captured bytes are not decodable.
+function capturedChildOutput(supervisor, maxOutputBytes) {
+  try {
+    return {
+      stdout: decodeUtf8(supervisor.stdout_b64, maxOutputBytes),
+      stderr: decodeUtf8(supervisor.stderr_b64, maxOutputBytes),
+    }
+  } catch {
+    return null
+  }
 }
 
 function parseSupervisorOutput(output) {
@@ -120,23 +140,27 @@ export function runBoundedChild(executable, args, timeoutMs, maxOutputBytes, cwd
     throw new D1ChildError(D1_CHILD_FAILURE_CLASSIFICATIONS.UNCERTAIN)
   }
   const supervisor = parseSupervisorOutput(result.stdout)
+  const failureEvidence = capturedChildOutput(supervisor, maxOutputBytes)
   if (supervisor.residual_process_group || supervisor.status === 'uncertain'
     || supervisor.status === 'output_overflow') {
     throw new D1ChildError(
       D1_CHILD_FAILURE_CLASSIFICATIONS.UNCERTAIN,
       supervisor.duration_ms,
+      failureEvidence,
     )
   }
   if (supervisor.status === 'timed_out') {
     throw new D1ChildError(
       D1_CHILD_FAILURE_CLASSIFICATIONS.TIMEOUT,
       supervisor.duration_ms,
+      failureEvidence,
     )
   }
   if (supervisor.status === 'nonzero') {
     throw new D1ChildError(
       D1_CHILD_FAILURE_CLASSIFICATIONS.NONZERO,
       supervisor.duration_ms,
+      failureEvidence,
     )
   }
   const stdout = decodeUtf8(supervisor.stdout_b64, maxOutputBytes)
