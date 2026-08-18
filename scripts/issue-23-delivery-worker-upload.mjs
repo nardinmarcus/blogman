@@ -19,6 +19,7 @@ import {
   writeSync,
 } from 'node:fs'
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { verifyBuildDirectory } from './issue-23-build-proof.mjs'
 import { comparePathSegments } from './issue-23-delivery-d1-contracts.mjs'
@@ -339,15 +340,33 @@ function absolutePathChain(path) {
   return chain
 }
 
+// Issue #175: the hold chain must never freeze the public system temp root or
+// its ancestors. macOS legitimately updates TMPDIR mtime/ctime during the
+// upload window (periodic tmp cleanup), which fail-closed a strict hold on the
+// TMPDIR ancestor (R9: 'held path changed: .../T' after a successful upload).
+// The chain therefore starts at the directory we created directly under the
+// system temp root -- the mkdtemp root, which is already verified on its own
+// (0700 + realpath + identity). Paths outside the system temp tree keep their
+// full chain. absolutePathChain itself stays complete for commonAncestor.
+function stableHeldChainTop(path) {
+  const chain = absolutePathChain(path)
+  const temporaryRoot = realpathSync(tmpdir())
+  for (const entry of chain) {
+    if (dirname(entry) === temporaryRoot) return entry
+  }
+  return chain[0]
+}
+
 function holdStablePathChain(path, type, mode) {
   const chain = absolutePathChain(path)
   const held = []
   try {
-    for (const [index, entry] of chain.entries()) {
+    for (let index = chain.indexOf(stableHeldChainTop(path)); index < chain.length; index += 1) {
+      const last = index === chain.length - 1
       held.push(holdStablePath(
-        entry,
-        index === chain.length - 1 ? type : 'directory',
-        index === chain.length - 1 ? mode : undefined,
+        chain[index],
+        last ? type : 'directory',
+        last ? mode : undefined,
       ))
     }
     return held
@@ -412,10 +431,13 @@ function bindStrictPathMetadata(held, stabilityRoot) {
     }
     const parentPath = dirname(entry.path)
     const parent = held.find((candidate) => candidate.path === parentPath)
-    if (!parent) throw new Error()
+    // Issue #175: a held chain may start at our own mkdtemp root whose parent
+    // (the public temp root) is intentionally not held; evaluate
+    // replaceability from a fresh stat of that unheld parent instead.
+    const parentStat = parent ? parent.before : lstatSync(parentPath, { bigint: true })
     entry.strictMetadata = (stabilityRoot !== undefined
       && isWithin(stabilityRoot, entry.path))
-      || processCanReplaceEntry(parent.before, entry.before)
+      || processCanReplaceEntry(parentStat, entry.before)
   }
 }
 

@@ -1171,6 +1171,56 @@ fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
     })
   })
 
+  // Issue #175: the report directory is a mkdtemp root directly under the
+  // system temp root (execute() materializes blogman-issue-91-upload-* via
+  // mkdtempSync(join(tmpdir(), ...))). macOS legitimately updates the system
+  // TMPDIR mtime/ctime during the upload window (periodic tmp cleanup); the
+  // held chain must stop at our mkdtemp root and never freeze the public
+  // TMPDIR ancestor. Root-below strict hold semantics are unchanged. macOS
+  // refuses unprivileged utimes on the real TMPDIR, so the test substitutes
+  // an equivalent private temp root we own (0700 self-owned, same shape) and
+  // churns its timestamps the way the cleanup daemon churns the real one.
+  it('accepts system temp-root churn when the report directory is a mkdtemp root under TMPDIR (Issue #175)', () => {
+    const fakeSystemTempRoot = realpathSync(mkdtempSync(join(
+      sharedTemporaryDirectory,
+      'blogman-issue-175-tmpdir-',
+    )))
+    chmodSync(fakeSystemTempRoot, 0o700)
+    temporaryDirectories.push(fakeSystemTempRoot)
+    const fixture = uploadSourceLifecycleFixture(fakeSystemTempRoot)
+    // De-register the nested mkdtemp root (it lives inside fakeSystemTempRoot)
+    // so afterEach cleans the outermost temp root once, recursively.
+    temporaryDirectories.splice(temporaryDirectories.indexOf(fixture.directory), 1)
+    const tmpMtimeBefore = statSync(fakeSystemTempRoot, { bigint: true }).mtimeNs
+    writeFileSync(join(fixture.fakeBin, 'npm'), `#!/usr/bin/env node
+const fs = require('node:fs')
+const count = Number(fs.readFileSync(process.env.UPLOAD_COUNTER, 'utf8')) + 1
+fs.writeFileSync(process.env.UPLOAD_COUNTER, String(count))
+const before = fs.statSync(process.env.SYSTEM_TMP_ROOT, { bigint: true })
+fs.utimesSync(
+  process.env.SYSTEM_TMP_ROOT,
+  new Date(Number(before.atimeNs) / 1e6 + 10_000),
+  new Date(Number(before.mtimeNs) / 1e6 + 10_000),
+)
+fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
+  type: 'version-upload', version: 1, version_id: 'fixture-version',
+}) + '\\n')
+`)
+    chmodSync(join(fixture.fakeBin, 'npm'), 0o755)
+
+    const lifecycle = runCurrentUploadLifecycle(fixture, {
+      SYSTEM_TMP_ROOT: fakeSystemTempRoot,
+      TMPDIR: fakeSystemTempRoot,
+    })
+    expect(lifecycle.status, lifecycle.stderr).toBe(0)
+    expect(readFileSync(fixture.counter, 'utf8')).toBe('1')
+    expect(statSync(fakeSystemTempRoot, { bigint: true }).mtimeNs).not.toBe(tmpMtimeBefore)
+    expect(JSON.parse(lifecycle.stdout)).toMatchObject({
+      state: 'accepted',
+      version_id: 'fixture-version',
+    })
+  })
+
   it('proves the frozen snapshot against the sealed archive before invoking upload', () => {
     const fixture = uploadSourceLifecycleFixture()
     installCountingUpload(fixture)
