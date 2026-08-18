@@ -57,6 +57,7 @@ function copyCanonicalMigrationSet(directory: string): void {
     '004_complete_historical_text_ai_schema.baseline.sql',
     '005_fix_posts_fts_sync.sql',
     '006_add_rollout_safety_controls.sql',
+    '007_seed_rollout_executor.sql',
   ]) {
     writeFileSync(
       join(directory, name),
