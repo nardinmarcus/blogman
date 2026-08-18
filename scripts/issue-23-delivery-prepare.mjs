@@ -918,6 +918,27 @@ function createBuildArchive(repositoryPath, archivePath, files) {
   command(repositoryPath, 'zip', ['-X', '-q', basename(absoluteArchive), ...files], { cwd: buildRoot })
 }
 
+// Issue #179: the Worker upload wrapper freezes a destination snapshot proof
+// over the real .open-next walk (archive excluded, paths relative to the
+// .open-next root with no prefix): sha256(JSON.stringify(entries)+'\n') with
+// entries [{path, bytes, sha256}] ordered by comparePathSegments on the
+// relative path. The manifest must freeze the same domain so the
+// worker_deploy acceptance contract can compare snapshot_tree_sha256 against
+// delivery_snapshot_sha256 — the previous artifact_sha256 compared prefixed
+// paths plus wrangler.toml (a structurally different domain that could never
+// match the wrapper proof).
+function deliverySnapshotSha256(artifactFiles) {
+  const entries = artifactFiles
+    .filter((file) => file.path !== 'wrangler.toml')
+    .map((file) => ({
+      path: file.path.slice('.open-next/'.length),
+      bytes: file.bytes,
+      sha256: file.sha256,
+    }))
+    .sort((left, right) => comparePathSegments(left.path, right.path))
+  return sha256(Buffer.from(`${JSON.stringify(entries)}\n`))
+}
+
 function enumerateArtifactPaths(configuredFiles, buildFiles) {
   const buildPaths = buildFiles.map((path) => `.open-next/${path}`)
   const paths = [...buildPaths, 'wrangler.toml']
@@ -1298,7 +1319,7 @@ function resolveFacts(config, {
     repository: repositoryFacts,
     ci,
     toolchain,
-    artifact: { ...artifact, file_tree: { ...artifact.file_tree, sha256: sha256(Buffer.from(JSON.stringify(artifact.file_tree.files))) } },
+    artifact: { ...artifact, file_tree: { ...artifact.file_tree, sha256: sha256(Buffer.from(JSON.stringify(artifact.file_tree.files))), delivery_snapshot_sha256: deliverySnapshotSha256(artifact.file_tree.files) } },
     migration,
     target,
   }
@@ -1405,6 +1426,13 @@ function assertManifestRelationships(manifest, policy = PRODUCTION_MANIFEST_POLI
   }
   if (!jsonEqual(filePaths, [...filePaths].sort())) {
     fail('artifact.file_tree.files must be ordered by public path')
+  }
+
+  if (typeof manifest.artifact.file_tree.delivery_snapshot_sha256 !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(manifest.artifact.file_tree.delivery_snapshot_sha256)
+    || manifest.artifact.file_tree.delivery_snapshot_sha256
+      !== deliverySnapshotSha256(manifest.artifact.file_tree.files)) {
+    fail('artifact.file_tree.delivery_snapshot_sha256 is not the frozen delivery snapshot identity')
   }
 
   const migrationIds = manifest.migration.catalog.migrations.map((migration) => migration.id)

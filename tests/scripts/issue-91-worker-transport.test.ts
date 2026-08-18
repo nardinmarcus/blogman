@@ -163,7 +163,7 @@ function forgeWorkerBindings() {
     config_path: '/repo/wrangler.toml', config_sha256: h,
     artifact_archive_path: '/repo/.open-next/open-next-build.zip', artifact_archive_sha256: h,
     artifact_source_path: '/repo/.open-next', artifact_file_tree_sha256: h,
-    artifact_file_tree_files: [], artifact_sha256: h,
+    artifact_file_tree_files: [], artifact_sha256: h, delivery_snapshot_sha256: h,
     candidate_id: 'c'.repeat(40), worker_name: 'blogman',
     d1_database_id: '5d1cadcf-e10e-4245-b07d-16c64754f00d', account_id: 'account-id',
     rollout_safety_path: '/repo/scripts/rollout-safety.mjs', rollout_safety_sha256: h,

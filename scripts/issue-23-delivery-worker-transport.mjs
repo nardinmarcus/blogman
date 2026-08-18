@@ -407,7 +407,7 @@ export function createRehearsalWorkerTransport(bindings, sink, fault = null, env
       const recorded = record(request.operation, command, {
         format: 'blogman-upload-source-lifecycle-acceptance/v1', state: 'accepted',
         upload_operation_id: `issue-23-${bindings.candidate_id}-upload-1`, version_id: `rehearsal-version-${bindings.candidate_id.slice(0, 12)}`,
-        config_sha256: bindings.config_sha256, snapshot_tree_sha256: bindings.artifact_sha256,
+        config_sha256: bindings.config_sha256, snapshot_tree_sha256: bindings.delivery_snapshot_sha256,
         snapshot_identity_sha256: 'a'.repeat(64), snapshot_proof_before_sha256: 'b'.repeat(64), snapshot_proof_after_sha256: 'c'.repeat(64),
         build_directory_proof_sha256: 'd'.repeat(64), wrangler_output_sha256: 'e'.repeat(64),
         upload_stdout_sha256: 'f'.repeat(64), upload_stderr_sha256: '7'.repeat(64),

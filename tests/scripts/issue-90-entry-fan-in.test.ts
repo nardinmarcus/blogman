@@ -330,6 +330,7 @@ function manifest(overrides: Record<string, unknown> = {}) {
       worker: { path: '.open-next/worker.js', sha256: HASH, bytes: 1 },
       file_tree: {
         sha256: HASH,
+        delivery_snapshot_sha256: HASH,
         complete: true,
         files: [
           { path: '.open-next/assets/index.html', sha256: HASH, bytes: 1 },
