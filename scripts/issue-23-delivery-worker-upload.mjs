@@ -24,7 +24,12 @@ import { verifyBuildDirectory } from './issue-23-build-proof.mjs'
 import { comparePathSegments } from './issue-23-delivery-d1-contracts.mjs'
 
 const sha256 = /^[a-f0-9]{64}$/
-const shellSafeAbsolutePath = /^\/[A-Za-z0-9._/-]+$/
+// Issue #173: admit '@' (scoped npm packages like '@opennextjs/cloudflare') in
+// the argv-facing shell-safe absolute-path grammar. These bound paths reach
+// spawnSync as an argv array — never an interpolated shell string — so '@' is
+// not a metacharacter here; the class still excludes spaces, ';', quotes, and
+// other real shell metacharacters.
+const shellSafeAbsolutePath = /^\/[A-Za-z0-9._/@-]+$/
 const uploadOperationId = /^issue-23-[a-f0-9]{40}-upload-1$/
 const MAX_UPLOAD_CHILD_OUTPUT_BYTES = 64 * 1024
 const UPLOAD_CHILD_FAILURE_FORMAT = 'blogman-upload-child-failure/v1'

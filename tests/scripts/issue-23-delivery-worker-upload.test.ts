@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
+  closeSync,
   existsSync,
   linkSync,
   lstatSync,
@@ -18,7 +19,10 @@ import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-import { uploadToolchainPath } from '../../scripts/issue-23-delivery-worker-upload.mjs'
+import {
+  runPreflight,
+  uploadToolchainPath,
+} from '../../scripts/issue-23-delivery-worker-upload.mjs'
 const temporaryDirectories: string[] = []
 const sharedTemporaryDirectory = realpathSync('/tmp')
 const crossRootTemporaryDirectory = realpathSync(
@@ -1497,6 +1501,128 @@ for (const versionId of ['', ' invalid ']) {
     const record = assertWrapperFailureRecord(lifecycle, receipt, evidence, 'preflight')
     expect(record.error.message).toBe('')
     expect(record.error.name).toBe('Error')
+  })
+
+  // Issue #173: production preflight replay with REAL toolchain bindings. The
+  // entry binds open_next_path to realpath(node_modules/.bin/opennextjs-cloudflare)
+  // — a scoped-package path containing '@' that the shellSafeAbsolutePath gate
+  // rejected in verifyBoundExecutable (the shared root cause of the third,
+  // fifth, seventh, and eighth production burns). Rehearsal never runs
+  // runPreflight (it synthesizes the acceptance envelope), so this in-process
+  // replay is the CI nail: real node/npm/openNext paths + live shas + the
+  // realpath'd temp staging (macOS /var → /private/var symlink avoided) + the
+  // projected child environment. runPreflight stops exactly before the
+  // upload-child spawn, so the replay is zero-network by construction.
+  function realToolchainBindings(workingDirectory: string) {
+    const nodePath = realpathSync(process.execPath)
+    const npmPath = realpathSync(join(
+      dirname(dirname(nodePath)),
+      'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js',
+    ))
+    const openNextPath = realpathSync(resolve(
+      workingDirectory,
+      'node_modules/.bin/opennextjs-cloudflare',
+    ))
+    // The point of this fixture: the real scoped-package path must contain '@'
+    // so the gate under test actually sees the production shape.
+    expect(openNextPath).toContain('@')
+    const shaOf = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex')
+    return {
+      nodePath,
+      nodeSha256: shaOf(nodePath),
+      npmPath,
+      npmSha256: shaOf(npmPath),
+      openNextPath,
+      openNextSha256: shaOf(openNextPath),
+    }
+  }
+
+  // runPreflight reads the three upload evidence paths from process.env; the
+  // replay sets them exactly like the entry's projected child environment and
+  // restores the caller's process.env afterwards.
+  function replayPreflightEnvironment(fixture: ReturnType<typeof uploadSourceLifecycleFixture>) {
+    const replays = {
+      WRANGLER_OUTPUT_FILE_PATH: fixture.uploadOutput,
+      UPLOAD_STDOUT_FILE_PATH: fixture.uploadChildStdout,
+      UPLOAD_STDERR_FILE_PATH: fixture.uploadChildStderr,
+    }
+    const prior = Object.fromEntries(Object.keys(replays).map((name) => [name, process.env[name]]))
+    for (const [name, value] of Object.entries(replays)) process.env[name] = value
+    return prior
+  }
+
+  it('accepts the real production openNext scoped-package path through the preflight gate under a projected environment (Issue #173)', async () => {
+    const fixture = uploadSourceLifecycleFixture()
+    const prior = replayPreflightEnvironment(fixture)
+    const bindings = realToolchainBindings(realpathSync(process.cwd()))
+    let staged: Awaited<ReturnType<typeof runPreflight>> | undefined
+    try {
+      staged = await runPreflight({
+        ...bindings,
+        workingDirectory: realpathSync(process.cwd()),
+        config: fixture.config,
+        source: fixture.source,
+        destination: fixture.destination,
+        operationId: `issue-23-${'a'.repeat(40)}-upload-1`,
+        proofBeforePath: fixture.proofBefore,
+        proofAfterPath: fixture.proofAfter,
+        buildProofPath: fixture.buildProof,
+        archive: fixture.archive,
+        archiveSha256: fixture.archiveSha256,
+        expectedConfigSha256: fixture.configSha256,
+      })
+      // verifyFrozenSnapshotAgainstArchive already threw unless the sealed
+      // archive matched the frozen destination; parse its JSON proof bytes.
+      expect(JSON.parse(staged.buildProof.toString('utf8')).state).toBe('matched')
+      expect(staged.before.file_count).toBe(2)
+      // The preflight-built upload PATH must lead with the real bound toolchain
+      // directories: the npm bin resolution ran against the real npm binding.
+      expect(staged.uploadEnvironment.PATH.split(delimiter).slice(0, 2))
+        .toEqual(expect.arrayContaining([dirname(bindings.nodePath)]))
+    } finally {
+      if (staged) {
+        for (const entry of staged.held) closeSync(entry.descriptor)
+        for (const entry of staged.evidence) closeSync(entry.descriptor)
+      }
+      for (const [name, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+    }
+  })
+
+  it('rejects shell-unsafe openNext paths through the preflight gate after admitting @ (Issue #173 fail-closed)', async () => {
+    const fixture = uploadSourceLifecycleFixture()
+    const prior = replayPreflightEnvironment(fixture)
+    const bindings = realToolchainBindings(realpathSync(process.cwd()))
+    try {
+      // Space and semicolon are real shell metacharacters: the path-shape gate
+      // must keep rejecting them even after '@' is admitted. The bogus sha
+      // never matters — the character-class gate throws first.
+      for (const illegalComponent of ['unused space.js', 'unused;semicolon.js']) {
+        await expect(runPreflight({
+          ...bindings,
+          openNextPath: join(bindings.openNextPath, illegalComponent),
+          openNextSha256: '0'.repeat(64),
+          workingDirectory: realpathSync(process.cwd()),
+          config: fixture.config,
+          source: fixture.source,
+          destination: fixture.destination,
+          operationId: `issue-23-${'a'.repeat(40)}-upload-1`,
+          proofBeforePath: fixture.proofBefore,
+          proofAfterPath: fixture.proofAfter,
+          buildProofPath: fixture.buildProof,
+          archive: fixture.archive,
+          archiveSha256: fixture.archiveSha256,
+          expectedConfigSha256: fixture.configSha256,
+        })).rejects.toThrow()
+      }
+    } finally {
+      for (const [name, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+    }
   })
 
 })
