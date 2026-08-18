@@ -158,6 +158,22 @@ function hash(bytes: Buffer) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
+// Issue #179: wrapper-isomorphic delivery snapshot identity — same canonical
+// construction as the Worker upload snapshotProof
+// (JSON.stringify(entries)+'\n', entries [{path,bytes,sha256}] in code-unit
+// path order, .open-next prefix stripped, wrangler.toml excluded).
+function deliverySnapshotSha256(files: Array<{ path: string; sha256: string; bytes: number }>) {
+  const entries = files
+    .filter((file) => file.path !== 'wrangler.toml')
+    .map((file) => ({
+      path: file.path.slice('.open-next/'.length),
+      bytes: file.bytes,
+      sha256: file.sha256,
+    }))
+    .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+  return hash(Buffer.from(`${JSON.stringify(entries)}\n`))
+}
+
 function policy() {
   return {
     authorization: {
@@ -330,7 +346,11 @@ function manifest(overrides: Record<string, unknown> = {}) {
       worker: { path: '.open-next/worker.js', sha256: HASH, bytes: 1 },
       file_tree: {
         sha256: HASH,
-        delivery_snapshot_sha256: HASH,
+        delivery_snapshot_sha256: deliverySnapshotSha256([
+          { path: '.open-next/assets/index.html', sha256: HASH, bytes: 1 },
+          { path: '.open-next/worker.js', sha256: HASH, bytes: 1 },
+          { path: 'wrangler.toml', sha256: HASH, bytes: 1 },
+        ]),
         complete: true,
         files: [
           { path: '.open-next/assets/index.html', sha256: HASH, bytes: 1 },
