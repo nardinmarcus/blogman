@@ -3103,7 +3103,12 @@ function readUploadFailureDiagnostic(path) {
   return null
 }
 
-function createProductionWorkerTransport(bindings, environments = { cloudflare: process.env, smoke: process.env }, monotonicMs = () => 0) {
+export function createProductionWorkerTransport(
+  bindings,
+  environments = { cloudflare: process.env, smoke: process.env },
+  monotonicMs = () => 0,
+  overrides = {},
+) {
   if (typeof worker.createTransportForTestsOnly === 'function') {
     return worker.createTransportForTestsOnly(bindings, environments, monotonicMs)
   }
@@ -3166,8 +3171,8 @@ function createProductionWorkerTransport(bindings, environments = { cloudflare: 
     worker.assertBoundFile(bindings.lockfile_path, bindings.lockfile_sha256)
   }
 
-  function invoke(executable, args, request, spent, env = environments.cloudflare, stdin = null) {
-    validateLocalBindings()
+  function invoke(executable, args, request, spent, env = environments.cloudflare, stdin = null, invokeOptions = {}) {
+    if (overrides.skipLocalBindings !== true) validateLocalBindings()
     const actualSpent = Math.max(spent, monotonicMs() - request.elapsed_ms)
     const stageRemaining = request.timeout_ms - actualSpent
     const overallRemaining = worker.OVERALL_TIMEOUT_MS - request.elapsed_ms - actualSpent
@@ -3181,7 +3186,14 @@ function createProductionWorkerTransport(bindings, environments = { cloudflare: 
       ? 'overall_timeout'
       : 'stage_timeout'
     try {
-      const result = runBoundedChild(
+      // Issue #177: the upload wrapper's bounded stderr is sideband — the
+      // wrapper itself persists child stdout/stderr to its durable evidence
+      // paths and its exit-0 acceptance JSON (stdout) is the authoritative
+      // success signal. Tooling it shells out to (npm build, wrangler) may emit
+      // warnings on stderr without a failed upload, so stderr must not flip an
+      // otherwise-successful upload to UNCERTAIN. Every other command keeps
+      // the stderr-is-fatal guard.
+      const result = (overrides.runBoundedChild ?? runBoundedChild)(
         executable,
         args,
         Math.min(stageRemaining, overallRemaining),
@@ -3190,7 +3202,9 @@ function createProductionWorkerTransport(bindings, environments = { cloudflare: 
         env,
         stdin,
       )
-      if (result.stderr !== '') throw new WorkerTransportError('UNCERTAIN', 'worker_adapter_uncertain', result.duration_ms)
+      if (result.stderr !== '' && invokeOptions.ignoreStderr !== true) {
+        throw new WorkerTransportError('UNCERTAIN', 'worker_adapter_uncertain', result.duration_ms)
+      }
       return result
     } catch (error) {
       if (error instanceof WorkerTransportError) throw error
@@ -3258,7 +3272,7 @@ function createProductionWorkerTransport(bindings, environments = { cloudflare: 
       || request.operation !== request.stage || !['worker_deploy', 'version_traffic_verification', 'smoke_control_t0'].includes(request.operation)
       || !Number.isSafeInteger(request.timeout_ms) || !Number.isSafeInteger(request.elapsed_ms)
       || request.timeout_ms <= 0 || request.elapsed_ms < 0) worker.fail('request is invalid')
-    validateLocalBindings()
+    if (overrides.skipLocalBindings !== true) validateLocalBindings()
     if (request.operation === 'worker_deploy') {
       const root = realpathSync(mkdtempSync(join(tmpdir(), 'blogman-issue-91-upload-')))
       chmodSync(root, 0o700)
@@ -3292,8 +3306,10 @@ function createProductionWorkerTransport(bindings, environments = { cloudflare: 
             UPLOAD_EVIDENCE_DIR: uploadEvidenceDirectory,
             UPLOAD_FAILURE_PATH: uploadFailurePath,
           },
+          undefined,
+          { ignoreStderr: true },
         )
-        return worker.response(parseJson(result.stdout, 'upload_acceptance', result.duration_ms), result.duration_ms)
+        return worker.response(worker.parseJson(result.stdout, 'upload_acceptance', result.duration_ms), result.duration_ms)
       } catch (error) {
         if (error instanceof WorkerTransportError) {
           try {
