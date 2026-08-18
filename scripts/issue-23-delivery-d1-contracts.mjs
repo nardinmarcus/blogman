@@ -287,6 +287,83 @@ export function parseStrictJson(json) {
   return JSON.parse(json)
 }
 
+/**
+ * Issue #163: Cloudflare D1 v3-prod file imports interleave upstream upload
+ * banners (lines that carry a per-upload hash and change on every invocation)
+ * between the legacy prefix and the JSON envelope. Instead of stripping a
+ * fixed prefix, locate the first isolated balanced JSON document in the
+ * bounded child stdout and parse exactly that. Isolation (document must start
+ * at the beginning of the string or immediately after a line break) prevents
+ * JSON-shaped banner fragments printed mid-line from shadowing the real
+ * envelope, and the returned candidate still runs the strict parser so the
+ * semantic gates stay unchanged. Fail-closed: null when no JSON document
+ * exists, independently of any banner noise.
+ */
+export function extractJsonDocument(text) {
+  if (typeof text !== 'string') return null
+  let index = 0
+  while (index < text.length) {
+    const char = text[index]
+    if ((char === '[' || char === '{') && isIsolatedJsonStart(text, index)) {
+      const end = balancedJsonEnd(text, index)
+      if (end !== -1) {
+        const candidate = text.slice(index, end + 1)
+        try {
+          parseStrictJson(candidate)
+          return candidate
+        } catch {
+          // not a strict JSON document; keep scanning for the next candidate
+        }
+      }
+    }
+    index += 1
+  }
+  return null
+}
+
+function isIsolatedJsonStart(text, index) {
+  if (index === 0) return true
+  const previous = text[index - 1]
+  return previous === '\n' || previous === '\r'
+}
+
+// Returns the index of the closing bracket of the value that starts at
+// `start`, or -1 when the candidate never balances. Handles strings and their
+// escapes so braces inside string content cannot disturb the depth.
+function balancedJsonEnd(text, start) {
+  let depth = 0
+  let index = start
+  while (index < text.length) {
+    const char = text[index]
+    if (char === '"') {
+      index += 1
+      while (index < text.length) {
+        if (text[index] === '\\') {
+          index += 1
+        } else if (text[index] === '"') {
+          index += 1
+          break
+        }
+        index += 1
+      }
+      continue
+    }
+    if (char === '[' || char === '{') {
+      depth += 1
+      index += 1
+      continue
+    }
+    if (char === ']' || char === '}') {
+      depth -= 1
+      index += 1
+      if (depth === 0) return index - 1
+      continue
+    }
+    index += 1
+  }
+  return -1
+}
+
 export function parseRemoteD1InfoResponse(stdout, expectedDatabaseId) {
   try {
     const response = parseStrictJson(stdout)

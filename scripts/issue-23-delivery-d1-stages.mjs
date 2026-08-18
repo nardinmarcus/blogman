@@ -3,8 +3,10 @@ import {
   D1_CANONICAL_MIGRATION_NAMES,
   D1_STAGE_TIMEOUT_MS,
   d1StageBindingsSha256,
+  extractJsonDocument,
   parseStrictJson,
 } from './issue-23-delivery-d1-contracts.mjs'
+import { writeDurableD1Evidence } from './issue-23-delivery-d1-transport.mjs'
 
 export { D1_STAGE_TIMEOUT_MS }
 
@@ -27,7 +29,6 @@ export const D1_RECONCILIATION_DIMENSIONS = Object.freeze([
 
 const D1_OVERALL_TIMEOUT_MS = 5_400_000
 const MAX_STAGE_OUTPUT_BYTES = 64 * 1024
-const RESET_RESPONSE_PREFIX = '\u251c Checking if file needs uploading\n\u2502\n'
 const RESET_LOCAL_STATEMENT_COUNT = 15
 const BINDING_KEYS = Object.freeze([
   'mode',
@@ -164,8 +165,15 @@ function stageFailure(outcome, classification, durationMs = 0) {
 }
 
 function parseJson(stdout, classification = 'malformed') {
+  // Issue #163: wrangler D1 stdout may interleave upstream upload banners
+  // (with per-upload hashes) before the JSON document; locate and parse the
+  // isolated document instead of expecting a fixed prefix or bare JSON.
+  // Fail-closed semantics stay unchanged: no JSON document (or a document
+  // that fails the strict parser) yields the caller's classification.
+  const json = extractJsonDocument(stdout)
+  if (json === null) throw stageFailure('ERROR', classification)
   try {
-    return parseStrictJson(stdout)
+    return parseStrictJson(json)
   } catch {
     throw stageFailure('ERROR', classification)
   }
@@ -348,6 +356,12 @@ function callOperation({ bindings, transport, stage, operation }, state) {
     ))
   } catch (error) {
     if (error instanceof StageFailure) throw error
+    // Issue #163: the bounded child output rides the transport failure (the
+    // D1 transport attaches the decoded stdout/stderr it captured), so the
+    // stage runner persists byte-level evidence for failed child runs too.
+    if (typeof error?.stdout === 'string' && typeof error?.stderr === 'string') {
+      recordOperationEvidence(state, { stage, operation, stdout: error.stdout, stderr: error.stderr })
+    }
     transportFailure(error, state.durationMs)
   }
 
@@ -358,6 +372,16 @@ function callOperation({ bindings, transport, stage, operation }, state) {
     if (error instanceof StageFailure) throw error
     throw stageFailure('ERROR', 'malformed', state.durationMs)
   }
+  // Evidence is recorded before parsing: a later semantic rejection (such as
+  // the D14-R5 reset parse failure) still leaves the raw bytes durable, which
+  // is exactly the diagnostic the sixth burn lacked. Successful stage
+  // responses carry an empty stderr by contract.
+  recordOperationEvidence(state, {
+    stage,
+    operation,
+    stdout: result.stdout,
+    stderr: result.stderr ?? '',
+  })
   state.durationMs += result.durationMs
   state.overallElapsedMs += result.durationMs
   const after = actualElapsed(state)
@@ -365,6 +389,24 @@ function callOperation({ bindings, transport, stage, operation }, state) {
   state.overallElapsedMs = Math.max(state.overallElapsedMs, after.overall)
   assertActualDeadline(state, timeoutMs, true)
   return result.stdout
+}
+
+// Issue #163: mirror the #159 upload-evidence sink for D1. Every stage-runner
+// operation records its raw stdout/stderr identities; when a durable evidence
+// directory is configured, the bounded bytes land O_EXCL 0600 as
+// `<stage>.<sha256>.stdout` / `<stage>.<sha256>.stderr` (the receipt's
+// stage_evidence hashes address those files directly). Hash computation never
+// fails; a failed durable write is terminal for the stage.
+function recordOperationEvidence(state, { stage, operation, stdout, stderr }) {
+  const stdoutSha256 = sha256(Buffer.from(stdout, 'utf8'))
+  const stderrSha256 = sha256(Buffer.from(stderr, 'utf8'))
+  if (state.evidenceDir !== null) {
+    writeDurableD1Evidence(state.evidenceDir, stage, stdout, stderr)
+  }
+  state.stageEvidence[operation] = Object.freeze({
+    stdout_sha256: stdoutSha256,
+    stderr_sha256: stderrSha256,
+  })
 }
 
 function parseOperationOutput(stdout, state, parser, classification) {
@@ -447,10 +489,10 @@ function parseResetEnvelope(envelope) {
 }
 
 function parseResetResponse(stdout, mode) {
-  const json = stdout.startsWith(RESET_RESPONSE_PREFIX)
-    ? stdout.slice(RESET_RESPONSE_PREFIX.length)
-    : stdout
-  const value = parseJson(json, 'reset_response_invalid')
+  // Issue #163: the v3-prod file-import banner (dynamic per-upload hash line)
+  // polluted the fixed-prefix strip; parseJson now locates the isolated JSON
+  // envelope, keeping the summary/meta/success cross-checks below unchanged.
+  const value = parseJson(stdout, 'reset_response_invalid')
   if (!Array.isArray(value)) throw stageFailure('ERROR', 'reset_response_invalid')
   if (mode === 'remote') {
     if (value.length !== 1) throw stageFailure('ERROR', 'reset_response_invalid')
@@ -592,7 +634,7 @@ function parseReconciliation(stdout) {
 }
 
 function runD1Identity(bindings, transport, overallElapsedMs, clock = {}) {
-  const state = { durationMs: 0, overallElapsedMs, ...clock }
+  const state = { durationMs: 0, overallElapsedMs, evidenceDir: clock.evidenceDir ?? null, stageEvidence: clock.stageEvidence ?? {}, ...clock }
   const stdout = callOperation({
     bindings,
     transport,
@@ -604,7 +646,7 @@ function runD1Identity(bindings, transport, overallElapsedMs, clock = {}) {
 }
 
 function runReset(bindings, transport, overallElapsedMs, clock = {}) {
-  const state = { durationMs: 0, overallElapsedMs, ...clock }
+  const state = { durationMs: 0, overallElapsedMs, evidenceDir: clock.evidenceDir ?? null, stageEvidence: clock.stageEvidence ?? {}, ...clock }
   const stdout = callOperation({
     bindings,
     transport,
@@ -616,7 +658,7 @@ function runReset(bindings, transport, overallElapsedMs, clock = {}) {
 }
 
 function runEmptyProof(bindings, transport, overallElapsedMs, clock = {}) {
-  const state = { durationMs: 0, overallElapsedMs, ...clock }
+  const state = { durationMs: 0, overallElapsedMs, evidenceDir: clock.evidenceDir ?? null, stageEvidence: clock.stageEvidence ?? {}, ...clock }
   const stdout = callOperation({
     bindings,
     transport,
@@ -628,7 +670,7 @@ function runEmptyProof(bindings, transport, overallElapsedMs, clock = {}) {
 }
 
 function runMigrations(bindings, transport, overallElapsedMs, clock = {}) {
-  const state = { durationMs: 0, overallElapsedMs, ...clock }
+  const state = { durationMs: 0, overallElapsedMs, evidenceDir: clock.evidenceDir ?? null, stageEvidence: clock.stageEvidence ?? {}, ...clock }
   const catalog = callOperation({
     bindings,
     transport,
@@ -671,7 +713,7 @@ function runMigrations(bindings, transport, overallElapsedMs, clock = {}) {
 }
 
 function runReconciliation(bindings, transport, overallElapsedMs, clock = {}) {
-  const state = { durationMs: 0, overallElapsedMs, ...clock }
+  const state = { durationMs: 0, overallElapsedMs, evidenceDir: clock.evidenceDir ?? null, stageEvidence: clock.stageEvidence ?? {}, ...clock }
   const stdout = callOperation({
     bindings,
     transport,
@@ -690,7 +732,7 @@ const STAGE_RUNNERS = Object.freeze({
   reconciliation: runReconciliation,
 })
 
-export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, monotonic_ms, initial_stage_started_ms }) {
+export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, monotonic_ms, initial_stage_started_ms, d1_evidence_dir }) {
   if (!Number.isSafeInteger(elapsed_ms) || elapsed_ms < 0 || elapsed_ms > D1_OVERALL_TIMEOUT_MS) {
     fail('elapsed_ms is invalid')
   }
@@ -699,8 +741,16 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, 
     && (!Number.isSafeInteger(initial_stage_started_ms) || initial_stage_started_ms < 0)) {
     fail('initial_stage_started_ms is invalid')
   }
+  // Issue #163: optional durable D1 stage evidence directory (mirror of #159
+  // upload-evidence). Undefined disables file persistence while the receipt
+  // stage_evidence hashes stay computed.
+  if (d1_evidence_dir !== undefined) {
+    assertSafePath(d1_evidence_dir, 'd1_evidence_dir')
+  }
   const bindings = normalizeBindings(rawBindings)
   validateTransport(transport)
+  const evidenceDir = d1_evidence_dir ?? null
+  const stageEvidence = {}
   const bindingSha256 = d1StageBindingsSha256(bindings)
   const bindingMismatch = transport.bindings_sha256 !== undefined
     && transport.bindings_sha256 !== bindingSha256
@@ -736,6 +786,8 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, 
         monotonicMs: monotonic_ms,
         stageStartedMs: stageStarted,
         timeoutMs: D1_STAGE_TIMEOUT_MS[stage],
+        evidenceDir,
+        stageEvidence,
       })
       const measuredDuration = monotonic_ms === undefined ? durationMs : monotonic_ms() - stageStarted
       durationMs = Math.max(durationMs, measuredDuration)
@@ -784,6 +836,10 @@ export function runD1Stages({ bindings: rawBindings, transport, elapsed_ms = 0, 
     failure: terminal.outcome === 'PASS' ? null : { classification: terminal.classification },
     stage_counts: stageCounts,
     stage_durations_ms: stageDurations,
+    // Issue #163: per-operation raw stdout/stderr identities recorded by the
+    // stage runner (mirror #159 upload evidence). Each sha256 addresses the
+    // durable `<stage>.<sha>.stdout|stderr` file under the evidence directory.
+    stage_evidence: stageEvidence,
     evidence: {
       source: evidenceSource,
       production,
