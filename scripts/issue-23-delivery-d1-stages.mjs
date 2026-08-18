@@ -14,7 +14,7 @@ export const D1_STAGE_ORDER = Object.freeze([
   'd1_identity',
   'clean_start_reset',
   'empty_d1_proof',
-  'migrations_001_006',
+  'migrations_001_007',
   'reconciliation',
 ])
 
@@ -247,8 +247,8 @@ function normalizeBindings(value) {
   for (const field of ['manifest_sha256', 'authorization_sha256', 'attempt_id']) {
     if (attemptBound || value[field] !== null) assertHash(value[field], `bindings.${field}`)
   }
-  if (!Array.isArray(value.migrations) || value.migrations.length !== 6) {
-    fail('bindings.migrations must contain exactly six entries')
+  if (!Array.isArray(value.migrations) || value.migrations.length !== D1_CANONICAL_MIGRATION_NAMES.length) {
+    fail('bindings.migrations must contain exactly the canonical migration entries')
   }
   const migrations = value.migrations.map((entry, index) => (
     normalizeMigration(entry, index, 'bindings.migrations')
@@ -674,21 +674,21 @@ function runMigrations(bindings, transport, overallElapsedMs, clock = {}) {
   const catalog = callOperation({
     bindings,
     transport,
-    stage: 'migrations_001_006',
+    stage: 'migrations_001_007',
     operation: 'migration_catalog',
   }, state)
   parseOperationOutput(catalog, state, (value) => parseCatalog(value, bindings), 'migration_contract_invalid')
   const plan = callOperation({
     bindings,
     transport,
-    stage: 'migrations_001_006',
+    stage: 'migrations_001_007',
     operation: 'migration_plan',
   }, state)
   parseOperationOutput(plan, state, (value) => parsePlan(value, bindings), 'empty_only_plan_invalid')
   const applied = callOperation({
     bindings,
     transport,
-    stage: 'migrations_001_006',
+    stage: 'migrations_001_007',
     operation: 'migration_apply',
   }, state)
   parseOperationOutput(
@@ -700,7 +700,7 @@ function runMigrations(bindings, transport, overallElapsedMs, clock = {}) {
   const verified = callOperation({
     bindings,
     transport,
-    stage: 'migrations_001_006',
+    stage: 'migrations_001_007',
     operation: 'migration_verify',
   }, state)
   parseOperationOutput(
@@ -728,7 +728,7 @@ const STAGE_RUNNERS = Object.freeze({
   d1_identity: runD1Identity,
   clean_start_reset: runReset,
   empty_d1_proof: runEmptyProof,
-  migrations_001_006: runMigrations,
+  migrations_001_007: runMigrations,
   reconciliation: runReconciliation,
 })
 

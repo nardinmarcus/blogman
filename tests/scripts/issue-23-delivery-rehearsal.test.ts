@@ -91,7 +91,7 @@ describe('Issue #90 local D1 rehearsal', () => {
       value: {
         format: 'blogman-d1-reconciliation/v1',
         schema: { sha256: expect.stringMatching(/^[a-f0-9]{64}$/u) },
-        migration_ledger: { state: 'present', row_count: 6 },
+        migration_ledger: { state: 'present', row_count: 7 },
         posts: { count: 0 },
       },
       sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),

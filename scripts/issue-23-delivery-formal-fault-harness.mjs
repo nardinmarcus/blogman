@@ -7,7 +7,7 @@ const STAGES = new Set([
   'd1_identity',
   'clean_start_reset',
   'empty_d1_proof',
-  'migrations_001_006',
+  'migrations_001_007',
   'reconciliation',
   'worker_deploy',
   'version_traffic_verification',

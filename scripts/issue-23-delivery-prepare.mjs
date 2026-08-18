@@ -24,7 +24,7 @@ export const DEFAULT_STAGE_POLICY = Object.freeze([
   Object.freeze({ name: 'd1_identity', timeout_seconds: 120 }),
   Object.freeze({ name: 'clean_start_reset', timeout_seconds: 300 }),
   Object.freeze({ name: 'empty_d1_proof', timeout_seconds: 300 }),
-  Object.freeze({ name: 'migrations_001_006', timeout_seconds: 2100 }),
+  Object.freeze({ name: 'migrations_001_007', timeout_seconds: 2100 }),
   Object.freeze({ name: 'reconciliation', timeout_seconds: 300 }),
   Object.freeze({ name: 'worker_deploy', timeout_seconds: 600 }),
   Object.freeze({ name: 'version_traffic_verification', timeout_seconds: 300 }),
@@ -52,7 +52,7 @@ const EXPECTED_EVIDENCE_EXCLUSIONS = Object.freeze([
   'sql_bodies',
   'private_operator_paths',
 ])
-const EXPECTED_MIGRATIONS = Object.freeze(['001', '002', '003', '004', '005', '006'])
+const EXPECTED_MIGRATIONS = Object.freeze(['001', '002', '003', '004', '005', '006', '007'])
 const EXPECTED_D1_MIGRATION_NAMES = Object.freeze([
   '001_initial_schema',
   '002_add_ai_image_configuration',
@@ -60,6 +60,7 @@ const EXPECTED_D1_MIGRATION_NAMES = Object.freeze([
   '004_complete_historical_text_ai_schema',
   '005_fix_posts_fts_sync',
   '006_add_rollout_safety_controls',
+  '007_seed_rollout_executor',
 ])
 const EXPECTED_RECONCILIATION_FORMAT = 'blogman-d1-reconciliation/v1'
 const CANONICAL_D1_PATHS = Object.freeze({

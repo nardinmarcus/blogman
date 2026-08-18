@@ -10,7 +10,7 @@ export const D1_STAGE_TIMEOUT_MS = Object.freeze({
   d1_identity: 120_000,
   clean_start_reset: 300_000,
   empty_d1_proof: 300_000,
-  migrations_001_006: 2_100_000,
+  migrations_001_007: 2_100_000,
   reconciliation: 300_000,
 })
 
@@ -21,6 +21,7 @@ export const D1_CANONICAL_MIGRATION_NAMES = Object.freeze([
   '004_complete_historical_text_ai_schema',
   '005_fix_posts_fts_sync',
   '006_add_rollout_safety_controls',
+  '007_seed_rollout_executor',
 ])
 
 const D1_CATALOG_NUL = Buffer.from([0])

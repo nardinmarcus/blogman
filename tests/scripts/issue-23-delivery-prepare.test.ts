@@ -159,7 +159,7 @@ function baseConfig() {
       runner: { path: 'scripts/migrations.mjs', sha256: '643594349a3f70d3bf9a7185c6449065cab497c07582cb92aacddb9dbf934c4d' },
       catalog: {
         path: 'db/ledger-migrations',
-        sha256: '9421f735e2fa27b1051b884a16c6d2b0123791e05afc2bb6c02d2bcfac7e846c',
+        sha256: '520454add455cfa27e6f37840e665fb2ec9051a4f0bcd2f8452f9451d057e5b9',
         migrations: [
           { id: '001', path: 'db/ledger-migrations/001_initial_schema.sql', sha256: 'ce80438c559ff16bfc9909761837ea83b053d33c80616bd8477cee8841d7bfd1' },
           { id: '002', path: 'db/ledger-migrations/002_add_ai_image_configuration.sql', sha256: '20abce1feba8dbf376448a359ba7e96dd11ac8458e097a8538cf67db632133af' },
@@ -167,6 +167,7 @@ function baseConfig() {
           { id: '004', path: 'db/ledger-migrations/004_complete_historical_text_ai_schema.sql', sha256: '938e64fa93a4bbbabc8376ce2a02e90ca1d0d6896201f7350612bbd40da2b77a' },
           { id: '005', path: 'db/ledger-migrations/005_fix_posts_fts_sync.sql', sha256: 'f6fde6db01e2fbaa967580ed707cded98f4eb7e36ab47707fc2ffc3d5e710441' },
           { id: '006', path: 'db/ledger-migrations/006_add_rollout_safety_controls.sql', sha256: '8179bc9795619d44b7b01affeb0bb591b95af69c0b4a8399474a8ce4778ac551' },
+          { id: '007', path: 'db/ledger-migrations/007_seed_rollout_executor.sql', sha256: '282038f800f031de9716c07e2566f1a3efcd8ba8013cec9bf4e918a2a660c02d' },
         ],
       },
       historical_data_disposition: {
@@ -2206,7 +2207,7 @@ describe('Issue #23 Delivery Preparation', { timeout: 120_000 }, () => {
       { name: 'd1_identity', timeout_seconds: 120 },
       { name: 'clean_start_reset', timeout_seconds: 300 },
       { name: 'empty_d1_proof', timeout_seconds: 300 },
-      { name: 'migrations_001_006', timeout_seconds: 2100 },
+      { name: 'migrations_001_007', timeout_seconds: 2100 },
       { name: 'reconciliation', timeout_seconds: 300 },
       { name: 'worker_deploy', timeout_seconds: 600 },
       { name: 'version_traffic_verification', timeout_seconds: 300 },

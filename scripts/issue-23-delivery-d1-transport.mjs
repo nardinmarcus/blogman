@@ -74,10 +74,10 @@ const OPERATION_STAGES = Object.freeze({
   d1_identity: 'd1_identity',
   clean_start_reset: 'clean_start_reset',
   empty_d1_proof: 'empty_d1_proof',
-  migration_catalog: 'migrations_001_006',
-  migration_plan: 'migrations_001_006',
-  migration_apply: 'migrations_001_006',
-  migration_verify: 'migrations_001_006',
+  migration_catalog: 'migrations_001_007',
+  migration_plan: 'migrations_001_007',
+  migration_apply: 'migrations_001_007',
+  migration_verify: 'migrations_001_007',
   reconciliation: 'reconciliation',
 })
 const EMPTY_OBJECT_QUERY = `
@@ -328,8 +328,8 @@ function validateConfig(config) {
     && !attemptBound) {
     fail('remote transport requires production evidence')
   }
-  if (!Array.isArray(config.migrations) || config.migrations.length !== 6) {
-    fail('migrations must contain exactly six entries')
+  if (!Array.isArray(config.migrations) || config.migrations.length !== D1_CANONICAL_MIGRATION_NAMES.length) {
+    fail('migrations must contain exactly the canonical migration entries')
   }
   for (const [index, migration] of config.migrations.entries()) {
     assertExactKeys(migration, ['checksum', 'name', 'number'], `migrations[${index}]`)
@@ -793,10 +793,10 @@ const REHEARSAL_D1_STAGE_BY_OPERATION = Object.freeze({
   d1_identity: 'd1_identity',
   clean_start_reset: 'clean_start_reset',
   empty_d1_proof: 'empty_d1_proof',
-  migration_catalog: 'migrations_001_006',
-  migration_plan: 'migrations_001_006',
-  migration_apply: 'migrations_001_006',
-  migration_verify: 'migrations_001_006',
+  migration_catalog: 'migrations_001_007',
+  migration_plan: 'migrations_001_007',
+  migration_apply: 'migrations_001_007',
+  migration_verify: 'migrations_001_007',
   reconciliation: 'reconciliation',
 })
 

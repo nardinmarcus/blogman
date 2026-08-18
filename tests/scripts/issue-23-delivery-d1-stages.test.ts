@@ -31,6 +31,7 @@ const MIGRATIONS = [
   { number: 4, name: '004_complete_historical_text_ai_schema', checksum: '12afd5f8171987b638692a564335165018d198ff8c7e5a706b0738c024c3d2fc' },
   { number: 5, name: '005_fix_posts_fts_sync', checksum: 'f6fde6db01e2fbaa967580ed707cded98f4eb7e36ab47707fc2ffc3d5e710441' },
   { number: 6, name: '006_add_rollout_safety_controls', checksum: '8179bc9795619d44b7b01affeb0bb591b95af69c0b4a8399474a8ce4778ac551' },
+  { number: 7, name: '007_seed_rollout_executor', checksum: '282038f800f031de9716c07e2566f1a3efcd8ba8013cec9bf4e918a2a660c02d' },
 ]
 
 const RECONCILIATION_DIMENSIONS = [
@@ -385,10 +386,10 @@ describe('Issue #23 D1 delivery stages', () => {
       D1_STAGE_TIMEOUT_MS.d1_identity,
       D1_STAGE_TIMEOUT_MS.clean_start_reset,
       D1_STAGE_TIMEOUT_MS.empty_d1_proof,
-      D1_STAGE_TIMEOUT_MS.migrations_001_006,
-      D1_STAGE_TIMEOUT_MS.migrations_001_006,
-      D1_STAGE_TIMEOUT_MS.migrations_001_006,
-      D1_STAGE_TIMEOUT_MS.migrations_001_006,
+      D1_STAGE_TIMEOUT_MS.migrations_001_007,
+      D1_STAGE_TIMEOUT_MS.migrations_001_007,
+      D1_STAGE_TIMEOUT_MS.migrations_001_007,
+      D1_STAGE_TIMEOUT_MS.migrations_001_007,
       D1_STAGE_TIMEOUT_MS.reconciliation,
     ])
     expect(transport.calls[0].request).toMatchObject({
@@ -407,7 +408,7 @@ describe('Issue #23 D1 delivery stages', () => {
       'd1_identity',
       'clean_start_reset',
       'empty_d1_proof',
-      'migrations_001_006',
+      'migrations_001_007',
       'reconciliation',
     ])
     expect(D1_RECONCILIATION_DIMENSIONS).toEqual(RECONCILIATION_DIMENSIONS)
@@ -419,7 +420,7 @@ describe('Issue #23 D1 delivery stages', () => {
         d1_identity: 1,
         clean_start_reset: 1,
         empty_d1_proof: 1,
-        migrations_001_006: 1,
+        migrations_001_007: 1,
         reconciliation: 1,
       },
       failure: null,
@@ -463,14 +464,14 @@ describe('Issue #23 D1 delivery stages', () => {
         d1_identity: 1,
         clean_start_reset: 0,
         empty_d1_proof: 0,
-        migrations_001_006: 0,
+        migrations_001_007: 0,
         reconciliation: 0,
       },
       stage_durations_ms: {
         d1_identity: 0,
         clean_start_reset: 0,
         empty_d1_proof: 0,
-        migrations_001_006: 0,
+        migrations_001_007: 0,
         reconciliation: 0,
       },
       evidence: {
@@ -500,7 +501,7 @@ describe('Issue #23 D1 delivery stages', () => {
         d1_identity: 1,
         clean_start_reset: 0,
         empty_d1_proof: 0,
-        migrations_001_006: 0,
+        migrations_001_007: 0,
         reconciliation: 0,
       },
     })
@@ -544,7 +545,7 @@ describe('Issue #23 D1 delivery stages', () => {
         d1_identity: 1,
         clean_start_reset: 1,
         empty_d1_proof: 0,
-        migrations_001_006: 0,
+        migrations_001_007: 0,
         reconciliation: 0,
       },
     })
@@ -579,7 +580,7 @@ describe('Issue #23 D1 delivery stages', () => {
         d1_identity: 1,
         clean_start_reset: 1,
         empty_d1_proof: 1,
-        migrations_001_006: 0,
+        migrations_001_007: 0,
         reconciliation: 0,
       },
     })
@@ -608,13 +609,13 @@ describe('Issue #23 D1 delivery stages', () => {
 
     expect(result.value).toMatchObject({
       outcome: 'NON_PASS',
-      first_terminal_stage: 'migrations_001_006',
+      first_terminal_stage: 'migrations_001_007',
       failure: { classification: 'empty_only_plan_invalid' },
       stage_counts: {
         d1_identity: 1,
         clean_start_reset: 1,
         empty_d1_proof: 1,
-        migrations_001_006: 1,
+        migrations_001_007: 1,
         reconciliation: 0,
       },
     })
@@ -640,13 +641,13 @@ describe('Issue #23 D1 delivery stages', () => {
 
     expect(result.value).toMatchObject({
       outcome: 'NON_PASS',
-      first_terminal_stage: 'migrations_001_006',
+      first_terminal_stage: 'migrations_001_007',
       failure: { classification: 'migration_contract_invalid' },
       stage_counts: {
         d1_identity: 1,
         clean_start_reset: 1,
         empty_d1_proof: 1,
-        migrations_001_006: 1,
+        migrations_001_007: 1,
         reconciliation: 0,
       },
     })
@@ -667,11 +668,11 @@ describe('Issue #23 D1 delivery stages', () => {
     expect(result.value.outcome).toBe('PASS')
     expect(apply?.request).toMatchObject({
       operation: 'migration_apply',
-      stage: 'migrations_001_006',
+      stage: 'migrations_001_007',
     })
     expect(verify?.request).toMatchObject({
       operation: 'migration_verify',
-      stage: 'migrations_001_006',
+      stage: 'migrations_001_007',
     })
     expect(apply?.request).not.toHaveProperty('candidate_id')
     expect(apply?.request).not.toHaveProperty('migration_runner_path')
@@ -688,13 +689,13 @@ describe('Issue #23 D1 delivery stages', () => {
 
     expect(result.value).toMatchObject({
       outcome: 'NON_PASS',
-      first_terminal_stage: 'migrations_001_006',
+      first_terminal_stage: 'migrations_001_007',
       failure: { classification: 'migration_ledger_invalid' },
       stage_counts: {
         d1_identity: 1,
         clean_start_reset: 1,
         empty_d1_proof: 1,
-        migrations_001_006: 1,
+        migrations_001_007: 1,
         reconciliation: 0,
       },
     })
@@ -720,7 +721,7 @@ describe('Issue #23 D1 delivery stages', () => {
 
     expect(result.value).toMatchObject({
       outcome: 'NON_PASS',
-      first_terminal_stage: 'migrations_001_006',
+      first_terminal_stage: 'migrations_001_007',
       failure: { classification: 'migration_ledger_invalid' },
     })
     expect(transport.calls.map(({ operation }) => operation).at(-1)).toBe('migration_verify')
@@ -749,7 +750,7 @@ describe('Issue #23 D1 delivery stages', () => {
         d1_identity: 1,
         clean_start_reset: 1,
         empty_d1_proof: 1,
-        migrations_001_006: 1,
+        migrations_001_007: 1,
         reconciliation: 1,
       },
     })
@@ -988,8 +989,8 @@ describe('Issue #23 D1 delivery stages', () => {
 
     const result = runD1Stages({ bindings: BINDINGS, transport })
 
-    expect(result.value.stage_durations_ms.migrations_001_006).toBe(expectedDuration)
-    expect(result.value.stage_durations_ms.migrations_001_006).not.toBe(expectedDuration * 2)
+    expect(result.value.stage_durations_ms.migrations_001_007).toBe(expectedDuration)
+    expect(result.value.stage_durations_ms.migrations_001_007).not.toBe(expectedDuration * 2)
   })
 
   it('stops a multi-operation Stage suffix when the actual monotonic Stage deadline expires', () => {
@@ -998,7 +999,7 @@ describe('Issue #23 D1 delivery stages', () => {
     let elapsedMs = 0
     transport.execute = (request: Record<string, unknown>) => {
       const response = successExecute(request)
-      if (request.operation === 'migration_catalog') elapsedMs = D1_STAGE_TIMEOUT_MS.migrations_001_006
+      if (request.operation === 'migration_catalog') elapsedMs = D1_STAGE_TIMEOUT_MS.migrations_001_007
       return response
     }
 
@@ -1006,7 +1007,7 @@ describe('Issue #23 D1 delivery stages', () => {
 
     expect(result.value).toMatchObject({
       outcome: 'TIMEOUT',
-      first_terminal_stage: 'migrations_001_006',
+      first_terminal_stage: 'migrations_001_007',
       failure: { classification: 'timeout' },
     })
     expect(transport.calls.map(({ operation }) => operation)).toEqual([
@@ -1084,7 +1085,7 @@ describe('Issue #23 D1 delivery stages', () => {
         d1_identity: 1,
         clean_start_reset: 0,
         empty_d1_proof: 0,
-        migrations_001_006: 0,
+        migrations_001_007: 0,
         reconciliation: 0,
       },
       stage_durations_ms: { d1_identity: 120_000, clean_start_reset: 0 },
@@ -1159,7 +1160,7 @@ describe('Issue #23 D1 delivery stages', () => {
         d1_identity: 1,
         clean_start_reset: 1,
         empty_d1_proof: 1,
-        migrations_001_006: 1,
+        migrations_001_007: 1,
         reconciliation: 1,
       },
       evidence: {
