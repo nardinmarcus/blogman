@@ -58,6 +58,8 @@ import type {
   SoftDeleteInput,
   VersionComparisonFacts,
 } from './types'
+import { resolveFormalAnchor, revisionSnapshotFromSave, saveRevision } from '@/lib/publish-revision'
+import type { FormalAnchor } from '@/lib/publish-revision/types'
 
 /** Monotonic version facts for one article (article_versions row surface). */
 interface VersionRow {
@@ -420,6 +422,37 @@ export async function save(db: Database, input: SaveArticleInput): Promise<SaveR
       existing: true,
       projectionFailures: [],
     }
+  }
+
+  // B3-02 (issue #34): a formally published article edits NEVER change the
+  // live version. The save is routed into the shared revision surface — every
+  // writer (editor autosave, AI enrichment, external versioned writers) lands
+  // in the SAME active revision; the formal projection stays online until
+  // promotion. A draft article (no formal publication) keeps the normal
+  // monotonic version path below. When the formal_publications surface is
+  // absent (pre-B3-01 / ledger-only DB) there is no formal anchor to route to
+  // and the normal version path is preserved.
+  let formalAnchor: FormalAnchor | null = null
+  try {
+    formalAnchor = await resolveFormalAnchor(db, articleId)
+  } catch {
+    formalAnchor = null
+  }
+  if (formalAnchor) {
+    const routed = await saveRevision(db, {
+      articleId,
+      postRef,
+      expectedVersion,
+      operationId,
+      snapshot: revisionSnapshotFromSave(snapshot),
+      formal: formalAnchor,
+    })
+    if (routed.outcome === 'applied' || routed.outcome === 'replayed') {
+      const result = routed as AppliedVersionResult
+      result.projectionFailures = await runProjections(input.projections, result)
+      return result as SaveResult
+    }
+    return routed as unknown as SaveResult
   }
 
   const serverVersion = (await findLatestVersion(db, articleId))?.version ?? 0

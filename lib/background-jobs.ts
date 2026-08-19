@@ -3,6 +3,7 @@ import { processPost, getAiRuntimeEnv } from '@/lib/ai'
 import { isAutoDescription } from '@/lib/post-utils'
 import { deletePostFromRelatedIndex, syncPostToRelatedIndex } from '@/lib/related-content'
 import { save, type ArticleCommandSnapshot } from '@/lib/article-commands'
+import { findActiveRevision, snapshotContentHash } from '@/lib/publish-revision'
 import type { ArticleIdentitySnapshot } from '@/lib/article-identity'
 import { parsePostTags } from '@/lib/repositories/post-mappers'
 
@@ -168,6 +169,103 @@ async function runProcessPostAiJob(env: BackgroundJobEnv, job: Extract<Backgroun
     .bind(article.post_ref)
     .first<{ deleted_at: number | null }>()
   if (live?.deleted_at != null) return
+
+  // B3-02 (issue #34): a formally published article with an ACTIVE pending
+  // revision is edited through the shared revision surface — the AI writer
+  // anchors to the ACTIVE REVISION (title/body from the revision) and its
+  // revision number is the version token; every writer lands in the same row.
+  // Drafts keep the monotonic article_versions anchor below. On a DB where the
+  // revision/first-publish tables are absent the branch is skipped.
+  let activeRevision: Awaited<ReturnType<typeof findActiveRevision>> = null
+  try {
+    activeRevision = await findActiveRevision(env.DB, article.id)
+  } catch {
+    activeRevision = null
+  }
+  if (activeRevision) {
+    const expectedVersion = activeRevision.revision_number
+    const operationId =
+      job.operationId && job.operationId.trim() !== ''
+        ? job.operationId
+        : `ai:process-post:${article.post_ref}:rev${expectedVersion}`
+
+    let currentTags: string[] = []
+    try {
+      const parsed = JSON.parse(activeRevision.tags ?? '[]')
+      currentTags = Array.isArray(parsed) ? parsed.filter((tag): tag is string => typeof tag === 'string') : []
+    } catch {
+      currentTags = []
+    }
+    const baseSnapshot: ArticleCommandSnapshot = {
+      slug: activeRevision.slug,
+      title: activeRevision.title,
+      content: activeRevision.content,
+      html: activeRevision.html,
+      description: activeRevision.description,
+      category: activeRevision.category,
+      tags: currentTags.length > 0 ? currentTags : null,
+      status: 'published',
+      password: activeRevision.password,
+      is_pinned: activeRevision.is_pinned,
+      is_hidden: activeRevision.is_hidden,
+      cover_image: activeRevision.cover_image,
+      deleted_at: null,
+      published_at: null,
+      updated_at: null,
+    }
+
+    const aiResult = await processPost(
+      baseSnapshot.title,
+      baseSnapshot.content,
+      getAiRuntimeEnv(env),
+      2,
+      env.DB,
+    )
+    if (!aiResult) return
+
+    // Same gap-fill merge policy (never overwrite author-authored metadata),
+    // evaluated against the revision's current facts.
+    const overrides: Partial<ArticleCommandSnapshot> = {}
+    if (!baseSnapshot.category || baseSnapshot.category === '未分类') {
+      overrides.category = aiResult.category
+    }
+    if (currentTags.length === 0 && aiResult.tags.length > 0) {
+      overrides.tags = aiResult.tags
+    }
+    if (!baseSnapshot.description || isAutoDescription(baseSnapshot.description, baseSnapshot.content)) {
+      overrides.description = aiResult.description
+    }
+    if (Object.keys(overrides).length === 0) return
+
+    const snapshot: ArticleCommandSnapshot = { ...baseSnapshot, ...overrides }
+    const result = await save(env.DB, {
+      articleId: article.id,
+      expectedVersion,
+      operationId,
+      snapshot,
+      projections: {
+        afterCommit: async () => {
+          await invalidatePublicContentCache(env)
+          await syncPostToRelatedIndex(env, article.post_ref)
+        },
+      },
+    })
+    if (result.outcome === 'applied' || result.outcome === 'replayed') {
+      console.log(
+        `background-jobs: AI metadata committed into revision for post ${article.post_ref} (rev ${result.version}, ${result.outcome})`,
+      )
+    } else if (result.outcome === 'conflict') {
+      const hash = snapshotContentHash(snapshot)
+      console.warn(
+        `background-jobs: discarding stale AI result for post ${article.post_ref} (expected rev ${expectedVersion}, server rev ${result.serverVersion}, body ${hash === activeRevision.content_sha256 ? 'matches' : 'diverged'})`,
+      )
+    } else {
+      console.warn(
+        `background-jobs: AI metadata not applied into revision for post ${article.post_ref}: ${result.outcome}`,
+      )
+    }
+    return
+  }
 
   // Expected version + stable operation id: prefer the job's recorded values,
   // fall back to the latest version at job start for legacy-shaped messages.

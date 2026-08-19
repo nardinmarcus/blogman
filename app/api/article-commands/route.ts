@@ -422,6 +422,84 @@ export async function GET(req: NextRequest) {
       .first<{ version: number; snapshot_json: string }>()
     if (!latest) return jsonOk({ articleId: article.id, version: null, snapshot: null })
 
+    // B3-02 (issue #34): when the article has an ACTIVE pending revision the
+    // editor must load THAT snapshot and its revision number as the version
+    // token — the live formal projection is deliberately not the editing
+    // surface anymore (editing never changes the live version). Skipped when
+    // the revision table is absent (pre-B3-02 DB).
+    let activeRevision: {
+      revision_id: string
+      base_version: number
+      revision_number: number
+      status: string
+      slug: string
+      title: string
+      content: string
+      html: string
+      description: string | null
+      category: string | null
+      tags: string | null
+      password: string | null
+      is_pinned: number
+      is_hidden: number
+      cover_image: string | null
+    } | null = null
+    try {
+      activeRevision = await db
+        .prepare(
+          `SELECT revision_id, base_version, revision_number, status,
+                  slug, title, content, html, description, category, tags, password,
+                  is_pinned, is_hidden, cover_image
+           FROM publish_revisions WHERE article_id = ? AND status = 'active'
+           ORDER BY id DESC LIMIT 1`,
+        )
+        .bind(article.id)
+        .first<{
+          revision_id: string
+          base_version: number
+          revision_number: number
+          status: string
+          slug: string
+          title: string
+          content: string
+          html: string
+          description: string | null
+          category: string | null
+          tags: string | null
+          password: string | null
+          is_pinned: number
+          is_hidden: number
+          cover_image: string | null
+        }>()
+    } catch {
+      activeRevision = null
+    }
+    if (activeRevision) {
+      return jsonOk({
+        articleId: article.id,
+        version: activeRevision.revision_number,
+        revision: {
+          revisionId: activeRevision.revision_id,
+          baseVersion: activeRevision.base_version,
+          status: activeRevision.status,
+        },
+        snapshot: {
+          slug: activeRevision.slug,
+          title: activeRevision.title,
+          html: activeRevision.html,
+          content: activeRevision.content,
+          description: activeRevision.description ?? '',
+          category: activeRevision.category ?? '',
+          tags: parseTags(activeRevision.tags),
+          coverImage: activeRevision.cover_image ?? '',
+          status: 'published',
+          password: activeRevision.password,
+          isHidden: activeRevision.is_hidden,
+          publishedAt: null,
+        },
+      })
+    }
+
     let record: ArticleIdentitySnapshot | null = null
     try {
       record = JSON.parse(latest.snapshot_json) as ArticleIdentitySnapshot
