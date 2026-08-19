@@ -40,7 +40,11 @@ import {
   upgradeSignal,
   EXTERNAL_WRITE_PROTOCOL,
 } from '@/lib/external-write-api'
-import { createPost, updatePostBySlug } from '@/lib/db'
+import {
+  createPost,
+  updatePostBySlug,
+} from '@/lib/db'
+import { versionedWriteGuard } from '@/lib/rollout-controls'
 import {
   buildContentEnvelopeFields,
   missingContentEnvelopeColumns,
@@ -218,8 +222,11 @@ export async function POST(req: NextRequest) {
     const clientType = resolveClientType(req)
 
     // Ledger-only D1 (no identity tables yet): the kernel can't run — keep the
-    // original compatible write instead of failing closed.
+    // original compatible write instead of failing closed, unless the rollout
+    // has closed the legacy new-write producer.
     if (!(await hasIdentitySchema(db))) {
+      const guard = await versionedWriteGuard(db, { requireProducer: true })
+      if (guard.refused) return jsonError(guard.message!, 409)
       return await legacyCompatCreate(env, ctx, db, payload, clientType)
     }
 
@@ -352,6 +359,8 @@ export async function PATCH(req: NextRequest) {
     const clientType = resolveClientType(req)
 
     if (!(await hasIdentitySchema(db))) {
+      const guard = await versionedWriteGuard(db, { requireProducer: true })
+      if (guard.refused) return jsonError(guard.message!, 409)
       return await legacyCompatUpdate(env, db, payload, clientType)
     }
 

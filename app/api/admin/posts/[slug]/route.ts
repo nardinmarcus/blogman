@@ -11,6 +11,7 @@ import {
 import { enqueueBackgroundJob } from '@/lib/background-jobs'
 import { getRouteContextWithDb, jsonError, jsonOk, parseJsonBody } from '@/lib/server/route-helpers'
 import { rethrowIfDatabaseMigrationRequired, withDatabaseErrorResponse } from '@/lib/database-errors'
+import { versionedWriteGuard } from '@/lib/rollout-controls'
 import type { NextRequest } from 'next/server'
 
 async function checkAuth(req: NextRequest): Promise<boolean> {
@@ -84,6 +85,14 @@ async function updatePostRoute(req: NextRequest, { params }: Ctx) {
         return false
       }
     })()
+    if (!hasVersionedAuthority) {
+      // Ledger-only DB — this is a versionless legacy write. B2-G: once the
+      // rollout closes the legacy producer or enables authority, the direct
+      // `posts` write is refused (management writes go through the kernel).
+      const guard = await versionedWriteGuard(db, { requireProducer: true })
+      if (guard.refused) return jsonError(guard.message!, 409)
+    }
+
     if (hasVersionedAuthority) {
       const lifecycleFields = ['status', 'is_pinned', 'is_hidden', 'password', 'category'] as const
       const blocked = lifecycleFields.filter((field) => field in body)

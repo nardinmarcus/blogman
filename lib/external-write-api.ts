@@ -42,6 +42,7 @@ import {
   normalizePostSlug,
   stripMarkdownFrontmatter,
 } from '@/lib/post-utils'
+import { isAuthorityEnabled } from '@/lib/rollout-controls'
 
 export const EXTERNAL_WRITE_PROTOCOL = 'v1' as const
 export const LEGACY_TELEMETRY_KEY = 'legacy_external_write_telemetry' as const
@@ -91,13 +92,26 @@ export function resolveClientType(req: {
   return 'unknown'
 }
 
-/** True once the operator flips the external-write authority to versioned-only. */
+/**
+ * True once the external-write authority flips to versioned-only.
+ *
+ * Source of truth is the B2-G `rollout_controls.authority` (issue #32); the
+ * legacy `site_settings` flag from B2-08 remains a tolerated backward-compat
+ * signal so pre-switch deployments keep their existing gate until the rollout
+ * control rows exist. Reading a ledger-only D1 (no rollout tables, no identity
+ * tables yet) reports disabled without crashing.
+ */
 export async function isExternalWriteAuthoritySwitched(db: Database): Promise<boolean> {
-  const row = await db
-    .prepare('SELECT value FROM site_settings WHERE key = ?')
-    .bind(AUTHORITY_KEY)
-    .first<{ value: string }>()
-  return row?.value === AUTHORITY_VERSIONED
+  if (await isAuthorityEnabled(db)) return true
+  try {
+    const row = await db
+      .prepare('SELECT value FROM site_settings WHERE key = ?')
+      .bind(AUTHORITY_KEY)
+      .first<{ value: string }>()
+    return row?.value === AUTHORITY_VERSIONED
+  } catch {
+    return false
+  }
 }
 
 /* ------------------------------------------------------------------ */
