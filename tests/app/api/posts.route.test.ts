@@ -9,6 +9,19 @@ const mocks = vi.hoisted(() => ({
   invalidatePublicContentCache: vi.fn(),
   enqueueBackgroundJob: vi.fn(),
   nanoid: vi.fn(() => 'abc123'),
+  missingContentEnvelopeColumns: vi.fn(),
+  buildContentEnvelopeFields: vi.fn(),
+}))
+
+const ENVELOPE_FIELDS = {
+  content_envelope: '{"format":"blogman-content-envelope/v1"}',
+  content_snapshot_sha256: 'a'.repeat(64),
+  source_sync_sha256: 'b'.repeat(64),
+}
+
+vi.mock('@/lib/content-envelope-columns', () => ({
+  missingContentEnvelopeColumns: mocks.missingContentEnvelopeColumns,
+  buildContentEnvelopeFields: mocks.buildContentEnvelopeFields,
 }))
 
 vi.mock('@/lib/db', () => ({
@@ -50,6 +63,8 @@ describe('/api/posts route', () => {
     mocks.ensureAuthenticatedRequest.mockResolvedValue(null)
     mocks.invalidatePublicContentCache.mockResolvedValue(undefined)
     mocks.enqueueBackgroundJob.mockResolvedValue(undefined)
+    mocks.missingContentEnvelopeColumns.mockResolvedValue([])
+    mocks.buildContentEnvelopeFields.mockReturnValue({ ...ENVELOPE_FIELDS })
   })
 
   it('creates a post with normalized payload fields and enqueues follow-up jobs', async () => {
@@ -190,5 +205,53 @@ Clean body.`,
       }),
     )
     expect(await response.json()).toEqual({ success: true, slug: 'old-slug' })
+  })
+
+  it('dual-writes content envelope fields on POST when columns exist', async () => {
+    mocks.parseJsonBody.mockResolvedValue({ title: 'Env', content: '# Body', status: 'published' })
+    mocks.createPost.mockResolvedValue(7)
+
+    const response = await POST({} as never)
+
+    expect(mocks.missingContentEnvelopeColumns).toHaveBeenCalledOnce()
+    expect(mocks.buildContentEnvelopeFields).toHaveBeenCalledWith('# Body')
+    expect(mocks.createPost).toHaveBeenCalledWith(
+      { kind: 'db' },
+      expect.objectContaining({ ...ENVELOPE_FIELDS }),
+    )
+    expect(await response.json()).toEqual(expect.objectContaining({ success: true, id: 7 }))
+  })
+
+  it('rejects POST with a clear DDL hint when envelope columns are missing', async () => {
+    mocks.missingContentEnvelopeColumns.mockResolvedValueOnce([
+      'content_envelope',
+      'content_snapshot_sha256',
+      'source_sync_sha256',
+    ])
+    mocks.parseJsonBody.mockResolvedValue({ title: 'Env', content: '# Body', status: 'published' })
+
+    const response = await POST({} as never)
+
+    expect(response.status).toBe(503)
+    expect(mocks.createPost).not.toHaveBeenCalled()
+    const body = await response.json()
+    expect(JSON.stringify(body)).toContain('apply-content-envelope-ddl.mjs')
+  })
+
+  it('dual-writes envelope fields on PATCH when content is updated', async () => {
+    mocks.parseJsonBody.mockResolvedValue({ current_slug: 's', content: '## 新正文' })
+
+    const response = await PATCH({} as never)
+
+    expect(mocks.missingContentEnvelopeColumns).toHaveBeenCalled()
+    expect(mocks.updatePostBySlug).toHaveBeenCalledWith(
+      { kind: 'db' },
+      's',
+      expect.objectContaining({
+        content: '## 新正文',
+        ...ENVELOPE_FIELDS,
+      }),
+    )
+    expect(await response.json()).toEqual({ success: true, slug: 's' })
   })
 })
