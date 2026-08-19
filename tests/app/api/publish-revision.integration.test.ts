@@ -245,4 +245,95 @@ describe('app/api revision loop — browser autosave never changes live', { time
       await query<Record<string, unknown>>(`SELECT * FROM publish_revisions WHERE article_id = ${article.articleId} AND status = 'active'`),
     ).toHaveLength(0)
   })
+
+  // B3-03 (issue #35): compare / restore / undo through the route.
+  it('compare 通过 route 重验预览版本并返回差异', async () => {
+    const article = await createFormalArticle(fresh('route-cmp-slug'), '线上标题', '线上正文')
+    const compared = await post(RevisionPost, {
+      action: 'compare',
+      articleId: article.articleId,
+      expectedVersion: 1,
+    })
+    expect(compared.outcome).toBe('compared')
+    if (compared.outcome !== 'compared') return
+    expect(compared.verifiedVersion).toBe(1)
+    expect(compared.identical).toBe(true)
+
+    // Stale preview version → conflict, never silently compared.
+    const stale = await post(RevisionPost, {
+      action: 'compare',
+      articleId: article.articleId,
+      expectedVersion: 999,
+    })
+    expect(stale.outcome).toBe('conflict')
+  })
+
+  it('restore 通过 route 恢复为修订与草稿，undo 均不改变线上', async () => {
+    const article = await createFormalArticle(fresh('route-restore-slug'), '第一版标题', '第一版正文')
+
+    // Promote once so a pre-promotion restore point for v1 exists.
+    await post(ArticlePost, {
+      action: 'save',
+      articleId: article.articleId,
+      expectedVersion: 1,
+      operationId: fresh('route-restore-save'),
+      snapshot: {
+        slug: article.slug,
+        title: '第二版标题',
+        content: '第二版正文',
+        html: '<p>第二版正文</p>',
+        description: null,
+        category: null,
+        tags: [],
+        status: 'published',
+        password: null,
+        is_pinned: 0,
+        is_hidden: 0,
+        cover_image: null,
+        deleted_at: null,
+        published_at: 2,
+        updated_at: null,
+      },
+    })
+    const promoted = await post(RevisionPost, { action: 'promote', revisionId: `revision:${article.articleId}:v1` })
+    expect(promoted.outcome).toBe('promoted')
+
+    const state = await revisionGet(`articleId=${article.articleId}`)
+    const rp = state.state.restorePoints[0]
+    expect(rp).toBeTruthy()
+
+    // Restore as revision.
+    const restored = await post(RevisionPost, {
+      action: 'restore',
+      restorePointId: rp.restore_point_id,
+      articleId: article.articleId,
+      expectedVersion: 2,
+      target: 'revision',
+    })
+    expect(restored.outcome).toBe('restored')
+    expect(restored.target).toBe('revision')
+    // Live projection still reads v2 (the promoted body).
+    expect((await livePostRow(article.postRef))?.title).toBe('第二版标题')
+
+    // Undo restores the pending revision away; live untouched.
+    const undone = await post(RevisionPost, {
+      action: 'undo-restore',
+      restoreOperationId: restored.restoreOperationId,
+    })
+    expect(undone.outcome).toBe('undone')
+    expect((await livePostRow(article.postRef))?.title).toBe('第二版标题')
+
+    // Restore as draft → standalone copy, original stays published.
+    const draftRestored = await post(RevisionPost, {
+      action: 'restore',
+      restorePointId: rp.restore_point_id,
+      articleId: article.articleId,
+      expectedVersion: 2,
+      target: 'draft',
+    })
+    expect(draftRestored.outcome).toBe('restored')
+    expect(draftRestored.target).toBe('draft')
+    expect(draftRestored.draftArticleId).toBeTruthy()
+    expect((await livePostRow(article.postRef))?.status).toBe('published')
+  })
 })

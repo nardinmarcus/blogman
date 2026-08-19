@@ -74,6 +74,25 @@ export const PUBLISH_REVISION_DDL_STATEMENTS: string[] = [
   ) STRICT`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_publish_promotions_article
      ON publish_promotions(article_id, promoted_version)`,
+  `CREATE TABLE IF NOT EXISTS publish_restore_ops (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    restore_operation_id TEXT UNIQUE NOT NULL CHECK(length(restore_operation_id) > 0),
+    article_id INTEGER NOT NULL,
+    source_restore_point_id TEXT NOT NULL CHECK(length(source_restore_point_id) > 0),
+    target TEXT NOT NULL CHECK(target IN ('revision', 'draft')),
+    expected_version INTEGER NOT NULL CHECK(expected_version > 0),
+    pre_restore_snapshot_json TEXT NOT NULL,
+    pre_restore_content_sha256 TEXT NOT NULL,
+    revision_id TEXT,
+    draft_article_id INTEGER,
+    post_ref INTEGER,
+    actor TEXT NOT NULL CHECK(length(actor) > 0),
+    status TEXT NOT NULL CHECK(status IN ('active', 'undone')),
+    created_at INTEGER NOT NULL,
+    undone_at INTEGER
+  ) STRICT`,
+  `CREATE INDEX IF NOT EXISTS idx_publish_restore_ops_article
+     ON publish_restore_ops(article_id)`,
 ]
 
 /** Idempotently create the revision-loop tables if absent. Never drops/alters. */

@@ -30,7 +30,7 @@ import {
 } from '@/lib/server/route-helpers'
 import { migrationRequiredResponse } from '@/lib/database-errors'
 import { invalidatePublicContentCache } from '@/lib/cache'
-import { discardRevision, promoteRevision, readRevisionState } from '@/lib/publish-revision'
+import { discardRevision, promoteRevision, readRevisionState, compareRevision, restoreRevisionSnapshot, saveRestorePoint, undoRestoreOperation } from '@/lib/publish-revision'
 import { getSiteUrl } from '@/lib/site-config'
 import { normalizePostSlug } from '@/lib/post-utils'
 import { getPostBySlug } from '@/lib/db'
@@ -87,6 +87,66 @@ export async function POST(req: NextRequest) {
         articleId,
         actor,
       })
+      return jsonOk(result)
+    }
+
+    // B3-03 (issue #35): compare / restore / undo / preflight snapshot.
+    if (action === 'compare') {
+      const rawArticleId = Number(payload.articleId)
+      const articleId = Number.isInteger(rawArticleId) && rawArticleId > 0 ? rawArticleId : undefined
+      const expectedVersion = Number(payload.expectedVersion)
+      const revisionId = typeof payload.revisionId === 'string' ? payload.revisionId.trim() : undefined
+      if (!articleId || !Number.isInteger(expectedVersion)) {
+        return jsonError('compare: articleId 与 expectedVersion 必填', 400)
+      }
+      const result = await compareRevision(db, {
+        articleId,
+        expectedVersion,
+        revisionId: revisionId || undefined,
+      })
+      return jsonOk(result)
+    }
+
+    if (action === 'restore') {
+      const restorePointId = typeof payload.restorePointId === 'string' ? payload.restorePointId.trim() : ''
+      const rawArticleId = Number(payload.articleId)
+      const articleId = Number.isInteger(rawArticleId) && rawArticleId > 0 ? rawArticleId : undefined
+      const rawVersion = Number(payload.expectedVersion)
+      const expectedVersion = Number.isInteger(rawVersion) && rawVersion > 0 ? rawVersion : undefined
+      const target = payload.target === 'draft' ? 'draft' : payload.target === 'revision' ? 'revision' : undefined
+      const actor = typeof payload.actor === 'string' && payload.actor.trim() ? payload.actor.trim() : 'admin'
+      if (!restorePointId || !target) {
+        return jsonError('restore: restorePointId 与 target(revision|draft) 必填', 400)
+      }
+      const result = await restoreRevisionSnapshot(db, {
+        restorePointId,
+        articleId,
+        expectedVersion,
+        target,
+        actor,
+      })
+      return jsonOk(result)
+    }
+
+    if (action === 'undo-restore') {
+      const restoreOperationId = typeof payload.restoreOperationId === 'string' ? payload.restoreOperationId.trim() : ''
+      const actor = typeof payload.actor === 'string' && payload.actor.trim() ? payload.actor.trim() : 'admin'
+      if (!restoreOperationId) {
+        return jsonError('undo-restore: restoreOperationId 必填', 400)
+      }
+      const result = await undoRestoreOperation(db, { restoreOperationId, actor })
+      return jsonOk(result)
+    }
+
+    if (action === 'save-restore-point') {
+      const rawArticleId = Number(payload.articleId)
+      const articleId = Number.isInteger(rawArticleId) && rawArticleId > 0 ? rawArticleId : undefined
+      const reason = typeof payload.reason === 'string' && payload.reason.trim() ? payload.reason.trim() : 'manual'
+      const actor = typeof payload.actor === 'string' && payload.actor.trim() ? payload.actor.trim() : 'admin'
+      if (!articleId) {
+        return jsonError('save-restore-point: articleId 必填', 400)
+      }
+      const result = await saveRestorePoint(db, { articleId, actor, reason })
       return jsonOk(result)
     }
 
