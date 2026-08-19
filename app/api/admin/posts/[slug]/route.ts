@@ -70,13 +70,22 @@ async function updatePostRoute(req: NextRequest, { params }: Ctx) {
     // least one version snapshot), the old UNVERSIONED Inline content write is
     // rejected — it would overwrite `posts` without a version fact. Metadata
     // toggles (category / is_pinned / is_hidden / status / password) still work.
+    // When the identity shadow tables are absent (e.g. a ledger-only test DB
+    // that never ran the article-identity DDL), the article has not switched to
+    // versioned authority — keep the legacy compatible path instead of 503'ing.
     if ('title' in body || 'html' in body || 'content' in body) {
-      const identity = await getByPostRef(db, post.id)
-      if (identity) {
-        const versions = await listVersions(db, identity.id)
-        if (versions.length > 0) {
-          return jsonError('这篇文章已启用版本化写入，请使用版本化保存入口', 409)
+      let hasVersionedAuthority = false
+      try {
+        const identity = await getByPostRef(db, post.id)
+        if (identity) {
+          const versions = await listVersions(db, identity.id)
+          hasVersionedAuthority = versions.length > 0
         }
+      } catch {
+        hasVersionedAuthority = false
+      }
+      if (hasVersionedAuthority) {
+        return jsonError('这篇文章已启用版本化写入，请使用版本化保存入口', 409)
       }
     }
 
