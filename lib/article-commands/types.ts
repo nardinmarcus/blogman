@@ -128,3 +128,92 @@ export type PublishTempResult =
   | AppliedVersionResult
   | VersionConflictResult
   | { outcome: 'status-conflict'; articleId: number; postRef: number; expectedVersion: number; serverVersion: number; currentStatus: string | null }
+
+/* ------------------------------------------------------------------ */
+/* B2-06 — article-level (non-body) commands (issue #29).              */
+/*                                                                    */
+/* Status toggles (publish/unpublish) already run through the         */
+/* versioned `publishTemp` command. The remaining admin-list actions   */
+/* (pin / hide / password / category / soft-delete / restore) are      */
+/* INDEPENDENT commands: they carry the same article identity +        */
+/* expected version + operation id preconditions but never write a     */
+/* new `article_versions` row — a non-revision article-level action    */
+/* must NOT advance the body version.                                  */
+/* ------------------------------------------------------------------ */
+
+/** Applied / replayed / conflict — the evidence surface of one article-level command. */
+export interface ArticleLevelAppliedResult {
+  outcome: 'applied'
+  articleId: number
+  postRef: number
+  /** The version the action was anchored to (unchanged by the action). */
+  version: number
+  operationId: string
+  existing: false
+  projectionFailures: string[]
+}
+
+export interface ArticleLevelReplayedResult {
+  outcome: 'replayed'
+  articleId: number
+  postRef: number
+  version: number
+  operationId: string
+  existing: true
+  projectionFailures: string[]
+}
+
+export type ArticleLevelResult =
+  | ArticleLevelAppliedResult
+  | ArticleLevelReplayedResult
+  | VersionConflictResult
+
+/** Shared precondition envelope for every independent article-level command. */
+export interface ArticleLevelInput {
+  articleId: number
+  /** Body version the client last saw; the action is refused on mismatch. */
+  expectedVersion: number
+  /** Idempotency key — replays return `existing: true` and never re-write. */
+  operationId: string
+}
+
+export interface SetPinnedInput extends ArticleLevelInput {
+  is_pinned: 0 | 1
+}
+
+export interface SetHiddenInput extends ArticleLevelInput {
+  is_hidden: 0 | 1
+}
+
+export interface SetPasswordInput extends ArticleLevelInput {
+  password: string | null
+}
+
+export interface SetCategoryInput extends ArticleLevelInput {
+  category: string | null
+}
+
+/** Soft delete keeps the first deletion timestamp and the posts status. */
+export type SoftDeleteInput = ArticleLevelInput
+/** Restore returns a deleted post to draft with NO deletion timestamp. */
+export type RestoreInput = ArticleLevelInput
+
+/** One article of a batch category write; each item keeps its own version precondition + operation id. */
+export interface BatchSetCategoryItem extends ArticleLevelInput {
+  category: string | null
+}
+
+export interface BatchSetCategoryInput {
+  items: BatchSetCategoryItem[]
+}
+
+export type BatchSetCategoryItemResult =
+  | ArticleLevelAppliedResult
+  | ArticleLevelReplayedResult
+  | { outcome: 'not-found'; articleId: number; expectedVersion: number }
+  | VersionConflictResult
+
+/** Batch classification never silently overwrites a conflicting article — every item reports its own outcome. */
+export interface BatchSetCategoryResult {
+  items: BatchSetCategoryItemResult[]
+}

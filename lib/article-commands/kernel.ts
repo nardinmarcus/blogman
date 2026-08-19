@@ -38,12 +38,24 @@ import type {
   AppliedVersionResult,
   ArticleCommandProjections,
   ArticleCommandSnapshot,
+  ArticleLevelInput,
+  ArticleLevelResult,
+  BatchSetCategoryInput,
+  BatchSetCategoryItem,
+  BatchSetCategoryItemResult,
+  BatchSetCategoryResult,
   CreateArticleInput,
   CreateResult,
   PublishTempInput,
   PublishTempResult,
   SaveArticleInput,
   SaveResult,
+  SetCategoryInput,
+  SetHiddenInput,
+  SetPasswordInput,
+  SetPinnedInput,
+  RestoreInput,
+  SoftDeleteInput,
   VersionComparisonFacts,
 } from './types'
 
@@ -718,3 +730,262 @@ export async function publishTemp(
   result.projectionFailures = await runProjections(input.projections, result)
   return result
 }
+
+/* ------------------------------------------------------------------ */
+/* article-level (non-body) commands — B2-06 (issue #29)               */
+/*                                                                    */
+/* These commands are the admin list's explicit write protocol. They   */
+/* share one driver: resolve the article, anchor on the current body   */
+/* version (expected version precondition), then apply a SINGLE        */
+/* guarded `posts` update — the guard re-checks the version inside the */
+/* UPDATE so a racing save/publish between pre-read and write still    */
+/* aborts atomically. No `article_versions` row is ever inserted, so   */
+/* the body version never advances on a non-revision action.           */
+/*                                                                    */
+/* Idempotency: an operation whose target value is already the live    */
+/* value returns `replayed` (existing: true) without writing; repeated */
+/* operation ids for the same target are therefore safe and no-op.     */
+/* ------------------------------------------------------------------ */
+
+interface ArticleLevelSpec {
+  input: ArticleLevelInput
+  label: string
+  /** `SELECT <expr> AS current FROM posts WHERE id = ?` — the idempotency signal. */
+  readSql: string
+  isUnchanged: (current: unknown) => boolean
+  /** SET fragment; binds with `value` first, then updated_at is appended. */
+  setSql: string
+  value: unknown
+  /** Category count bookkeeping runs only after a confirmed applied write. */
+  afterUpdate?: (db: Database, postRef: number, prev: unknown) => Promise<void>
+}
+
+async function runArticleLevelCommand(
+  db: Database,
+  spec: ArticleLevelSpec,
+): Promise<ArticleLevelResult> {
+  const { input, label } = spec
+  if (!input.articleId || !input.operationId || input.operationId.trim() === '') {
+    throw new Error(`${label}: articleId and operationId are required`)
+  }
+
+  const article = await findArticleById(db, input.articleId)
+  if (!article) throw new Error(`${label}: article ${input.articleId} not found`)
+  const postRef = article.post_ref
+
+  const latest = await findLatestVersion(db, input.articleId)
+  const serverVersion = latest?.version ?? 0
+  if (serverVersion !== input.expectedVersion) {
+    return {
+      outcome: 'conflict',
+      articleId: input.articleId,
+      postRef,
+      expectedVersion: input.expectedVersion,
+      serverVersion,
+      facts: comparisonFacts(latest),
+    }
+  }
+
+  const row = await db
+    .prepare(spec.readSql)
+    .bind(postRef)
+    .first<{ current: unknown }>()
+  const current = row?.current ?? null
+  if (spec.isUnchanged(current)) {
+    return {
+      outcome: 'replayed' as const,
+      articleId: input.articleId,
+      postRef,
+      version: serverVersion,
+      operationId: input.operationId,
+      existing: true,
+      projectionFailures: [],
+    }
+  }
+
+  const guard = `
+    UPDATE posts SET ${spec.setSql}, updated_at = strftime('%s', 'now')
+    WHERE id = ?
+      AND EXISTS (SELECT 1 FROM article_versions WHERE article_id = ? AND version = ?)`
+  try {
+    // Only include the value binding when the SET fragment actually uses a placeholder.
+    const binds = spec.setSql.includes('?') ? [spec.value] : []
+    await db
+      .prepare(guard)
+      .bind(...binds, postRef, input.articleId, input.expectedVersion)
+      .run()
+  } catch (error) {
+    // Guard refused the write (version raced forward) or a constraint fired.
+    const fresh = await findLatestVersion(db, input.articleId)
+    if ((fresh?.version ?? 0) !== serverVersion) {
+      return {
+        outcome: 'conflict',
+        articleId: input.articleId,
+        postRef,
+        expectedVersion: input.expectedVersion,
+        serverVersion: fresh?.version ?? 0,
+        facts: comparisonFacts(fresh),
+      }
+    }
+    throw new Error(
+      `${label}: unexpected write failure for article ${input.articleId} operation '${input.operationId}': ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+
+  // Verify the guarded update actually landed; a lost race is a conflict, never a silent overwrite.
+  const after = await db
+    .prepare(spec.readSql)
+    .bind(postRef)
+    .first<{ current: unknown }>()
+  if (spec.isUnchanged(after?.current ?? null)) {
+    await spec.afterUpdate?.(db, postRef, current)
+    return {
+      outcome: 'applied' as const,
+      articleId: input.articleId,
+      postRef,
+      version: serverVersion,
+      operationId: input.operationId,
+      existing: false,
+      projectionFailures: [],
+    }
+  }
+
+  const fresh = await findLatestVersion(db, input.articleId)
+  return {
+    outcome: 'conflict',
+    articleId: input.articleId,
+    postRef,
+    expectedVersion: input.expectedVersion,
+    serverVersion: fresh?.version ?? 0,
+    facts: comparisonFacts(fresh),
+  }
+}
+
+/** Pin / unpin — independent, never advances the body version. */
+export async function setPinned(db: Database, input: SetPinnedInput): Promise<ArticleLevelResult> {
+  const is_pinned = input.is_pinned === 1 ? 1 : 0
+  return runArticleLevelCommand(db, {
+    input,
+    label: 'setPinned',
+    readSql: 'SELECT is_pinned AS current FROM posts WHERE id = ?',
+    isUnchanged: (current) => current === is_pinned,
+    setSql: 'is_pinned = ?',
+    value: is_pinned,
+  })
+}
+
+/** Visibility (unlisted/link-only) — independent, never advances the body version. */
+export async function setHidden(db: Database, input: SetHiddenInput): Promise<ArticleLevelResult> {
+  const is_hidden = input.is_hidden === 1 ? 1 : 0
+  return runArticleLevelCommand(db, {
+    input,
+    label: 'setHidden',
+    readSql: 'SELECT is_hidden AS current FROM posts WHERE id = ?',
+    isUnchanged: (current) => current === is_hidden,
+    setSql: 'is_hidden = ?',
+    value: is_hidden,
+  })
+}
+
+/** Access password — independent, never advances the body version. */
+export async function setPassword(db: Database, input: SetPasswordInput): Promise<ArticleLevelResult> {
+  const password = typeof input.password === 'string' && input.password.trim() ? input.password.trim() : null
+  return runArticleLevelCommand(db, {
+    input,
+    label: 'setPassword',
+    readSql: 'SELECT password AS current FROM posts WHERE id = ?',
+    // NULL and '' are the same "no password" state.
+    isUnchanged: (current) => (current ?? null) === password,
+    setSql: 'password = ?',
+    value: password,
+  })
+}
+
+/** Category rename/move — independent, never advances the body version; keeps `categories.post_count`. */
+export async function setCategory(db: Database, input: SetCategoryInput): Promise<ArticleLevelResult> {
+  const category = typeof input.category === 'string' && input.category.trim() ? input.category.trim() : null
+  return runArticleLevelCommand(db, {
+    input,
+    label: 'setCategory',
+    readSql: 'SELECT category AS current FROM posts WHERE id = ?',
+    isUnchanged: (current) => (current ?? null) === category,
+    setSql: 'category = ?',
+    value: category,
+    afterUpdate: async (dbi, postRef, prev) => {
+      const oldCategory = (prev as string | null) ?? null
+      if (oldCategory !== category) {
+        if (oldCategory) {
+          await dbi
+            .prepare('UPDATE categories SET post_count = post_count - 1 WHERE name = ?')
+            .bind(oldCategory)
+            .run()
+        }
+        if (category) {
+          await dbi
+            .prepare('UPDATE categories SET post_count = post_count + 1 WHERE name = ?')
+            .bind(category)
+            .run()
+        }
+      }
+    },
+  })
+}
+
+/** Soft delete — keeps the first deletion timestamp and the post status; independent, never advances the body version. */
+export async function softDelete(db: Database, input: SoftDeleteInput): Promise<ArticleLevelResult> {
+  return runArticleLevelCommand(db, {
+    input,
+    label: 'softDelete',
+    readSql: 'SELECT deleted_at AS current FROM posts WHERE id = ?',
+    isUnchanged: (current) => current !== null,
+    setSql: "deleted_at = COALESCE(deleted_at, strftime('%s', 'now'))",
+    value: null,
+  })
+}
+
+/** Restore — returns a soft-deleted post to draft with NO deletion timestamp; independent, never advances the body version. */
+export async function restore(db: Database, input: RestoreInput): Promise<ArticleLevelResult> {
+  return runArticleLevelCommand(db, {
+    input,
+    label: 'restore',
+    readSql: "SELECT (deleted_at IS NULL AND status = 'draft') AS current FROM posts WHERE id = ?",
+    isUnchanged: (current) => current === 1,
+    setSql: "status = 'draft', deleted_at = NULL",
+    value: null,
+  })
+}
+
+/** One batch item; a missing article is reported, never silently skipped. */
+async function applyBatchCategoryItem(
+  db: Database,
+  item: BatchSetCategoryItem,
+): Promise<BatchSetCategoryItemResult> {
+  let article: ArticleRow | null = null
+  try {
+    article = await findArticleById(db, item.articleId)
+  } catch {
+    article = null
+  }
+  if (!article) {
+    return { outcome: 'not-found', articleId: item.articleId, expectedVersion: item.expectedVersion }
+  }
+  return setCategory(db, {
+    articleId: item.articleId,
+    expectedVersion: item.expectedVersion,
+    operationId: item.operationId,
+    category: item.category,
+  })
+}
+
+/**
+ * Batch classification — every article keeps its own version precondition and
+ * operation id; each item reports applied / replayed / conflict / not-found.
+ * A conflicting article is NEVER silently overwritten and never blocks the
+ * other items in the batch.
+ */
+export async function batchSetCategory(db: Database, input: BatchSetCategoryInput): Promise<BatchSetCategoryResult> {
+  const items = Array.isArray(input.items) ? input.items : []
+  const results = await Promise.all(items.map((item) => applyBatchCategoryItem(db, item)))
+  return { items: results }
+}
+

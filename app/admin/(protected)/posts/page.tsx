@@ -1,12 +1,20 @@
 import { getPosts, searchPosts, getCategories } from '@/lib/db'
+import { listIdentityFacts } from '@/lib/repositories/articles'
+import type { PostWithTags } from '@/lib/db'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
-import Link from 'next/link'
 import { FileText, PenLine } from 'lucide-react'
-import { PostRow } from './PostRow'
+import Link from 'next/link'
+import { PostListClient } from './PostListClient'
 import { FilterBar } from './FilterBar'
 
 export const metadata = { title: '文章管理' }
+
+/** The list read model — a post augmented with its article identity + current version (B2-06). */
+export interface AdminListPost extends PostWithTags {
+  articleId: number | null
+  version: number | null
+}
 
 export default async function AdminPostsPage({
   searchParams,
@@ -31,6 +39,21 @@ export default async function AdminPostsPage({
       console.error('Posts fetch error:', error)
     }
   }
+
+  // B2-06 — merge the versioned-authority facts (article id + current version) so
+  // every list write action can carry expected version + operation id. Falls back
+  // to null facts (legacy direct writes) on a ledger-only DB that lacks identity tables.
+  let versionFacts: Map<number, { articleId: number; version: number }> = new Map()
+  if (env?.DB) {
+    const facts = await listIdentityFacts(env.DB, sourcePosts.map((p) => p.id))
+    versionFacts = new Map(
+      [...facts.entries()].map(([postRef, fact]) => [postRef, { articleId: fact.articleId, version: fact.version }]),
+    )
+  }
+  const posts: AdminListPost[] = sourcePosts.map((p) => {
+    const fact = versionFacts.get(p.id)
+    return { ...p, articleId: fact?.articleId ?? null, version: fact?.version ?? null }
+  })
 
   // 从 categories 表获取正式分类列表（用于 PostRow 下拉菜单）
   let dbCategories: string[] = []
@@ -58,24 +81,24 @@ export default async function AdminPostsPage({
     pinned: sourcePosts.filter((p) => p.is_pinned === 1).length,
   }
 
-  let posts = sourcePosts
+  let filteredPosts = posts
   if (status && status !== 'all') {
     switch (status) {
       case 'encrypted':
-        posts = posts.filter((p) => !!p.password)
+        filteredPosts = filteredPosts.filter((p) => !!p.password)
         break
       case 'unlisted':
-        posts = posts.filter((p) => p.is_hidden === 1)
+        filteredPosts = filteredPosts.filter((p) => p.is_hidden === 1)
         break
       case 'pinned':
-        posts = posts.filter((p) => p.is_pinned === 1)
+        filteredPosts = filteredPosts.filter((p) => p.is_pinned === 1)
         break
       default:
-        posts = posts.filter((p) => p.status === status)
+        filteredPosts = filteredPosts.filter((p) => p.status === status)
     }
   }
   if (category && category !== 'all') {
-    posts = posts.filter((p) => p.category === category)
+    filteredPosts = filteredPosts.filter((p) => p.category === category)
   }
 
   return (
@@ -86,10 +109,10 @@ export default async function AdminPostsPage({
         categories={postCategories}
         initialQuery={q}
         counts={stats}
-        resultCount={posts.length}
+        resultCount={filteredPosts.length}
       />
 
-      {posts.length === 0 ? (
+      {filteredPosts.length === 0 ? (
         <div className="bg-[var(--editor-panel)] rounded-2xl border border-[var(--editor-line)] p-16 text-center">
           <div className="max-w-xs mx-auto">
             <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-[var(--editor-soft)] flex items-center justify-center text-[var(--stone-gray)]">
@@ -113,38 +136,7 @@ export default async function AdminPostsPage({
           </div>
         </div>
       ) : (
-        <div className="overflow-visible rounded-xl border border-[var(--editor-line)] bg-[var(--editor-panel)]">
-          {/* 表头 */}
-          <div className="hidden rounded-t-xl border-b border-[var(--editor-line)] bg-[var(--editor-soft)] px-5 py-3.5 md:grid md:grid-cols-[50px_1fr_120px_90px_150px] gap-3">
-            <span className="text-xs font-semibold text-[var(--editor-muted)] uppercase tracking-wide text-center">
-              状态
-            </span>
-            <span className="text-xs font-semibold text-[var(--editor-muted)] uppercase tracking-wide">
-              标题
-            </span>
-            <span className="text-xs font-semibold text-[var(--editor-muted)] uppercase tracking-wide">
-              分类
-            </span>
-            <span className="text-xs font-semibold text-[var(--editor-muted)] uppercase tracking-wide text-center">
-              阅读
-            </span>
-            <span className="text-xs font-semibold text-[var(--editor-muted)] uppercase tracking-wide text-right">
-              操作
-            </span>
-          </div>
-
-          {/* 文章列表 */}
-          <div className="divide-y divide-[var(--editor-line)]">
-            {posts.map((post, index) => (
-              <PostRow
-                key={post.slug}
-                post={post}
-                categories={dbCategories}
-                preferMenuUp={posts.length > 1 && index >= posts.length - 2}
-              />
-            ))}
-          </div>
-        </div>
+        <PostListClient posts={posts} categories={dbCategories} />
       )}
     </div>
   )

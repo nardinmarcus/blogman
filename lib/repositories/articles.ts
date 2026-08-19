@@ -37,6 +37,57 @@ export interface AppendVersionInput {
   publishedAt: number | null
 }
 
+/** B2-06 — identity + current-version facts for a set of post refs (admin list read model). */
+export interface PostVersionFact {
+  postRef: number
+  articleId: number
+  /** Current body version (0 when an identity exists but no version snapshot is present). */
+  version: number
+  identitySlug: string | null
+}
+
+/**
+ * Bulk identity lookup for the admin list. Never throws on a ledger-only DB
+ * (missing identity tables) — the list keeps serving posts without version
+ * facts instead of 503'ing existing CRUD.
+ */
+export async function listIdentityFacts(
+  db: Database,
+  postRefs: number[],
+): Promise<Map<number, PostVersionFact>> {
+  const map = new Map<number, PostVersionFact>()
+  const ids = postRefs.filter((ref) => Number.isInteger(ref) && ref > 0)
+  if (ids.length === 0) return map
+  const placeholders = ids.map(() => '?').join(',')
+  try {
+    const { results } = await db
+      .prepare(
+        `SELECT a.post_ref, a.id AS article_id, a.slug AS identity_slug,
+                (SELECT MAX(version) FROM article_versions v WHERE v.article_id = a.id) AS version
+         FROM articles a
+         WHERE a.post_ref IN (${placeholders})`,
+      )
+      .bind(...ids)
+      .all<{
+        post_ref: number
+        article_id: number
+        identity_slug: string | null
+        version: number | null
+      }>()
+    for (const row of results) {
+      map.set(row.post_ref, {
+        postRef: row.post_ref,
+        articleId: row.article_id,
+        version: row.version ?? 0,
+        identitySlug: row.identity_slug,
+      })
+    }
+  } catch {
+    // identity tables absent — no versioned authority exists on this DB
+  }
+  return map
+}
+
 /** Canonical ordered projection of an article identity. */
 export async function getByPostRef(db: Database, postRef: number): Promise<ArticleIdentity | null> {
   const row = await db

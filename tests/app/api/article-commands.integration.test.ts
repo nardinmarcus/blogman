@@ -229,4 +229,49 @@ describe('app/api/article-commands — real kernel + D1', { timeout: 600_000 }, 
     // D1 still holds exactly [1, 2] — the failed projection added nothing.
     expect((await versions(articleId)).map((r) => r.version)).toEqual([1, 2])
   })
+
+  it('article-level command (setPinned) applies through the route WITHOUT advancing the body version (B2-06)', async () => {
+    const slug = fresh('pin-slug')
+    const creationId = fresh('pin-create')
+    mocks.parseJsonBody.mockResolvedValue({
+      action: 'create',
+      creationId,
+      snapshot: snapshot(slug, '置顶前'),
+    })
+    const created = (await (await POST({} as never)).json()) as { articleId: number; version: number }
+    expect(created.version).toBe(1)
+    const articleId = created.articleId
+
+    mocks.parseJsonBody.mockResolvedValue({
+      action: 'setPinned',
+      slug,
+      articleId,
+      expectedVersion: 1,
+      operationId: 'op-pin-d1',
+      is_pinned: 1,
+    })
+    const outcome = (await (await POST({} as never)).json()) as { outcome: string; version: number }
+    expect(outcome.outcome).toBe('applied')
+    expect(outcome.version).toBe(1) // pinned, but still version 1
+
+    // D1: the pin never advanced the version counter.
+    expect((await versions(articleId)).map((r) => r.version)).toEqual([1])
+    const row = (await query(`SELECT is_pinned FROM posts WHERE slug = '${slug}'`))[0] as { is_pinned: number }
+    expect(row.is_pinned).toBe(1)
+
+    // A stale article-level request (旧请求) is rejected as a conflict.
+    mocks.parseJsonBody.mockResolvedValue({
+      action: 'setHidden',
+      slug,
+      articleId,
+      expectedVersion: 0, // stale
+      operationId: 'op-hide-stale',
+      is_hidden: 1,
+    })
+    const conflict = (await (await POST({} as never)).json()) as { outcome: string; serverVersion: number }
+    expect(conflict.outcome).toBe('conflict')
+    expect(conflict.serverVersion).toBe(1)
+    const hiddenRow = (await query(`SELECT is_hidden FROM posts WHERE slug = '${slug}'`))[0] as { is_hidden: number }
+    expect(hiddenRow.is_hidden).toBe(0)
+  })
 })
