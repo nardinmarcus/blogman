@@ -18,6 +18,7 @@
 import type { NextRequest } from 'next/server'
 import type { ArticleCommandProjections, ArticleCommandSnapshot } from '@/lib/article-commands'
 import { create, publishTemp, save, setPinned, setHidden, setPassword, setCategory, softDelete, restore } from '@/lib/article-commands'
+import { ensureArticleLifecycleTables, relive, unpublish } from '@/lib/article-lifecycle'
 import {
   ensureAuthenticatedRequest,
   getRouteContextWithDb,
@@ -34,6 +35,7 @@ import { normalizePostSlug } from '@/lib/post-utils'
 import { nanoid } from 'nanoid'
 import { getPostBySlug, updatePost } from '@/lib/db'
 import { getByPostRef, listVersions } from '@/lib/repositories/articles'
+import { getSiteUrl } from '@/lib/site-config'
 import type { ArticleIdentitySnapshot } from '@/lib/article-identity'
 
 type RouteEnv = RouteDbEnv
@@ -201,6 +203,8 @@ async function dispatchArticleLevelAction(
     else if (action === 'setCategory') await legacyWrite({ category: typeof payload.category === 'string' && payload.category.trim() ? payload.category.trim() : null })
     else if (action === 'softDelete') await legacyWrite({ status: 'deleted' })
     else if (action === 'restore') await legacyWrite({ status: 'draft' })
+    else if (action === 'unpublish') await legacyWrite({ status: 'draft' })
+    else if (action === 'relive') await legacyWrite({ status: 'published' })
     else return jsonError(`${action}: 未知动作`, 400)
     await runProjectorsFor(projections, { postRef: post.id, operationId, existing: false }, failures)
     return jsonOk({ outcome: 'legacy-applied', articleId, postRef: post.id, version: null, operationId, existing: false, projectionFailures: failures })
@@ -208,6 +212,16 @@ async function dispatchArticleLevelAction(
 
   if (authority.articleId !== articleId) {
     return jsonError(`${action}: articleId 与 slug 不匹配 (期望 ${authority.articleId})`, 409)
+  }
+
+  // B3-05 (issue #37): lifecycle commands write the immutable lifecycle ledger.
+  // Ensure the table idempotently (no-op when already present; never drops/alters).
+  if (action === 'unpublish' || action === 'relive') {
+    try {
+      await ensureArticleLifecycleTables(db)
+    } catch {
+      // A ledger-only DB without DDL channel access fails closed on the write.
+    }
   }
 
   const input = { articleId, expectedVersion, operationId }
@@ -230,6 +244,16 @@ async function dispatchArticleLevelAction(
       break
     case 'restore':
       result = (await restore(db, input)) as never
+      break
+    case 'unpublish':
+      result = (await unpublish(db, { ...input })) as never
+      break
+    case 'relive':
+      result = (await relive(db, {
+        ...input,
+        content: payload.content === 'revision' ? 'revision' : 'formal',
+        siteUrl: (env.NEXT_PUBLIC_SITE_URL?.trim() || getSiteUrl()).replace(/\/+$/, ''),
+      })) as never
       break
     default:
       return jsonError(`${action}: 未知动作`, 400)
@@ -351,7 +375,7 @@ export async function POST(req: NextRequest) {
       return jsonOk(await attachFacts(db, result))
     }
 
-    if (action === 'setPinned' || action === 'setHidden' || action === 'setPassword' || action === 'setCategory' || action === 'softDelete' || action === 'restore') {
+    if (action === 'setPinned' || action === 'setHidden' || action === 'setPassword' || action === 'setCategory' || action === 'softDelete' || action === 'restore' || action === 'unpublish' || action === 'relive') {
       return dispatchArticleLevelAction({
         action,
         slug: typeof payload.slug === 'string' ? payload.slug : '',
