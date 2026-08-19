@@ -28,6 +28,7 @@ import {
 } from '@/lib/server/route-helpers'
 import { migrationRequiredResponse } from '@/lib/database-errors'
 import { invalidatePublicContentCache } from '@/lib/cache'
+import { versionedWriteGuard } from '@/lib/rollout-controls'
 import { enqueueBackgroundJob, aiProcessPostOperationId } from '@/lib/background-jobs'
 import { normalizePostSlug } from '@/lib/post-utils'
 import { nanoid } from 'nanoid'
@@ -190,6 +191,10 @@ async function dispatchArticleLevelAction(
   const authority = await versionedAuthority(db, post.id)
   if (!authority) {
     // Ledger-only DB — legacy compatible direct write, no version conditions exist.
+    // B2-G: once the rollout closes the legacy producer or enables authority,
+    // the versionless management write is refused outright.
+    const guard = await versionedWriteGuard(db, { requireProducer: true })
+    if (guard.refused) return jsonError(guard.message!, 409)
     if (action === 'setPinned') await legacyWrite({ is_pinned: payload.is_pinned === 1 ? 1 : 0 })
     else if (action === 'setHidden') await legacyWrite({ is_hidden: payload.is_hidden === 1 ? 1 : 0 })
     else if (action === 'setPassword') await legacyWrite({ password: typeof payload.password === 'string' && payload.password.trim() ? payload.password.trim() : null })
