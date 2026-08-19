@@ -10,6 +10,19 @@ import type {
   StatsRow,
 } from '@/lib/repositories/types'
 
+/**
+ * B3-02 (issue #34): an attempted in-place update of a formally published
+ * article's live row. The revision loop owns edits to formal articles — the
+ * legacy direct `posts` write is refused (编辑不改变线上版本 / 拒绝旧式原地更新).
+ */
+export class FormalArticleInPlaceUpdateError extends Error {
+  readonly code = 'FORMAL_ARTICLE_IN_PLACE_UPDATE'
+  constructor(articleId: number, detail: string) {
+    super(`正式文章不能原地更新（article ${articleId}）：${detail}。请通过修订流程编辑并在发布页面确认上线。`)
+    this.name = 'FormalArticleInPlaceUpdateError'
+  }
+}
+
 // 获取文章列表（默认只返回已发布文章）
 export async function getPosts(
   db: Database,
@@ -196,11 +209,65 @@ type PostUpdateFields = {
   source_sync_sha256: string | null
 }
 
+/** Content-bearing fields that would alter the live article (edited via revision). */
+const FORMAL_CONTENT_FIELDS = [
+  'slug',
+  'title',
+  'content',
+  'html',
+  'description',
+  'category',
+  'tags',
+  'cover_image',
+  'password',
+  'status',
+] as const
+
+/**
+ * B3-02 — refuse an in-place update of a formally published article's live
+ * content. Public reads keep reading the formal projection; the only way to
+ * change a formal article is the revision loop (edit → promote). The guard is
+ * a belt on top of the route-level rejection: even a stray direct `posts`
+ * UPDATE bypassing the routes cannot silently overwrite the live version.
+ */
+async function assertNotFormalInPlaceUpdate(
+  db: Database,
+  id: number,
+  data: Partial<PostUpdateFields>,
+): Promise<void> {
+  const touchesContent = FORMAL_CONTENT_FIELDS.some((field) => data[field] !== undefined)
+  if (!touchesContent) return
+  let formal: { article_id: number } | null = null
+  try {
+    formal = await db
+      .prepare(
+        `SELECT article_id FROM formal_publications
+         WHERE article_id = (SELECT id FROM articles WHERE post_ref = ?)`,
+      )
+      .bind(id)
+      .first<{ article_id: number }>()
+  } catch {
+    // Missing surface (ledger-only DB without the articles / first-publish
+    // tables): there is no formal article to protect here — keep the original
+    // compatible write (no 503), exactly like the save router's compat path.
+    formal = null
+  }
+  if (formal) {
+    throw new FormalArticleInPlaceUpdateError(formal.article_id, '内容必须通过修订流程编辑')
+  }
+}
+
+/**
+ * Update an existing post (legacy direct write). Refuses content edits to
+ * formally published articles (issue #34).
+ */
 export async function updatePost(
   db: Database,
   id: number,
   data: Partial<PostUpdateFields>,
 ): Promise<void> {
+  await assertNotFormalInPlaceUpdate(db, id, data)
+
   let oldCategory: string | null = null
   if (data.category !== undefined) {
     const post = await db

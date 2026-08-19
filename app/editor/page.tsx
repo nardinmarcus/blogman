@@ -72,6 +72,78 @@ export default async function EditorPage({
           initialData.articleId = identity.id
           initialData.version = latest?.version ?? null
         }
+        // B3-02 (issue #34): when a pending revision is ACTIVE the editor edits
+        // THAT snapshot (never the live formal projection) and its revision number
+        // is the version token; the live article stays online until promotion.
+        // Skipped when the revision table is absent (pre-B3-02 DB).
+        let activeRevision: {
+          revision_id: string
+          base_version: number
+          revision_number: number
+          slug: string
+          title: string
+          content: string
+          html: string
+          description: string | null
+          category: string | null
+          tags: string | null
+          password: string | null
+          is_pinned: number
+          is_hidden: number
+          cover_image: string | null
+        } | null = null
+        try {
+          activeRevision = await env.DB
+            .prepare(
+              `SELECT revision_id, base_version, revision_number, slug, title, content,
+                      html, description, category, tags, password, is_pinned, is_hidden, cover_image
+               FROM publish_revisions WHERE article_id = ? AND status = 'active'
+               ORDER BY id DESC LIMIT 1`,
+            )
+            .bind(identity?.id ?? 0)
+            .first<{
+              revision_id: string
+              base_version: number
+              revision_number: number
+              slug: string
+              title: string
+              content: string
+              html: string
+              description: string | null
+              category: string | null
+              tags: string | null
+              password: string | null
+              is_pinned: number
+              is_hidden: number
+              cover_image: string | null
+            }>()
+        } catch {
+          activeRevision = null
+        }
+        if (activeRevision) {
+          let tags: string[] = []
+          try {
+            const parsed = JSON.parse(activeRevision.tags ?? '[]')
+            tags = Array.isArray(parsed) ? parsed.filter((tag): tag is string => typeof tag === 'string') : []
+          } catch {
+            tags = []
+          }
+          initialData = {
+            slug: activeRevision.slug,
+            title: activeRevision.title,
+            html: activeRevision.html,
+            category: activeRevision.category ?? undefined,
+            status: 'published',
+            password: activeRevision.password,
+            is_hidden: activeRevision.is_hidden,
+            tags,
+            description: activeRevision.description,
+            cover_image: activeRevision.cover_image,
+            published_at: null,
+            articleId: identity?.id ?? null,
+            version: activeRevision.revision_number,
+          }
+        }
       }
     }
   }
