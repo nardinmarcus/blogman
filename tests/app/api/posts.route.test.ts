@@ -23,6 +23,10 @@ const mocks = vi.hoisted(() => ({
   dispatchExternalWrite: vi.fn(),
   recordLegacyWrite: vi.fn(),
   resolveArticleBySlug: vi.fn(),
+  createPost: vi.fn(),
+  updatePostBySlug: vi.fn(),
+  missingContentEnvelopeColumns: vi.fn(),
+  buildContentEnvelopeFields: vi.fn(),
 }))
 
 vi.mock('@/lib/server/route-helpers', () => ({
@@ -35,6 +39,18 @@ vi.mock('@/lib/server/route-helpers', () => ({
 
 vi.mock('@/lib/cache', () => ({ invalidatePublicContentCache: mocks.invalidatePublicContentCache }))
 vi.mock('@/lib/background-jobs', () => ({ enqueueBackgroundJob: mocks.enqueueBackgroundJob }))
+
+vi.mock('@/lib/db', () => ({
+  createPost: mocks.createPost,
+  updatePostBySlug: mocks.updatePostBySlug,
+}))
+
+vi.mock('@/lib/content-envelope-columns', () => ({
+  missingContentEnvelopeColumns: mocks.missingContentEnvelopeColumns,
+  buildContentEnvelopeFields: mocks.buildContentEnvelopeFields,
+}))
+
+vi.mock('nanoid', () => ({ nanoid: () => 'abc123' }))
 
 vi.mock('@/lib/external-write-api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/external-write-api')>()
@@ -52,11 +68,15 @@ vi.mock('@/lib/external-write-api', async (importOriginal) => {
 
 import { PATCH, POST } from '@/app/api/posts/route'
 
-/** Fake D1 that satisfies the route's schema probe + fact attachment. */
-function fakeDb() {
+/** Fake D1 that satisfies the route's schema probe + fact attachment + compat CRUD. */
+function fakeDb(identity = true) {
   const stmt = {
-    all: async () => ({ results: [{ name: 'articles' }, { name: 'article_versions' }] }),
+    all: async () =>
+      identity
+        ? { results: [{ name: 'articles' }, { name: 'article_versions' }] }
+        : { results: [] },
     first: async () => ({ slug: 'persisted-slug', published_at: 1700000000 }),
+    run: async () => ({ meta: { last_row_id: 1 } }),
     bind: () => stmt,
   }
   return { prepare: () => stmt }
@@ -99,6 +119,14 @@ beforeEach(() => {
   mocks.updateLegacyDraft.mockResolvedValue({ result: APPLIED, snapshot: { slug: 'persisted-slug' } })
   mocks.dispatchExternalWrite.mockResolvedValue(CREATED)
   mocks.recordLegacyWrite.mockResolvedValue(undefined)
+  mocks.createPost.mockResolvedValue(42)
+  mocks.updatePostBySlug.mockResolvedValue(undefined)
+  mocks.missingContentEnvelopeColumns.mockResolvedValue([])
+  mocks.buildContentEnvelopeFields.mockReturnValue({
+    content_envelope: '{"format":"blogman-content-envelope/v1"}',
+    content_snapshot_sha256: 'a'.repeat(64),
+    source_sync_sha256: 'b'.repeat(64),
+  })
 })
 
 function headers(extra: Record<string, string> = {}): Headers {
@@ -270,31 +298,52 @@ describe('PATCH /api/posts — legacy update (draft-only through the kernel)', (
   })
 })
 
-describe('POST/PATCH /api/posts — kernel schema guard', () => {
-  it('fails closed with a DDL hint when the identity tables are absent', async () => {
-    const stmt = {
-      all: async () => ({ results: [] }), // no identity tables
-      first: async () => null,
-      bind: () => stmt,
-    }
+describe('POST/PATCH /api/posts — ledger-only D1 compat (no identity tables)', () => {
+  it('falls back to the original direct create (no 503) and surfaces the upgrade signal', async () => {
     mocks.getRouteContextWithDb.mockResolvedValue({
       ok: true,
       env: {},
-      db: { prepare: () => stmt },
+      db: fakeDb(false), // articles/article_versions absent
       ctx: { waitUntil: vi.fn() },
     })
-    mocks.parseJsonBody.mockResolvedValue({ title: 'T', content: 'C' })
+    mocks.parseJsonBody.mockResolvedValue({ title: '原协议创建', content: '正文', status: 'draft' })
+
     const response = await POST({ headers } as never)
-    expect(response.status).toBe(503)
-    expect(JSON.stringify(await response.json())).toContain('apply-article-identity-ddl.mjs')
-    expect(mocks.createLegacyDraft).not.toHaveBeenCalled()
+    const body = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(mocks.createPost).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ slug: expect.stringMatching(/^\d{4}-\d{2}-\d{2}-abc123$/) }))
+    expect(body.success).toBe(true)
+    expect(body.status).toBe('draft')
+    expect(body.legacy).toBe(true)
+    expect(body.upgrade).toMatchObject({ protocol: 'v1', required: false, endpoint: '/api/posts' })
+    expect(mocks.recordLegacyWrite).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ operation: 'create' }))
   })
 
-  it('rejects unauthenticated writes before any kernel call', async () => {
+  it('falls back to the original direct update (no 503) with telemetry', async () => {
+    mocks.getRouteContextWithDb.mockResolvedValue({
+      ok: true,
+      env: {},
+      db: fakeDb(false),
+      ctx: { waitUntil: vi.fn() },
+    })
+    mocks.parseJsonBody.mockResolvedValue({ current_slug: 's', title: '原协议更新' })
+
+    const response = await PATCH({ headers } as never)
+    const body = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(mocks.updatePostBySlug).toHaveBeenCalled()
+    expect(body.success).toBe(true)
+    expect(body.legacy).toBe(true)
+    expect(mocks.recordLegacyWrite).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ operation: 'update' }))
+  })
+
+  it('still rejects unauthenticated writes before any write', async () => {
     mocks.ensureAuthenticatedRequest.mockResolvedValueOnce(Response.json({ error: 'Unauthorized' }, { status: 401 }))
     mocks.parseJsonBody.mockResolvedValue({ title: 'T', content: 'C' })
     const response = await POST({ headers } as never)
     expect(response.status).toBe(401)
-    expect(mocks.createLegacyDraft).not.toHaveBeenCalled()
+    expect(mocks.createPost).not.toHaveBeenCalled()
   })
 })
