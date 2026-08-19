@@ -237,13 +237,21 @@ async function assertNotFormalInPlaceUpdate(
 ): Promise<void> {
   const touchesContent = FORMAL_CONTENT_FIELDS.some((field) => data[field] !== undefined)
   if (!touchesContent) return
-  const formal = await db
-    .prepare(
-      `SELECT article_id FROM formal_publications
-       WHERE article_id = (SELECT id FROM articles WHERE post_ref = ?)`,
-    )
-    .bind(id)
-    .first<{ article_id: number }>()
+  let formal: { article_id: number } | null = null
+  try {
+    formal = await db
+      .prepare(
+        `SELECT article_id FROM formal_publications
+         WHERE article_id = (SELECT id FROM articles WHERE post_ref = ?)`,
+      )
+      .bind(id)
+      .first<{ article_id: number }>()
+  } catch {
+    // Missing surface (ledger-only DB without the articles / first-publish
+    // tables): there is no formal article to protect here — keep the original
+    // compatible write (no 503), exactly like the save router's compat path.
+    formal = null
+  }
   if (formal) {
     throw new FormalArticleInPlaceUpdateError(formal.article_id, '内容必须通过修订流程编辑')
   }
