@@ -36,6 +36,7 @@ import type { Database } from '@/lib/repositories/schema'
 import { contentSnapshotHash, parse } from '@/lib/content-envelope'
 import { buildInitialSnapshot, snapshotJson, type PostAuthorityRow } from '@/lib/article-identity'
 import { FIRST_PUBLISH_DEFAULT_SITE_URL } from '@/lib/first-publish'
+import { isOwnHistorical, isSlugOwnedByOther, promoteAddressStatements, reserveCandidate } from '@/lib/slug-address'
 import type {
   DiscardResult,
   FormalAnchor,
@@ -356,6 +357,27 @@ export async function saveRevision(
       }
     }
 
+    // B3-04: reserve the pending slug as a candidate address before the
+    // revision exists. A slug already occupied by another article — or this
+    // article's own current/historical address — blocks the save up front.
+    const candidateReserved = await reserveCandidate(db, {
+      articleId,
+      currentSlug: formal.slug,
+      candidateSlug: snapshot.slug,
+    })
+    if (candidateReserved.outcome === 'conflict') {
+      return {
+        outcome: 'conflict',
+        articleId,
+        postRef,
+        expectedVersion,
+        serverVersion: formal.version,
+        revision: true,
+        revisionId: revisionIdFor(articleId, formal.version),
+        reason: 'slug-conflict',
+      }
+    }
+
     const revisionId = revisionIdFor(articleId, formal.version)
     const now = unixNow()
     try {
@@ -488,6 +510,26 @@ export async function saveRevision(
       revision: true,
       revisionId: active.revision_id,
       baseVersion: active.base_version,
+    }
+  }
+
+  // B3-04: same candidate reservation for an advancing revision (the author
+  // may retype the slug while the revision is active).
+  const candidateReserved = await reserveCandidate(db, {
+    articleId,
+    currentSlug: formal.slug,
+    candidateSlug: snapshot.slug,
+  })
+  if (candidateReserved.outcome === 'conflict') {
+    return {
+      outcome: 'conflict',
+      articleId,
+      postRef,
+      expectedVersion,
+      serverVersion: active.revision_number,
+      revision: true,
+      revisionId: active.revision_id,
+      reason: 'slug-conflict',
     }
   }
 
@@ -792,6 +834,18 @@ async function promoteById(
         promoteOperationId,
         promotionId,
       ),
+    // (7) B3-04: rotate the slug-address registry INSIDE the same transaction
+    // (guarded by our own promoted version fact): old live slug → historical,
+    // promoted candidate slug → current. Atomic with the go-live, so a failed
+    // promotion leaves zero address changes.
+    ...promoteAddressStatements(db, {
+      articleId,
+      oldSlug: formal.slug,
+      newSlug: revision.slug,
+      promotedVersion,
+      operationId: promoteOperationId,
+      now,
+    }),
   ]
 
   try {
@@ -921,6 +975,14 @@ export async function promoteRevision(db: Database, input: PromoteInput): Promis
     .bind(revision.slug, article.post_ref)
     .first<{ id: number }>()
   if (rivalFormal || rivalPublished) failures.push('slug-conflict')
+  // B3-04: address registry exclusivity — a promoted slug must not be occupied
+  // by ANOTHER article as its current / candidate / historical address, and an
+  // article must not revert to one of its own permanently-reserved historical
+  // addresses (that would create a redirect cycle).
+  if (revision.slug !== formal.slug) {
+    if (await isSlugOwnedByOther(db, revision.slug, articleId)) failures.push('slug-conflict')
+    if (await isOwnHistorical(db, revision.slug, articleId)) failures.push('slug-revert-conflict')
+  }
   if (failures.length > 0) return { outcome: 'blocked', articleId, reason: 'promotion blockers failed', failures }
 
   return promoteById(db, {

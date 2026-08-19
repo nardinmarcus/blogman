@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto'
 import { bootstrapState, createDatabase, query } from '@/tests/lib/article-commands/helpers'
 import { ensureFirstPublishTables } from '@/lib/first-publish/ddl'
 import { ensurePublishRevisionTables } from '@/lib/publish-revision/ddl'
+import { ensureSlugAddressTables } from '@/lib/slug-address'
 import { create } from '@/lib/article-commands'
 import { confirmPublish, preparePublish } from '@/lib/first-publish'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands/types'
@@ -30,11 +31,12 @@ export function sha256(body: string): string {
   return createHash('sha256').update(body, 'utf8').digest('hex')
 }
 
-/** Boot the identity + first-publish + revision schema on the shared D1. */
+/** Boot the identity + first-publish + revision + slug-address schema. */
 export async function bootstrapRevisionState(stateDir: string): Promise<void> {
   await bootstrapState(stateDir)
   await ensureFirstPublishTables(createDatabase())
   await ensurePublishRevisionTables(createDatabase())
+  await ensureSlugAddressTables(createDatabase())
 }
 
 function snapshotFor(slug: string, title: string, content: string): ArticleCommandSnapshot {

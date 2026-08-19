@@ -1,7 +1,7 @@
 import { getPostBySlug, incrementViewCount, isPubliclyAccessiblePost, isSearchIndexablePost } from '@/lib/db'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { verifyPassword } from '@/lib/password'
-import { notFound } from 'next/navigation'
+import { notFound, permanentRedirect } from 'next/navigation'
 import Link from 'next/link'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
@@ -12,6 +12,7 @@ import { CopyArticleLink } from '@/components/CopyArticleLink'
 import { TwitterEmbedsEnhancer } from '@/components/TwitterEmbedsEnhancer'
 import { ArticleOutline } from '@/components/ArticleOutline'
 import { getSiteHeaderData } from '@/lib/site'
+import { resolveArticleAddress } from '@/lib/slug-address'
 import { getRelatedPosts } from '@/lib/related-content'
 import { getByPostRef, listVersions } from '@/lib/repositories/articles'
 import { getPublicContentCacheNamespace } from '@/lib/cache'
@@ -105,6 +106,18 @@ export default async function PostPage({
   }
   if (!env?.DB) notFound()
   const db = env!.DB
+
+  // B3-04: a historical address permanently single-hops (301) to the article's
+  // current address. The registry resolves straight to the CURRENT slug, so a
+  // slug renamed several times never chains — always one hop.
+  try {
+    const resolved = await resolveArticleAddress(db, slug)
+    if (resolved?.redirect) {
+      permanentRedirect(`/${resolved.currentSlug}`)
+    }
+  } catch (error) {
+    rethrowIfDatabaseMigrationRequired(error)
+  }
 
   const post = await getPostBySlug(db, slug, getPublicContentCacheNamespace(env)).catch((error) => {
     rethrowIfDatabaseMigrationRequired(error)
