@@ -9,12 +9,19 @@ const mocks = vi.hoisted(() => ({
   enqueueBackgroundJob: vi.fn(),
   getRouteContextWithDb: vi.fn(),
   parseJsonBody: vi.fn(),
+  getByPostRef: vi.fn(),
+  listVersions: vi.fn(),
 }))
 
 vi.mock('@/lib/db', () => ({
   deletePost: mocks.deletePost,
   getPostBySlug: mocks.getPostBySlug,
   updatePost: mocks.updatePost,
+}))
+
+vi.mock('@/lib/repositories/articles', () => ({
+  getByPostRef: mocks.getByPostRef,
+  listVersions: mocks.listVersions,
 }))
 
 vi.mock('@/lib/admin-auth', () => ({
@@ -61,6 +68,9 @@ describe('/api/admin/posts/[slug] route', () => {
     })
     mocks.invalidatePublicContentCache.mockRejectedValue(new Error('cache down'))
     mocks.enqueueBackgroundJob.mockResolvedValue(undefined)
+    // Default: post has no versioned authority -> legacy writes still allowed.
+    mocks.getByPostRef.mockResolvedValue(null)
+    mocks.listVersions.mockResolvedValue([])
   })
 
   it('updates a post, falls back description, and tolerates cache invalidation failures', async () => {
@@ -124,6 +134,51 @@ Clean body.`,
         description: 'Admin route summary.',
       }),
     )
+  })
+
+  it('rejects an unversioned Inline content write once the post is under versioned authority; online content unchanged', async () => {
+    // B2-05: the post has an article identity with >=1 version -> old unversioned
+    // Inline write (title/html/content) is rejected.
+    mocks.getByPostRef.mockResolvedValue({ id: 1, post_ref: 7, slug: 'old-slug', draft_ref: null, source_page_identity: null, created_at: 1 })
+    mocks.listVersions.mockResolvedValue([{ id: 10, version: 2 } as never])
+
+    const response = await PUT(
+      { cookies: { get: vi.fn(() => ({ value: 'token' })) } } as never,
+      { params: Promise.resolve({ slug: 'old-slug' }) },
+    )
+    const body = await response.json()
+
+    expect(response.status).toBe(409)
+    expect(body.error).toMatch(/版本化/)
+    // The overwrite was never applied -> online content unchanged.
+    expect(mocks.updatePost).not.toHaveBeenCalled()
+  })
+
+  it('still allows metadata-only toggles (category/status/pin) on a versioned post', async () => {
+    mocks.getByPostRef.mockResolvedValue({ id: 1, post_ref: 7, slug: 'old-slug', draft_ref: null, source_page_identity: null, created_at: 1 })
+    mocks.listVersions.mockResolvedValue([{ id: 10, version: 2 } as never])
+    mocks.parseJsonBody.mockResolvedValue({ category: '新分类' })
+
+    const response = await PUT(
+      { cookies: { get: vi.fn(() => ({ value: 'token' })) } } as never,
+      { params: Promise.resolve({ slug: 'old-slug' }) },
+    )
+    const body = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(mocks.updatePost).toHaveBeenCalled()
+    expect(body).toEqual({ success: true, slug: 'old-slug' })
+  })
+
+  it('rejects unauthenticated writes before any authority check', async () => {
+    mocks.isAdminAuthenticated.mockResolvedValueOnce(false)
+    const response = await PUT(
+      { cookies: { get: vi.fn(() => ({ value: 'token' })) } } as never,
+      { params: Promise.resolve({ slug: 'old-slug' }) },
+    )
+    expect(response.status).toBe(401)
+    expect(mocks.updatePost).not.toHaveBeenCalled()
+    expect(mocks.getByPostRef).not.toHaveBeenCalled()
   })
 
   it('does not clear description when updating metadata without content', async () => {

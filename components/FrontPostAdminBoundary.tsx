@@ -15,6 +15,13 @@ interface FrontPostAdminBoundaryProps {
   viewCount?: number
   content?: string
   children: ReactNode
+  /** B2-05 versioned-authority identity + latest server version. */
+  articleId?: number | null
+  version?: number | null
+  status?: 'draft' | 'published'
+  description?: string | null
+  tags?: string[] | null
+  isHidden?: number
 }
 
 export function FrontPostAdminBoundary({
@@ -28,6 +35,12 @@ export function FrontPostAdminBoundary({
   viewCount,
   content,
   children,
+  articleId,
+  version,
+  status,
+  description,
+  tags,
+  isHidden,
 }: FrontPostAdminBoundaryProps) {
   const { authenticated } = useAdminSession()
   const [editing, setEditing] = useState(false)
@@ -62,6 +75,12 @@ export function FrontPostAdminBoundary({
           viewCount={viewCount}
           content={content}
           onExitReading={() => setEditing(false)}
+          articleId={articleId}
+          version={version}
+          status={status}
+          description={description}
+          tags={tags}
+          isHidden={isHidden}
         />
       </section>
     )

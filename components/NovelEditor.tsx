@@ -68,13 +68,14 @@ import { getSiteDisplayUrl } from '@/lib/site-config'
 import { resizeTextareaHeight, useAutoResizeTextarea } from '@/lib/textarea-autosize'
 import {
   EditorSaveCoordinator,
-  type CommandTransport,
   type CoordinatorState,
   type EditorSnapshotContent,
   type EditorSnapshot,
-  type LocalDraftRecord,
-  type LocalDraftStore,
 } from '@/lib/editor-save-coordinator'
+import {
+  createCommandTransport,
+  createLocalDraftStore,
+} from '@/lib/editor-command-transport'
 
 type SaveFeedback =
   | { type: 'success' | 'error'; message: string; slug?: string }
@@ -125,60 +126,6 @@ function mapPublishTarget(
       return { status: 'published', password: null, isHidden: 1 }
     default:
       return { status: 'published', password: null, isHidden: 0 }
-  }
-}
-
-function createLocalDraftStore(): LocalDraftStore {
-  const ns = (key: string) => `blogman:${key}`
-  return {
-    load(key) {
-      try {
-        const raw = window.localStorage.getItem(ns(key))
-        return raw ? (JSON.parse(raw) as LocalDraftRecord) : null
-      } catch {
-        return null
-      }
-    },
-    save(key, record) {
-      try {
-        window.localStorage.setItem(ns(key), JSON.stringify(record))
-      } catch { /* storage full / blocked — ignore */ }
-    },
-    remove(key) {
-      try {
-        window.localStorage.removeItem(ns(key))
-      } catch { /* ignore */ }
-    },
-  }
-}
-
-function createCommandTransport(): CommandTransport {
-  async function post(action: string, payload: Record<string, unknown>): Promise<unknown> {
-    const res = await fetch('/api/article-commands', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, ...payload }),
-    })
-    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
-    if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : '保存失败')
-    return data
-  }
-  return {
-    create({ creationId, snapshot }) {
-      return post('create', { creationId, snapshot }) as ReturnType<CommandTransport['create']>
-    },
-    save(payload) {
-      return post('save', payload) as ReturnType<CommandTransport['save']>
-    },
-    publishTemp(payload) {
-      return post('publishTemp', payload) as ReturnType<CommandTransport['publishTemp']>
-    },
-    async getServerSnapshot({ articleId }) {
-      const res = await fetch(`/api/article-commands?articleId=${encodeURIComponent(String(articleId))}`)
-      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
-      if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : '读取失败')
-      return data as never
-    },
   }
 }
 

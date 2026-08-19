@@ -194,4 +194,39 @@ describe('app/api/article-commands — real kernel + D1', { timeout: 600_000 }, 
     expect(got.version).toBe(2)
     expect(got.snapshot.status).toBe('published')
   })
+
+  it('cache/index projection failure never changes the core save result (只读投影失败回滚不影响版本事实)', async () => {
+    const slug = fresh('cacheslug')
+    const creationId = fresh('cachecreate')
+    mocks.parseJsonBody.mockResolvedValue({
+      action: 'create',
+      creationId,
+      snapshot: snapshot(slug, '缓存失败前'),
+    })
+    const created = (await (await POST({} as never)).json()) as { articleId: number; version: number }
+    const articleId = created.articleId
+    expect(created.version).toBe(1)
+
+    // The out-of-transaction cache invalidation blows up — but the version
+    // fact must still land: core result is applied and the failure is recorded.
+    mocks.invalidatePublicContentCache.mockRejectedValueOnce(new Error('kv unavailable'))
+    mocks.parseJsonBody.mockResolvedValue({
+      action: 'save',
+      articleId,
+      expectedVersion: 1,
+      operationId: 'op-cache-1',
+      snapshot: snapshot(slug, '缓存失败后'),
+    })
+    const applied = (await (await POST({} as never)).json()) as {
+      outcome: string
+      version: number
+      projectionFailures?: string[]
+    }
+    expect(applied.outcome).toBe('applied')
+    expect(applied.version).toBe(2)
+    expect(applied.projectionFailures).toEqual(expect.arrayContaining([expect.stringContaining('kv unavailable')]))
+
+    // D1 still holds exactly [1, 2] — the failed projection added nothing.
+    expect((await versions(articleId)).map((r) => r.version)).toEqual([1, 2])
+  })
 })
