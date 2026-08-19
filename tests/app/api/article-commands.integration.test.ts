@@ -36,7 +36,11 @@ vi.mock('@/lib/server/route-helpers', () => ({
 }))
 
 vi.mock('@/lib/cache', () => ({ invalidatePublicContentCache: mocks.invalidatePublicContentCache }))
-vi.mock('@/lib/background-jobs', () => ({ enqueueBackgroundJob: mocks.enqueueBackgroundJob }))
+vi.mock('@/lib/background-jobs', () => ({
+  enqueueBackgroundJob: mocks.enqueueBackgroundJob,
+  aiProcessPostOperationId: (postRef: number, version: number) =>
+    `ai:process-post:${postRef}:v${version}`,
+}))
 
 import { GET, POST } from '@/app/api/article-commands/route'
 
