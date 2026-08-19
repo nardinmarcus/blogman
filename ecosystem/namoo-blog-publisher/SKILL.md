@@ -127,19 +127,69 @@ curl -s -X POST "https://your-domain.com/api/uploads" \
 
 默认用 `draft`。
 
-### 8. 发布
+### 8. 发布（B2-08 versioned 协议）
+
+必须使用 `protocol=v1`：携带稳定的 `creationId`（同一篇内容/同一意图重试时保持不变）、完整快照，并显式使用 `action`。创建永远是草稿；发布走 `publishTemp`。
 
 ```bash
+# 8.1 创建（幂等：同一 creationId 重试不会复制文章）
+curl -s -X POST "https://your-domain.com/api/posts" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "x-blogman-client: agent" \
+  -d '{
+    "protocol": "v1",
+    "action": "create",
+    "creationId": "agent:article-2026-04-16-title",
+    "clientType": "agent",
+    "snapshot": {
+      "title": "The Title",
+      "content": "Full processed Markdown content",
+      "description": "Optional summary from frontmatter",
+      "category": "selected-category-or-empty",
+      "status": "draft"
+    }
+  }'
+
+# 返回：{ "protocol": "v1", "outcome": "created" | "existing", "articleId": 7, "version": 1, "slug": "..." }
+# 重试（网络断开后）必须复用同一个 creationId → 服务器返回 existing 而不是再建一篇。
+
+# 8.2 发布（仅当用户选择 published）
+# 使用 8.1 返回的 articleId 与 version：
 curl -s -X POST "https://your-domain.com/api/posts" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "title": "The Title",
-    "content": "Full processed Markdown content",
-    "description": "Optional summary from frontmatter",
-    "category": "selected-category-or-empty",
-    "status": "draft"
+    "protocol": "v1",
+    "action": "publishTemp",
+    "articleId": 7,
+    "expectedVersion": 1,
+    "currentStatus": "draft",
+    "operationId": "agent:pub:article-2026-04-16-title:1",
+    "status": "published"
   }'
+
+# 8.3 更新已有文章（按版本安全更新：expectedVersion + operationId + 完整快照）
+curl -s -X POST "https://your-domain.com/api/posts" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "protocol": "v1",
+    "action": "save",
+    "articleId": 7,
+    "expectedVersion": 2,
+    "operationId": "agent:save:article-2026-04-16-title:<content-hash>",
+    "snapshot": {
+      "title": "The Title (v3)",
+      "content": "Updated Markdown",
+      "category": "selected-category-or-empty",
+      "description": "updated summary",
+      "status": "draft"
+    }
+  }'
+```
+
+升级信号：如果响应里出现 `{ "legacy": true, "upgrade": { "protocol": "v1", "required": true } }`，说明服务器只接受 legacy 草稿写入：本次已按草稿创建/更新，但请提示用户升级服务器（versioned 协议）后再继续。`required: false` 表示服务器已在过渡期：legacy 写入仍被接受且只落草稿。
 ```
 
 ### 9. 输出结果

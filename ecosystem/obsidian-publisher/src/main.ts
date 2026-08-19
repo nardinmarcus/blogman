@@ -30,12 +30,25 @@ interface PostResult {
   success: boolean;
   slug?: string;
   id?: number;
+  articleId?: number;
+  version?: number;
+  legacy?: boolean;
   error?: string;
 }
+
+/** Per-note versioned write state (drives update-by-version idempotency). */
+interface PublishStateEntry {
+  articleId: number;
+  version: number;
+  status: "draft" | "published";
+}
+
+type PublishState = Record<string, PublishStateEntry>;
 
 export default class BlogmanPublisher extends Plugin {
   settings: BlogmanSettings = DEFAULT_SETTINGS;
   private statusBarEl: HTMLElement | null = null;
+  private publishState: PublishState = {};
 
   async onload() {
     await this.loadSettings();
@@ -93,11 +106,18 @@ export default class BlogmanPublisher extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = (await this.loadData()) ?? {};
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    if (data && typeof data === "object" && "publishState" in data) {
+      const state = (data as { publishState?: unknown }).publishState;
+      if (state && typeof state === "object") {
+        this.publishState = state as PublishState;
+      }
+    }
   }
 
   async saveSettings() {
-    await this.saveData(this.settings);
+    await this.saveData({ ...this.settings, publishState: this.publishState });
   }
 
   // ─── Status Bar Helpers ──────────────────────────────────
@@ -275,6 +295,7 @@ export default class BlogmanPublisher extends Plugin {
     // 5. Create post
     onProgress("正在创建文章...");
     const postResult = await this.createPost(
+      file,
       options.title,
       processedContent,
       options.status,
@@ -673,38 +694,161 @@ export default class BlogmanPublisher extends Plugin {
   /**
    * Create a post via /api/posts
    */
+  /**
+   * Create or update a post via the B2-08 versioned protocol
+   * (protocol=v1: identity + expected version + operation id + full snapshot).
+   *
+   * - creation is idempotent (stable creationId per note path) so network
+   *   retries never duplicate the article;
+   * - updates go through `save` with the stored expected version and an
+   *   operation id derived from the content hash (same content retries replay);
+   * - draft<->published transitions go through `publishTemp` only.
+   */
   async createPost(
+    file: TFile,
     title: string,
     content: string,
     status: "draft" | "published" = "draft",
     category: string = "",
     description: string = ""
   ): Promise<PostResult> {
-    const payload: Record<string, string> = {
-      title,
-      content,
-      status,
-    };
-    if (category) {
-      payload.category = category;
-    }
-    if (description) {
-      payload.description = description;
+    const notePath = file.path;
+    const creationId = `obsidian:${encodeURIComponent(notePath)}`;
+    const prior = this.publishState[notePath] ?? null;
+
+    const snapshot: Record<string, unknown> = { title, content, status: "draft" };
+    if (category) snapshot.category = category;
+    if (description) snapshot.description = description;
+
+    let articleId: number | null = prior?.articleId ?? null;
+    let version = prior?.version ?? 0;
+    let nextStatus: "draft" | "published" = prior?.status ?? "draft";
+    let slug: string | undefined;
+
+    // 1. Create (idempotent) or update (versioned save) the content.
+    if (articleId === null) {
+      const created = await this.versionedRequest({ action: "create", creationId, snapshot });
+      if (!created.ok) return { success: false, error: created.error };
+      if (created.json.protocol !== "v1") {
+        return {
+          success: false,
+          error: "目标服务器不支持 versioned 写入协议（protocol=v1），请先升级服务器后再发布",
+        };
+      }
+      articleId = Number(created.json.articleId);
+      version = Number(created.json.version);
+      slug = typeof created.json.slug === "string" ? created.json.slug : undefined;
+    } else {
+      const operationId = `obsidian:save:${creationId}:${this.contentHash(content)}`;
+      const saved = await this.versionedRequest({
+        action: "save",
+        articleId,
+        expectedVersion: version,
+        operationId,
+        snapshot,
+      });
+      if (saved.json.outcome === "conflict" || saved.json.outcome === "status-conflict") {
+        return {
+          success: false,
+          error: `版本冲突：服务器为 v${saved.json.serverVersion ?? "?"}，本地为 v${version}。请在网页端刷新后重试`,
+        };
+      }
+      if (!saved.ok) return { success: false, error: saved.error };
+      version = Number(saved.json.version);
+      slug = typeof saved.json.slug === "string" ? saved.json.slug : undefined;
     }
 
-    const response = await requestUrl({
-      url: `${this.settings.apiUrl}/api/posts?_t=${Date.now()}`,
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.settings.apiToken}`,
-        "Content-Type": "application/json",
-        "Cache-Control": "no-cache, no-store",
-      },
-      body: JSON.stringify(payload),
-    });
+    // 2. Status transition only via the versioned publish path.
+    if (articleId === null) {
+      return { success: false, error: "创建失败：未取得文章编号" };
+    }
+    if (status === "published" && nextStatus !== "published") {
+      const pub = await this.versionedRequest({
+        action: "publishTemp",
+        articleId,
+        expectedVersion: version,
+        currentStatus: "draft",
+        operationId: `obsidian:pub:${creationId}:${version}`,
+        status: "published",
+      });
+      if (pub.json.outcome === "conflict" || pub.json.outcome === "status-conflict") {
+        return { success: false, error: "发布冲突：文章状态已在别处变更，请在网页端刷新后重试" };
+      }
+      if (!pub.ok) return { success: false, error: pub.error };
+      version = Number(pub.json.version);
+      nextStatus = "published";
+    } else if (status === "draft" && nextStatus === "published") {
+      const unpub = await this.versionedRequest({
+        action: "publishTemp",
+        articleId,
+        expectedVersion: version,
+        currentStatus: "published",
+        operationId: `obsidian:unpub:${creationId}:${version}`,
+        status: "draft",
+      });
+      if (unpub.json.outcome === "conflict" || unpub.json.outcome === "status-conflict") {
+        return { success: false, error: "取消发布冲突：文章状态已在别处变更，请在网页端刷新后重试" };
+      }
+      if (!unpub.ok) return { success: false, error: unpub.error };
+      version = Number(unpub.json.version);
+      nextStatus = "draft";
+    }
 
-    const json = response.json as PostResult;
-    return json;
+    // 3. Persist the per-note state so the next publish updates by version.
+    this.publishState[notePath] = { articleId, version, status: nextStatus };
+    await this.saveSettings();
+    return { success: true, slug, articleId, version };
+  }
+
+  /**
+   * POST one versioned action to /api/posts and normalize the response.
+   */
+  private async versionedRequest(payload: Record<string, unknown>): Promise<{
+    ok: boolean;
+    status: number;
+    json: Record<string, unknown>;
+    error?: string;
+  }> {
+    try {
+      const response = await requestUrl({
+        url: `${this.settings.apiUrl}/api/posts?_t=${Date.now()}`,
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.settings.apiToken}`,
+          "Content-Type": "application/json",
+          "Cache-Control": "no-cache, no-store",
+        },
+        body: JSON.stringify({ protocol: "v1", ...payload }),
+      });
+      const json = response.json as Record<string, unknown>;
+      const ok = response.status >= 200 && response.status < 300 && json.error === undefined;
+      return {
+        ok,
+        status: response.status,
+        json,
+        error: typeof json.error === "string" ? json.error : undefined,
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        status: 0,
+        json: {},
+        error: e instanceof Error ? e.message : String(e),
+      };
+    }
+  }
+
+  /** Deterministic 32-bit content hash (stable operation id across retries). */
+  private contentHash(input: string): string {
+    let h1 = 0xdeadbeef ^ input.length;
+    let h2 = 0x41c6ce57 ^ input.length;
+    for (let i = 0; i < input.length; i++) {
+      const ch = input.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    return `${input.length}:${(h1 >>> 0).toString(16).padStart(8, "0")}`;
   }
 
   /**
