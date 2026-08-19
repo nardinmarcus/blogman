@@ -117,14 +117,17 @@ export async function createPost(
     password?: string | null
     is_hidden?: number
     cover_image?: string | null
+    content_envelope?: string | null
+    content_snapshot_sha256?: string | null
+    source_sync_sha256?: string | null
   },
 ): Promise<number> {
   const category = data.category || '未分类'
 
   const result = await db
     .prepare(
-      `INSERT INTO posts (slug, title, content, html, description, category, tags, status, password, is_hidden, cover_image)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO posts (slug, title, content, html, description, category, tags, status, password, is_hidden, cover_image, content_envelope, content_snapshot_sha256, source_sync_sha256)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       data.slug,
@@ -138,6 +141,9 @@ export async function createPost(
       data.password ?? null,
       data.is_hidden ?? 0,
       data.cover_image ?? null,
+      data.content_envelope ?? null,
+      data.content_snapshot_sha256 ?? null,
+      data.source_sync_sha256 ?? null,
     )
     .run()
 
@@ -157,20 +163,7 @@ export async function createPost(
 export async function updatePostBySlug(
   db: Database,
   slug: string,
-  data: Partial<{
-    slug: string
-    title: string
-    content: string
-    html: string
-    description: string
-    category: string
-    tags: string[]
-    status: 'draft' | 'published' | 'deleted'
-    password: string | null
-    is_pinned: number
-    is_hidden: number
-    cover_image: string | null
-  }>,
+  data: Partial<PostUpdateFields>,
 ): Promise<void> {
   const post = await db
     .prepare('SELECT id, category FROM posts WHERE slug = ?')
@@ -185,23 +178,28 @@ export async function updatePostBySlug(
 }
 
 // 更新文章
+type PostUpdateFields = {
+  slug: string
+  title: string
+  content: string
+  html: string
+  description: string
+  category: string
+  tags: string[]
+  status: 'draft' | 'published' | 'deleted'
+  password: string | null
+  is_pinned: number
+  is_hidden: number
+  cover_image: string | null
+  content_envelope: string | null
+  content_snapshot_sha256: string | null
+  source_sync_sha256: string | null
+}
+
 export async function updatePost(
   db: Database,
   id: number,
-  data: Partial<{
-    slug: string
-    title: string
-    content: string
-    html: string
-    description: string
-    category: string
-    tags: string[]
-    status: 'draft' | 'published' | 'deleted'
-    password: string | null
-    is_pinned: number
-    is_hidden: number
-    cover_image: string | null
-  }>,
+  data: Partial<PostUpdateFields>,
 ): Promise<void> {
   let oldCategory: string | null = null
   if (data.category !== undefined) {
@@ -267,6 +265,18 @@ export async function updatePost(
   if (data.cover_image !== undefined) {
     updates.push('cover_image = ?')
     values.push(data.cover_image)
+  }
+  if (data.content_envelope !== undefined) {
+    updates.push('content_envelope = ?')
+    values.push(data.content_envelope)
+  }
+  if (data.content_snapshot_sha256 !== undefined) {
+    updates.push('content_snapshot_sha256 = ?')
+    values.push(data.content_snapshot_sha256)
+  }
+  if (data.source_sync_sha256 !== undefined) {
+    updates.push('source_sync_sha256 = ?')
+    values.push(data.source_sync_sha256)
   }
 
   if (updates.length === 0) return

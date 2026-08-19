@@ -97,6 +97,14 @@ function applyLedger(state: string) {
   if (result.status !== 0) throw new Error(result.stderr || result.stdout)
 }
 
+function applyContentEnvelopeDdl(state: string) {
+  const result = spawnSync(process.execPath, [
+    join(repoRoot, 'scripts', 'apply-content-envelope-ddl.mjs'),
+    '--local', '--persist-to', state, '--database', 'DB', '--config', join(repoRoot, 'wrangler.toml'),
+  ], { cwd: repoRoot, encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(result.stderr || result.stdout)
+}
+
 function literal(value: unknown) {
   if (value === null || value === undefined) return 'NULL'
   if (typeof value === 'number') return String(value)
@@ -235,6 +243,9 @@ describe('real route CRUD on a ledger-migrated D1', () => {
   it('runs article CRUD and keeps FTS synchronized on the canonical ledger schema', { timeout: 180_000 }, async () => {
     const state = createState()
     applyLedger(state)
+    // B2-01b: envelope columns arrive via the independent DDL channel (not a
+    // ledger migration), so the write path needs them applied before POST.
+    applyContentEnvelopeDdl(state)
     const db = createDatabase(state)
     const env = { DB: db }
     mocks.getAppCloudflareEnv.mockResolvedValue(env)
@@ -248,6 +259,12 @@ describe('real route CRUD on a ledger-migrated D1', () => {
     }))).status).toBe(200)
     expect(query(state, "SELECT rowid, title, content FROM posts_fts WHERE posts_fts MATCH 'original'"))
       .toEqual([{ rowid: 1, title: 'Original title', content: 'original searchable body' }])
+    // B2-01b: dual-write produced a canonical envelope + both hashes on the same row.
+    const envelopeRow = query(state, "SELECT content_envelope, content_snapshot_sha256, source_sync_sha256 FROM posts WHERE slug = 'route-post'")
+    expect(envelopeRow).toHaveLength(1)
+    expect(String(envelopeRow[0].content_envelope)).toContain('blogman-content-envelope/v1')
+    expect(envelopeRow[0].content_snapshot_sha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(envelopeRow[0].source_sync_sha256).toMatch(/^[0-9a-f]{64}$/)
     expect((await getAdminPost(request('/api/admin/posts/route-post', 'GET'), postContext)).status).toBe(200)
     expect((await updateAdminPost(request('/api/admin/posts/route-post', 'PUT', {
       title: 'Updated title', content: 'updated searchable body', html: '<p>updated searchable body</p>', status: 'published',

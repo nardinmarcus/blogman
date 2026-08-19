@@ -19,6 +19,10 @@ import {
   parseJsonBody,
 } from '@/lib/server/route-helpers'
 import { migrationRequiredResponse } from '@/lib/database-errors'
+import {
+  buildContentEnvelopeFields,
+  missingContentEnvelopeColumns,
+} from '@/lib/content-envelope-columns'
 import type { NextRequest } from 'next/server'
 
 export async function POST(req: NextRequest) {
@@ -73,6 +77,16 @@ export async function POST(req: NextRequest) {
           .process(content)
       ).toString()
 
+    // 3.1 B2-01b: 写路径接入 envelope（双写不切换）。列缺失时明确报错提示先跑 DDL 脚本。
+    const missingEnvelopeColumns = await missingContentEnvelopeColumns(db)
+    if (missingEnvelopeColumns.length > 0) {
+      return jsonError(
+        `content envelope 列缺失: ${missingEnvelopeColumns.join(', ')}。请先运行 scripts/apply-content-envelope-ddl.mjs`,
+        503,
+      )
+    }
+    const envelopeFields = buildContentEnvelopeFields(content)
+
     // 4. 立即保存到 D1（不等 AI）
     const postId = await createPost(db, {
       slug,
@@ -86,6 +100,7 @@ export async function POST(req: NextRequest) {
       password,
       is_hidden,
       cover_image: coverImage,
+      ...envelopeFields,
     })
 
     // 6. 清除缓存
@@ -171,6 +186,18 @@ export async function PATCH(req: NextRequest) {
     if (payload.cover_image !== undefined) updates.cover_image = payload.cover_image
     if (payload.status === 'draft' || payload.status === 'published' || payload.status === 'deleted') {
       updates.status = payload.status
+    }
+
+    // B2-01b: 正文更新时先做列守卫，再同步双写 envelope（renderer/serializer 升级不推进版本语义）。
+    if (typeof payload.content === 'string') {
+      const missingEnvelopeColumns = await missingContentEnvelopeColumns(db)
+      if (missingEnvelopeColumns.length > 0) {
+        return jsonError(
+          `content envelope 列缺失: ${missingEnvelopeColumns.join(', ')}。请先运行 scripts/apply-content-envelope-ddl.mjs`,
+          503,
+        )
+      }
+      Object.assign(updates, buildContentEnvelopeFields(updates.content as string))
     }
 
     if (Object.keys(updates).length === 0) {
