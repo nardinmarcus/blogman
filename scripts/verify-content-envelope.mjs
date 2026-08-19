@@ -36,7 +36,7 @@ const kernelUrl = pathToFileURL(join(repoRoot, 'lib', 'content-envelope', 'index
 
 const STATE_BASE = join(homedir(), '.local', 'state', 'blogman', 'b201b')
 const DEFAULT_PERSIST = join(STATE_BASE, 'd1-state')
-const DEFAULT_REPORT = join(STATE_BASE, 'report.md')
+const DEFAULT_REPORT = join(STATE_BASE, 'fidelity-report.md')
 
 /**
  * Representative historical-body sample matrix (issue #24 coverage: equivalent
