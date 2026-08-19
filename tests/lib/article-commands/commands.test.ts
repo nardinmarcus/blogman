@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands'
-import { create, publishTemp, save } from '@/lib/article-commands'
+import { create, publishTemp, save, setPinned, setHidden, setPassword, setCategory, softDelete, restore, batchSetCategory } from '@/lib/article-commands'
 import { bootstrapState, createDatabase, query, teardownState } from './helpers'
 
 let state: string
@@ -546,5 +546,184 @@ describe('lib/article-commands — projections', { timeout: 600_000 }, () => {
     })
     expect(second).toMatchObject({ outcome: 'applied', projectionFailures: ['vector projection exploded'] })
     expect(await articleVersions(result.articleId)).toHaveLength(2)
+  })
+})
+
+describe('lib/article-commands — B2-06 article-level commands', { timeout: 600_000 }, () => {
+  async function createdArticle(title: string): Promise<{ articleId: number; postRef: number; categoriesCount: () => Promise<Record<string, number>> }> {
+    const creationId = fresh('b206-base')
+    const snap = snapshot({ title, slug: fresh('b206-slug'), category: 'AI工具', status: 'published' })
+    const result = await create(createDatabase(), { creationId, snapshot: snap })
+    expect(result.outcome).toBe('created')
+    if (result.outcome !== 'created') throw new Error('create failed')
+    return {
+      articleId: result.articleId,
+      postRef: result.postRef,
+      categoriesCount: async () => {
+        const rows = await query<{ name: string; post_count: number }>('SELECT name, post_count FROM categories')
+        return Object.fromEntries(rows.map((r) => [r.name, r.post_count]))
+      },
+    }
+  }
+
+  it('setPinned applies WITHOUT advancing the body version', async () => {
+    const { articleId, postRef } = await createdArticle('置顶文章')
+    const db = createDatabase()
+    const before = (await articleVersions(articleId)).length
+
+    const result = await setPinned(db, { articleId, expectedVersion: 1, operationId: fresh('op'), is_pinned: 1 })
+    expect(result).toMatchObject({ outcome: 'applied', postRef, version: 1, existing: false })
+
+    // posts updated…
+    expect((await postRow(postRef))!.is_pinned).toBe(1)
+    // …but the version counter is untouched.
+    expect(await articleVersions(articleId)).toHaveLength(before)
+
+    // A no-op (already pinned) replays without a write and still does not advance.
+    const again = await setPinned(db, { articleId, expectedVersion: 1, operationId: fresh('op'), is_pinned: 1 })
+    expect(again.outcome).toBe('replayed')
+    expect(again.existing).toBe(true)
+    expect(await articleVersions(articleId)).toHaveLength(before)
+  })
+
+  it('rejects a stale expected version as a conflict with zero writes (旧请求拒绝)', async () => {
+    const { articleId, postRef } = await createdArticle('旧请求')
+    const db = createDatabase()
+    // A content revision moves the body to v2 first.
+    await save(db, { articleId, expectedVersion: 1, operationId: fresh('op'), snapshot: snapshot({ title: '第二版' }) })
+
+    const stale = await setHidden(db, { articleId, expectedVersion: 1, operationId: fresh('op'), is_hidden: 1 })
+    expect(stale.outcome).toBe('conflict')
+    if (stale.outcome !== 'conflict') return
+    expect(stale.serverVersion).toBe(2)
+
+    // Nothing changed: version still 2, is_hidden still 0.
+    expect(await articleVersions(articleId)).toHaveLength(2)
+    expect((await postRow(postRef))!.is_hidden).toBe(0)
+  })
+
+  it('setPassword applies without advancing the version; empty == null', async () => {
+    const { articleId, postRef } = await createdArticle('密码')
+    const db = createDatabase()
+    const result = await setPassword(db, { articleId, expectedVersion: 1, operationId: fresh('op'), password: 'secret' })
+    expect(result.outcome).toBe('applied')
+    expect((await postRow(postRef))!.password).toBe('secret')
+    expect(await articleVersions(articleId)).toHaveLength(1)
+
+    const cleared = await setPassword(db, { articleId, expectedVersion: 1, operationId: fresh('op'), password: '' })
+    expect(cleared.outcome).toBe('applied')
+    expect((await postRow(postRef))!.password).toBeNull()
+    expect(await articleVersions(articleId)).toHaveLength(1)
+  })
+
+  it('soft-delete keeps the first deletion timestamp; repeated lifecycle commands are idempotent and never advance version', async () => {
+    const { articleId, postRef } = await createdArticle('软删除')
+    const db = createDatabase()
+
+    const first = await softDelete(db, { articleId, expectedVersion: 1, operationId: 'del-op' })
+    expect(first.outcome).toBe('applied')
+    const stamp = (await postRow(postRef))!.deleted_at
+    expect(stamp).not.toBeNull()
+    expect(await articleVersions(articleId)).toHaveLength(1) // no version advance
+
+    // Repeating the same operation id (response-lost / double-click) is a replay.
+    const repeated = await softDelete(db, { articleId, expectedVersion: 1, operationId: 'del-op' })
+    expect(repeated.outcome).toBe('replayed')
+    expect(repeated.existing).toBe(true)
+    // The FIRST deletion timestamp is preserved across the replay.
+    expect((await postRow(postRef))!.deleted_at).toBe(stamp)
+    expect(await articleVersions(articleId)).toHaveLength(1)
+
+    // Restore returns to draft with a NULL deletion timestamp, version still untouched.
+    const restored = await restore(db, { articleId, expectedVersion: 1, operationId: 're-op' })
+    expect(restored.outcome).toBe('applied')
+    const row = await postRow(postRef)
+    expect(row!.status).toBe('draft')
+    expect(row!.deleted_at).toBeNull()
+    expect(await articleVersions(articleId)).toHaveLength(1)
+  })
+
+  it('setCategory keeps categories.post_count (deltas) and does not advance the version', async () => {
+    const { articleId, postRef, categoriesCount } = await createdArticle('分类')
+    const db = createDatabase()
+    // Ensure the target category row exists so the count increment applies.
+    await query("INSERT OR IGNORE INTO categories (name, slug, post_count) VALUES ('随笔', 'essay', 0)")
+    const before = await categoriesCount()
+
+    const result = await setCategory(db, { articleId, expectedVersion: 1, operationId: fresh('op'), category: '随笔' })
+    expect(result.outcome).toBe('applied')
+    expect((await postRow(postRef))!.category).toBe('随笔')
+    expect(await articleVersions(articleId)).toHaveLength(1)
+
+    const after = await categoriesCount()
+    // The article left 'AI工具' and entered '随笔'.
+    expect((after['AI工具'] ?? 0) - (before['AI工具'] ?? 0)).toBe(-1)
+    expect((after['随笔'] ?? 0) - (before['随笔'] ?? 0)).toBe(1)
+  })
+
+  it('batch classification returns per-article applied/conflict, never blocking each other or silently overwriting', async () => {
+    const good = await createdArticle('批量好')
+    const conflicting = await createdArticle('批量冲突')
+    const db = createDatabase()
+
+    // Conflict article: content saved elsewhere (v2), so expectedVersion 1 is stale.
+    const saved = await save(db, {
+      articleId: conflicting.articleId,
+      expectedVersion: 1,
+      operationId: fresh('op'),
+      snapshot: snapshot({ title: '并发内容' }),
+    })
+    expect(saved.outcome).toBe('applied')
+
+    const result = await batchSetCategory(db, {
+      items: [
+        { articleId: good.articleId, expectedVersion: 1, operationId: fresh('op'), category: '随笔' },
+        { articleId: conflicting.articleId, expectedVersion: 1, operationId: fresh('op'), category: '随笔' },
+        { articleId: 99999, expectedVersion: 1, operationId: fresh('op'), category: '随笔' },
+      ],
+    })
+
+    expect(result.items).toHaveLength(3)
+    expect(result.items[0].outcome).toBe('applied')
+    expect(result.items[1].outcome).toBe('conflict')
+    if (result.items[1].outcome === 'conflict') expect(result.items[1].serverVersion).toBe(2)
+    expect(result.items[2].outcome).toBe('not-found')
+
+    // The good article moved; the conflicting article was NOT silently overwritten.
+    const goodRow = await postRow(good.postRef)
+    const badRow = await postRow(conflicting.postRef)
+    expect(goodRow!.category).toBe('随笔')
+    expect(badRow!.category).toBe('AI工具')
+  })
+
+  it('a content revision writes a full version; a later article-level action does not advance it further (修订/非修订区别)', async () => {
+    const { articleId, postRef } = await createdArticle('修订')
+    const db = createDatabase()
+
+    const v2 = await save(db, {
+      articleId,
+      expectedVersion: 1,
+      operationId: fresh('op'),
+      snapshot: snapshot({ title: '完整第二版', category: 'AI工具' }),
+    })
+    expect(v2.outcome).toBe('applied')
+    if (v2.outcome !== 'applied') return
+    expect(v2.version).toBe(2)
+
+    // Pin at version 2, then save a third content revision at the still-current version.
+    const pin = await setPinned(db, { articleId, expectedVersion: 2, operationId: fresh('op'), is_pinned: 1 })
+    expect(pin.outcome).toBe('applied')
+
+    const v3 = await save(db, {
+      articleId,
+      expectedVersion: 2, // pin did NOT advance the version, so the editor's pending save still lands
+      operationId: fresh('op'),
+      snapshot: snapshot({ title: '第三版' }),
+    })
+    expect(v3.outcome).toBe('applied')
+    if (v3.outcome !== 'applied') return
+    expect(v3.version).toBe(3)
+    expect(await articleVersions(articleId)).toHaveLength(3)
+    expect((await postRow(postRef))!.title).toBe('第三版')
   })
 })

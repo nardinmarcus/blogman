@@ -9,6 +9,9 @@ interface PasswordModalProps {
   isOpen: boolean
   onClose: () => void
   slug: string
+  /** B2-06 — set when under versioned authority; otherwise the legacy PUT is used. */
+  articleId?: number | null
+  version?: number | null
   currentPassword: string | null
   articleUrl: string
   onSuccess: () => void
@@ -18,6 +21,8 @@ export function PasswordModal({
   isOpen,
   onClose,
   slug,
+  articleId = null,
+  version = null,
   currentPassword,
   articleUrl,
   onSuccess,
@@ -46,27 +51,56 @@ export function PasswordModal({
     setLoading(true)
     try {
       const newPassword = isEncrypted ? null : generatePassword()
+      const hasAuthority = typeof articleId === 'number' && typeof version === 'number'
 
-      const response = await fetch(`/api/admin/posts/${slug}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: newPassword }),
-      })
-
-      if (!response.ok) {
-        throw new Error('密码设置失败')
-      }
-
-      if (newPassword) {
-        setPassword(newPassword)
-        toast.success('已启用密码保护')
+      let ok: boolean
+      if (hasAuthority) {
+        const operationId =
+          typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`
+        const res = await fetch('/api/article-commands', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'setPassword',
+            slug,
+            articleId,
+            expectedVersion: version,
+            operationId,
+            password: newPassword,
+          }),
+        })
+        const data = (await res.json().catch(() => ({}))) as { outcome?: string; error?: string }
+        if (res.ok && data.outcome !== 'conflict' && data.outcome !== 'error') {
+          ok = true
+        } else if (data.outcome === 'conflict') {
+          toast.error('版本冲突：文章已被修改，请刷新后重试')
+          return
+        } else {
+          throw new Error(data.error || '密码设置失败')
+        }
       } else {
-        setPassword('')
-        toast.success('已取消密码保护')
-        onClose()
+        const response = await fetch(`/api/admin/posts/${slug}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: newPassword }),
+        })
+        if (!response.ok) throw new Error('密码设置失败')
+        ok = true
       }
 
-      onSuccess()
+      if (ok) {
+        if (newPassword) {
+          setPassword(newPassword)
+          toast.success('已启用密码保护')
+        } else {
+          setPassword('')
+          toast.success('已取消密码保护')
+          onClose()
+        }
+        onSuccess()
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '操作失败')
     } finally {

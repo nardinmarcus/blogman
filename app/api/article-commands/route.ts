@@ -17,7 +17,7 @@
 
 import type { NextRequest } from 'next/server'
 import type { ArticleCommandProjections, ArticleCommandSnapshot } from '@/lib/article-commands'
-import { create, publishTemp, save } from '@/lib/article-commands'
+import { create, publishTemp, save, setPinned, setHidden, setPassword, setCategory, softDelete, restore } from '@/lib/article-commands'
 import {
   ensureAuthenticatedRequest,
   getRouteContextWithDb,
@@ -31,6 +31,8 @@ import { invalidatePublicContentCache } from '@/lib/cache'
 import { enqueueBackgroundJob, aiProcessPostOperationId } from '@/lib/background-jobs'
 import { normalizePostSlug } from '@/lib/post-utils'
 import { nanoid } from 'nanoid'
+import { getPostBySlug, updatePost } from '@/lib/db'
+import { getByPostRef, listVersions } from '@/lib/repositories/articles'
 import type { ArticleIdentitySnapshot } from '@/lib/article-identity'
 
 type RouteEnv = RouteDbEnv
@@ -122,6 +124,173 @@ async function attachFacts<T>(db: D1Database, result: T): Promise<T & { slug?: s
   return r
 }
 
+/** B2-06 — the versioned-authority facts for a post. Null when the identity tables are absent (a ledger-only DB that never ran the B2-02 DDL) so existing CRUD never 503s. */
+async function versionedAuthority(
+  db: D1Database,
+  postRef: number,
+): Promise<{ articleId: number; version: number } | null> {
+  try {
+    const identity = await getByPostRef(db, postRef)
+    if (!identity) return null
+    const versions = await listVersions(db, identity.id)
+    if (versions.length === 0) return null
+    return { articleId: identity.id, version: versions[0].version }
+  } catch {
+    return null
+  }
+}
+
+/** Run the best-effort out-of-transaction projections for a content-affecting result. */
+async function runProjectorsFor(
+  projections: ArticleCommandProjections,
+  result: { postRef: number; operationId: string; existing: boolean } | { postRef: number; operationId: string; existing?: boolean },
+  projectionFailures: string[],
+): Promise<void> {
+  try {
+    await projections.afterCommit?.(result as never)
+  } catch (error) {
+    projectionFailures.push(error instanceof Error ? error.message : String(error))
+  }
+}
+
+/**
+ * B2-06 — shared adapter for the independent (non-body) article-level commands.
+ * Once a post is under versioned authority the write goes through the kernel's
+ * explicit command (expected version + operation id preconditions). On a
+ * ledger-only DB (identity tables absent) the same action falls back to the
+ * legacy direct `updatePost` write so nothing 503s.
+ */
+async function dispatchArticleLevelAction(
+  params: {
+    action: string
+    slug: string
+    articleId: number
+    expectedVersion: number
+    operationId: string
+    payload: Record<string, unknown>
+    env: RouteEnv
+    db: D1Database
+    ctx?: { waitUntil?: (promise: Promise<unknown>) => void }
+  },
+): Promise<Response> {
+  const { action, slug, articleId, expectedVersion, operationId, payload, env, db, ctx } = params
+  if (!slug || !Number.isInteger(articleId) || !Number.isInteger(expectedVersion) || !operationId.trim()) {
+    return jsonError(`${action}: slug / articleId / expectedVersion / operationId 无效`, 400)
+  }
+
+  const post = await getPostBySlug(db, slug)
+  if (!post) return jsonError(`${action}: 文章不存在 (${slug})`, 404)
+
+  const projections = afterCommit(env, ctx)
+  const failures: string[] = []
+  const legacyWrite = async (data: Record<string, unknown>) => {
+    await updatePost(db, post.id, data as Parameters<typeof updatePost>[2])
+  }
+
+  const authority = await versionedAuthority(db, post.id)
+  if (!authority) {
+    // Ledger-only DB — legacy compatible direct write, no version conditions exist.
+    if (action === 'setPinned') await legacyWrite({ is_pinned: payload.is_pinned === 1 ? 1 : 0 })
+    else if (action === 'setHidden') await legacyWrite({ is_hidden: payload.is_hidden === 1 ? 1 : 0 })
+    else if (action === 'setPassword') await legacyWrite({ password: typeof payload.password === 'string' && payload.password.trim() ? payload.password.trim() : null })
+    else if (action === 'setCategory') await legacyWrite({ category: typeof payload.category === 'string' && payload.category.trim() ? payload.category.trim() : null })
+    else if (action === 'softDelete') await legacyWrite({ status: 'deleted' })
+    else if (action === 'restore') await legacyWrite({ status: 'draft' })
+    else return jsonError(`${action}: 未知动作`, 400)
+    await runProjectorsFor(projections, { postRef: post.id, operationId, existing: false }, failures)
+    return jsonOk({ outcome: 'legacy-applied', articleId, postRef: post.id, version: null, operationId, existing: false, projectionFailures: failures })
+  }
+
+  if (authority.articleId !== articleId) {
+    return jsonError(`${action}: articleId 与 slug 不匹配 (期望 ${authority.articleId})`, 409)
+  }
+
+  const input = { articleId, expectedVersion, operationId }
+  let result: { outcome: string; postRef: number; operationId: string; existing: boolean; projectionFailures: string[] }
+  switch (action) {
+    case 'setPinned':
+      result = (await setPinned(db, { ...input, is_pinned: payload.is_pinned === 1 ? 1 : 0 })) as never
+      break
+    case 'setHidden':
+      result = (await setHidden(db, { ...input, is_hidden: payload.is_hidden === 1 ? 1 : 0 })) as never
+      break
+    case 'setPassword':
+      result = (await setPassword(db, { ...input, password: typeof payload.password === 'string' ? payload.password : null })) as never
+      break
+    case 'setCategory':
+      result = (await setCategory(db, { ...input, category: typeof payload.category === 'string' ? payload.category : null })) as never
+      break
+    case 'softDelete':
+      result = (await softDelete(db, input)) as never
+      break
+    case 'restore':
+      result = (await restore(db, input)) as never
+      break
+    default:
+      return jsonError(`${action}: 未知动作`, 400)
+  }
+  if (result.outcome === 'applied' || result.outcome === 'replayed') {
+    await runProjectorsFor(projections, result, result.projectionFailures)
+  }
+  return jsonOk(result)
+}
+
+/**
+ * B2-06 — batch classification. Every article keeps its own version
+ * precondition + operation id; conflicts are reported per article and never
+ * silently overwritten. On a ledger-only DB each item falls back to the legacy
+ * direct write (no version conditions exist there).
+ */
+async function dispatchBatchSetCategory(
+  env: RouteEnv,
+  db: D1Database,
+  ctx: { waitUntil?: (promise: Promise<unknown>) => void } | undefined,
+  payload: Record<string, unknown>,
+): Promise<Response> {
+  const rawItems = Array.isArray(payload.items) ? (payload.items as Record<string, unknown>[]) : []
+  if (rawItems.length === 0) return jsonError('batchSetCategory: items 不能为空', 400)
+
+  const projections = afterCommit(env, ctx)
+  const items = []
+  for (const raw of rawItems) {
+    const articleId = Number(raw.articleId)
+    const expectedVersion = Number(raw.expectedVersion)
+    const operationId = typeof raw.operationId === 'string' ? raw.operationId.trim() : ''
+    const slug = typeof raw.slug === 'string' ? raw.slug : ''
+    const category = typeof raw.category === 'string' && raw.category.trim() ? raw.category.trim() : null
+    if (!Number.isInteger(articleId) || !Number.isInteger(expectedVersion) || !operationId || !slug) {
+      items.push({ outcome: 'invalid', articleId, expectedVersion, operationId, reason: '参数不完整' })
+      continue
+    }
+
+    const post = await getPostBySlug(db, slug)
+    if (!post) {
+      items.push({ outcome: 'not-found', articleId, expectedVersion, operationId, slug })
+      continue
+    }
+    const authority = await versionedAuthority(db, post.id)
+    if (!authority) {
+      await updatePost(db, post.id, { category } as Parameters<typeof updatePost>[2])
+      items.push({ outcome: 'legacy-applied', articleId, postRef: post.id, version: null, operationId, existing: false, slug, projectionFailures: [] })
+      continue
+    }
+    if (authority.articleId !== articleId) {
+      items.push({ outcome: 'conflict', articleId, postRef: post.id, expectedVersion, serverVersion: authority.version, slug, facts: null })
+      continue
+    }
+    try {
+      const result = await setCategory(db, { articleId, expectedVersion, operationId, category })
+      if (result.outcome === 'applied' || result.outcome === 'replayed') {
+        await runProjectorsFor(projections, result, result.projectionFailures)
+      }
+      items.push({ ...result, slug })
+    } catch (error) {
+      items.push({ outcome: 'error', articleId, expectedVersion, operationId, slug, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  return jsonOk({ items })
+}
+
 export async function POST(req: NextRequest) {
   try {
     const route = await getRouteContextWithDb('数据库未配置')
@@ -175,6 +344,24 @@ export async function POST(req: NextRequest) {
         projections,
       })
       return jsonOk(await attachFacts(db, result))
+    }
+
+    if (action === 'setPinned' || action === 'setHidden' || action === 'setPassword' || action === 'setCategory' || action === 'softDelete' || action === 'restore') {
+      return dispatchArticleLevelAction({
+        action,
+        slug: typeof payload.slug === 'string' ? payload.slug : '',
+        articleId: Number(payload.articleId),
+        expectedVersion: Number(payload.expectedVersion),
+        operationId: typeof payload.operationId === 'string' ? payload.operationId : '',
+        payload,
+        env,
+        db,
+        ctx,
+      })
+    }
+
+    if (action === 'batchSetCategory') {
+      return dispatchBatchSetCategory(env, db, ctx, payload)
     }
 
     return jsonError('未知 action', 400)

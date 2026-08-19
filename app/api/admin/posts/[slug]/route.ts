@@ -66,25 +66,34 @@ async function updatePostRoute(req: NextRequest, { params }: Ctx) {
       description?: string
     }>(req)
 
-    // B2-05: once an article is under versioned authority (has an identity + at
-    // least one version snapshot), the old UNVERSIONED Inline content write is
-    // rejected — it would overwrite `posts` without a version fact. Metadata
-    // toggles (category / is_pinned / is_hidden / status / password) still work.
-    // When the identity shadow tables are absent (e.g. a ledger-only test DB
-    // that never ran the article-identity DDL), the article has not switched to
-    // versioned authority — keep the legacy compatible path instead of 503'ing.
-    if ('title' in body || 'html' in body || 'content' in body) {
-      let hasVersionedAuthority = false
+    // B2-06: once an article is under versioned authority (identity + >=1 version
+    // snapshot), the generic field PATCH may no longer touch lifecycle/status or
+    // article-level state directly — those go through the explicit command route
+    // (/api/article-commands) with expected version + operation id preconditions.
+    // Content writes (title/html/content) were already rejected by B2-05. When the
+    // identity shadow tables are absent (e.g. a ledger-only test DB that never ran
+    // the article-identity DDL), the article has not switched to versioned
+    // authority — keep the legacy compatible path instead of 503'ing.
+    const hasVersionedAuthority = await (async () => {
       try {
         const identity = await getByPostRef(db, post.id)
-        if (identity) {
-          const versions = await listVersions(db, identity.id)
-          hasVersionedAuthority = versions.length > 0
-        }
+        if (!identity) return false
+        const versions = await listVersions(db, identity.id)
+        return versions.length > 0
       } catch {
-        hasVersionedAuthority = false
+        return false
       }
-      if (hasVersionedAuthority) {
+    })()
+    if (hasVersionedAuthority) {
+      const lifecycleFields = ['status', 'is_pinned', 'is_hidden', 'password', 'category'] as const
+      const blocked = lifecycleFields.filter((field) => field in body)
+      if (blocked.length > 0) {
+        return jsonError(
+          `这篇文章已启用版本化写入，请通过 /api/article-commands 的显式命令修改: ${blocked.join(', ')}（携带 expectedVersion + operationId）`,
+          409,
+        )
+      }
+      if ('title' in body || 'html' in body || 'content' in body) {
         return jsonError('这篇文章已启用版本化写入，请使用版本化保存入口', 409)
       }
     }

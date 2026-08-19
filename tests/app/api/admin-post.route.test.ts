@@ -154,7 +154,7 @@ Clean body.`,
     expect(mocks.updatePost).not.toHaveBeenCalled()
   })
 
-  it('still allows metadata-only toggles (category/status/pin) on a versioned post', async () => {
+  it('rejects lifecycle/metadata toggles (category/status/pin/hidden/password) on a versioned post (B2-06 explicit commands)', async () => {
     mocks.getByPostRef.mockResolvedValue({ id: 1, post_ref: 7, slug: 'old-slug', draft_ref: null, source_page_identity: null, created_at: 1 })
     mocks.listVersions.mockResolvedValue([{ id: 10, version: 2 } as never])
     mocks.parseJsonBody.mockResolvedValue({ category: '新分类' })
@@ -165,9 +165,34 @@ Clean body.`,
     )
     const body = await response.json()
 
+    expect(response.status).toBe(409)
+    expect(body.error).toMatch(/api\/article-commands/)
+    // The direct overwrite was never applied.
+    expect(mocks.updatePost).not.toHaveBeenCalled()
+
+    // status via generic PATCH is also refused — it must ride the lifecycle commands.
+    mocks.parseJsonBody.mockResolvedValue({ status: 'published' })
+    const statusRes = await PUT(
+      { cookies: { get: vi.fn(() => ({ value: 'token' })) } } as never,
+      { params: Promise.resolve({ slug: 'old-slug' }) },
+    )
+    expect(statusRes.status).toBe(409)
+    expect(mocks.updatePost).not.toHaveBeenCalled()
+  })
+
+  it('keeps the legacy path alive on a ledger-only DB (missing identity tables) — no 503, metadata toggles still work', async () => {
+    // Identity infra absent -> authority detection swallows the error -> legacy writes allowed.
+    mocks.getByPostRef.mockRejectedValue(new Error('no such table: articles'))
+    mocks.listVersions.mockRejectedValue(new Error('no such table: article_versions'))
+    mocks.parseJsonBody.mockResolvedValue({ status: 'published', is_pinned: 1 })
+
+    const response = await PUT(
+      { cookies: { get: vi.fn(() => ({ value: 'token' })) } } as never,
+      { params: Promise.resolve({ slug: 'old-slug' }) },
+    )
+
     expect(response.status).toBe(200)
     expect(mocks.updatePost).toHaveBeenCalled()
-    expect(body).toEqual({ success: true, slug: 'old-slug' })
   })
 
   it('rejects unauthenticated writes before any authority check', async () => {

@@ -8,13 +8,23 @@ import { useToast } from '@/components/Toast'
 import { Modal } from '@/components/Modal'
 import { PasswordModal } from '@/components/PasswordModal'
 import { Dropdown } from '@/components/Dropdown'
-import type { PostWithTags } from '@/lib/db'
 import { getSiteUrl } from '@/lib/site-config'
+import type { AdminListPost } from './page'
 
 interface PostRowProps {
-  post: PostWithTags
+  post: AdminListPost
   categories: string[]
   preferMenuUp?: boolean
+  selected?: boolean
+  onSelectChange?: () => void
+}
+
+/** Client-side operation id — stable per user action, replayed server-side. */
+function operationId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`
 }
 
 function formatDate(ts: number) {
@@ -32,7 +42,7 @@ function formatDate(ts: number) {
   })
 }
 
-export function PostRow({ post, categories, preferMenuUp = false }: PostRowProps) {
+export function PostRow({ post, categories, preferMenuUp = false, selected = false, onSelectChange }: PostRowProps) {
   const [showPasswordModal, setShowPasswordModal] = useState(false)
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [showPermanentModal, setShowPermanentModal] = useState(false)
@@ -44,6 +54,77 @@ export function PostRow({ post, categories, preferMenuUp = false }: PostRowProps
 
   const router = useRouter()
   const toast = useToast()
+
+  // B2-06 — under versioned authority every list write goes through the explicit
+  // /api/article-commands protocol carrying expected version + operation id. On a
+  // ledger-only DB (no identity tables ⇒ articleId/version are null) the same
+  // action falls back to the legacy direct PUT so existing CRUD never 503s.
+  const hasAuthority = typeof post.articleId === 'number' && typeof post.version === 'number'
+  const command = async (action: string, value: Record<string, unknown>): Promise<Response> => {
+    if (!hasAuthority) {
+      const legacyBody: Record<string, unknown> =
+        action === 'setPinned' ? { is_pinned: value.is_pinned }
+          : action === 'setHidden' ? { is_hidden: value.is_hidden }
+            : action === 'setPassword' ? { password: value.password }
+              : action === 'setCategory' ? { category: value.category }
+                : action === 'softDelete' ? { status: 'deleted' }
+                  : action === 'restore' ? { status: 'draft' }
+                    : action === 'publishTemp' ? { status: value.status }
+                      : {}
+      return fetch(`/api/admin/posts/${post.slug}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(legacyBody),
+      })
+    }
+    return fetch('/api/article-commands', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action,
+        slug: post.slug,
+        articleId: post.articleId,
+        expectedVersion: post.version,
+        operationId: operationId(),
+        ...value,
+      }),
+    })
+  }
+
+  /**
+   * Execute one explicit list command. A server-side `conflict` outcome (HTTP
+   * 200 with `outcome: conflict`) surfaces explicitly — the stale action is
+   * never applied and never reported as a success.
+   */
+  const run = async (action: string, value: Record<string, unknown>, successMsg: string): Promise<boolean> => {
+    setLoading(true)
+    try {
+      const res = await command(action, value)
+      let data: { outcome?: string; error?: string } | null = null
+      try {
+        data = (await res.json()) as { outcome?: string; error?: string }
+      } catch {
+        data = null
+      }
+      const outcome = data?.outcome
+      if (res.ok && (outcome === undefined || outcome === 'applied' || outcome === 'replayed' || outcome === 'legacy-applied')) {
+        toast.success(successMsg)
+        return true
+      }
+      if (outcome === 'conflict') {
+        toast.error('版本冲突：这篇文章已被他人修改，未应用改动，请刷新后重试')
+      } else {
+        toast.error(data?.error || '操作失败，请重试')
+      }
+      router.refresh()
+      return false
+    } catch {
+      toast.error('网络错误，请重试')
+      return false
+    } finally {
+      setLoading(false)
+    }
+  }
 
   const siteUrl = getSiteUrl()
   const baseArticleUrl = `${siteUrl}/${post.slug}`
@@ -92,153 +173,61 @@ export function PostRow({ post, categories, preferMenuUp = false }: PostRowProps
 
   // 更新分类
   const handleCategoryChange = async (newCategory: string) => {
-    setLoading(true)
-    try {
-      const res = await fetch(`/api/admin/posts/${post.slug}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ category: newCategory || null }),
-      })
-      if (res.ok) {
-        toast.success('分类已更新')
-        router.refresh()
-      } else {
-        toast.error('更新失败')
-      }
-    } catch {
-      toast.error('网络错误')
-    } finally {
-      setLoading(false)
-    }
+    const ok = await run('setCategory', { category: newCategory || null }, '分类已更新')
+    if (ok) router.refresh()
   }
 
   // 置顶切换
   const handlePinToggle = async () => {
-    setLoading(true)
     const newPinned = post.is_pinned === 1 ? 0 : 1
-    try {
-      const res = await fetch(`/api/admin/posts/${post.slug}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ is_pinned: newPinned }),
-      })
-      if (res.ok) {
-        toast.success(newPinned === 1 ? '已置顶' : '已取消置顶')
-        setShowPinModal(false)
-        router.refresh()
-        return true
-      } else {
-        toast.error('操作失败')
-        return false
-      }
-    } catch {
-      toast.error('网络错误')
-      return false
-    } finally {
-      setLoading(false)
+    const ok = await run('setPinned', { is_pinned: newPinned }, newPinned === 1 ? '已置顶' : '已取消置顶')
+    if (ok) {
+      setShowPinModal(false)
+      router.refresh()
     }
+    return ok
   }
 
   // 隐藏切换
   const handleHiddenToggle = async () => {
-    setLoading(true)
     const newHidden = post.is_hidden === 1 ? 0 : 1
-    try {
-      const res = await fetch(`/api/admin/posts/${post.slug}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ is_hidden: newHidden }),
-      })
-      if (res.ok) {
-        toast.success(newHidden === 1 ? '已隐藏' : '已取消隐藏')
-        setShowHiddenModal(false)
-        router.refresh()
-        return true
-      } else {
-        toast.error('操作失败')
-        return false
-      }
-    } catch {
-      toast.error('网络错误')
-      return false
-    } finally {
-      setLoading(false)
+    const ok = await run('setHidden', { is_hidden: newHidden }, newHidden === 1 ? '已隐藏' : '已取消隐藏')
+    if (ok) {
+      setShowHiddenModal(false)
+      router.refresh()
     }
+    return ok
   }
 
-  // 状态切换
+  // 状态切换（发布/取消发布 —— 走临时版本化命令）
   const handleStatusToggle = async () => {
-    setLoading(true)
     const newStatus = post.status === 'published' ? 'draft' : 'published'
-    try {
-      const res = await fetch(`/api/admin/posts/${post.slug}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus }),
-      })
-      if (res.ok) {
-        toast.success(newStatus === 'published' ? '已发布' : '已转为草稿')
-        setShowStatusModal(false)
-        router.refresh()
-        return true
-      } else {
-        toast.error('操作失败')
-        return false
-      }
-    } catch {
-      toast.error('网络错误')
-      return false
-    } finally {
-      setLoading(false)
+    const ok = await run(
+      'publishTemp',
+      { currentStatus: post.status === 'published' ? 'published' : 'draft', status: newStatus },
+      newStatus === 'published' ? '已发布' : '已转为草稿',
+    )
+    if (ok) {
+      setShowStatusModal(false)
+      router.refresh()
     }
+    return ok
   }
 
   // 软删除
   const handleSoftDelete = async () => {
-    setLoading(true)
-    try {
-      const res = await fetch(`/api/admin/posts/${post.slug}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'deleted' }),
-      })
-      if (res.ok) {
-        toast.success('已删除（可恢复）')
-        setShowDeleteModal(false)
-        router.refresh()
-        return true
-      } else {
-        toast.error('删除失败')
-        return false
-      }
-    } catch {
-      toast.error('网络错误')
-      return false
-    } finally {
-      setLoading(false)
+    const ok = await run('softDelete', {}, '已删除（可恢复）')
+    if (ok) {
+      setShowDeleteModal(false)
+      router.refresh()
     }
+    return ok
   }
 
   // 恢复
   const handleRestore = async () => {
-    setLoading(true)
-    try {
-      const res = await fetch(`/api/admin/posts/${post.slug}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'draft' }),
-      })
-      if (res.ok) {
-        toast.success('已恢复为草稿')
-        router.refresh()
-      } else {
-        toast.error('恢复失败')
-      }
-    } catch {
-      toast.error('网络错误')
-    } finally {
-      setLoading(false)
-    }
+    const ok = await run('restore', {}, '已恢复为草稿')
+    if (ok) router.refresh()
   }
 
   // 永久删除
@@ -276,7 +265,19 @@ export function PostRow({ post, categories, preferMenuUp = false }: PostRowProps
   return (
     <>
       {/* 桌面端 */}
-      <div className="hidden md:grid grid-cols-[50px_1fr_120px_90px_150px] gap-3 px-5 py-3 hover:bg-[var(--editor-panel)] transition-colors items-center">
+      <div className="hidden md:grid grid-cols-[32px_50px_1fr_120px_90px_150px] gap-3 px-5 py-3 hover:bg-[var(--editor-panel)] transition-colors items-center">
+        {/* 选择列 */}
+        <span className="flex items-center">
+          {onSelectChange && (
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={() => onSelectChange()}
+              className="accent-[var(--editor-accent)]"
+              aria-label={`选择 ${post.title}`}
+            />
+          )}
+        </span>
         {/* 状态列 */}
         <div className="flex flex-col items-center gap-1.5">
           {/* 状态圆点 */}
@@ -498,6 +499,17 @@ export function PostRow({ post, categories, preferMenuUp = false }: PostRowProps
       {/* 移动端 */}
       <div className="md:hidden p-4 hover:bg-[var(--editor-panel)] transition-colors">
         <div className="flex items-start gap-3 mb-2">
+          {onSelectChange && (
+            <span className="flex-shrink-0 pt-0.5">
+              <input
+                type="checkbox"
+                checked={selected}
+                onChange={() => onSelectChange()}
+                className="accent-[var(--editor-accent)]"
+                aria-label={`选择 ${post.title}`}
+              />
+            </span>
+          )}
           {/* 状态列 */}
           <div className="flex flex-col items-center gap-1 flex-shrink-0">
             <span
@@ -707,6 +719,8 @@ export function PostRow({ post, categories, preferMenuUp = false }: PostRowProps
         isOpen={showPasswordModal}
         onClose={() => setShowPasswordModal(false)}
         slug={post.slug}
+        articleId={hasAuthority ? post.articleId : null}
+        version={hasAuthority ? post.version : null}
         currentPassword={post.password}
         articleUrl={baseArticleUrl}
         onSuccess={() => {
