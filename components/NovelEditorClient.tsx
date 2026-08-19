@@ -14,20 +14,28 @@ const NovelEditor = dynamic(
   }
 )
 
-export function NovelEditorClient(props: {
-  initialData?: {
-    slug: string
-    title: string
-    html: string
-    category?: string
-    status?: 'draft' | 'published' | 'deleted'
-    password?: string | null
-    is_hidden?: number
-    tags?: string[]
-    description?: string | null
-    cover_image?: string | null
-  }
+export interface NovelEditorInitialData {
+  slug: string
+  title: string
+  html: string
+  category?: string
+  status?: 'draft' | 'published' | 'deleted'
+  password?: string | null
+  is_hidden?: number
+  tags?: string[]
+  description?: string | null
+  cover_image?: string | null
+  published_at?: number | null
+  articleId?: number | null
+  version?: number | null
+}
+
+export function NovelEditorClient({
+  initialData,
+  skipDraftRestore,
+}: {
+  initialData?: NovelEditorInitialData
   skipDraftRestore?: boolean
 }) {
-  return <NovelEditor {...props} />
+  return <NovelEditor initialData={initialData} skipDraftRestore={skipDraftRestore} />
 }
