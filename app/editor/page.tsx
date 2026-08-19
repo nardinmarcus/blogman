@@ -1,4 +1,5 @@
 import { getPostBySlug } from '@/lib/db'
+import { getByPostRef, listVersions } from '@/lib/repositories/articles'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { isAdminAuthenticated, COOKIE_NAME } from '@/lib/admin-auth'
 import { cookies } from 'next/headers'
@@ -37,6 +38,11 @@ export default async function EditorPage({
     tags?: string[]
     description?: string | null
     cover_image?: string | null
+    published_at?: number | null
+    /** B2-02 article identity — null for pre-backfill legacy posts (legacy write path). */
+    articleId?: number | null
+    /** Latest server-confirmed version — null when no identity exists yet. */
+    version?: number | null
   } | undefined
 
   if (edit) {
@@ -55,6 +61,16 @@ export default async function EditorPage({
           tags: post.tags,
           description: post.description,
           cover_image: post.cover_image,
+          published_at: post.published_at,
+        }
+        // B2-02: resolve the article identity + latest version so the editor can
+        // drive versioned save (expected version + operation id) against the kernel.
+        const identity = await getByPostRef(env.DB, post.id)
+        if (identity) {
+          const versions = await listVersions(env.DB, identity.id)
+          const latest = versions[0] // newest first
+          initialData.articleId = identity.id
+          initialData.version = latest?.version ?? null
         }
       }
     }

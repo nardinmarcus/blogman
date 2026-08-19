@@ -66,18 +66,121 @@ import { resolvePostCoverImage } from '@/lib/default-cover-images'
 import { buildAutoDescription, normalizePostSlug, sanitizePostSlugInput } from '@/lib/post-utils'
 import { getSiteDisplayUrl } from '@/lib/site-config'
 import { resizeTextareaHeight, useAutoResizeTextarea } from '@/lib/textarea-autosize'
+import {
+  EditorSaveCoordinator,
+  type CommandTransport,
+  type CoordinatorState,
+  type EditorSnapshotContent,
+  type EditorSnapshot,
+  type LocalDraftRecord,
+  type LocalDraftStore,
+} from '@/lib/editor-save-coordinator'
 
 type SaveFeedback =
   | { type: 'success' | 'error'; message: string; slug?: string }
   | null
 
 type PublishStatus = 'public' | 'draft' | 'encrypted' | 'unlisted'
-type SaveState = 'saved' | 'dirty' | 'saving' | 'error'
+type SaveState = 'saved' | 'dirty' | 'saving' | 'error' | 'conflict'
 
 const SIDEBAR_KEY = 'blogman:sidebar-open'
 const AUTOSAVE_DEBOUNCE_MS = 1500
 const AUTOSAVE_MAX_RETRY_DELAY_MS = 10000
+const NEW_SESSION_KEY = 'blogman:editor-new-session'
 const SITE_DISPLAY_URL = getSiteDisplayUrl()
+
+/** Device-stable new-post session key; reused across retries (at most one per article). */
+function newCreationId(): string {
+  if (typeof window === 'undefined') return crypto.randomUUID()
+  const stored = window.localStorage.getItem(NEW_SESSION_KEY)
+  if (stored) return stored
+  const id = crypto.randomUUID()
+  window.localStorage.setItem(NEW_SESSION_KEY, id)
+  return id
+}
+
+/** Rotate to a fresh new-post session after an article is finished. */
+function freshCreationId(): string {
+  const id = crypto.randomUUID()
+  if (typeof window !== 'undefined') window.localStorage.setItem(NEW_SESSION_KEY, id)
+  return id
+}
+
+interface PublishTarget {
+  status: 'draft' | 'published'
+  password?: string | null
+  isHidden?: number
+}
+
+function mapPublishTarget(
+  publishStatus: PublishStatus,
+  generatedPassword?: string,
+): PublishTarget {
+  switch (publishStatus) {
+    case 'draft':
+      return { status: 'draft', password: null, isHidden: 0 }
+    case 'encrypted':
+      return { status: 'published', password: generatedPassword, isHidden: 0 }
+    case 'unlisted':
+      return { status: 'published', password: null, isHidden: 1 }
+    default:
+      return { status: 'published', password: null, isHidden: 0 }
+  }
+}
+
+function createLocalDraftStore(): LocalDraftStore {
+  const ns = (key: string) => `blogman:${key}`
+  return {
+    load(key) {
+      try {
+        const raw = window.localStorage.getItem(ns(key))
+        return raw ? (JSON.parse(raw) as LocalDraftRecord) : null
+      } catch {
+        return null
+      }
+    },
+    save(key, record) {
+      try {
+        window.localStorage.setItem(ns(key), JSON.stringify(record))
+      } catch { /* storage full / blocked — ignore */ }
+    },
+    remove(key) {
+      try {
+        window.localStorage.removeItem(ns(key))
+      } catch { /* ignore */ }
+    },
+  }
+}
+
+function createCommandTransport(): CommandTransport {
+  async function post(action: string, payload: Record<string, unknown>): Promise<unknown> {
+    const res = await fetch('/api/article-commands', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, ...payload }),
+    })
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
+    if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : '保存失败')
+    return data
+  }
+  return {
+    create({ creationId, snapshot }) {
+      return post('create', { creationId, snapshot }) as ReturnType<CommandTransport['create']>
+    },
+    save(payload) {
+      return post('save', payload) as ReturnType<CommandTransport['save']>
+    },
+    publishTemp(payload) {
+      return post('publishTemp', payload) as ReturnType<CommandTransport['publishTemp']>
+    },
+    async getServerSnapshot({ articleId }) {
+      const res = await fetch(`/api/article-commands?articleId=${encodeURIComponent(String(articleId))}`)
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
+      if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : '读取失败')
+      return data as never
+    },
+  }
+}
 
 const EMPTY_DOCUMENT = {
   type: 'doc',
@@ -108,7 +211,11 @@ interface NovelEditorProps {
     tags?: string[]
     description?: string | null
     cover_image?: string | null
+    published_at?: number | null
+    articleId?: number | null
+    version?: number | null
   }
+  skipDraftRestore?: boolean
 }
 
 type DraftMetaState = {
@@ -129,7 +236,7 @@ const METADATA_TARGET_LABEL: Record<MetaGenerationTarget, string> = {
   cover: '封面',
 }
 
-export function NovelEditor({ initialData }: NovelEditorProps = {}) {
+export function NovelEditor({ initialData, skipDraftRestore = false }: NovelEditorProps = {}) {
   // ── Core state ──
   const [draftReady, setDraftReady] = useState(false)
   const [initialContent, setInitialContent] = useState<JSONContent>(EMPTY_DOCUMENT)
@@ -171,12 +278,11 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
   const titleRef = useRef<HTMLTextAreaElement>(null)
   const toast = useToast()
 
-  // Draft save refs
-  const draftSaveTimerRef = useRef<number | null>(null)
-  const retrySaveTimerRef = useRef<number | null>(null)
-  const autosaveAbortRef = useRef<AbortController | null>(null)
-  const autosaveSeqRef = useRef(0)
-  const lastAutosaveSnapshotRef = useRef<string | null>(null)
+  // B2-04 versioned save coordinator (single per session).
+  const [conflictOpen, setConflictOpen] = useState(false)
+  const [coordinatorUI, setCoordinatorUI] = useState<CoordinatorState | null>(null)
+  const coordinatorRef = useRef<EditorSaveCoordinator | null>(null)
+  const coordinatorInitRef = useRef(false)
   const skipNextEditorUpdateRef = useRef(Boolean(initialData?.html))
   const slugInputFocusedRef = useRef(false)
   const latestMetaRef = useRef<DraftMetaState>({
@@ -199,6 +305,28 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
       setInitialContent(EMPTY_DOCUMENT)
     }
     setDraftReady(true)
+
+    // B2-04: create the versioned save coordinator once per session.
+    if (!coordinatorInitRef.current) {
+      coordinatorInitRef.current = true
+      coordinatorRef.current = new EditorSaveCoordinator({
+        articleId: initialData?.articleId ?? null,
+        version: initialData?.version ?? null,
+        creationId: initialData?.articleId ? '' : newCreationId(),
+        getContent: buildCoordinatorContent,
+        transport: createCommandTransport(),
+        draftStore: createLocalDraftStore(),
+        onStateChange: handleCoordinatorChange,
+        debounceMs: AUTOSAVE_DEBOUNCE_MS,
+        maxRetryDelayMs: AUTOSAVE_MAX_RETRY_DELAY_MS,
+      })
+      coordinatorRef.current.setAppliedState({
+        status: initialData?.status === 'draft' ? 'draft' : 'published',
+        password: initialData?.password ?? null,
+        isHidden: initialData?.is_hidden ?? 0,
+        publishedAt: initialData?.published_at ?? null,
+      })
+    }
 
     // Load sidebar preference
     if (typeof window !== 'undefined') {
@@ -230,14 +358,15 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
     return () => clearInterval(id)
   }, [title])
 
-  // Cleanup timers
+  // Persist the unconfirmed draft on unload; dispose coordinator timers.
   useEffect(() => {
+    const onUnload = () => coordinatorRef.current?.persistLocalDraft()
+    window.addEventListener('beforeunload', onUnload)
     return () => {
-      if (draftSaveTimerRef.current !== null) window.clearTimeout(draftSaveTimerRef.current)
-      if (retrySaveTimerRef.current !== null) window.clearTimeout(retrySaveTimerRef.current)
-      autosaveAbortRef.current?.abort()
+      window.removeEventListener('beforeunload', onUnload)
+      coordinatorRef.current?.dispose()
     }
-  }, [title])
+  }, [])
 
   // Auto-focus title on new post
   useEffect(() => {
@@ -325,42 +454,44 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
     }
   }, [])
 
-  const buildAutosaveSnapshot = useCallback((payload: {
-    currentSlug: string | null
-    nextSlug: string
-    title: string
-    html: string
-    description: string
-    category: string
-    tags: string[]
-    coverImage: string
-  }) => {
-    return JSON.stringify({
-      currentSlug: payload.currentSlug,
-      nextSlug: payload.nextSlug,
-      title: payload.title,
-      html: payload.html,
-      description: payload.description,
-      category: payload.category,
-      tags: payload.tags,
-      coverImage: payload.coverImage,
-    })
-  }, [])
+  // B2-04: versioned save coordinator plumbing — the editor feeds the
+  // coordinator its live content; the coordinator owns autosave, confirmed
+  // state, the local unconfirmed draft and conflict handling.
 
-  const clearAutosaveTimers = useCallback(() => {
-    if (draftSaveTimerRef.current !== null) {
-      window.clearTimeout(draftSaveTimerRef.current)
-      draftSaveTimerRef.current = null
+  const buildCoordinatorContent = useCallback((): EditorSnapshotContent => {
+    const { slug: nextSlugRaw, category, tags, description, coverImage } = latestMetaRef.current
+    const editor = editorRef.current
+    const html = editor?.getHTML() ?? initialData?.html ?? ''
+    let content = ''
+    try {
+      // tiptap-markdown is the canonical body-of-truth when available.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      content = (editor?.storage as any)?.markdown?.getMarkdown?.() ?? ''
+    } catch {
+      content = ''
     }
-    if (retrySaveTimerRef.current !== null) {
-      window.clearTimeout(retrySaveTimerRef.current)
-      retrySaveTimerRef.current = null
+    if (!content && editor) content = editor.getText({ blockSeparator: '\n\n' })
+    return {
+      slug: normalizePostSlug(nextSlugRaw),
+      title: latestTitleRef.current.trim(),
+      html,
+      content: content.trim(),
+      description,
+      category,
+      tags,
+      coverImage,
     }
-  }, [])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const abortAutosaveRequest = useCallback(() => {
-    autosaveAbortRef.current?.abort()
-    autosaveAbortRef.current = null
+  const handleCoordinatorChange = useCallback((s: CoordinatorState) => {
+    setCoordinatorUI(s)
+    setSaveState(s.status)
+    if (s.lastSavedAt) setLastSavedAt(s.lastSavedAt)
+    if (s.status === 'conflict') setConflictOpen(true)
+    else if (s.conflict === null) setConflictOpen(false)
+    if (s.status === 'error' && s.errorMessage) {
+      setFeedback({ type: 'error', message: s.errorMessage })
+    }
   }, [])
 
   const syncPersistedSlug = useCallback((
@@ -388,153 +519,10 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
     }
   }, [])
 
-  const persistDraft = useCallback(async (
-    nextTitle = latestTitleRef.current,
-    editor = editorRef.current,
-    retryAttempt = 0,
-  ) => {
-    if (typeof window === 'undefined' || !draftReady || !editor) return
-
-    const { editSlug: currentSlug, slug: nextSlugRaw, category, tags, description, coverImage } = latestMetaRef.current
-    const nextSlug = normalizePostSlug(nextSlugRaw)
-    const normalizedTitle = nextTitle.trim() || '无标题'
-    const contentJson = editor.getJSON()
-    const html = editor.getHTML()
-    const plainText = editor.getText({ blockSeparator: '\n\n' }).trim()
-    const hasMedia = /<(img|video|audio|iframe)\b/i.test(html)
-    const hasMeaningfulContent = Boolean(nextTitle.trim() || plainText || hasMedia)
-
-    if (!hasMeaningfulContent) {
-      setSaveState('saved')
-      return
-    }
-
-    const normalizedDescription = (description || buildAutoDescription(plainText) || '').trim()
-    const snapshot = buildAutosaveSnapshot({
-      currentSlug,
-      nextSlug,
-      title: normalizedTitle,
-      html,
-      description: normalizedDescription,
-      category,
-      tags,
-      coverImage,
-    })
-
-    if (snapshot === lastAutosaveSnapshotRef.current) {
-      setSaveState('saved')
-      return
-    }
-
-    const requestId = autosaveSeqRef.current + 1
-    autosaveSeqRef.current = requestId
-
-    abortAutosaveRequest()
-    const controller = new AbortController()
-    autosaveAbortRef.current = controller
-
-    setSaveState('saving')
-
-    try {
-      if (currentSlug) {
-        const res = await fetch('/api/posts', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            current_slug: currentSlug,
-            new_slug: nextSlug && nextSlug !== currentSlug ? nextSlug : undefined,
-            title: normalizedTitle,
-            html,
-            content: plainText || JSON.stringify(contentJson),
-            description: normalizedDescription,
-            category,
-            tags,
-            cover_image: coverImage,
-          }),
-          signal: controller.signal,
-        })
-
-        const data = await res.json().catch(() => ({})) as { error?: string; slug?: string }
-        if (!res.ok) {
-          throw new Error(data.error || '自动保存失败')
-        }
-
-        if (requestId !== autosaveSeqRef.current) return
-
-        const persistedSlug = typeof data.slug === 'string' ? data.slug : currentSlug
-        if (persistedSlug !== currentSlug || latestMetaRef.current.slug !== persistedSlug) {
-          syncPersistedSlug(persistedSlug, currentSlug)
-        }
-      } else {
-        const res = await fetch('/api/posts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            title: normalizedTitle,
-            html,
-            content: plainText || JSON.stringify(contentJson),
-            category,
-            status: 'draft',
-            tags,
-            description: normalizedDescription,
-            cover_image: coverImage,
-          }),
-          signal: controller.signal,
-        })
-
-        const data = await res.json().catch(() => ({})) as { error?: string; slug?: string }
-        if (!res.ok) {
-          throw new Error(data.error || '自动保存失败')
-        }
-
-        if (requestId !== autosaveSeqRef.current) return
-
-        if (typeof data.slug === 'string' && data.slug) {
-          syncPersistedSlug(data.slug, null, true)
-        }
-      }
-
-      if (requestId !== autosaveSeqRef.current) return
-
-      lastAutosaveSnapshotRef.current = snapshot
-      setSaveState('saved')
-      setLastSavedAt(Date.now())
-    } catch (error) {
-      if (controller.signal.aborted) return
-      if (requestId !== autosaveSeqRef.current) return
-
-      console.error('Auto-save failed:', error)
-      setSaveState('error')
-
-      const nextAttempt = retryAttempt + 1
-      const delay = Math.min(AUTOSAVE_MAX_RETRY_DELAY_MS, 2000 * (2 ** retryAttempt))
-      retrySaveTimerRef.current = window.setTimeout(() => {
-        if (editorRef.current) {
-          void persistDraft(latestTitleRef.current, editorRef.current, nextAttempt)
-        }
-      }, delay)
-    } finally {
-      if (autosaveAbortRef.current === controller) {
-        autosaveAbortRef.current = null
-      }
-    }
-  }, [abortAutosaveRequest, buildAutosaveSnapshot, draftReady, syncPersistedSlug])
-
-  // ── Draft save ──
-  const scheduleDraftSave = useCallback((
-    nextTitle = latestTitleRef.current,
-    editor = editorRef.current,
-  ) => {
-    if (typeof window === 'undefined' || !draftReady || !editor) return
-
-    latestTitleRef.current = nextTitle
-    clearAutosaveTimers()
-    setSaveState((prev) => (prev === 'saving' ? prev : 'dirty'))
-
-    draftSaveTimerRef.current = window.setTimeout(() => {
-      void persistDraft(nextTitle, editor)
-    }, AUTOSAVE_DEBOUNCE_MS)
-  }, [clearAutosaveTimers, draftReady, persistDraft])
+  // B2-04: autosave is driven by the save coordinator (debounced, versioned).
+  const scheduleDraftSave = useCallback(() => {
+    coordinatorRef.current?.schedule()
+  }, [])
 
   const markDirty = useCallback((metaOverrides?: Partial<DraftMetaState>) => {
     if (metaOverrides && Object.keys(metaOverrides).length > 0) {
@@ -545,6 +533,64 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
     }
     scheduleDraftSave()
   }, [scheduleDraftSave])
+
+  // Apply a snapshot to the editor + meta (restore / conflict "server version").
+  const applySnapshot = useCallback((snap: EditorSnapshot) => {
+    latestTitleRef.current = snap.title
+    setTitle(snap.title)
+    const nextMeta = {
+      editSlug: snap.slug || (latestMetaRef.current.editSlug ?? null),
+      slug: snap.slug,
+      category: snap.category || '未分类',
+      tags: snap.tags ?? [],
+      description: snap.description ?? '',
+      coverImage: snap.coverImage ?? '',
+    }
+    latestMetaRef.current = nextMeta
+    setEditSlug(nextMeta.editSlug)
+    setSlug(nextMeta.slug)
+    setCategory(nextMeta.category)
+    setTags(nextMeta.tags)
+    setDescription(nextMeta.description)
+    setCoverImage(nextMeta.coverImage)
+    if (editorRef.current && snap.html !== undefined) {
+      skipNextEditorUpdateRef.current = false
+      editorRef.current.commands.setContent(snap.html || '')
+    }
+    if (snap.slug && snap.slug !== nextMeta.editSlug) {
+      window.history.replaceState({}, '', `/editor?edit=${encodeURIComponent(snap.slug)}`)
+    }
+  }, [])
+
+  // Conflict resolution choices — adopt server / safe re-submit / save as new.
+  const handleAdoptServer = useCallback(async () => {
+    const coordinator = coordinatorRef.current
+    if (!coordinator) return
+    const snap = await coordinator.adoptServerVersion()
+    if (snap) {
+      applySnapshot(snap)
+      coordinator.setInitialConfirmed()
+    }
+    setConflictOpen(false)
+  }, [applySnapshot])
+
+  const handleResubmitLocal = useCallback(async () => {
+    await coordinatorRef.current?.resubmitLocal()
+    setConflictOpen(false)
+  }, [])
+
+  const handleSaveAsNew = useCallback(async () => {
+    const coordinator = coordinatorRef.current
+    if (!coordinator) return
+    const res = await coordinator.saveAsNewDraft()
+    setConflictOpen(false)
+    if (res.ok && res.slug) {
+      latestMetaRef.current = { ...latestMetaRef.current, editSlug: res.slug, slug: res.slug }
+      setEditSlug(res.slug)
+      setSlug(res.slug)
+      window.history.replaceState({}, '', `/editor?edit=${encodeURIComponent(res.slug)}`)
+    }
+  }, [])
 
   const imageExtensions = useMemo(() => createEditorExtensions({
     imageActions: {
@@ -584,7 +630,7 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
     try {
       const optimizedFile = await optimizeImageForUpload(file, EDITOR_IMAGE_OPTIMIZE_OPTIONS)
       const result = await uploadEditorFile(optimizedFile, (p) => setUploadProgress(p))
-      if (editorRef.current) scheduleDraftSave(latestTitleRef.current, editorRef.current)
+      if (editorRef.current) scheduleDraftSave()
       return result.url
     } catch (error) {
       setFeedback({ type: 'error', message: error instanceof Error ? error.message : '图片上传失败' })
@@ -614,7 +660,7 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
       const result = await uploadEditorFile(file, (p) => setUploadProgress(p))
       removeUploadPlaceholder(editor, marker)
       insertUploadedFileIntoEditor(editor, file, result)
-      scheduleDraftSave(latestTitleRef.current, editor)
+      scheduleDraftSave()
     } catch (error) {
       try { removeUploadPlaceholder(editor, marker) } catch {}
       setFeedback({ type: 'error', message: error instanceof Error ? error.message : '文件上传失败' })
@@ -759,86 +805,50 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
   const handleSave = async () => {
     const editor = editorRef.current
     const normalizedTitle = title.trim()
-    const normalizedSlug = normalizePostSlug(slug)
     if (!normalizedTitle) { setFeedback({ type: 'error', message: '先把文章标题写上。' }); return }
     if (!editor) { setFeedback({ type: 'error', message: '编辑器还没准备好。' }); return }
     const content = editor.getText({ blockSeparator: '\n\n' }).trim()
     const html = editor.getHTML()
     const hasContent = content || /<(img|video|audio|iframe)\s/.test(html)
     if (!hasContent) { setFeedback({ type: 'error', message: '正文还是空的。' }); return }
-    const normalizedDescription = (description || buildAutoDescription(content) || '').trim()
 
-    clearAutosaveTimers()
-    abortAutosaveRequest()
+    const coordinator = coordinatorRef.current
+    if (!coordinator) return
+    const isEdit = editSlug !== null
+    const keptPassword = coordinatorUI?.applied.password ?? initialData?.password ?? undefined
+    const target = mapPublishTarget(
+      publishStatus,
+      publishStatus === 'encrypted' ? (keptPassword || generatePassword()) : undefined,
+    )
 
     setSaving(true); setSaveState('saving'); setFeedback(null)
 
     try {
-      const isEdit = editSlug !== null
-      const url = isEdit ? `/api/admin/posts/${editSlug}` : '/api/posts'
-      const method = isEdit ? 'PUT' : 'POST'
-
-      let statusFields: { status: string; is_hidden: number; password?: string | null }
-      if (publishStatus === 'encrypted') {
-        statusFields = { status: 'published', is_hidden: 0, password: initialData?.password || generatePassword() }
-      } else {
-        const m = { public: { status: 'published', is_hidden: 0, password: null }, draft: { status: 'draft', is_hidden: 0, password: null }, unlisted: { status: 'published', is_hidden: 1, password: null } }
-        statusFields = m[publishStatus as 'public' | 'draft' | 'unlisted']
-      }
-
-      const response = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          slug: normalizedSlug || (isEdit ? editSlug : undefined),
-          title: normalizedTitle, content, html, category,
-          ...statusFields,
-          tags, description: normalizedDescription, cover_image: coverImage || null,
-        }),
-      })
-      const result = (await response.json()) as {
-        success?: boolean
-        slug?: string
-        error?: string
-      }
-      if (!response.ok || !result.success) throw new Error(result.error || '保存失败')
-
-      const persistedSlug: string | null = typeof result.slug === 'string'
-        ? result.slug
-        : (isEdit ? editSlug : null)
-      const snapshot = buildAutosaveSnapshot({
-        currentSlug: persistedSlug,
-        nextSlug: persistedSlug || '',
-        title: normalizedTitle,
-        html,
-        description: (description || buildAutoDescription(content) || '').trim(),
-        category,
-        tags,
-        coverImage,
-      })
-      lastAutosaveSnapshotRef.current = snapshot
-
-      setSaveState('saved')
-      setLastSavedAt(Date.now())
-
       if (isEdit) {
-        if (!description && normalizedDescription) {
-          setDescription(normalizedDescription)
+        const res = await coordinator.saveAndPublish(target)
+        if (res.ok) {
+          if (editSlug) syncPersistedSlug(editSlug, editSlug, true)
+          if (!description && content) setDescription(buildAutoDescription(content) || '')
+          setFeedback({ type: 'success', message: '文章已更新。', slug: editSlug ?? undefined })
+        } else if (res.error === 'conflict') {
+          // The conflict modal is shown via coordinator state — no auto-merge.
+        } else if (res.error === 'status-conflict') {
+          setFeedback({ type: 'error', message: '文章状态已被其他设备修改，请刷新后重试' })
+        } else {
+          setFeedback({ type: 'error', message: '保存失败，请检查网络后重试' })
         }
-        if (persistedSlug) {
-          syncPersistedSlug(persistedSlug, editSlug, true)
-        }
-        setFeedback({ type: 'success', message: '文章已更新。', slug: persistedSlug || editSlug || undefined })
       } else {
-        if (!description && normalizedDescription) {
-          setDescription(normalizedDescription)
+        const res = await coordinator.createNew(target)
+        if (res.ok) {
+          const msgs = { public: '已发布', draft: '草稿已保存', encrypted: '已发布（加密）', unlisted: '已发布（链接访问）' }
+          setFeedback({ type: 'success', message: `${msgs[publishStatus]}`, slug: res.slug })
+          setTitle('')
+          latestTitleRef.current = ''
+          editor.commands.clearContent()
+          coordinator.resetForNewPost(freshCreationId())
+        } else {
+          setFeedback({ type: 'error', message: res.error || '保存失败' })
         }
-        const msgs = { public: '已发布', draft: '草稿已保存', encrypted: '已发布（加密）', unlisted: '已发布（链接访问）' }
-        setFeedback({ type: 'success', message: `${msgs[publishStatus]}`, slug: result.slug })
-        setTitle('')
-        latestTitleRef.current = ''
-        lastAutosaveSnapshotRef.current = null
-        editor.commands.clearContent()
       }
       setPublishPanelOpen(false)
     } catch (error) {
@@ -959,9 +969,11 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
 
   // ── Save status display ──
   const saveStatusText = saveState === 'saved' ? `已保存 · ${relativeTime(lastSavedAt)}` :
+    saveState === 'conflict' ? '版本冲突，待处理' :
     saveState === 'dirty' ? '未保存' : saveState === 'saving' ? '保存中…' : '保存失败'
 
   const saveStatusColor = saveState === 'saved' ? 'text-emerald-600' :
+    saveState === 'conflict' ? 'text-amber-600' :
     saveState === 'error' ? 'text-orange-500' : 'text-[var(--stone-gray)]'
 
   const showSidebar = sidebarOpen
@@ -991,6 +1003,7 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
             <div className={`flex items-center gap-1.5 text-sm min-w-[140px] ${saveStatusColor}`}>
               <span className={`inline-block h-2 w-2 rounded-full shrink-0 ${
                 saveState === 'saved' ? 'bg-emerald-500' :
+                saveState === 'conflict' ? 'bg-amber-500' :
                 saveState === 'dirty' ? 'bg-gray-300' :
                 saveState === 'saving' ? 'bg-gray-400 animate-pulse' : 'bg-orange-500'
               }`} />
@@ -1241,18 +1254,18 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
                       }
 
                       if (initialData?.slug) {
-                        lastAutosaveSnapshotRef.current = buildAutosaveSnapshot({
-                          currentSlug: initialData.slug,
-                          nextSlug: initialData.slug,
-                          title: initialData.title || '无标题',
-                          html: initialData.html || '',
-                          description: (initialData.description || '').trim(),
-                          category: initialData.category || '未分类',
-                          tags: initialData.tags || [],
-                          coverImage: initialData.cover_image || '',
-                        })
+                        coordinatorRef.current?.setInitialConfirmed()
+                        // Refresh recovery: restore this device's unconfirmed draft for
+                        // the article (only when it differs from the confirmed baseline).
+                        if (!skipDraftRestore) {
+                          const draft = coordinatorRef.current?.restoreLocalDraft()
+                          if (draft) {
+                            skipNextEditorUpdateRef.current = false
+                            applySnapshot(draft)
+                          }
+                        }
                       } else {
-                        lastAutosaveSnapshotRef.current = null
+                        coordinatorRef.current?.setInitialConfirmed()
                       }
                     }}
                     onUpdate={({ editor }) => {
@@ -1266,7 +1279,7 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
                         return
                       }
 
-                      scheduleDraftSave(latestTitleRef.current, editor)
+                      scheduleDraftSave()
                       // eslint-disable-next-line @typescript-eslint/no-explicit-any
                       const st = editor.storage as any
                       setCharCount(st.characterCount?.characters?.() ?? 0)
@@ -1579,6 +1592,52 @@ export function NovelEditor({ initialData }: NovelEditorProps = {}) {
             markDirty()
           }}
         />
+      )}
+
+      {/* B2-04: version conflict — autosave paused, never auto-merged; three choices. */}
+      {conflictOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-[var(--editor-line)] bg-[var(--editor-panel)] p-6 shadow-2xl">
+            <div className="flex items-center gap-2">
+              <span className="inline-block h-2.5 w-2.5 rounded-full bg-amber-500" />
+              <h3 className="text-base font-semibold text-[var(--editor-ink)]">保存冲突</h3>
+            </div>
+            <p className="mt-3 text-sm text-[var(--editor-muted)]">
+              这篇文章已在其他设备上被更新（服务器版本{' '}
+              <span className="font-semibold text-[var(--editor-ink)] tabular-nums">
+                {coordinatorUI?.conflict?.serverVersion ?? '?'}
+              </span>
+              {coordinatorUI?.conflict?.serverTitle ? ` · 《${coordinatorUI.conflict.serverTitle}》` : ''}
+              ）。自动保存已暂停，请选择如何处理：
+            </p>
+            <div className="mt-5 space-y-2">
+              <button
+                type="button"
+                onClick={() => void handleAdoptServer()}
+                className="w-full rounded-lg border border-[var(--editor-line)] bg-[var(--editor-soft)] px-4 py-3 text-left text-sm text-[var(--editor-ink)] hover:border-[var(--editor-accent)]/40 transition"
+              >
+                <span className="font-semibold">采用服务器版本</span>
+                <span className="mt-0.5 block text-xs text-[var(--editor-muted)]">放弃本机的未确认修改，加载最新服务器内容</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleResubmitLocal()}
+                className="w-full rounded-lg border border-[var(--editor-line)] bg-[var(--editor-soft)] px-4 py-3 text-left text-sm text-[var(--editor-ink)] hover:border-[var(--editor-accent)]/40 transition"
+              >
+                <span className="font-semibold">用本机版本重新提报</span>
+                <span className="mt-0.5 block text-xs text-[var(--editor-muted)]">以当前服务端版本为基础安全覆盖</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSaveAsNew()}
+                className="w-full rounded-lg border border-[var(--editor-line)] bg-[var(--editor-soft)] px-4 py-3 text-left text-sm text-[var(--editor-ink)] hover:border-[var(--editor-accent)]/40 transition"
+              >
+                <span className="font-semibold">另存为新草稿</span>
+                <span className="mt-0.5 block text-xs text-[var(--editor-muted)]">不碰服务器版本，把本机内容保存为独立新文章</span>
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
