@@ -1,10 +1,12 @@
 /**
  * B2-03 — versioned article write command kernel tests.
  *
- * Isolated D1 (real local D1 via `wrangler d1 execute --local --persist-to`)
- * exercising the full command surface of lib/article-commands: response-lost
- * replay, duplicate commands, concurrent saves, stale expected versions,
- * slug conflicts, transaction interruption, and projection failure.
+ * Isolated D1 through one shared in-process Miniflare instance (real workerd
+ * engine, real D1 binding — zero wrangler CLI spawns during execution),
+ * bootstrapped once per suite. Exercises the full command surface of
+ * lib/article-commands: response-lost replay, duplicate commands, concurrent
+ * saves, stale expected versions, slug conflicts, transaction interruption,
+ * and projection failure.
  */
 
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -13,18 +15,19 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands'
 import { create, publishTemp, save } from '@/lib/article-commands'
-import { bootstrapState, createDatabase, query } from './helpers'
+import { bootstrapState, createDatabase, query, teardownState } from './helpers'
 
 let state: string
 const cleanup: string[] = []
 
-beforeAll(() => {
+beforeAll(async () => {
   state = mkdtempSync(join(tmpdir(), 'blogman-b203-commands-'))
   cleanup.push(state)
-  bootstrapState(state)
+  await bootstrapState(state)
 }, 300_000)
 
-afterAll(() => {
+afterAll(async () => {
+  await teardownState()
   for (const dir of cleanup) rmSync(dir, { recursive: true, force: true })
 })
 
@@ -55,9 +58,8 @@ function snapshot(overrides: Partial<ArticleCommandSnapshot> = {}): ArticleComma
   }
 }
 
-function postRow(postRef: number): Record<string, unknown> | null {
-  const rows = query<Record<string, unknown>>(
-    state,
+async function postRow(postRef: number): Promise<Record<string, unknown> | null> {
+  const rows = await query<Record<string, unknown>>(
     `SELECT slug, title, content, html, description, category, tags, status, password,
             is_pinned, is_hidden, cover_image, deleted_at, published_at, updated_at,
             content_envelope, content_snapshot_sha256, source_sync_sha256
@@ -66,9 +68,8 @@ function postRow(postRef: number): Record<string, unknown> | null {
   return rows[0] ?? null
 }
 
-function articleVersions(articleId: number): Array<Record<string, unknown>> {
+async function articleVersions(articleId: number): Promise<Array<Record<string, unknown>>> {
   return query<Record<string, unknown>>(
-    state,
     `SELECT id, article_id, version, operation_id, snapshot_json,
             content_snapshot_sha256, published_at
      FROM article_versions WHERE article_id = ${articleId} ORDER BY version DESC`,
@@ -78,24 +79,24 @@ function articleVersions(articleId: number): Array<Record<string, unknown>> {
 describe('lib/article-commands — create', { timeout: 600_000 }, () => {
   it('skips a blank session (no title and no body) with zero writes', async () => {
     const creationId = fresh('blank')
-    const db = createDatabase(state)
-    const before = query<{ n: number }>(state, 'SELECT COUNT(*) AS n FROM posts').at(-1)?.n as number
+    const db = createDatabase()
+    const before = (await query<{ n: number }>('SELECT COUNT(*) AS n FROM posts')).at(-1)?.n as number
     const result = await create(db, {
       creationId,
       snapshot: snapshot({ title: '  ', content: '' }),
     })
     expect(result).toEqual({ outcome: 'skipped', reason: 'blank-session' })
-    expect(query(state, `SELECT id FROM articles WHERE draft_ref = '${creationId}'`)).toEqual([])
+    expect(await query(`SELECT id FROM articles WHERE draft_ref = '${creationId}'`)).toEqual([])
     expect(
-      query(state, `SELECT id FROM article_versions WHERE operation_id = 'create:${creationId}'`),
+      await query(`SELECT id FROM article_versions WHERE operation_id = 'create:${creationId}'`),
     ).toEqual([])
-    expect(query<{ n: number }>(state, 'SELECT COUNT(*) AS n FROM posts').at(-1)?.n).toBe(before)
+    expect((await query<{ n: number }>('SELECT COUNT(*) AS n FROM posts')).at(-1)?.n).toBe(before)
   })
 
   it('creates the article identity + version 1 + posts compat projection atomically', async () => {
     const creationId = fresh('mk')
     const snap = snapshot({ title: '建稿标题', status: 'published' })
-    const db = createDatabase(state)
+    const db = createDatabase()
     const result = await create(db, { creationId, snapshot: snap })
 
     expect(result.outcome).toBe('created')
@@ -105,15 +106,15 @@ describe('lib/article-commands — create', { timeout: 600_000 }, () => {
     expect(result.operationId).toBe(`create:${creationId}`)
 
     // articles identity row, draft_ref = creationId, slug + post_ref filled.
-    const articles = query<Record<string, unknown>>(
-      state, `SELECT id, post_ref, slug, draft_ref FROM articles WHERE draft_ref = '${creationId}'`,
+    const articles = await query<Record<string, unknown>>(
+      `SELECT id, post_ref, slug, draft_ref FROM articles WHERE draft_ref = '${creationId}'`,
     )
     expect(articles).toHaveLength(1)
     expect(articles[0].slug).toBe(snap.slug)
     expect(result.postRef).toBe(articles[0].post_ref)
 
     // version-1 fact.
-    const versions = articleVersions(result.articleId)
+    const versions = await articleVersions(result.articleId)
     expect(versions).toHaveLength(1)
     expect(versions[0].version).toBe(1)
     expect(versions[0].operation_id).toBe(`create:${creationId}`)
@@ -130,7 +131,7 @@ describe('lib/article-commands — create', { timeout: 600_000 }, () => {
     expect(record.source_sync_sha256).toMatch(/^[0-9a-f]{64}$/)
 
     // posts compat projection matches the version facts.
-    const post = postRow(result.postRef)
+    const post = await postRow(result.postRef)
     expect(post).not.toBeNull()
     expect(post!.slug).toBe(snap.slug)
     expect(post!.status).toBe('published')
@@ -141,7 +142,7 @@ describe('lib/article-commands — create', { timeout: 600_000 }, () => {
 
   it('replays a lost-response creation as the same article (at most one per creation id)', async () => {
     const creationId = fresh('replay')
-    const db = createDatabase(state)
+    const db = createDatabase()
     const first = await create(db, { creationId, snapshot: snapshot({ title: '原稿' }) })
     expect(first.outcome).toBe('created')
     if (first.outcome !== 'created') return
@@ -161,51 +162,49 @@ describe('lib/article-commands — create', { timeout: 600_000 }, () => {
 
     // Still exactly one article + one version; original facts untouched.
     expect(
-      query(state, `SELECT id FROM articles WHERE draft_ref = '${creationId}'`),
+      await query(`SELECT id FROM articles WHERE draft_ref = '${creationId}'`),
     ).toHaveLength(1)
-    expect(articleVersions(first.articleId)).toHaveLength(1)
-    expect(postRow(first.postRef)!.title).toBe('原稿')
+    expect(await articleVersions(first.articleId)).toHaveLength(1)
+    expect((await postRow(first.postRef))!.title).toBe('原稿')
   })
 
   it('returns slug-conflict with zero writes when the slug is already taken', async () => {
     const takenSlug = fresh('taken')
     // Pre-seed a post with that slug (outside the command layer).
-    query(
-      state,
+    await query(
       `INSERT INTO posts (slug, title, content, html) VALUES ('${takenSlug}', '先占', '先占正文', '<p>先占正文</p>')`,
     )
     const creationId = fresh('slugconf')
-    const db = createDatabase(state)
+    const db = createDatabase()
     const result = await create(db, { creationId, snapshot: snapshot({ slug: takenSlug }) })
     expect(result).toEqual({ outcome: 'slug-conflict', slug: takenSlug })
-    expect(query(state, `SELECT id FROM articles WHERE draft_ref = '${creationId}'`)).toEqual([])
+    expect(await query(`SELECT id FROM articles WHERE draft_ref = '${creationId}'`)).toEqual([])
     expect(
-      query(state, `SELECT id FROM article_versions WHERE operation_id = 'create:${creationId}'`),
+      await query(`SELECT id FROM article_versions WHERE operation_id = 'create:${creationId}'`),
     ).toEqual([])
-    expect(query<{ n: number }>(state, `SELECT COUNT(*) AS n FROM posts WHERE slug = '${takenSlug}'`).at(-1)?.n).toBe(1)
+    expect((await query<{ n: number }>(`SELECT COUNT(*) AS n FROM posts WHERE slug = '${takenSlug}'`)).at(-1)?.n).toBe(1)
   })
 
   it('rolls back the whole create batch when the slug UNIQUE fires mid-batch (transaction interruption)', async () => {
     const takenSlug = fresh('interrupt')
-    query(
-      state,
+    await query(
       `INSERT INTO posts (slug, title, content, html) VALUES ('${takenSlug}', '先占', '先占正文', '<p>先占正文</p>')`,
     )
     const creationId = fresh('interrupt-mk')
     // The slug pre-read is stale (returns "free"); the batch then hits the real
     // UNIQUE(slug) and must roll back everything.
-    const db = createDatabase(state, {
+    const db = createDatabase({
       stale: [{ sqlIncludes: 'FROM posts WHERE slug =', rows: [] }],
     })
     const result = await create(db, { creationId, snapshot: snapshot({ slug: takenSlug }) })
     expect(result).toEqual({ outcome: 'slug-conflict', slug: takenSlug })
 
     // Zero partial writes: no article, no version, no second posts row.
-    expect(query(state, `SELECT id FROM articles WHERE draft_ref = '${creationId}'`)).toEqual([])
+    expect(await query(`SELECT id FROM articles WHERE draft_ref = '${creationId}'`)).toEqual([])
     expect(
-      query(state, `SELECT id FROM article_versions WHERE operation_id = 'create:${creationId}'`),
+      await query(`SELECT id FROM article_versions WHERE operation_id = 'create:${creationId}'`),
     ).toEqual([])
-    expect(query<{ n: number }>(state, `SELECT COUNT(*) AS n FROM posts WHERE slug = '${takenSlug}'`).at(-1)?.n).toBe(1)
+    expect((await query<{ n: number }>(`SELECT COUNT(*) AS n FROM posts WHERE slug = '${takenSlug}'`)).at(-1)?.n).toBe(1)
   })
 })
 
@@ -213,7 +212,7 @@ describe('lib/article-commands — save', { timeout: 600_000 }, () => {
   async function createdArticle(title: string): Promise<{ articleId: number; postRef: number; slug: string }> {
     const creationId = fresh('save-base')
     const snap = snapshot({ title, slug: fresh('save-slug') })
-    const result = await create(createDatabase(state), { creationId, snapshot: snap })
+    const result = await create(createDatabase(), { creationId, snapshot: snap })
     expect(result.outcome).toBe('created')
     if (result.outcome !== 'created') throw new Error('create failed')
     return { articleId: result.articleId, postRef: result.postRef, slug: snap.slug }
@@ -221,13 +220,13 @@ describe('lib/article-commands — save', { timeout: 600_000 }, () => {
 
   it('writes the next monotonic version only when the expected version matches', async () => {
     const { articleId, postRef } = await createdArticle('单调版本')
-    const db = createDatabase(state)
+    const db = createDatabase()
 
     const v2 = await save(db, {
       articleId,
       expectedVersion: 1,
       operationId: fresh('op'),
-      snapshot: snapshot({ title: '第二版', slug: query<Record<string, unknown>>(state, `SELECT slug FROM posts WHERE id = ${postRef}`)[0].slug as string }),
+      snapshot: snapshot({ title: '第二版', slug: (await query<Record<string, unknown>>(`SELECT slug FROM posts WHERE id = ${postRef}`))[0].slug as string }),
     })
     expect(v2.outcome).toBe('applied')
     if (v2.outcome !== 'applied') return
@@ -238,24 +237,24 @@ describe('lib/article-commands — save', { timeout: 600_000 }, () => {
       articleId,
       expectedVersion: 2,
       operationId: fresh('op'),
-      snapshot: snapshot({ title: '第三版', slug: query<Record<string, unknown>>(state, `SELECT slug FROM posts WHERE id = ${postRef}`)[0].slug as string }),
+      snapshot: snapshot({ title: '第三版', slug: (await query<Record<string, unknown>>(`SELECT slug FROM posts WHERE id = ${postRef}`))[0].slug as string }),
     })
     expect(v3.outcome).toBe('applied')
     if (v3.outcome !== 'applied') return
     expect(v3.version).toBe(3)
 
-    const versions = articleVersions(articleId).map((row) => row.version)
+    const versions = (await articleVersions(articleId)).map((row) => row.version)
     expect(versions).toEqual([3, 2, 1])
 
     // posts compat projection follows the latest version.
-    const post = postRow(postRef)
+    const post = await postRow(postRef)
     expect(post!.title).toBe('第三版')
     expect(post!.content_snapshot_sha256).toMatch(/^[0-9a-f]{64}$/)
   })
 
   it('replays the original result for the same operation id (response-lost save)', async () => {
     const { articleId, postRef } = await createdArticle('重放保存')
-    const db = createDatabase(state)
+    const db = createDatabase()
     const opId = fresh('replay-op')
     const payload = snapshot({ title: '重放内容' })
 
@@ -275,13 +274,13 @@ describe('lib/article-commands — save', { timeout: 600_000 }, () => {
     })
 
     // No new version, posts untouched by the replay.
-    expect(articleVersions(articleId)).toHaveLength(2)
-    expect(postRow(postRef)!.title).toBe('重放内容')
+    expect(await articleVersions(articleId)).toHaveLength(2)
+    expect((await postRow(postRef))!.title).toBe('重放内容')
   })
 
   it('rejects a stale expected version with the server version + comparison facts and zero writes', async () => {
     const { articleId, postRef } = await createdArticle('旧版本冲突')
-    const db = createDatabase(state)
+    const db = createDatabase()
     await save(db, {
       articleId,
       expectedVersion: 1,
@@ -305,13 +304,13 @@ describe('lib/article-commands — save', { timeout: 600_000 }, () => {
     expect(conflict.facts.content_snapshot_sha256).toMatch(/^[0-9a-f]{64}$/)
 
     // Zero partial writes.
-    expect(articleVersions(articleId)).toHaveLength(2)
-    expect(postRow(postRef)!.title).toBe('服务端第二版')
+    expect(await articleVersions(articleId)).toHaveLength(2)
+    expect((await postRow(postRef))!.title).toBe('服务端第二版')
   })
 
   it('detects a concurrent save that lost the race between pre-read and batch (zero partial writes)', async () => {
     const { articleId, postRef } = await createdArticle('并发保存')
-    const dbReal = createDatabase(state)
+    const dbReal = createDatabase()
     // Server commits v2 via a first writer.
     const winner = await save(dbReal, {
       articleId,
@@ -324,13 +323,14 @@ describe('lib/article-commands — save', { timeout: 600_000 }, () => {
 
     // Second writer read the latest version BEFORE the first writer committed
     // (stale pre-read simulates the race window); server state is already v2.
-    const staleV1 = query<Record<string, unknown>>(
-      state,
-      `SELECT id, article_id, version, operation_id, snapshot_json,
-              content_snapshot_sha256, published_at
-       FROM article_versions WHERE article_id = ${articleId} AND version = 1`,
+    const staleV1 = (
+      await query<Record<string, unknown>>(
+        `SELECT id, article_id, version, operation_id, snapshot_json,
+                content_snapshot_sha256, published_at
+         FROM article_versions WHERE article_id = ${articleId} AND version = 1`,
+      )
     )[0]
-    const dbStale = createDatabase(state, {
+    const dbStale = createDatabase({
       stale: [{ sqlIncludes: 'ORDER BY version DESC LIMIT 1', rows: [staleV1] }],
     })
 
@@ -345,19 +345,18 @@ describe('lib/article-commands — save', { timeout: 600_000 }, () => {
     expect(loser.serverVersion).toBe(2)
 
     // The guarded batch wrote nothing: versions still [2,1], posts still the winner's.
-    expect(articleVersions(articleId).map((row) => row.version)).toEqual([2, 1])
-    expect(postRow(postRef)!.title).toBe('先到者第二版')
-    expect(postRow(postRef)!.content_snapshot_sha256).toMatch(/^[0-9a-f]{64}$/)
+    expect((await articleVersions(articleId)).map((row) => row.version)).toEqual([2, 1])
+    expect((await postRow(postRef))!.title).toBe('先到者第二版')
+    expect((await postRow(postRef))!.content_snapshot_sha256).toMatch(/^[0-9a-f]{64}$/)
   })
 
   it('returns slug-conflict with zero writes when renaming to a taken slug', async () => {
     const { articleId, postRef } = await createdArticle('改slug冲突')
     const takenSlug = fresh('taken-save')
-    query(
-      state,
+    await query(
       `INSERT INTO posts (slug, title, content, html) VALUES ('${takenSlug}', '占位', '占位正文', '<p>占位正文</p>')`,
     )
-    const db = createDatabase(state)
+    const db = createDatabase()
     const result = await save(db, {
       articleId,
       expectedVersion: 1,
@@ -365,15 +364,15 @@ describe('lib/article-commands — save', { timeout: 600_000 }, () => {
       snapshot: snapshot({ slug: takenSlug, title: '想改名' }),
     })
     expect(result).toEqual({ outcome: 'slug-conflict', slug: takenSlug })
-    expect(articleVersions(articleId)).toHaveLength(1)
-    expect(postRow(postRef)!.slug).not.toBe(takenSlug)
+    expect(await articleVersions(articleId)).toHaveLength(1)
+    expect((await postRow(postRef))!.slug).not.toBe(takenSlug)
   })
 })
 
 describe('lib/article-commands — publishTemp', { timeout: 600_000 }, () => {
   async function publishedArticle(): Promise<{ articleId: number; postRef: number }> {
     const creationId = fresh('pub-base')
-    const result = await create(createDatabase(state), {
+    const result = await create(createDatabase(), {
       creationId,
       snapshot: snapshot({ title: '临时发布基稿', status: 'published' }),
     })
@@ -384,7 +383,7 @@ describe('lib/article-commands — publishTemp', { timeout: 600_000 }, () => {
 
   it('transitions draft<->published with version + status preconditions; first published_at now', async () => {
     const { articleId } = await publishedArticle() // v1 = published
-    const db = createDatabase(state)
+    const db = createDatabase()
 
     const toDraft = await publishTemp(db, {
       articleId,
@@ -406,12 +405,12 @@ describe('lib/article-commands — publishTemp', { timeout: 600_000 }, () => {
     expect(toPublished).toMatchObject({ outcome: 'applied', version: 3 })
     if (toPublished.outcome !== 'applied') return
 
-    const post = postRow(toPublished.postRef)
+    const post = await postRow(toPublished.postRef)
     expect(post!.status).toBe('published')
     expect(post!.published_at).not.toBeNull()
 
     // Version facts record both transitions with the observable published time.
-    const versions = articleVersions(articleId)
+    const versions = await articleVersions(articleId)
     expect(versions.map((row) => row.version)).toEqual([3, 2, 1])
     const vStatus3 = (JSON.parse(versions[0].snapshot_json as string) as { fields: { status: string } }).fields.status
     expect(vStatus3).toBe('published')
@@ -419,8 +418,8 @@ describe('lib/article-commands — publishTemp', { timeout: 600_000 }, () => {
 
   it('keeps the first published_at on unpublish and records the draft with no observable time (never fabricates)', async () => {
     const { articleId, postRef } = await publishedArticle()
-    const db = createDatabase(state)
-    const before = postRow(postRef)!.published_at as number
+    const db = createDatabase()
+    const before = (await postRow(postRef))!.published_at as number
 
     const unpublish = await publishTemp(db, {
       articleId,
@@ -433,11 +432,11 @@ describe('lib/article-commands — publishTemp', { timeout: 600_000 }, () => {
     if (unpublish.outcome !== 'applied') return
 
     // Legacy compat: posts keeps the first published time.
-    expect(postRow(postRef)!.status).toBe('draft')
-    expect(postRow(postRef)!.published_at).toBe(before)
+    expect((await postRow(postRef))!.status).toBe('draft')
+    expect((await postRow(postRef))!.published_at).toBe(before)
 
     // Version fact: draft has NO observable published_at.
-    const draftVersion = articleVersions(articleId)[0]
+    const draftVersion = (await articleVersions(articleId))[0]
     expect(draftVersion.published_at).toBeNull()
     const record = JSON.parse(draftVersion.snapshot_json as string) as {
       fields: { status: string; published_at: number | null }
@@ -449,7 +448,7 @@ describe('lib/article-commands — publishTemp', { timeout: 600_000 }, () => {
 
   it('rejects a stale version preconditions as a conflict', async () => {
     const { articleId } = await publishedArticle()
-    const db = createDatabase(state)
+    const db = createDatabase()
     const conflict = await publishTemp(db, {
       articleId,
       expectedVersion: 99, // stale
@@ -460,12 +459,12 @@ describe('lib/article-commands — publishTemp', { timeout: 600_000 }, () => {
     expect(conflict.outcome).toBe('conflict')
     if (conflict.outcome !== 'conflict') return
     expect(conflict.serverVersion).toBe(1)
-    expect(articleVersions(articleId)).toHaveLength(1)
+    expect(await articleVersions(articleId)).toHaveLength(1)
   })
 
   it('rejects a status precondition mismatch as a status-conflict with zero writes', async () => {
     const { articleId, postRef } = await publishedArticle()
-    const db = createDatabase(state)
+    const db = createDatabase()
     const conflict = await publishTemp(db, {
       articleId,
       expectedVersion: 1,
@@ -481,13 +480,13 @@ describe('lib/article-commands — publishTemp', { timeout: 600_000 }, () => {
       serverVersion: 1,
       currentStatus: 'published',
     })
-    expect(articleVersions(articleId)).toHaveLength(1)
-    expect(postRow(postRef)!.status).toBe('published')
+    expect(await articleVersions(articleId)).toHaveLength(1)
+    expect((await postRow(postRef))!.status).toBe('published')
   })
 
   it('replays the original result for the same operation id', async () => {
     const { articleId } = await publishedArticle()
-    const db = createDatabase(state)
+    const db = createDatabase()
     const opId = fresh('op')
     const first = await publishTemp(db, {
       articleId,
@@ -507,14 +506,14 @@ describe('lib/article-commands — publishTemp', { timeout: 600_000 }, () => {
       status: 'draft',
     })
     expect(again).toMatchObject({ outcome: 'replayed', version: 2, operationId: opId, existing: true })
-    expect(articleVersions(articleId)).toHaveLength(2)
+    expect(await articleVersions(articleId)).toHaveLength(2)
   })
 })
 
 describe('lib/article-commands — projections', { timeout: 600_000 }, () => {
   it('keeps core facts when an out-of-transaction projection fails (failure never rolls back)', async () => {
     const creationId = fresh('proj')
-    const db = createDatabase(state)
+    const db = createDatabase()
     const result = await create(db, {
       creationId,
       snapshot: snapshot({ title: '投影失败稿' }),
@@ -529,9 +528,9 @@ describe('lib/article-commands — projections', { timeout: 600_000 }, () => {
     expect(result.projectionFailures).toEqual(['kv projection exploded'])
 
     // Core facts fully committed despite the projection failure.
-    expect(query(state, `SELECT id FROM articles WHERE draft_ref = '${creationId}'`)).toHaveLength(1)
-    expect(articleVersions(result.articleId)).toHaveLength(1)
-    expect(postRow(result.postRef)!.title).toBe('投影失败稿')
+    expect(await query(`SELECT id FROM articles WHERE draft_ref = '${creationId}'`)).toHaveLength(1)
+    expect(await articleVersions(result.articleId)).toHaveLength(1)
+    expect((await postRow(result.postRef))!.title).toBe('投影失败稿')
 
     // A second command still works and reports its own projection failures.
     const second = await save(db, {
@@ -546,6 +545,6 @@ describe('lib/article-commands — projections', { timeout: 600_000 }, () => {
       },
     })
     expect(second).toMatchObject({ outcome: 'applied', projectionFailures: ['vector projection exploded'] })
-    expect(articleVersions(result.articleId)).toHaveLength(2)
+    expect(await articleVersions(result.articleId)).toHaveLength(2)
   })
 })

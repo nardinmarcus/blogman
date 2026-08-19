@@ -1,149 +1,183 @@
 /**
- * B2-03 — isolated D1 test adapter for the versioned write command kernel.
+ * B2-03 — in-process D1 test adapter for the versioned write command kernel.
  *
- * Uses the same real local D1 (wrangler d1 execute --local --persist-to) as the
- * B2-02 repository tests. Differences from the repository adapter:
+ * One `Miniflare` instance (the same workerd engine the wrangler CLI uses)
+ * is bootstrapped ONCE per test file and shared by every test — zero wrangler
+ * CLI spawns during test execution. The schema subset mirrors what the
+ * command layer actually writes:
  *
- *   - `batch()` executes every statement in ONE `wrangler d1 execute --command`
- *     call, so a mid-batch constraint failure rolls back the whole batch —
- *     real D1 transaction semantics (verified experimentally).
- *   - staleness injection: a prepared statement whose rendered SQL contains a
- *     registered fragment returns canned rows for standalone reads, simulating
- *     the pre-read/batch race window for concurrency tests. `batch()` always
- *     executes against the real state.
+ *   - ledger migration 001 (posts incl. FTS triggers, categories, settings,
+ *     ai_actions, api_tokens…) — later migrations only add unrelated tables
+ *     the kernel never reads or writes,
+ *   - the B2-02 article-identity DDL (articles + article_versions), mirrored
+ *     verbatim from scripts/apply-article-identity-ddl.mjs,
+ *   - the B2-01b envelope columns (content_envelope, *sha256) on `posts`,
+ *     mirrored from scripts/apply-content-envelope-ddl.mjs.
+ *
+ * `db.batch()` goes straight to the real D1 binding, so multi-statement
+ * batches have genuine transaction semantics (mid-batch failure rolls back
+ * everything — verified experimentally). Staleness injection lets standalone
+ * (pre-read) statements return canned rows to simulate the pre-read/batch
+ * race window; batch statements always execute against the live state.
  */
 
-import { spawnSync } from 'node:child_process'
+import { Miniflare } from 'miniflare'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Database } from '@/lib/repositories/schema'
-import {
-  applyArticleIdentityDdl,
-  applyLedger,
-  configPath,
-  repoRoot,
-  runD1,
-  wranglerPath,
-} from '@/tests/helpers/article-identity-state'
+import { repoRoot } from '@/tests/helpers/article-identity-state'
 
-export function applyContentEnvelopeDdl(state: string): void {
-  const ddlPath = join(repoRoot, 'scripts', 'apply-content-envelope-ddl.mjs')
-  const result = spawnSync(
-    process.execPath,
-    [ddlPath, '--local', '--persist-to', state, '--database', 'DB', '--config', configPath],
-    { encoding: 'utf8' },
-  )
-  if (result.status !== 0) {
-    throw new Error(`content-envelope ddl failed: ${result.stderr || result.stdout}`)
+let mf: Miniflare | null = null
+let sharedDb: D1Database | null = null
+
+/**
+ * Split a ledger SQL file into single statements. Handles `CREATE TRIGGER
+ * BEGIN … END` bodies that contain internal `;` separators.
+ */
+export function splitSqlFile(filePath: string): string[] {
+  const raw = readFileSync(filePath, 'utf8')
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('--'))
+    .join('\n')
+  const statements: string[] = []
+  let pending = ''
+  for (const part of raw.split(';')) {
+    pending = pending ? `${pending};${part}` : part
+    const trimmed = pending.trim()
+    if (trimmed.startsWith('CREATE TRIGGER') && !/END\s*$/.test(trimmed)) continue
+    if (trimmed) statements.push(trimmed)
+    pending = ''
+  }
+  return statements
+}
+
+/** Bootstrap the shared in-process D1 for the whole test file. */
+export async function bootstrapState(stateDir: string): Promise<void> {
+  mf = new Miniflare({
+    modules: true,
+    script: 'export default { fetch() { return new Response("ok") } }',
+    d1Databases: { DB: 'b203-command-kernel' },
+    persist: stateDir,
+  })
+  sharedDb = (await mf.getD1Database('DB')) as D1Database
+
+  for (const statement of splitSqlFile(join(repoRoot, 'db', 'ledger-migrations', '001_initial_schema.sql'))) {
+    await sharedDb.prepare(statement).run()
+  }
+
+  const identityDdl = [
+    `CREATE TABLE IF NOT EXISTS articles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      post_ref INTEGER UNIQUE NOT NULL,
+      slug TEXT,
+      draft_ref TEXT,
+      source_page_identity TEXT,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS article_versions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      article_id INTEGER NOT NULL,
+      version INTEGER NOT NULL,
+      operation_id TEXT NOT NULL UNIQUE,
+      snapshot_json TEXT NOT NULL,
+      content_snapshot_sha256 TEXT NOT NULL,
+      published_at INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+      UNIQUE (article_id, version)
+    )`,
+  ]
+  for (const statement of identityDdl) await sharedDb.prepare(statement).run()
+
+  for (const column of ['content_envelope', 'content_snapshot_sha256', 'source_sync_sha256']) {
+    await sharedDb.prepare(`ALTER TABLE posts ADD COLUMN ${column} TEXT`).run()
   }
 }
 
-/** Bootstrap the full schema (ledger + article-identity + envelope columns). */
-export function bootstrapState(state: string): void {
-  applyLedger(state)
-  applyArticleIdentityDdl(state)
-  applyContentEnvelopeDdl(state)
-}
-
-function literal(value: unknown): string {
-  if (value === null || value === undefined) return 'NULL'
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  return `'${String(value).replaceAll("'", "''")}'`
+export async function teardownState(): Promise<void> {
+  sharedDb = null
+  await mf?.dispose()
+  mf = null
 }
 
 export interface StaleRead {
-  /** Match against the rendered SQL of a standalone (non-batch) statement. */
+  /** Match against the SQL template of a standalone (non-batch) statement. */
   sqlIncludes: string
   /** Canned rows returned by first()/all(). */
   rows: unknown[]
-  /** Served at most this many times (default 1) — later reads hit the real state. */
+  /** Served at most this many times (default 1) — later reads hit the live state. */
   remaining?: number
-}
-
-function executeCommand(state: string, sql: string): Array<{ results?: unknown[]; success?: boolean }> {
-  const result = spawnSync(wranglerPath, [
-    'd1', 'execute', 'DB', '--local', '--persist-to', state,
-    '--config', configPath, '--command', sql, '--json',
-  ], { cwd: repoRoot, encoding: 'utf8' })
-  if (result.status !== 0) {
-    throw new Error(
-      `d1 execute failed (${result.stderr ? 'stderr' : 'stdout'}): ${(result.stderr || result.stdout).trim().slice(0, 2000)}`,
-    )
-  }
-  return JSON.parse(result.stdout) as Array<{ results?: unknown[]; success?: boolean }>
 }
 
 export interface TestDatabaseOptions {
   stale?: StaleRead[]
 }
 
-export function createDatabase(state: string, options: TestDatabaseOptions = {}): Database {
-  const stale = options.stale ?? []
+class CommandStatement {
+  private readonly values: unknown[] = []
 
-  class Statement {
-    constructor(
-      private readonly sql: string,
-      private readonly values: unknown[] = [],
-      private readonly isStale: boolean = false,
-    ) {}
+  constructor(
+    private readonly db: D1Database,
+    private readonly sql: string,
+    private readonly stale: StaleRead[],
+  ) {}
 
-    bind(...values: unknown[]): Statement {
-      return new Statement(this.sql, values, this.isStale)
-    }
-
-    render(): string {
-      let index = 0
-      return this.sql.replace(/\?/g, () => literal(this.values[index++]))
-    }
-
-    private canned(): unknown[] | null {
-      const rendered = this.render()
-      for (const read of stale) {
-        if (rendered.includes(read.sqlIncludes)) {
-          if ((read.remaining ?? 1) > 0) {
-            read.remaining = (read.remaining ?? 1) - 1
-            return read.rows
-          }
-        }
-      }
-      return null
-    }
-
-    async all<T>(): Promise<{ results: T[]; success: boolean }> {
-      const rows = this.canned()
-      if (rows !== null) return { results: rows as T[], success: true }
-      const out = executeCommand(state, this.render())
-      return { results: (out.at(-1)?.results ?? []) as T[], success: true }
-    }
-
-    async first<T>(): Promise<T | null> {
-      return (await this.all<T>()).results[0] ?? null
-    }
-
-    async run<T>(): Promise<{ meta: Record<string, unknown>; results: T[]; success: boolean }> {
-      const { results } = await this.all<T>()
-      return { meta: {}, results, success: true }
-    }
+  bind(...values: unknown[]): CommandStatement {
+    const next = new CommandStatement(this.db, this.sql, this.stale)
+    next.values.push(...values)
+    return next
   }
 
+  prepared(): D1PreparedStatement {
+    return this.db.prepare(this.sql).bind(...this.values)
+  }
+
+  private canned(): unknown[] | null {
+    for (const read of this.stale) {
+      if ((read.remaining ?? 1) > 0 && this.sql.includes(read.sqlIncludes)) {
+        read.remaining = (read.remaining ?? 1) - 1
+        return read.rows
+      }
+    }
+    return null
+  }
+
+  async all<T>(): Promise<{ results: T[]; success?: boolean }> {
+    const rows = this.canned()
+    if (rows !== null) return { results: rows as T[], success: true }
+    return this.prepared().all<T>()
+  }
+
+  async first<T>(): Promise<T | null> {
+    const rows = this.canned()
+    if (rows !== null) return (rows as T[])[0] ?? null
+    return this.prepared().first<T>()
+  }
+
+  async run(): Promise<{ meta: { last_row_id: number }; results?: unknown[]; success?: boolean }> {
+    const rows = this.canned()
+    if (rows !== null) return { meta: { last_row_id: 0 }, results: rows, success: true }
+    return this.prepared().run()
+  }
+}
+
+/** Wraps the shared D1 binding; `batch()` delegates to the real binding. */
+export function createDatabase(options: TestDatabaseOptions = {}): Database {
+  const db = sharedDb
+  if (!db) throw new Error('createDatabase: bootstrapState() must run first')
+  const stale = [...(options.stale ?? [])]
   return {
-    prepare(sql: string): Statement {
-      return new Statement(sql)
+    prepare(sql: string): CommandStatement {
+      return new CommandStatement(db, sql, stale)
     },
-    async batch(statements: Statement[]): Promise<Array<{ meta: Record<string, unknown>; results: unknown[]; success: boolean }>> {
-      // One wrangler call => one real D1 transaction. A failing statement
-      // aborts (and rolls back) the whole batch.
-      const sql = statements.map((statement) => statement.render()).join(';\n')
-      const out = executeCommand(state, sql)
-      return out.map((entry) => ({
-        meta: {},
-        results: (entry.results ?? []) as unknown[],
-        success: entry.success ?? true,
-      }))
+    async batch(statements: CommandStatement[]): Promise<Array<{ results: unknown[]; meta: { last_row_id: number } }>> {
+      return db.batch(statements.map((statement) => statement.prepared()))
     },
   } as unknown as Database
 }
 
-/** Convenience: run a SQL command against the state and return the last result rows. */
-export function query<T>(state: string, sql: string): T[] {
-  return (runD1(state, sql).at(-1)?.results ?? []) as T[]
+/** Convenience: run a SQL command against the shared live state. */
+export async function query<T>(sql: string): Promise<T[]> {
+  if (!sharedDb) throw new Error('query: bootstrapState() must run first')
+  const { results } = await sharedDb.prepare(sql).all<T>()
+  return results
 }
