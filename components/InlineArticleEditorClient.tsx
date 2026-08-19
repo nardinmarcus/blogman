@@ -21,6 +21,12 @@ export function InlineArticleEditorClient(props: {
   viewCount?: number
   content?: string
   onExitReading?: () => void
+  articleId?: number | null
+  version?: number | null
+  status?: 'draft' | 'published'
+  description?: string | null
+  tags?: string[] | null
+  isHidden?: number
 }) {
   return <InlineArticleEditor {...props} />
 }

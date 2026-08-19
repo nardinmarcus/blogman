@@ -38,6 +38,17 @@ import {
 } from '@/lib/editor-ui'
 import type { EditorImageActionTarget } from '@/lib/resizable-image'
 import { resizeTextareaHeight, useAutoResizeTextarea } from '@/lib/textarea-autosize'
+import { normalizePostSlug } from '@/lib/post-utils'
+import {
+  EditorSaveCoordinator,
+  type CoordinatorState,
+  type EditorSnapshot,
+  type EditorSnapshotContent,
+} from '@/lib/editor-save-coordinator'
+import {
+  createCommandTransport,
+  createLocalDraftStore,
+} from '@/lib/editor-command-transport'
 
 interface InlineArticleEditorProps {
   slug: string
@@ -50,6 +61,14 @@ interface InlineArticleEditorProps {
   viewCount?: number
   content?: string        // plain text, for reading time
   onExitReading?: () => void
+  /** B2-05 versioned-authority identity + latest server version (issue #28). */
+  articleId?: number | null
+  version?: number | null
+  /** Applied article state so save never drifts from the confirmed snapshot. */
+  status?: 'draft' | 'published'
+  description?: string | null
+  tags?: string[] | null
+  isHidden?: number
 }
 
 export function InlineArticleEditor({
@@ -63,6 +82,12 @@ export function InlineArticleEditor({
   viewCount,
   content,
   onExitReading,
+  articleId,
+  version,
+  status,
+  description,
+  tags,
+  isHidden,
 }: InlineArticleEditorProps) {
   const editorRef = useRef<EditorInstance | null>(null)
   const titleRef = useRef<HTMLTextAreaElement | null>(null)
@@ -85,6 +110,28 @@ export function InlineArticleEditor({
   const [charCount, setCharCount] = useState(0)
   const [referenceImageTarget, setReferenceImageTarget] = useState<EditorImageActionTarget | null>(null)
   const [cropImageTarget, setCropImageTarget] = useState<EditorImageActionTarget | null>(null)
+
+  // B2-05: versioned save coordinator — same protocol as the main editor.
+  const [coordinatorUI, setCoordinatorUI] = useState<CoordinatorState | null>(null)
+  const [conflictOpen, setConflictOpen] = useState(false)
+  const coordinatorRef = useRef<EditorSaveCoordinator | null>(null)
+  const coordinatorInitRef = useRef(false)
+  const latestTitleRef = useRef(initialTitle)
+  const latestCategoryRef = useRef(category || '未分类')
+  const latestCoverRef = useRef(initialCoverImage || '')
+  const slugRef = useRef(slug)
+
+  useEffect(() => {
+    latestTitleRef.current = title
+  }, [title])
+
+  useEffect(() => {
+    latestCategoryRef.current = selectedCategory
+  }, [selectedCategory])
+
+  useEffect(() => {
+    latestCoverRef.current = coverImage
+  }, [coverImage])
 
   const checkDirty = useCallback((editor: EditorInstance, overrides?: {
     title?: string
@@ -110,52 +157,116 @@ export function InlineArticleEditor({
     coverImageValueRef.current = coverImage
   }, [coverImage])
 
-  const handleSave = async () => {
+  // B2-05: feed the coordinator the live inline-editor content (full snapshot:
+  // authoring fields + preserved description/tags from the loaded article).
+  const buildInlineContent = useCallback((): EditorSnapshotContent => {
     const editor = editorRef.current
-    if (!editor) return
+    const liveHtml = editor?.getHTML() ?? html
+    let md = ''
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      md = (editor?.storage as any)?.markdown?.getMarkdown?.() ?? ''
+    } catch {
+      md = ''
+    }
+    if (!md && editor) md = editor.getText({ blockSeparator: '\n\n' })
+    return {
+      slug: normalizePostSlug(slugRef.current),
+      title: latestTitleRef.current.trim(),
+      html: liveHtml,
+      content: md.trim(),
+      description: description ?? '',
+      category: latestCategoryRef.current,
+      tags: tags ?? [],
+      coverImage: latestCoverRef.current,
+    }
+  }, [html, description, tags])
 
+  const handleCoordinatorChange = useCallback((s: CoordinatorState) => {
+    setCoordinatorUI(s)
+    if (s.status === 'conflict') setConflictOpen(true)
+    else if (s.conflict === null) setConflictOpen(false)
+    if (s.status === 'error' && s.errorMessage) {
+      setFeedback({ type: 'error', message: s.errorMessage })
+    }
+  }, [])
+
+  // B2-05: one coordinator per session — the transport/confirm/conflict semantics
+  // are identical to the main editor (shared CommandTransport + coordinator).
+  useEffect(() => {
+    if (coordinatorInitRef.current) return
+    coordinatorInitRef.current = true
+    coordinatorRef.current = new EditorSaveCoordinator({
+      articleId: articleId ?? null,
+      version: version ?? null,
+      creationId: articleId ? '' : crypto.randomUUID(),
+      getContent: buildInlineContent,
+      transport: createCommandTransport(),
+      draftStore: createLocalDraftStore('inline-editor'),
+      onStateChange: handleCoordinatorChange,
+      debounceMs: 1500,
+      maxRetryDelayMs: 10000,
+    })
+    coordinatorRef.current.setAppliedState({
+      status: status === 'draft' ? 'draft' : 'published',
+      password: password ?? null,
+      isHidden: isHidden ?? 0,
+      publishedAt: publishedAt ?? null,
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Persist the unconfirmed draft on unload; dispose coordinator timers.
+  useEffect(() => {
+    const onUnload = () => coordinatorRef.current?.persistLocalDraft()
+    window.addEventListener('beforeunload', onUnload)
+    return () => {
+      window.removeEventListener('beforeunload', onUnload)
+      coordinatorRef.current?.dispose()
+    }
+  }, [])
+
+  // Apply a snapshot to the inline editor (draft restore / conflict server version).
+  const applyInlineSnapshot = useCallback((snap: EditorSnapshot) => {
+    latestTitleRef.current = snap.title.trim()
+    setTitle(snap.title.trim())
+    setSelectedCategory(snap.category || '未分类')
+    setCoverImage(snap.coverImage || '')
+    originalTitleRef.current = snap.title.trim()
+    originalCategoryRef.current = snap.category || '未分类'
+    originalCoverImageRef.current = snap.coverImage || ''
+    originalHtmlRef.current = snap.html || ''
+    if (editorRef.current && snap.html !== undefined) {
+      editorRef.current.commands.setContent(snap.html || '')
+    }
+  }, [])
+
+  // Save through the versioned command layer: flush returns true ONLY when the
+  // server confirmed a matching snapshot (expected version + operation id).
+  const handleSave = async () => {
+    const coordinator = coordinatorRef.current
+    if (!coordinator) return
+    const trimmedTitle = title.trim()
+    if (!trimmedTitle) {
+      setFeedback({ type: 'error', message: '标题不能为空' })
+      return
+    }
     setSaving(true)
     setFeedback(null)
-
     try {
-      const newHtml = editor.getHTML()
-      const content = editor.getText({ blockSeparator: '\n\n' }).trim()
-      const trimmedTitle = title.trim()
-      if (!trimmedTitle) {
-        setFeedback({ type: 'error', message: '标题不能为空' })
-        setSaving(false)
-        return
+      const ok = await coordinator.flush()
+      if (ok) {
+        const editor = editorRef.current
+        const newHtml = editor?.getHTML() ?? html
+        originalHtmlRef.current = newHtml
+        originalTitleRef.current = trimmedTitle
+        originalCategoryRef.current = selectedCategory
+        originalCoverImageRef.current = coverImage
+        setDirty(false)
+        setFeedback({ type: 'success', message: '已保存' })
+        setTimeout(() => setFeedback(null), 2000)
       }
-
-      const res = await fetch(`/api/admin/posts/${slug}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: trimmedTitle,
-          html: newHtml,
-          content,
-          category: selectedCategory,
-          cover_image: coverImage || null,
-          // 密码管理统一到后台，前台不再修改
-        }),
-      })
-
-      const text = await res.text()
-      let result: { success?: boolean; error?: string }
-      try {
-        result = JSON.parse(text)
-      } catch {
-        throw new Error(`服务器返回异常 (${res.status}): ${text.slice(0, 120)}`)
-      }
-      if (!res.ok || !result.success) throw new Error(result.error || '保存失败')
-
-      originalHtmlRef.current = newHtml
-      originalTitleRef.current = trimmedTitle
-      originalCategoryRef.current = selectedCategory
-      originalCoverImageRef.current = coverImage
-      setDirty(false)
-      setFeedback({ type: 'success', message: '已保存' })
-      setTimeout(() => setFeedback(null), 2000)
+      // on conflict/error the coordinator's onStateChange surfaces the outcome.
     } catch (err) {
       setFeedback({ type: 'error', message: err instanceof Error ? err.message : '保存失败' })
     } finally {
@@ -163,6 +274,7 @@ export function InlineArticleEditor({
     }
   }
 
+  // 放弃：回到已确认的服务端基线（放弃本机未确认修改），并重置协调器基线。
   const handleDiscard = () => {
     const editor = editorRef.current
     if (!editor) return
@@ -170,9 +282,45 @@ export function InlineArticleEditor({
     setTitle(originalTitleRef.current)
     setSelectedCategory(originalCategoryRef.current)
     setCoverImage(originalCoverImageRef.current)
+    latestTitleRef.current = originalTitleRef.current
+    latestCategoryRef.current = originalCategoryRef.current
+    latestCoverRef.current = originalCoverImageRef.current
     setDirty(false)
     setFeedback(null)
+    coordinatorRef.current?.setInitialConfirmed()
   }
+
+  // Conflict: adopt the server version (discards local input).
+  const handleAdoptServer = useCallback(async () => {
+    const coordinator = coordinatorRef.current
+    if (!coordinator) return
+    const snap = await coordinator.adoptServerVersion()
+    if (snap) {
+      applyInlineSnapshot(snap)
+      coordinator.setInitialConfirmed()
+    }
+    setConflictOpen(false)
+  }, [applyInlineSnapshot])
+
+  // Conflict: safe re-submit of the local version against the current server version.
+  const handleResubmitLocal = useCallback(async () => {
+    await coordinatorRef.current?.resubmitLocal()
+    setConflictOpen(false)
+  }, [])
+
+  // Conflict: preserve local content as a brand-new draft article.
+  const handleSaveAsNew = useCallback(async () => {
+    const coordinator = coordinatorRef.current
+    if (!coordinator) return
+    const res = await coordinator.saveAsNewDraft()
+    setConflictOpen(false)
+    if (res.ok) {
+      setFeedback({ type: 'success', message: `已另存为新草稿${res.slug ? `：/${res.slug}` : ''}` })
+      setTimeout(() => setFeedback(null), 3000)
+    } else if (res.error) {
+      setFeedback({ type: 'error', message: res.error })
+    }
+  }, [])
 
   const {
     aiModal,
@@ -522,6 +670,12 @@ export function InlineArticleEditor({
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const st = editor.storage as any
             setCharCount(st.characterCount?.characters?.() ?? 0)
+
+            // B2-05: seed the confirmed baseline, then restore this device's
+            // unconfirmed inline draft when one exists (conflict preservation).
+            coordinatorRef.current?.setInitialConfirmed()
+            const draft = coordinatorRef.current?.restoreLocalDraft()
+            if (draft) applyInlineSnapshot(draft)
           }}
           onUpdate={({ editor }) => {
             editorRef.current = editor
@@ -603,8 +757,55 @@ export function InlineArticleEditor({
               autoResizeTitle(titleRef.current)
             }
             if (editorRef.current) checkDirty(editorRef.current, { title: nextTitle })
+            latestTitleRef.current = nextTitle
           }}
         />
+      )}
+
+      {/* B2-05: version conflict — autosave paused, never auto-merged; three choices. */}
+      {conflictOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-[var(--editor-line)] bg-[var(--editor-panel)] p-6 shadow-2xl">
+            <div className="flex items-center gap-2">
+              <span className="inline-block h-2.5 w-2.5 rounded-full bg-amber-500" />
+              <h3 className="text-base font-semibold text-[var(--editor-ink)]">保存冲突</h3>
+            </div>
+            <p className="mt-3 text-sm text-[var(--editor-muted)]">
+              这篇文章已在其他设备上被更新（服务器版本{' '}
+              <span className="font-semibold text-[var(--editor-ink)] tabular-nums">
+                {coordinatorUI?.conflict?.serverVersion ?? '?'}
+              </span>
+              {coordinatorUI?.conflict?.serverTitle ? ` · 《${coordinatorUI.conflict.serverTitle}》` : ''}
+              ）。本机输入已保留，自动保存已暂停，请选择如何处理：
+            </p>
+            <div className="mt-5 space-y-2">
+              <button
+                type="button"
+                onClick={() => void handleAdoptServer()}
+                className="w-full rounded-lg border border-[var(--editor-line)] bg-[var(--editor-soft)] px-4 py-3 text-left text-sm text-[var(--editor-ink)] hover:border-[var(--editor-accent)]/40 transition"
+              >
+                <span className="font-semibold">采用服务器版本</span>
+                <span className="mt-0.5 block text-xs text-[var(--editor-muted)]">放弃本机的未确认修改，加载最新服务器内容</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleResubmitLocal()}
+                className="w-full rounded-lg border border-[var(--editor-line)] bg-[var(--editor-soft)] px-4 py-3 text-left text-sm text-[var(--editor-ink)] hover:border-[var(--editor-accent)]/40 transition"
+              >
+                <span className="font-semibold">用本机版本重新提报</span>
+                <span className="mt-0.5 block text-xs text-[var(--editor-muted)]">以当前服务端版本为基础安全覆盖</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSaveAsNew()}
+                className="w-full rounded-lg border border-[var(--editor-line)] bg-[var(--editor-soft)] px-4 py-3 text-left text-sm text-[var(--editor-ink)] hover:border-[var(--editor-accent)]/40 transition"
+              >
+                <span className="font-semibold">另存为新草稿</span>
+                <span className="mt-0.5 block text-xs text-[var(--editor-muted)]">不碰服务器版本，把本机内容保存为独立新文章</span>
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   )

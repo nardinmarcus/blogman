@@ -13,6 +13,7 @@ import { TwitterEmbedsEnhancer } from '@/components/TwitterEmbedsEnhancer'
 import { ArticleOutline } from '@/components/ArticleOutline'
 import { getSiteHeaderData } from '@/lib/site'
 import { getRelatedPosts } from '@/lib/related-content'
+import { getByPostRef, listVersions } from '@/lib/repositories/articles'
 import { getPublicContentCacheNamespace } from '@/lib/cache'
 import { getSiteUrl } from '@/lib/site-config'
 import { resolvePostCoverImage } from '@/lib/default-cover-images'
@@ -112,6 +113,23 @@ export default async function PostPage({
   if (!post) notFound()
   if (!isPubliclyAccessiblePost(post)) notFound()
 
+  // B2-05: resolve the article identity + latest version so the inline editor
+  // drives versioned save (expected version + operation id) against the kernel.
+  let articleIdentity: { articleId: number | null; version: number | null } = { articleId: null, version: null }
+  const identity = await getByPostRef(db, post.id).catch(() => null)
+  if (identity) {
+    const versions = await listVersions(db, identity.id).catch(() => [])
+    articleIdentity = { articleId: identity.id, version: versions[0]?.version ?? null }
+  }
+  const inlineEditorFacts = {
+    articleId: articleIdentity.articleId,
+    version: articleIdentity.version,
+    status: post.deleted_at ? 'draft' as const : ((post.status === 'draft' ? 'draft' : 'published') as 'draft' | 'published'),
+    description: post.description,
+    tags: post.tags,
+    isHidden: post.is_hidden,
+  }
+
   const headerData = await getSiteHeaderData(db)
   const categorySlugMap = new Map(headerData.categories.map((category) => [category.name, category.slug]))
   const activeCategorySlug = headerData.categories.find((category) => category.name === post.category)?.slug ?? null
@@ -142,6 +160,12 @@ export default async function PostPage({
               publishedAt={post.published_at}
               viewCount={post.view_count}
               content={post.content}
+              articleId={inlineEditorFacts.articleId}
+              version={inlineEditorFacts.version}
+              status={inlineEditorFacts.status}
+              description={inlineEditorFacts.description}
+              tags={inlineEditorFacts.tags}
+              isHidden={inlineEditorFacts.isHidden}
             >
               <PasswordPrompt />
             </FrontPostAdminBoundary>
@@ -174,6 +198,12 @@ export default async function PostPage({
               publishedAt={post.published_at}
               viewCount={post.view_count}
               content={post.content}
+              articleId={inlineEditorFacts.articleId}
+              version={inlineEditorFacts.version}
+              status={inlineEditorFacts.status}
+              description={inlineEditorFacts.description}
+              tags={inlineEditorFacts.tags}
+              isHidden={inlineEditorFacts.isHidden}
             >
               <PasswordPrompt error={passwordError} />
             </FrontPostAdminBoundary>
@@ -264,6 +294,12 @@ export default async function PostPage({
           publishedAt={post.published_at}
           viewCount={post.view_count}
           content={post.content}
+          articleId={inlineEditorFacts.articleId}
+          version={inlineEditorFacts.version}
+          status={inlineEditorFacts.status}
+          description={inlineEditorFacts.description}
+          tags={inlineEditorFacts.tags}
+          isHidden={inlineEditorFacts.isHidden}
         >
           <div className={`article-reading-layout${hasArticleOutline ? ' article-reading-layout-with-outline' : ''}`}>
             {hasArticleOutline ? (

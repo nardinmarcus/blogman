@@ -1,6 +1,7 @@
 import { deletePost, getPostBySlug, updatePost } from '@/lib/db'
 import { isAdminAuthenticated, COOKIE_NAME } from '@/lib/admin-auth'
 import { invalidatePublicContentCache } from '@/lib/cache'
+import { getByPostRef, listVersions } from '@/lib/repositories/articles'
 import {
   buildAutoDescription,
   extractMarkdownDescription,
@@ -50,20 +51,7 @@ async function updatePostRoute(req: NextRequest, { params }: Ctx) {
   if (!post) return jsonError('文章不存在', 404)
 
   try {
-    const {
-      slug: nextSlugRaw,
-      title,
-      content,
-      html,
-      category,
-      status,
-      password,
-      is_pinned,
-      is_hidden,
-      cover_image,
-      tags,
-      description,
-    } = await parseJsonBody<{
+    const body = await parseJsonBody<{
       slug?: string
       title?: string
       content?: string
@@ -77,6 +65,45 @@ async function updatePostRoute(req: NextRequest, { params }: Ctx) {
       tags?: string[]
       description?: string
     }>(req)
+
+    // B2-05: once an article is under versioned authority (has an identity + at
+    // least one version snapshot), the old UNVERSIONED Inline content write is
+    // rejected — it would overwrite `posts` without a version fact. Metadata
+    // toggles (category / is_pinned / is_hidden / status / password) still work.
+    // When the identity shadow tables are absent (e.g. a ledger-only test DB
+    // that never ran the article-identity DDL), the article has not switched to
+    // versioned authority — keep the legacy compatible path instead of 503'ing.
+    if ('title' in body || 'html' in body || 'content' in body) {
+      let hasVersionedAuthority = false
+      try {
+        const identity = await getByPostRef(db, post.id)
+        if (identity) {
+          const versions = await listVersions(db, identity.id)
+          hasVersionedAuthority = versions.length > 0
+        }
+      } catch {
+        hasVersionedAuthority = false
+      }
+      if (hasVersionedAuthority) {
+        return jsonError('这篇文章已启用版本化写入，请使用版本化保存入口', 409)
+      }
+    }
+
+    const {
+      slug: nextSlugRaw,
+      title,
+      content,
+      html,
+      category,
+      status,
+      password,
+      is_pinned,
+      is_hidden,
+      cover_image,
+      tags,
+      description,
+    } = body
+
     const nextSlug = typeof nextSlugRaw === 'string' ? normalizePostSlug(nextSlugRaw) : ''
     const rawContent = typeof content === 'string' ? content : ''
     const normalizedContent = typeof content === 'string' ? stripMarkdownFrontmatter(content) : undefined
