@@ -1,0 +1,720 @@
+/**
+ * B2-03 — versioned article write command kernel (issue #26).
+ *
+ * The isolated D1 application command layer. Three commands:
+ *
+ *   - `create`: idempotent creation keyed by a client creation id; a blank
+ *     session (no title AND no body) never creates an article; writes the
+ *     article identity + version 1 + the legacy `posts` compat projection in
+ *     one D1 transaction.
+ *   - `save`: writes the next monotonic version only when the expected
+ *     version matches the server's latest; the same operation id replays the
+ *     original result; a conflict returns the current server version plus
+ *     comparison facts with zero partial writes.
+ *   - `publishTemp`: temporary publish / status change with version + status
+ *     preconditions and an idempotency key; it does NOT build batch-3 facts
+ *     (no publish intent / events / Outbox).
+ *
+ * Atomicity model: version facts lead, the posts projection follows — both
+ * guarded by the same preconditions inside one transaction. The posts UPDATE
+ * is guarded by `EXISTS(operation_id)` (the version row this command just
+ * inserted), so the two statements always move together. The kernel resolves
+ * outcomes by re-reading after the batch (the wrangler CLI does not surface
+ * `changes`/`last_row_id`, so result resolution never depends on statement
+ * meta) — identical behaviour on production D1 and in the CLI-backed tests.
+ *
+ * KV / FTS / related-content / vector indexes are out-of-transaction
+ * rebuildable projections: failures are recorded, never rolled back.
+ */
+
+import type { Database } from '@/lib/repositories/schema'
+import {
+  buildInitialSnapshot,
+  snapshotJson,
+  type ArticleIdentitySnapshot,
+  type PostAuthorityRow,
+} from '@/lib/article-identity'
+import type {
+  AppliedVersionResult,
+  ArticleCommandProjections,
+  ArticleCommandSnapshot,
+  CreateArticleInput,
+  CreateResult,
+  PublishTempInput,
+  PublishTempResult,
+  SaveArticleInput,
+  SaveResult,
+  VersionComparisonFacts,
+} from './types'
+
+/** Monotonic version facts for one article (article_versions row surface). */
+interface VersionRow {
+  id: number
+  article_id: number
+  version: number
+  operation_id: string
+  snapshot_json: string
+  content_snapshot_sha256: string | null
+  published_at: number | null
+}
+
+interface ArticleRow {
+  id: number
+  post_ref: number
+}
+
+function unixNow(): number {
+  return Math.floor(Date.now() / 1000)
+}
+
+/** Stable operation id derived from the creation id for the version-1 fact. */
+export function createOperationId(creationId: string): string {
+  return `create:${creationId}`
+}
+
+function snapshotRow(
+  snapshot: ArticleCommandSnapshot,
+  postRef: number,
+  now: number,
+): PostAuthorityRow {
+  return {
+    id: postRef,
+    slug: snapshot.slug,
+    title: snapshot.title,
+    content: snapshot.content,
+    html: snapshot.html,
+    description: snapshot.description,
+    category: snapshot.category,
+    tags: snapshot.tags ? JSON.stringify(snapshot.tags) : null,
+    status: snapshot.status,
+    password: snapshot.password,
+    is_pinned: snapshot.is_pinned,
+    is_hidden: snapshot.is_hidden,
+    cover_image: snapshot.cover_image,
+    deleted_at: snapshot.deleted_at,
+    published_at: snapshot.published_at,
+    updated_at: snapshot.updated_at ?? now,
+  }
+}
+
+/** Canonical version record (same shape as the B2-02 identity snapshots). */
+function buildVersionRecord(row: PostAuthorityRow, version: number): ArticleIdentitySnapshot {
+  // The B2-02 identity snapshot types version 1 as a literal; command writes
+  // stamp the actual monotonic version on top.
+  return { ...buildInitialSnapshot(row), version } as ArticleIdentitySnapshot
+}
+
+/** Envelope columns for the legacy posts compat projection. */
+function envelopeColumns(record: ArticleIdentitySnapshot): {
+  content_envelope: string | null
+  content_snapshot_sha256: string | null
+  source_sync_sha256: string | null
+} {
+  return {
+    content_envelope: record.envelope ? JSON.stringify(record.envelope) : null,
+    content_snapshot_sha256: record.content_snapshot_sha256,
+    source_sync_sha256: record.source_sync_sha256,
+  }
+}
+
+function findArticleById(db: Database, articleId: number): Promise<ArticleRow | null> {
+  return db
+    .prepare('SELECT id, post_ref FROM articles WHERE id = ?')
+    .bind(articleId)
+    .first<ArticleRow>()
+}
+
+function findArticleByCreationId(db: Database, creationId: string): Promise<ArticleRow | null> {
+  return db
+    .prepare('SELECT id, post_ref FROM articles WHERE draft_ref = ?')
+    .bind(creationId)
+    .first<ArticleRow>()
+}
+
+function findVersionByOperationId(db: Database, operationId: string): Promise<VersionRow | null> {
+  return db
+    .prepare(
+      `SELECT id, article_id, version, operation_id, snapshot_json,
+              content_snapshot_sha256, published_at
+       FROM article_versions WHERE operation_id = ?`,
+    )
+    .bind(operationId)
+    .first<VersionRow>()
+}
+
+function findLatestVersion(db: Database, articleId: number): Promise<VersionRow | null> {
+  return db
+    .prepare(
+      `SELECT id, article_id, version, operation_id, snapshot_json,
+              content_snapshot_sha256, published_at
+       FROM article_versions WHERE article_id = ? ORDER BY version DESC LIMIT 1`,
+    )
+    .bind(articleId)
+    .first<VersionRow>()
+}
+
+function slugTakenByOther(db: Database, slug: string, excludePostRef: number): Promise<boolean> {
+  return db
+    .prepare('SELECT id FROM posts WHERE slug = ? AND id != ?')
+    .bind(slug, excludePostRef)
+    .first<{ id: number }>()
+    .then((row) => row !== null)
+}
+
+function slugTaken(db: Database, slug: string): Promise<boolean> {
+  return db
+    .prepare('SELECT id FROM posts WHERE slug = ?')
+    .bind(slug)
+    .first<{ id: number }>()
+    .then((row) => row !== null)
+}
+
+/** Comparison facts extracted from the latest server-side version snapshot. */
+function comparisonFacts(latest: VersionRow | null): VersionComparisonFacts {
+  if (!latest) {
+    return {
+      version: 0,
+      title: null,
+      slug: null,
+      status: null,
+      published_at: null,
+      updated_at: null,
+      content_snapshot_sha256: null,
+      source_sync_sha256: null,
+      post_field_sha256: null,
+      fidelity: null,
+    }
+  }
+  let parsed: ArticleIdentitySnapshot | null = null
+  try {
+    parsed = JSON.parse(latest.snapshot_json) as ArticleIdentitySnapshot
+  } catch {
+    parsed = null
+  }
+  return {
+    version: latest.version,
+    title: parsed?.fields.title ?? null,
+    slug: parsed?.fields.slug ?? null,
+    status: parsed?.fields.status ?? null,
+    published_at: parsed?.published_at ?? null,
+    updated_at: parsed?.fields.updated_at ?? null,
+    content_snapshot_sha256: latest.content_snapshot_sha256,
+    source_sync_sha256: parsed?.source_sync_sha256 ?? null,
+    post_field_sha256: parsed?.post_field_sha256 ?? null,
+    fidelity: parsed?.fidelity ?? null,
+  }
+}
+
+async function runProjections(
+  projections: ArticleCommandProjections | undefined,
+  result: AppliedVersionResult,
+): Promise<string[]> {
+  const failures: string[] = []
+  if (!projections?.afterCommit) return failures
+  try {
+    await projections.afterCommit(result)
+  } catch (error) {
+    failures.push(error instanceof Error ? error.message : String(error))
+  }
+  return failures
+}
+
+/* ------------------------------------------------------------------ */
+/* create                                                              */
+/* ------------------------------------------------------------------ */
+
+export async function create(
+  db: Database,
+  input: CreateArticleInput,
+): Promise<CreateResult> {
+  const { creationId, snapshot } = input
+  if (!creationId || creationId.trim() === '') {
+    throw new Error('create: creationId is required')
+  }
+  if (!snapshot.slug || snapshot.slug.trim() === '') {
+    throw new Error('create: snapshot.slug is required')
+  }
+  if (snapshot.title.trim() === '' && snapshot.content.trim() === '') {
+    return { outcome: 'skipped', reason: 'blank-session' }
+  }
+
+  const operationId = createOperationId(creationId)
+
+  // Fast idempotent return: same creation id -> same article.
+  const existing = await findArticleByCreationId(db, creationId)
+  if (existing) {
+    return {
+      outcome: 'existing',
+      articleId: existing.id,
+      postRef: existing.post_ref,
+      version: 1,
+      operationId,
+      existing: true,
+      projectionFailures: [],
+    }
+  }
+
+  // Fast slug-conflict return.
+  if (await slugTaken(db, snapshot.slug)) {
+    return { outcome: 'slug-conflict', slug: snapshot.slug }
+  }
+
+  const now = unixNow()
+  const publishedAt =
+    snapshot.status === 'published' ? (snapshot.published_at ?? now) : snapshot.published_at
+  const row = snapshotRow({ ...snapshot, published_at: publishedAt }, 0, now)
+  const record = buildVersionRecord(row, 1)
+  // post_ref is patched into the stored JSON inside the transaction (json_set).
+  const recordJson = snapshotJson({ ...record, post_ref: 0 })
+  const { content_envelope, content_snapshot_sha256, source_sync_sha256 } =
+    envelopeColumns(record)
+
+  const batch = [
+    db
+      .prepare(
+        `INSERT INTO posts
+           (slug, title, content, html, description, category, tags, status, password,
+            is_pinned, is_hidden, cover_image, deleted_at, published_at, updated_at,
+            content_envelope, content_snapshot_sha256, source_sync_sha256)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE NOT EXISTS (SELECT 1 FROM articles WHERE draft_ref = ?)`,
+      )
+      .bind(
+        row.slug,
+        row.title,
+        row.content,
+        row.html,
+        row.description,
+        row.category,
+        row.tags,
+        row.status,
+        row.password,
+        row.is_pinned,
+        row.is_hidden,
+        row.cover_image,
+        row.deleted_at,
+        row.published_at,
+        row.updated_at,
+        content_envelope,
+        content_snapshot_sha256,
+        source_sync_sha256,
+        creationId,
+      ),
+    db
+      .prepare(
+        `INSERT INTO articles (post_ref, slug, draft_ref)
+         SELECT id, ?, ? FROM posts WHERE slug = ?
+           AND NOT EXISTS (SELECT 1 FROM articles WHERE draft_ref = ?)`,
+      )
+      .bind(row.slug, creationId, row.slug, creationId),
+    db
+      .prepare(
+        `INSERT INTO article_versions
+           (article_id, version, operation_id, snapshot_json, content_snapshot_sha256, published_at)
+         SELECT a.id, 1, ?, json_set(?, '$.post_ref', a.post_ref), ?, ?
+         FROM articles a WHERE a.draft_ref = ?
+           AND NOT EXISTS (SELECT 1 FROM article_versions WHERE operation_id = ?)`,
+      )
+      .bind(
+        operationId,
+        recordJson,
+        content_snapshot_sha256,
+        record.published_at,
+        creationId,
+        operationId,
+      ),
+  ]
+
+  try {
+    await db.batch(batch)
+  } catch {
+    // Batch aborted atomically (e.g. slug UNIQUE or operation_id UNIQUE from a
+    // concurrent identical create). Resolve the real state and report it.
+    const byCreation = await findArticleByCreationId(db, creationId)
+    if (byCreation) {
+      return {
+        outcome: 'existing',
+        articleId: byCreation.id,
+        postRef: byCreation.post_ref,
+        version: 1,
+        operationId,
+        existing: true,
+        projectionFailures: [],
+      }
+    }
+    if (await slugTaken(db, row.slug)) {
+      return { outcome: 'slug-conflict', slug: row.slug }
+    }
+    throw new Error(
+      `create: unexpected batch failure for creationId '${creationId}' (slug '${row.slug}')`,
+    )
+  }
+
+  const article = await findArticleByCreationId(db, creationId)
+  if (!article) {
+    throw new Error(`create: article for creationId '${creationId}' not found after batch`)
+  }
+  const version = await findVersionByOperationId(db, operationId)
+  if (!version) {
+    throw new Error(
+      `create: version for creationId '${creationId}' not found after batch (operation '${operationId}')`,
+    )
+  }
+
+  const result = {
+    outcome: 'created' as const,
+    articleId: article.id,
+    postRef: article.post_ref,
+    version: version.version,
+    operationId,
+    existing: false,
+    projectionFailures: [] as string[],
+  }
+  result.projectionFailures = await runProjections(input.projections, result)
+  return result
+}
+
+/* ------------------------------------------------------------------ */
+/* save                                                                */
+/* ------------------------------------------------------------------ */
+
+export async function save(db: Database, input: SaveArticleInput): Promise<SaveResult> {
+  const { articleId, expectedVersion, operationId, snapshot } = input
+  if (!articleId || !operationId || operationId.trim() === '') {
+    throw new Error('save: articleId and operationId are required')
+  }
+  if (!snapshot.slug || snapshot.slug.trim() === '') {
+    throw new Error('save: snapshot.slug is required')
+  }
+
+  const article = await findArticleById(db, articleId)
+  if (!article) throw new Error(`save: article ${articleId} not found`)
+  const postRef = article.post_ref
+
+  // Idempotent replay: the same operation id returns the original result.
+  const replayed = await findVersionByOperationId(db, operationId)
+  if (replayed) {
+    if (replayed.article_id !== articleId) {
+      throw new Error(
+        `save: operation '${operationId}' already used by article ${replayed.article_id}`,
+      )
+    }
+    return {
+      outcome: 'replayed',
+      articleId,
+      postRef,
+      version: replayed.version,
+      operationId,
+      existing: true,
+      projectionFailures: [],
+    }
+  }
+
+  const serverVersion = (await findLatestVersion(db, articleId))?.version ?? 0
+  if (serverVersion !== expectedVersion) {
+    return {
+      outcome: 'conflict',
+      articleId,
+      postRef,
+      expectedVersion,
+      serverVersion,
+      facts: comparisonFacts(await findLatestVersion(db, articleId)),
+    }
+  }
+
+  // Slug precondition (belt; the batch UNIQUE constraint is the suspenders).
+  if (await slugTakenByOther(db, snapshot.slug, postRef)) {
+    return { outcome: 'slug-conflict', slug: snapshot.slug }
+  }
+
+  const now = unixNow()
+  const publishedAt =
+    snapshot.status === 'published' ? (snapshot.published_at ?? now) : snapshot.published_at
+  const row = snapshotRow({ ...snapshot, published_at: publishedAt }, postRef, now)
+  const record = buildVersionRecord(row, expectedVersion + 1)
+  const recordJson = snapshotJson(record)
+  const { content_envelope, content_snapshot_sha256, source_sync_sha256 } =
+    envelopeColumns(record)
+
+  const batch = [
+    db
+      .prepare(
+        `INSERT INTO article_versions
+           (article_id, version, operation_id, snapshot_json, content_snapshot_sha256, published_at)
+         SELECT ?, COALESCE(MAX(version), 0) + 1, ?, ?, ?, ?
+         FROM article_versions
+         WHERE article_id = ?
+         GROUP BY article_id
+         HAVING COALESCE(MAX(version), 0) = ?
+           AND NOT EXISTS (SELECT 1 FROM article_versions WHERE operation_id = ?)`,
+      )
+      .bind(
+        articleId,
+        operationId,
+        recordJson,
+        content_snapshot_sha256,
+        record.published_at,
+        articleId,
+        expectedVersion,
+        operationId,
+      ),
+    db
+      .prepare(
+        `UPDATE posts SET
+           slug = ?, title = ?, content = ?, html = ?, description = ?, category = ?,
+           tags = ?, status = ?, password = ?, is_pinned = ?, is_hidden = ?,
+           cover_image = ?, deleted_at = ?, published_at = ?, updated_at = ?,
+           content_envelope = ?, content_snapshot_sha256 = ?, source_sync_sha256 = ?
+         WHERE id = ?
+           AND EXISTS (SELECT 1 FROM article_versions WHERE operation_id = ?)`,
+      )
+      .bind(
+        row.slug,
+        row.title,
+        row.content,
+        row.html,
+        row.description,
+        row.category,
+        row.tags,
+        row.status,
+        row.password,
+        row.is_pinned,
+        row.is_hidden,
+        row.cover_image,
+        row.deleted_at,
+        row.published_at,
+        row.updated_at,
+        content_envelope,
+        content_snapshot_sha256,
+        source_sync_sha256,
+        postRef,
+        operationId,
+      ),
+  ]
+
+  try {
+    await db.batch(batch)
+  } catch (error) {
+    // Atomic abort — most likely a slug UNIQUE race on the posts projection.
+    const byOperation = await findVersionByOperationId(db, operationId)
+    if (byOperation) {
+      return {
+        outcome: 'replayed',
+        articleId,
+        postRef,
+        version: byOperation.version,
+        operationId,
+        existing: true,
+        projectionFailures: [],
+      }
+    }
+    if (await slugTakenByOther(db, snapshot.slug, postRef)) {
+      return { outcome: 'slug-conflict', slug: snapshot.slug }
+    }
+    throw new Error(
+      `save: unexpected batch failure for article ${articleId} operation '${operationId}': ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+
+  const version = await findVersionByOperationId(db, operationId)
+  if (!version) {
+    // Guards no-op'd: the expected version lost a race between pre-read and
+    // batch. Nothing was written — report the real server state.
+    const latest = await findLatestVersion(db, articleId)
+    return {
+      outcome: 'conflict',
+      articleId,
+      postRef,
+      expectedVersion,
+      serverVersion: latest?.version ?? 0,
+      facts: comparisonFacts(latest),
+    }
+  }
+
+  const result = {
+    outcome: 'applied' as const,
+    articleId,
+    postRef,
+    version: version.version,
+    operationId,
+    existing: false,
+    projectionFailures: [] as string[],
+  }
+  result.projectionFailures = await runProjections(input.projections, result)
+  return result
+}
+
+/* ------------------------------------------------------------------ */
+/* publishTemp                                                         */
+/* ------------------------------------------------------------------ */
+
+export async function publishTemp(
+  db: Database,
+  input: PublishTempInput,
+): Promise<PublishTempResult> {
+  const { articleId, expectedVersion, currentStatus, operationId, status } = input
+  if (!articleId || !operationId || operationId.trim() === '') {
+    throw new Error('publishTemp: articleId and operationId are required')
+  }
+  if (status !== 'draft' && status !== 'published') {
+    throw new Error(`publishTemp: invalid status '${status}'`)
+  }
+
+  const article = await findArticleById(db, articleId)
+  if (!article) throw new Error(`publishTemp: article ${articleId} not found`)
+  const postRef = article.post_ref
+
+  // Idempotent replay.
+  const replayed = await findVersionByOperationId(db, operationId)
+  if (replayed) {
+    if (replayed.article_id !== articleId) {
+      throw new Error(
+        `publishTemp: operation '${operationId}' already used by article ${replayed.article_id}`,
+      )
+    }
+    return {
+      outcome: 'replayed',
+      articleId,
+      postRef,
+      version: replayed.version,
+      operationId,
+      existing: true,
+      projectionFailures: [],
+    }
+  }
+
+  const latest = await findLatestVersion(db, articleId)
+  const serverVersion = latest?.version ?? 0
+  if (serverVersion !== expectedVersion) {
+    return {
+      outcome: 'conflict',
+      articleId,
+      postRef,
+      expectedVersion,
+      serverVersion,
+      facts: comparisonFacts(latest),
+    }
+  }
+
+  // Status precondition against the live posts projection (legacy PATCH can
+  // change posts.status outside the command layer).
+  const post = await db
+    .prepare('SELECT status, published_at FROM posts WHERE id = ?')
+    .bind(postRef)
+    .first<{ status: string | null; published_at: number | null }>()
+  if (!post || post.status !== currentStatus) {
+    return {
+      outcome: 'status-conflict',
+      articleId,
+      postRef,
+      expectedVersion,
+      serverVersion,
+      currentStatus: post?.status ?? null,
+    }
+  }
+
+  // Legacy-compatible published_at: keep on unpublish, first-now on publish.
+  const now = unixNow()
+  const nextPublishedAt =
+    status === 'published' ? (post.published_at ?? now) : post.published_at
+  const current = JSON.parse(latest!.snapshot_json) as ArticleIdentitySnapshot
+  const nextRow: PostAuthorityRow = {
+    id: postRef,
+    slug: current.fields.slug,
+    title: current.fields.title,
+    content: current.original_content ?? '',
+    html: current.original_html ?? '',
+    description: current.fields.description,
+    category: current.fields.category,
+    tags: current.fields.tags,
+    status,
+    password: current.fields.password,
+    is_pinned: current.fields.is_pinned ?? 0,
+    is_hidden: current.fields.is_hidden ?? 0,
+    cover_image: current.fields.cover_image,
+    deleted_at: current.fields.deleted_at,
+    published_at: nextPublishedAt,
+    updated_at: now,
+  }
+  const record = buildVersionRecord(nextRow, expectedVersion + 1)
+  const recordJson = snapshotJson(record)
+
+  const batch = [
+    db
+      .prepare(
+        `INSERT INTO article_versions
+           (article_id, version, operation_id, snapshot_json, content_snapshot_sha256, published_at)
+         SELECT ?, COALESCE(MAX(version), 0) + 1, ?, ?, ?, ?
+         FROM article_versions
+         WHERE article_id = ?
+         GROUP BY article_id
+         HAVING COALESCE(MAX(version), 0) = ?
+           AND NOT EXISTS (SELECT 1 FROM article_versions WHERE operation_id = ?)
+           AND (SELECT status FROM posts WHERE id = ?) = ?`,
+      )
+      .bind(
+        articleId,
+        operationId,
+        recordJson,
+        record.content_snapshot_sha256 ?? '',
+        record.published_at,
+        articleId,
+        expectedVersion,
+        operationId,
+        postRef,
+        currentStatus,
+      ),
+    db
+      .prepare(
+        `UPDATE posts SET status = ?, published_at = ?, updated_at = strftime('%s', 'now')
+         WHERE id = ?
+           AND EXISTS (SELECT 1 FROM article_versions WHERE operation_id = ?)`,
+      )
+      .bind(status, nextPublishedAt, postRef, operationId),
+  ]
+
+  try {
+    await db.batch(batch)
+  } catch (error) {
+    const byOperation = await findVersionByOperationId(db, operationId)
+    if (byOperation) {
+      return {
+        outcome: 'replayed',
+        articleId,
+        postRef,
+        version: byOperation.version,
+        operationId,
+        existing: true,
+        projectionFailures: [],
+      }
+    }
+    throw new Error(
+      `publishTemp: unexpected batch failure for article ${articleId} operation '${operationId}': ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+
+  const version = await findVersionByOperationId(db, operationId)
+  if (!version) {
+    const server = await findLatestVersion(db, articleId)
+    return {
+      outcome: 'conflict',
+      articleId,
+      postRef,
+      expectedVersion,
+      serverVersion: server?.version ?? 0,
+      facts: comparisonFacts(server),
+    }
+  }
+
+  const result = {
+    outcome: 'applied' as const,
+    articleId,
+    postRef,
+    version: version.version,
+    operationId,
+    existing: false,
+    projectionFailures: [] as string[],
+  }
+  result.projectionFailures = await runProjections(input.projections, result)
+  return result
+}
