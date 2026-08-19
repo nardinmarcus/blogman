@@ -204,25 +204,33 @@ async function clipPage(options = {}) {
     }
   }
 
-  // 4. Create post with category and status
+  // 4. Create post with category and status (B2-08 versioned protocol)
   sendProgress('creating');
 
   try {
-    const postBody = {
+    // Stable creation id per source URL: retries never duplicate the article.
+    const creationId = `chrome:${encodeURIComponent(pageUrl)}`;
+    const snapshot = {
       title: finalTitle,
       content: markdown,
-      status: status || 'draft',
+      status: 'draft',
     };
+    if (category) snapshot.category = category;
 
-    if (category) {
-      postBody.category = category;
-    }
+    const postBody = {
+      protocol: 'v1',
+      action: 'create',
+      creationId,
+      clientType: 'chrome',
+      snapshot,
+    };
 
     const resp = await fetch(`${apiUrl}/api/posts`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiToken}`,
+        'x-blogman-client': 'chrome',
       },
       body: JSON.stringify(postBody),
     });
@@ -233,13 +241,50 @@ async function clipPage(options = {}) {
     }
 
     const json = await resp.json();
-    if (!json.success) {
-      return { success: false, error: '创建文章失败: API 返回 success=false' };
+    if (!json.success && json.error) {
+      return { success: false, error: `创建文章失败: ${json.error}` };
+    }
+    if (json.protocol !== 'v1') {
+      return { success: false, error: '目标服务器不支持 versioned 写入协议（protocol=v1），请先升级服务器' };
+    }
+
+    let slug = json.slug;
+    let articleId = json.articleId;
+    let version = json.version;
+
+    // Publish only through the versioned publish path when requested.
+    if ((status || 'draft') === 'published') {
+      const pubResp = await fetch(`${apiUrl}/api/posts`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiToken}`,
+          'x-blogman-client': 'chrome',
+        },
+        body: JSON.stringify({
+          protocol: 'v1',
+          action: 'publishTemp',
+          articleId,
+          expectedVersion: version,
+          currentStatus: 'draft',
+          operationId: `chrome:pub:${creationId}:${version}`,
+          status: 'published',
+        }),
+      });
+      if (!pubResp.ok) {
+        const text = await pubResp.text();
+        return { success: false, error: `发布文章失败: ${pubResp.status} ${text.slice(0, 200)}` };
+      }
+      const pubJson = await pubResp.json();
+      if (pubJson.outcome === 'conflict' || pubJson.outcome === 'status-conflict') {
+        return { success: false, error: '发布冲突：文章状态已在别处变更，请在网页端刷新后重试' };
+      }
+      version = pubJson.version;
     }
 
     return {
       success: true,
-      slug: json.slug,
+      slug: typeof slug === 'string' ? slug : json.slug,
       title: finalTitle,
       imageCount: imageCount,
     };
