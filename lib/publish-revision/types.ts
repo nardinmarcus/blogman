@@ -220,4 +220,153 @@ export interface RevisionState {
   active: RevisionRow | null
   promotions: PromotionRow[]
   latestRestorePoint: RestorePointRow | null
+  /** B3-03 — the most recent restore points for this article (recent 10). */
+  restorePoints: RestorePointRow[]
+}
+
+/* ------------------------------------------------------------------ */
+/* B3-03 — revision comparison / restore (issue #35)                   */
+/* ------------------------------------------------------------------ */
+
+/** A single field-level comparison between the live formal snapshot and a target snapshot. */
+export interface FieldComparison {
+  field: string
+  live: string | number | null
+  target: string | number | null
+  changed: boolean
+}
+
+/** A content-diff token pair for the editor workbench (rough word-line diff). */
+export interface ContentDiffToken {
+  type: 'same' | 'removed' | 'added'
+  value: string
+}
+
+/** Result of comparing the live formal body against a target snapshot. */
+export interface RevisionComparison {
+  articleId: number
+  /** The formal version the comparison was anchored to (re-verified at execution). */
+  verifiedVersion: number
+  targetLabel: string
+  /** True when every compared field matches the live snapshot. */
+  identical: boolean
+  fields: FieldComparison[]
+  contentDiff: ContentDiffToken[]
+  liveContentSha256: string
+  targetContentSha256: string
+}
+
+export type CompareRevisionResult =
+  | ({ outcome: 'compared' } & RevisionComparison)
+  | {
+      outcome: 'conflict'
+      articleId: number
+      expectedVersion: number
+      serverVersion: number
+      reason: string
+    }
+  | { outcome: 'not-found'; articleId?: number; reason: string }
+  | { outcome: 'invalid'; reason: string }
+
+/** Where a restore should materialise its snapshot. */
+export type RestoreTarget = 'revision' | 'draft'
+
+/** The undo-able restore operation record (one row per restore). */
+export interface RestoreOperationRow {
+  id: number
+  restore_operation_id: string
+  article_id: number
+  source_restore_point_id: string
+  target: RestoreTarget
+  expected_version: number
+  /** Full editable snapshot of the live state immediately before this restore. */
+  pre_restore_snapshot_json: string
+  pre_restore_content_sha256: string
+  /** The active revision formed for a `revision`-target restore (null for draft). */
+  revision_id: string | null
+  /** The draft copy article id for a `draft`-target restore (null for revision). */
+  draft_article_id: number | null
+  post_ref: number | null
+  actor: string
+  status: 'active' | 'undone'
+  created_at: number
+  undone_at: number | null
+}
+
+export type SaveRestorePointResult =
+  | {
+      outcome: 'saved'
+      articleId: number
+      restorePointId: string
+      formalVersion: number
+      reason: string
+      /** Number of restore points pruned to keep the recent-10 retention. */
+      pruned: number
+    }
+  | { outcome: 'not-found'; articleId: number; reason: string }
+  | { outcome: 'invalid'; reason: string }
+
+export type RestoreResult =
+  | {
+      outcome: 'restored'
+      articleId: number
+      restoreOperationId: string
+      target: RestoreTarget
+      formalVersion: number
+      restorePointId: string
+      /** For a `revision`-target restore: the active revision formed. */
+      revisionId: string | null
+      revisionNumber: number | null
+      /** For a `draft`-target restore: the draft copy article + post ref. */
+      draftArticleId: number | null
+      draftPostRef: number | null
+      /** Pruned restore points after this high-risk op. */
+      pruned: number
+    }
+  | {
+      outcome: 'conflict'
+      articleId: number
+      expectedVersion: number
+      serverVersion: number
+      reason: string
+    }
+  | { outcome: 'blocked'; articleId: number; reason: string; failures: string[] }
+  | { outcome: 'not-found'; articleId?: number; reason: string }
+  | { outcome: 'invalid'; reason: string }
+
+export type UndoRestoreResult =
+  | { outcome: 'undone'; articleId: number; restoreOperationId: string; target: RestoreTarget }
+  | { outcome: 'replayed'; articleId: number; restoreOperationId: string }
+  | { outcome: 'not-found'; articleId?: number; reason: string }
+  | { outcome: 'invalid'; reason: string }
+
+/** #35 inputs. */
+export interface CompareRevisionInput {
+  articleId: number
+  /** The formal version the client previewed; re-verified before diffing. */
+  expectedVersion: number
+  /** Defaults to the active revision; an explicit promoted revision may be named. */
+  revisionId?: string
+}
+
+export interface SaveRestorePointInput {
+  articleId: number
+  actor: string
+  /** Short reason label recorded on the restore point (e.g. `restore-preflight`). */
+  reason: string
+}
+
+export interface RestoreInput {
+  /** The restore point to materialise. */
+  restorePointId: string
+  articleId?: number
+  /** The formal version the client previewed; re-verified at execution. */
+  expectedVersion?: number
+  target: RestoreTarget
+  actor: string
+}
+
+export interface UndoRestoreInput {
+  restoreOperationId: string
+  actor: string
 }

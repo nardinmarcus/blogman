@@ -49,6 +49,18 @@ import type {
   RevisionState,
   SaveRevisionInput,
   SaveRevisionResult,
+  CompareRevisionInput,
+  CompareRevisionResult,
+  FieldComparison,
+  ContentDiffToken,
+  RestoreInput,
+  RestoreResult,
+  RestoreTarget,
+  RestoreOperationRow,
+  SaveRestorePointInput,
+  SaveRestorePointResult,
+  UndoRestoreInput,
+  UndoRestoreResult,
 } from './types'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands/types'
 
@@ -976,7 +988,7 @@ export async function discardRevision(
 export async function readRevisionState(db: Database, articleId: number): Promise<RevisionState> {
   const article = await findArticleById(db, articleId)
   if (!article) {
-    return { articleId, formal: null, active: null, promotions: [], latestRestorePoint: null }
+    return { articleId, formal: null, active: null, promotions: [], latestRestorePoint: null, restorePoints: [] }
   }
   const formal = await findFormalByArticle(db, articleId)
   const formalAnchor: FormalAnchor & { slug: string } | null = formal
@@ -1003,7 +1015,15 @@ export async function readRevisionState(db: Database, articleId: number): Promis
     )
     .bind(articleId)
     .first<RestorePointRow>()
-  return { articleId, formal: formalAnchor, active, promotions: promotions ?? [], latestRestorePoint }
+  const { results: restorePoints } = await db
+    .prepare(
+      `SELECT id, restore_point_id, article_id, formal_version, promoted_version,
+              snapshot_json, content_sha256, reason, created_at
+       FROM publish_restore_points WHERE article_id = ? ORDER BY created_at DESC LIMIT ?`,
+    )
+    .bind(articleId, RESTORE_POINT_RETENTION)
+    .all<RestorePointRow>()
+  return { articleId, formal: formalAnchor, active, promotions: promotions ?? [], latestRestorePoint, restorePoints: restorePoints ?? [] }
 }
 
 /** @internal — reuse the first-publish snapshot hashing for the record builder. */
@@ -1026,4 +1046,658 @@ export function revisionSnapshotFromSave(snapshot: ArticleCommandSnapshot): Revi
     is_hidden: snapshot.is_hidden,
     cover_image: snapshot.cover_image,
   }
+}
+
+/* ================================================================== */
+/* B3-03 — revision comparison / restore / undo (issue #35)            */
+/* ================================================================== */
+
+/** Recent-10 retention — the maximum restore points kept per article. */
+export const RESTORE_POINT_RETENTION = 10
+
+let manualSnapCounter = 0
+/** Monotonic uniqueness for manual restore-point ids (same-second saves must differ). */
+function manualSnapSeq(): number {
+  manualSnapCounter += 1
+  return manualSnapCounter
+}
+
+/** Deterministic restore-operation id. */
+export function restoreOperationIdFor(restorePointId: string, target: RestoreTarget): string {
+  return `restore:${target}:${restorePointId}`
+}
+
+/** Parse a restore-point snapshot (an ArticleIdentitySnapshot JSON) back into editable fields. */
+function snapshotFromRestorePoint(json: string): RevisionSnapshotInput | null {
+  try {
+    const parsed = JSON.parse(json) as {
+      fields?: {
+        slug?: string
+        title?: string
+        description?: string | null
+        category?: string | null
+        tags?: string | null
+        password?: string | null
+        is_pinned?: number | null
+        is_hidden?: number | null
+        cover_image?: string | null
+      }
+      original_content?: string | null
+      original_html?: string | null
+    }
+    const f = parsed.fields ?? {}
+    let tags: string[] = []
+    try {
+      const t = JSON.parse(f.tags ?? '[]')
+      tags = Array.isArray(t) ? t.filter((tag): tag is string => typeof tag === 'string') : []
+    } catch {
+      tags = []
+    }
+    return {
+      slug: f.slug ?? '',
+      title: f.title ?? '',
+      content: parsed.original_content ?? '',
+      html: parsed.original_html ?? '',
+      description: f.description ?? null,
+      category: f.category ?? null,
+      tags: tags.length > 0 ? tags : null,
+      password: f.password ?? null,
+      is_pinned: f.is_pinned ?? 0,
+      is_hidden: f.is_hidden ?? 0,
+      cover_image: f.cover_image ?? null,
+    }
+  } catch {
+    return null
+  }
+}
+
+/** Word-token rough content diff for the editor workbench (bounded, deterministic). */
+function contentDiff(a: string, b: string): ContentDiffToken[] {
+  const toks = (s: string) => (s || '').split(/\s+/).filter(Boolean)
+  const at = toks(a)
+  const bt = toks(b)
+  const out: ContentDiffToken[] = []
+  let i = 0
+  let j = 0
+  while (i < at.length && j < bt.length) {
+    if (at[i] === bt[j]) {
+      out.push({ type: 'same', value: at[i] })
+      i += 1
+      j += 1
+    } else {
+      out.push({ type: 'removed', value: at[i] })
+      out.push({ type: 'added', value: bt[j] })
+      i += 1
+      j += 1
+    }
+  }
+  while (i < at.length) out.push({ type: 'removed', value: at[i++] })
+  while (j < bt.length) out.push({ type: 'added', value: bt[j++] })
+  return out
+}
+
+function fieldCompare(label: string, live: string | number | null, target: string | number | null): FieldComparison {
+  const normL = live ?? null
+  const normT = target ?? null
+  return { field: label, live: normL, target: normT, changed: normL !== normT }
+}
+
+async function formalVersionOf(db: Database, articleId: number): Promise<number | null> {
+  const formal = await findFormalByArticle(db, articleId)
+  return formal ? formal.version : null
+}
+
+/**
+ * Compare the live formal projection against a target snapshot (default: the
+ * active revision). Re-verifies the preview version the client saw before
+ * producing the diff — a stale expected version is never compared silently.
+ * Read-only: no facts written.
+ */
+export async function compareRevision(db: Database, input: CompareRevisionInput): Promise<CompareRevisionResult> {
+  const { articleId, expectedVersion, revisionId } = input
+  if (!articleId || !Number.isInteger(articleId) || (articleId as number) <= 0) {
+    return { outcome: 'invalid', reason: 'compareRevision: articleId is required' }
+  }
+  const serverVersion = await formalVersionOf(db, articleId as number)
+  if (serverVersion === null) {
+    return { outcome: 'not-found', articleId: articleId as number, reason: 'article has no formal publication' }
+  }
+  if (serverVersion !== expectedVersion) {
+    return {
+      outcome: 'conflict',
+      articleId: articleId as number,
+      expectedVersion,
+      serverVersion,
+      reason: 'stale-formal-version',
+    }
+  }
+
+  const article = await findArticleById(db, articleId as number)
+  if (!article) return { outcome: 'not-found', articleId: articleId as number, reason: `article ${articleId} not found` }
+  const live = await findPostById(db, article.post_ref)
+  const liveSnapshot = live ? snapshotFromPost(live) : null
+
+  let targetSnapshot: RevisionSnapshotInput | null = null
+  let targetLabel = 'live'
+  if (revisionId && revisionId.trim() !== '') {
+    const revision = await findRevisionById(db, revisionId.trim())
+    if (!revision) return { outcome: 'not-found', articleId: articleId as number, reason: `revision '${revisionId}' not found` }
+    targetSnapshot = snapshotFromRevision(revision)
+    targetLabel = `revision:${revision.revision_id}`
+  } else {
+    const active = await findActiveRevision(db, articleId as number)
+    if (active) {
+      targetSnapshot = snapshotFromRevision(active)
+      targetLabel = `active-revision:${active.revision_id}`
+    }
+  }
+
+  if (!liveSnapshot) {
+    return { outcome: 'not-found', articleId: articleId as number, reason: 'live post projection missing' }
+  }
+  if (!targetSnapshot) {
+    // No active / named revision yet — the article is identical to itself.
+    return {
+      outcome: 'compared',
+      articleId: articleId as number,
+      verifiedVersion: serverVersion,
+      targetLabel: 'none',
+      identical: true,
+      fields: [],
+      contentDiff: [],
+      liveContentSha256: snapshotContentHash(liveSnapshot),
+      targetContentSha256: snapshotContentHash(liveSnapshot),
+    }
+  }
+
+  const fields: FieldComparison[] = [
+    fieldCompare('slug', liveSnapshot.slug, targetSnapshot.slug),
+    fieldCompare('title', liveSnapshot.title, targetSnapshot.title),
+    fieldCompare('description', liveSnapshot.description, targetSnapshot.description),
+    fieldCompare('category', liveSnapshot.category, targetSnapshot.category),
+    fieldCompare('password', liveSnapshot.password, targetSnapshot.password),
+    fieldCompare('is_pinned', liveSnapshot.is_pinned, targetSnapshot.is_pinned),
+    fieldCompare('is_hidden', liveSnapshot.is_hidden, targetSnapshot.is_hidden),
+    fieldCompare('cover_image', liveSnapshot.cover_image, targetSnapshot.cover_image),
+  ]
+  const tagsL = liveSnapshot.tags ? liveSnapshot.tags.join(',') : ''
+  const tagsT = targetSnapshot.tags ? targetSnapshot.tags.join(',') : ''
+  fields.push(fieldCompare('tags', tagsL, tagsT))
+
+  const onlyContentChanged =
+    fields.every((f) => !f.changed) &&
+    liveSnapshot.content !== targetSnapshot.content
+  const identical = fields.every((f) => !f.changed) && liveSnapshot.content === targetSnapshot.content
+
+  return {
+    outcome: 'compared',
+    articleId: articleId as number,
+    verifiedVersion: serverVersion,
+    targetLabel,
+    identical,
+    fields,
+    // Full content diff only when the body actually differs.
+    contentDiff: onlyContentChanged || !identical ? contentDiff(liveSnapshot.content, targetSnapshot.content) : [],
+    liveContentSha256: snapshotContentHash(liveSnapshot),
+    targetContentSha256: snapshotContentHash(targetSnapshot),
+  }
+}
+
+/**
+ * Materialise the given restore point as the target snapshot for subsequent
+ * diffing (read-only parse of a previously saved full editable snapshot).
+ */
+export async function readRestorePointSnapshot(
+  _db: Database,
+  restorePointId: string,
+): Promise<RevisionSnapshotInput | null> {
+  const row = await _db
+    .prepare(
+      `SELECT id, restore_point_id, article_id, formal_version, promoted_version,
+              snapshot_json, content_sha256, reason, created_at
+       FROM publish_restore_points WHERE restore_point_id = ?`,
+    )
+    .bind(restorePointId)
+    .first<RestorePointRow>()
+  return row ? snapshotFromRestorePoint(row.snapshot_json) : null
+}
+
+/**
+ * Prune restore points to the most recent {@link RESTORE_POINT_RETENTION}
+ * per article. Returns the number of rows deleted. Never touches the promoted
+ * formal state or slug history — only the snapshot ledger.
+ */
+export async function pruneRestorePoints(db: Database, articleId: number): Promise<number> {
+  const keep = RESTORE_POINT_RETENTION
+  const { results } = await db
+    .prepare(
+      `SELECT id FROM publish_restore_points
+       WHERE article_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
+    )
+    .bind(articleId, keep)
+    .all<{ id: number }>()
+  const keepIds = new Set((results ?? []).map((r) => r.id))
+  const before = await db
+    .prepare('SELECT COUNT(*) AS n FROM publish_restore_points WHERE article_id = ?')
+    .bind(articleId)
+    .first<{ n: number }>()
+  // Delete every restore point beyond the kept window.
+  if (keepIds.size > 0) {
+    await db
+      .prepare(
+        `DELETE FROM publish_restore_points
+         WHERE article_id = ? AND id NOT IN (${Array.from(keepIds).map(() => '?').join(',')})`,
+      )
+      .bind(articleId, ...Array.from(keepIds))
+      .run()
+  }
+  const pruned = Math.max(0, (before?.n ?? 0) - keepIds.size)
+  return pruned
+}
+
+/**
+ * Save a full editable snapshot of the CURRENT live formal state as a restore
+ * point (the pre-high-risk safety snapshot). Reasons like `promote:<rev>` are
+ * used by the existing promote path; this is the user/route-requested form.
+ * Retention is enforced (recent 10).
+ */
+export async function saveRestorePoint(db: Database, input: SaveRestorePointInput): Promise<SaveRestorePointResult> {
+  const { articleId, actor, reason } = input
+  if (!articleId || !Number.isInteger(articleId) || (articleId as number) <= 0) {
+    return { outcome: 'invalid', reason: 'saveRestorePoint: articleId is required' }
+  }
+  if (!actor || actor.trim() === '') {
+    return { outcome: 'invalid', reason: 'saveRestorePoint: actor is required' }
+  }
+  if (!reason || reason.trim() === '') {
+    return { outcome: 'invalid', reason: 'saveRestorePoint: reason is required' }
+  }
+  const aId = articleId as number
+  const article = await findArticleById(db, aId)
+  if (!article) return { outcome: 'not-found', articleId: aId, reason: `article ${aId} not found` }
+  const formal = await findFormalByArticle(db, aId)
+  if (!formal) return { outcome: 'not-found', articleId: aId, reason: 'article has no formal publication' }
+  const live = await findPostById(db, article.post_ref)
+  if (!live) return { outcome: 'not-found', articleId: aId, reason: 'live post projection missing' }
+
+  const restorePointId = `restore:${aId}:v${formal.version}:manual:${unixNow()}:${manualSnapSeq()}`
+  const snapshot = snapshotFromPost(live)
+  const snapshotJsonStr = snapshotJson(
+    buildInitialSnapshot({
+      id: live.id,
+      slug: live.slug,
+      title: live.title,
+      content: live.content ?? '',
+      html: live.html ?? '',
+      description: live.description,
+      category: live.category,
+      tags: live.tags,
+      status: live.status,
+      password: live.password,
+      is_pinned: live.is_pinned,
+      is_hidden: live.is_hidden,
+      cover_image: live.cover_image,
+      deleted_at: live.deleted_at,
+      published_at: live.published_at,
+      updated_at: live.updated_at,
+    }),
+  )
+  const now = unixNow()
+  try {
+    await db
+      .prepare(
+        `INSERT INTO publish_restore_points
+           (restore_point_id, article_id, formal_version, promoted_version, snapshot_json,
+            content_sha256, reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(restore_point_id) DO NOTHING`,
+      )
+      .bind(
+        restorePointId,
+        aId,
+        formal.version,
+        formal.version,
+        snapshotJsonStr,
+        snapshotContentHash(snapshot),
+        reason.trim(),
+        now,
+      )
+      .run()
+  } catch (error) {
+    throw new Error(
+      `saveRestorePoint: insert failure for article ${aId} reason '${reason}': ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  const pruned = await pruneRestorePoints(db, aId)
+  return { outcome: 'saved', articleId: aId, restorePointId, formalVersion: formal.version, reason: reason.trim(), pruned }
+}
+
+/** Low-level finder for a restore operation row. */
+async function findRestoreOperation(db: Database, restoreOperationId: string): Promise<RestoreOperationRow | null> {
+  return db
+    .prepare(
+      `SELECT id, restore_operation_id, article_id, source_restore_point_id, target,
+              expected_version, pre_restore_snapshot_json, pre_restore_content_sha256,
+              revision_id, draft_article_id, post_ref, actor, status, created_at, undone_at
+       FROM publish_restore_ops WHERE restore_operation_id = ?`,
+    )
+    .bind(restoreOperationId)
+    .first<RestoreOperationRow>()
+}
+
+/**
+ * Restore a saved restore point as either a pending REVISION (never promoted
+ * here — the user promotes explicitly) or a standalone DRAFT copy. The live
+ * formal projection, its slug history and its published state are NEVER
+ * touched. Before the high-risk write a full editable snapshot is saved so the
+ * whole restore can be undone.
+ */
+export async function restoreRevisionSnapshot(db: Database, input: RestoreInput): Promise<RestoreResult> {
+  const { restorePointId, articleId, expectedVersion, target, actor } = input
+  if (!restorePointId || restorePointId.trim() === '') {
+    return { outcome: 'invalid', reason: 'restore: restorePointId is required' }
+  }
+  if (target !== 'revision' && target !== 'draft') {
+    return { outcome: 'invalid', reason: `restore: invalid target '${String(target)}'` }
+  }
+  if (!actor || actor.trim() === '') {
+    return { outcome: 'invalid', reason: 'restore: actor is required' }
+  }
+
+  const rp = await db
+    .prepare(
+      `SELECT id, restore_point_id, article_id, formal_version, promoted_version,
+              snapshot_json, content_sha256, reason, created_at
+       FROM publish_restore_points WHERE restore_point_id = ?`,
+    )
+    .bind(restorePointId.trim())
+    .first<RestorePointRow>()
+  if (!rp) return { outcome: 'not-found', reason: `restore point '${restorePointId}' not found` }
+
+  const aId = articleId && Number.isInteger(articleId) && (articleId as number) > 0 ? (articleId as number) : rp.article_id
+  if (rp.article_id !== aId) {
+    return { outcome: 'not-found', articleId: aId, reason: 'restore point belongs to a different article' }
+  }
+
+  const serverVersion = await formalVersionOf(db, aId)
+  if (serverVersion === null) {
+    return { outcome: 'blocked', articleId: aId, reason: 'article has no formal publication', failures: ['formal-missing'] }
+  }
+  // Re-verify the preview version the client saw at execution time.
+  if (expectedVersion !== undefined && expectedVersion !== serverVersion) {
+    return {
+      outcome: 'conflict',
+      articleId: aId,
+      expectedVersion,
+      serverVersion,
+      reason: 'stale-formal-version',
+    }
+  }
+
+  const snapshot = snapshotFromRestorePoint(rp.snapshot_json)
+  if (!snapshot) return { outcome: 'invalid', reason: 'restore: restore point snapshot is unreadable' }
+
+  // High-risk preflight: save the current live state so this restore can be undone.
+  const preflight = await saveRestorePoint(db, {
+    articleId: aId,
+    actor,
+    reason: `restore-preflight:${rp.restore_point_id}`,
+  })
+  if (preflight.outcome !== 'saved') {
+    return { outcome: 'blocked', articleId: aId, reason: 'could not save pre-restore snapshot', failures: ['preflight-failed'] }
+  }
+
+  const opId = restoreOperationIdFor(rp.restore_point_id, target)
+  const existingOp = await findRestoreOperation(db, opId)
+  const now = unixNow()
+
+  if (target === 'revision') {
+    // Form a NEW active revision carrying the restored editable snapshot. The
+    // live article stays online; promotion is a separate explicit step.
+    const article = await findArticleById(db, aId)
+    if (!article) return { outcome: 'not-found', articleId: aId, reason: `article ${aId} not found` }
+    const formal = await findFormalByArticle(db, aId)
+    if (formal && formal.slug !== snapshot.slug) {
+      // Never rewrite slug history — the restored body keeps the LIVE slug.
+      snapshot.slug = formal.slug
+    }
+    const routed = await saveRevision(db, {
+      articleId: aId,
+      postRef: article.post_ref,
+      expectedVersion: serverVersion as number,
+      operationId: `restore:${rp.restore_point_id}:${now}`,
+      snapshot,
+      formal: { version: serverVersion as number, slug: snapshot.slug, contentHash: (await formalContentHash(db, aId, serverVersion as number)) ?? '' },
+    })
+    if (routed.outcome !== 'applied' && routed.outcome !== 'replayed') {
+      if (routed.outcome === 'conflict') {
+        return {
+          outcome: 'conflict',
+          articleId: aId,
+          expectedVersion: expectedVersion ?? (serverVersion as number),
+          serverVersion: routed.serverVersion,
+          reason: routed.reason,
+        }
+      }
+      return { outcome: 'blocked', articleId: aId, reason: routed.reason, failures: ['restore-revision-failed'] }
+    }
+    const revisionId = routed.revisionId
+    const revisionNumber = routed.version
+    // Record the undo-able operation (idempotent).
+    await db
+      .prepare(
+        `INSERT INTO publish_restore_ops
+           (restore_operation_id, article_id, source_restore_point_id, target, expected_version,
+            pre_restore_snapshot_json, pre_restore_content_sha256, revision_id, draft_article_id,
+            post_ref, actor, status, created_at, undone_at)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'active', ?, NULL
+         WHERE NOT EXISTS (SELECT 1 FROM publish_restore_ops WHERE restore_operation_id = ?)`,
+      )
+      .bind(
+        opId,
+        aId,
+        rp.restore_point_id,
+        'revision',
+        serverVersion,
+        preflight.outcome === 'saved' ? await readRestorePointSnap(preflight.restorePointId, db) : '',
+        preflight.outcome === 'saved' ? await readRestorePointHash(preflight.restorePointId, db) : '',
+        revisionId,
+        article.post_ref,
+        actor,
+        now,
+        opId,
+      )
+      .run()
+    const pruned = await pruneRestorePoints(db, aId)
+    return {
+      outcome: 'restored',
+      articleId: aId,
+      restoreOperationId: opId,
+      target: 'revision',
+      formalVersion: serverVersion as number,
+      restorePointId: rp.restore_point_id,
+      revisionId,
+      revisionNumber,
+      draftArticleId: null,
+      draftPostRef: null,
+      pruned,
+    }
+  }
+
+  // target === 'draft' — a standalone draft copy; never touches the live formal.
+  const existingDraft = existingOp && existingOp.draft_article_id && existingOp.status === 'active'
+  if (existingDraft) {
+    return {
+      outcome: 'restored' as const,
+      articleId: aId,
+      restoreOperationId: opId,
+      target: 'draft',
+      formalVersion: serverVersion as number,
+      restorePointId: rp.restore_point_id,
+      revisionId: null,
+      revisionNumber: null,
+      draftArticleId: existingOp.draft_article_id,
+      draftPostRef: existingOp.post_ref,
+      pruned: 0,
+    }
+  }
+
+  const duplicateDraftId = `restore-draft:${rp.restore_point_id}:${now}`
+  const insertResult = await insertDraftCopy(db, duplicateDraftId, snapshot)
+  if (insertResult.outcome !== 'created') {
+    return { outcome: 'blocked', articleId: aId, reason: insertResult.reason, failures: ['draft-copy-failed'] }
+  }
+  await db
+    .prepare(
+      `INSERT INTO publish_restore_ops
+         (restore_operation_id, article_id, source_restore_point_id, target, expected_version,
+          pre_restore_snapshot_json, pre_restore_content_sha256, revision_id, draft_article_id,
+          post_ref, actor, status, created_at, undone_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 'active', ?, NULL
+       WHERE NOT EXISTS (SELECT 1 FROM publish_restore_ops WHERE restore_operation_id = ?)`,
+    )
+    .bind(
+      opId,
+      aId,
+      rp.restore_point_id,
+      'draft',
+      serverVersion,
+      preflight.outcome === 'saved' ? await readRestorePointSnap(preflight.restorePointId, db) : '',
+      preflight.outcome === 'saved' ? await readRestorePointHash(preflight.restorePointId, db) : '',
+      insertResult.articleId,
+      insertResult.postRef,
+      actor,
+      now,
+      opId,
+    )
+    .run()
+  const pruned = await pruneRestorePoints(db, aId)
+  return {
+    outcome: 'restored',
+    articleId: aId,
+    restoreOperationId: opId,
+    target: 'draft',
+    formalVersion: serverVersion as number,
+    restorePointId: rp.restore_point_id,
+    revisionId: null,
+    revisionNumber: null,
+    draftArticleId: insertResult.articleId,
+    draftPostRef: insertResult.postRef,
+    pruned,
+  }
+}
+
+/** Read the editable snapshot JSON from a just-saved restore point (internal). */
+async function readRestorePointSnap(restorePointId: string, db: Database): Promise<string> {
+  const row = await db
+    .prepare('SELECT snapshot_json FROM publish_restore_points WHERE restore_point_id = ?')
+    .bind(restorePointId)
+    .first<{ snapshot_json: string }>()
+  return row?.snapshot_json ?? '{}'
+}
+
+/** Read the content hash from a just-saved restore point (internal). */
+async function readRestorePointHash(restorePointId: string, db: Database): Promise<string> {
+  const row = await db
+    .prepare('SELECT content_sha256 FROM publish_restore_points WHERE restore_point_id = ?')
+    .bind(restorePointId)
+    .first<{ content_sha256: string }>()
+  return row?.content_sha256 ?? ''
+}
+
+/** Insert a standalone draft copy article for a `draft`-target restore. */
+async function insertDraftCopy(
+  db: Database,
+  creationId: string,
+  snapshot: RevisionSnapshotInput,
+): Promise<
+  { outcome: 'created'; articleId: number; postRef: number } | { outcome: 'error'; reason: string }
+> {
+  // Reuse the proven B2-03 create kernel (deferred import to avoid a load-time
+  // cycle: article-commands imports publish-revision). slug-conflict is handled
+  // by suffixing so a restore copy never rewrites an existing slug.
+  const { create } = await import('@/lib/article-commands')
+  let slug = snapshot.slug
+  let attempt = 0
+  while (true) {
+    const created = await create(db, {
+      creationId,
+      snapshot: {
+        slug,
+        title: snapshot.title,
+        content: snapshot.content,
+        html: snapshot.html,
+        description: snapshot.description,
+        category: snapshot.category,
+        tags: snapshot.tags ?? null,
+        status: 'draft',
+        password: snapshot.password,
+        is_pinned: snapshot.is_pinned,
+        is_hidden: snapshot.is_hidden,
+        cover_image: snapshot.cover_image,
+        deleted_at: null,
+        published_at: null,
+        updated_at: null,
+      },
+    })
+    if (created.outcome === 'created' || created.outcome === 'existing') {
+      return {
+        outcome: 'created',
+        articleId: created.articleId,
+        postRef: created.postRef,
+      }
+    }
+    if (created.outcome === 'slug-conflict' && attempt < 5) {
+      attempt += 1
+      slug = `${snapshot.slug}-restore-${attempt}-${unixNow()}`
+      continue
+    }
+    return { outcome: 'error', reason: created.outcome === 'slug-conflict' ? 'slug-conflict' : JSON.stringify(created) }
+  }
+}
+
+
+/**
+ * Undo a restore: for a `revision`-target restore, discard the pending active
+ * revision that was formed; for a `draft`-target restore, delete the standalone
+ * draft copy. The live formal projection is never modified and never unpublishes.
+ */
+export async function undoRestoreOperation(db: Database, input: UndoRestoreInput): Promise<UndoRestoreResult> {
+  const { restoreOperationId, actor } = input
+  if (!restoreOperationId || restoreOperationId.trim() === '') {
+    return { outcome: 'invalid', reason: 'undo: restoreOperationId is required' }
+  }
+  if (!actor || actor.trim() === '') {
+    return { outcome: 'invalid', reason: 'undo: actor is required' }
+  }
+  const op = await findRestoreOperation(db, restoreOperationId.trim())
+  if (!op) return { outcome: 'not-found', reason: `restore operation '${restoreOperationId}' not found` }
+  if (op.status === 'undone') {
+    return { outcome: 'replayed', articleId: op.article_id, restoreOperationId: op.restore_operation_id }
+  }
+  const now = unixNow()
+  if (op.target === 'revision') {
+    // Discard the formed active revision (if still active) — zero live change.
+    if (op.revision_id) {
+      await db
+        .prepare(`UPDATE publish_revisions SET status = 'discarded', updated_at = ? WHERE revision_id = ? AND status = 'active'`)
+        .bind(now, op.revision_id)
+        .run()
+    }
+  } else if (op.draft_article_id) {
+    // Delete the standalone draft copy we created.
+    const draft = await db
+      .prepare('SELECT id, post_ref FROM articles WHERE id = ?')
+      .bind(op.draft_article_id)
+      .first<{ id: number; post_ref: number }>()
+    if (draft) {
+      await db.prepare('DELETE FROM articles WHERE id = ?').bind(draft.id).run()
+      if (draft.post_ref) await db.prepare('DELETE FROM posts WHERE id = ?').bind(draft.post_ref).run()
+    }
+  }
+  await db
+    .prepare(`UPDATE publish_restore_ops SET status = 'undone', undone_at = ? WHERE restore_operation_id = ? AND status = 'active'`)
+    .bind(now, op.restore_operation_id)
+    .run()
+  return { outcome: 'undone', articleId: op.article_id, restoreOperationId: op.restore_operation_id, target: op.target }
 }
