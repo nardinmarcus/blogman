@@ -42,6 +42,8 @@ vi.mock('@/lib/cache', () => ({
 
 vi.mock('@/lib/background-jobs', () => ({
   enqueueBackgroundJob: mocks.enqueueBackgroundJob,
+  aiProcessPostOperationId: (postRef: number, version: number) =>
+    `ai:process-post:${postRef}:v${version}`,
 }))
 
 vi.mock('nanoid', () => ({

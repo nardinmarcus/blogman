@@ -28,7 +28,7 @@ import {
 } from '@/lib/server/route-helpers'
 import { migrationRequiredResponse } from '@/lib/database-errors'
 import { invalidatePublicContentCache } from '@/lib/cache'
-import { enqueueBackgroundJob } from '@/lib/background-jobs'
+import { enqueueBackgroundJob, aiProcessPostOperationId } from '@/lib/background-jobs'
 import { normalizePostSlug } from '@/lib/post-utils'
 import { nanoid } from 'nanoid'
 import type { ArticleIdentitySnapshot } from '@/lib/article-identity'
@@ -87,7 +87,13 @@ function afterCommit(env: RouteEnv, ctx?: RouteCtx): ArticleCommandProjections {
         if (result.operationId.startsWith('create:') && !result.existing) {
           await enqueueBackgroundJob(
             env,
-            { type: 'process-post-ai', postId: result.postRef },
+            {
+              type: 'process-post-ai',
+              postId: result.postRef,
+              articleId: result.articleId,
+              expectedVersion: result.version,
+              operationId: aiProcessPostOperationId(result.postRef, result.version),
+            },
             { waitUntil: ctx?.waitUntil?.bind(ctx) },
           )
         }
