@@ -12,9 +12,12 @@
  * the article identity, the EXACT confirmed version, the absolute execution
  * time (epoch seconds) and the IANA timezone chosen by the author. The status
  * machine is owned by the scan kernel: `pending` (armed) → `claimed` (leased
- * in-flight) → `fired` / `stale`; `cancelled` terminates a pending/claimed
- * row (issue #41 command surface). `attempt_count` + `last_error` keep the
- * "core failure retries reliably, version drift goes stale" distinction.
+ * in-flight) → `fired` / `stale`; `paused` holds an armed intent (PAUSED —
+ * fires are suspended, original time + bound version retained) until the
+ * author re-confirms / reschedules (issue #41 command surface); `cancelled`
+ * terminates a pending/claimed/paused row. `attempt_count` + `last_error`
+ * keep the "core failure retries reliably, version drift goes stale"
+ * distinction.
  */
 
 import type { Database } from '@/lib/repositories/schema'
@@ -27,7 +30,7 @@ export const SCHEDULED_PUBLISH_DDL_STATEMENTS: string[] = [
     version INTEGER NOT NULL CHECK(version > 0),
     scheduled_at INTEGER NOT NULL CHECK(scheduled_at > 0),
     timezone TEXT NOT NULL CHECK(length(timezone) > 0),
-    status TEXT NOT NULL CHECK(status IN ('pending', 'claimed', 'fired', 'stale', 'cancelled')),
+    status TEXT NOT NULL CHECK(status IN ('pending', 'claimed', 'paused', 'fired', 'stale', 'cancelled')),
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     claimed_at INTEGER,
