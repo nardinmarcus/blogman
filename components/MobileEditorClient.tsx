@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { ArrowLeft, Bold, Check, Italic, Monitor, Strikethrough, Underline, Heading2, Heading3 } from 'lucide-react'
+import { ArrowLeft, Bold, Check, Italic, Monitor, Sparkles, Strikethrough, Underline, Heading2, Heading3 } from 'lucide-react'
 import { EditorContent, EditorInstance, EditorRoot, JSONContent } from 'novel'
 import {
   createMobileEditorExtensions,
@@ -21,6 +21,14 @@ import {
   hasComplexBlock,
   mobileSaveStatusLabel,
 } from '@/lib/mobile-edit/edit-model'
+import {
+  suggestionActions,
+  suggestionStatusLabel,
+} from '@/lib/mobile-ai-suggestion/ui-model'
+import type {
+  MobileAiSuggestionState,
+  MobileAiSuggestionRead,
+} from '@/lib/mobile-ai-suggestion/types'
 
 /**
  * B8-02 — mobile small-edit editor (issue #61).
@@ -94,6 +102,13 @@ export function MobileEditorClient({ initialData, skipDraftRestore = false }: Mo
   const [conflictOpen, setConflictOpen] = useState(false)
   const [coordinatorUI, setCoordinatorUI] = useState<CoordinatorState | null>(null)
   const [complexContent, setComplexContent] = useState(false)
+
+  // B8-03 — mobile local-AI suggestion tray (shares the #38 suggestion state).
+  const boardRef = useRef<number | null>(initialData?.articleId ?? null)
+  const [suggestionState, setSuggestionState] = useState<MobileAiSuggestionState | null>(null)
+  const [aiBusy, setAiBusy] = useState(false)
+  const [aiError, setAiError] = useState<string | null>(null)
+  const [aiPanelOpen, setAiPanelOpen] = useState(false)
 
   const coordinatorRef = useRef<EditorSaveCoordinator | null>(null)
   const coordinatorInitRef = useRef(false)
@@ -216,6 +231,99 @@ export function MobileEditorClient({ initialData, skipDraftRestore = false }: Mo
   }, [])
 
   const scheduleDraftSave = useCallback(() => coordinatorRef.current?.schedule(), [])
+
+  // B8-03 — load the shared version-bound suggestion list for this article.
+  const loadSuggestions = useCallback(async () => {
+    const id = boardRef.current
+    if (!id) {
+      setSuggestionState(null)
+      return
+    }
+    try {
+      const res = await fetch(`/api/mobile-ai-suggestion?articleId=${id}`)
+      if (res.ok) {
+        const data = (await res.json()) as { state?: MobileAiSuggestionState }
+        setSuggestionState(data.state ?? null)
+      }
+    } catch {
+      // Best-effort read — never blocks editing/saving.
+    }
+  }, [])
+
+  // B8-03 — request a LOCAL (mock-AI) suggestion for the selected text.
+  const handleRequestLocalAi = useCallback(async () => {
+    const editor = editorRef.current
+    const id = boardRef.current
+    if (!editor) return
+    const { from, to } = editor.state.selection
+    const selectedText = editor.state.doc.textBetween(from, to, ' ').trim()
+    if (!id) {
+      setAiError('还没有文章身份，请先保存一次草稿')
+      return
+    }
+    if (!selectedText) {
+      setAiError('请先选中要改写的一段文字')
+      return
+    }
+    setAiBusy(true)
+    setAiError(null)
+    try {
+      const res = await fetch('/api/mobile-ai-suggestion', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'request',
+          articleId: id,
+          selectedText,
+          operationId: typeof crypto !== 'undefined' ? crypto.randomUUID() : `mobile-ai-${Date.now()}`,
+        }),
+      })
+      const data = (await res.json()) as { outcome?: string; reason?: string }
+      if (res.ok && data?.outcome === 'recorded') {
+        await loadSuggestions()
+      } else {
+        setAiError(data?.reason && data.reason !== 'unknown' ? data.reason : '无法生成建议')
+      }
+    } catch {
+      setAiError('建议请求失败，不影响保存')
+    } finally {
+      setAiBusy(false)
+    }
+  }, [loadSuggestions])
+
+  // B8-03 — apply / undo / ignore a suggestion through the shared #38 commands.
+  const handleSuggestionAction = useCallback(
+    async (action: 'apply' | 'revoke' | 'ignore', suggestionId: string) => {
+      const id = boardRef.current
+      if (!id) return
+      setAiError(null)
+      try {
+        const res = await fetch('/api/mobile-ai-suggestion', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action,
+            suggestionId,
+            ...(action !== 'ignore' ? { operationId: crypto.randomUUID() } : {}),
+          }),
+        })
+        if (!res.ok) {
+          const data = (await res.json()) as { error?: string }
+          setAiError(data?.error ?? '操作失败')
+        }
+        await loadSuggestions()
+      } catch {
+        setAiError('操作失败')
+      }
+    },
+    [loadSuggestions],
+  )
+
+  // Refresh the tray when the article identity is established.
+  useEffect(() => {
+    boardRef.current = initialData?.articleId ?? null
+    void loadSuggestions()
+  }, [initialData?.articleId, loadSuggestions])
 
   const handleSave = async (target: 'draft' | 'published') => {
     const coordinator = coordinatorRef.current
@@ -345,7 +453,14 @@ export function MobileEditorClient({ initialData, skipDraftRestore = false }: Mo
           ) : (
             <EditorRoot>
               <div>
-                <MobileFormatBar editorRef={editorRef} />
+                <MobileFormatBar editorRef={editorRef} onRequestAi={handleRequestLocalAi} aiBusy={aiBusy} />
+                <MobileSuggestionPanel
+                  open={aiPanelOpen}
+                  onToggle={() => setAiPanelOpen((v) => !v)}
+                  state={suggestionState}
+                  error={aiError}
+                  onAction={handleSuggestionAction}
+                />
                 <EditorContent
                   initialContent={initialContent}
                   extensions={createMobileEditorExtensions() as never}
@@ -446,6 +561,116 @@ export function MobileEditorClient({ initialData, skipDraftRestore = false }: Mo
   )
 }
 
+function MobileSuggestionPanel({
+  open,
+  onToggle,
+  state,
+  error,
+  onAction,
+}: {
+  open: boolean
+  onToggle: () => void
+  state: MobileAiSuggestionState | null
+  error: string | null
+  onAction: (action: 'apply' | 'revoke' | 'ignore', suggestionId: string) => void
+}) {
+  const preparations = state?.preparations ?? []
+  const actions = preparations.length > 0 ? preparations[0].suggestions : []
+  const pendingCount = actions.filter((s) => s.status === 'pending').length
+
+  return (
+    <div className="mb-3 rounded-xl border border-[var(--editor-line)] bg-[var(--editor-panel)]">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm"
+      >
+        <Sparkles className="h-4 w-4 text-[var(--editor-accent)]" />
+        <span className="font-medium text-[var(--editor-ink)]">局部 AI 建议</span>
+        {pendingCount > 0 && (
+          <span className="ml-auto rounded-full bg-[var(--editor-accent)]/15 px-2 py-0.5 text-xs font-semibold text-[var(--editor-accent)]">
+            {pendingCount} 条待处理
+          </span>
+        )}
+        <span className="text-[var(--editor-muted)]">{open ? '收起' : '展开'}</span>
+      </button>
+
+      {(open || error) && (
+        <div className="border-t border-[var(--editor-line)] px-3 py-2.5 space-y-2">
+          {error && (
+            <p className="text-xs text-rose-600">{error}</p>
+          )}
+          {actions.length === 0 && !error && (
+            <p className="text-xs text-[var(--editor-muted)]">
+              选中一段文字，点上方「AI 建议」生成版本绑定的局部建议。
+            </p>
+          )}
+          {actions.map((s) => (
+            <MobileSuggestionRow key={s.suggestionId} suggestion={s} onAction={onAction} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MobileSuggestionRow({
+  suggestion,
+  onAction,
+}: {
+  suggestion: MobileAiSuggestionRead
+  onAction: (action: 'apply' | 'revoke' | 'ignore', suggestionId: string) => void
+}) {
+  const acts = suggestionActions(suggestion.status)
+  const value = Array.isArray(suggestion.value)
+    ? suggestion.value.join(', ')
+    : (suggestion.value ?? '')
+  return (
+    <div className="rounded-lg border border-[var(--editor-line)] bg-[var(--background)] px-3 py-2">
+      <div className="flex items-center gap-2">
+        <span className="rounded bg-[var(--editor-accent)]/10 px-1.5 py-0.5 text-[11px] font-medium text-[var(--editor-accent)]">
+          {suggestion.field === 'content' ? '正文' : suggestion.field}
+        </span>
+        <span className={`text-[11px] ${suggestion.status === 'stale' ? 'text-amber-600' : 'text-[var(--editor-muted)]'}`}>
+          {suggestionStatusLabel(suggestion.status)} · v{suggestion.boundVersion}
+        </span>
+      </div>
+      <p className="mt-1.5 line-clamp-3 whitespace-pre-wrap text-xs text-[var(--editor-ink)]">{value}</p>
+      {(acts.canApply || acts.canRevoke || acts.canIgnore) && (
+        <div className="mt-2 flex gap-2">
+          {acts.canApply && (
+            <button
+              type="button"
+              onClick={() => onAction('apply', suggestion.suggestionId)}
+              className="rounded-md bg-[var(--editor-accent)] px-2.5 py-1 text-xs font-medium text-white"
+            >
+              应用
+            </button>
+          )}
+          {acts.canRevoke && (
+            <button
+              type="button"
+              onClick={() => onAction('revoke', suggestion.suggestionId)}
+              className="rounded-md border border-[var(--editor-line)] px-2.5 py-1 text-xs text-[var(--editor-ink)]"
+            >
+              撤销
+            </button>
+          )}
+          {acts.canIgnore && (
+            <button
+              type="button"
+              onClick={() => onAction('ignore', suggestion.suggestionId)}
+              className="rounded-md border border-[var(--editor-line)] px-2.5 py-1 text-xs text-[var(--editor-muted)]"
+            >
+              忽略
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function HandoffHint({ slug, complex }: { slug: string | null; complex: boolean }) {
   const href = desktopHandoffUrl(slug)
   if (!slug) {
@@ -468,7 +693,15 @@ function HandoffHint({ slug, complex }: { slug: string | null; complex: boolean 
   )
 }
 
-function MobileFormatBar({ editorRef }: { editorRef: React.RefObject<EditorInstance | null> }) {
+function MobileFormatBar({
+  editorRef,
+  onRequestAi,
+  aiBusy,
+}: {
+  editorRef: React.RefObject<EditorInstance | null>
+  onRequestAi?: () => void
+  aiBusy?: boolean
+}) {
   const [open, setOpen] = useState(false)
   const run = (fn: (editor: EditorInstance) => void) => {
     const editor = editorRef.current
@@ -499,6 +732,18 @@ function MobileFormatBar({ editorRef }: { editorRef: React.RefObject<EditorInsta
           {b.icon}
         </button>
       ))}
+      {onRequestAi && (
+        <button
+          type="button"
+          onClick={onRequestAi}
+          disabled={aiBusy}
+          title="选中文字后请求局部 AI 建议"
+          className="grid h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-[var(--editor-accent)] hover:bg-[var(--editor-soft)] disabled:opacity-50"
+        >
+          <Sparkles className="h-4 w-4" />
+          {aiBusy ? '…' : 'AI建议'}
+        </button>
+      )}
       <button
         type="button"
         onClick={() => setOpen(!open)}
