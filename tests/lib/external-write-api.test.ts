@@ -22,7 +22,6 @@ vi.mock('@/lib/article-commands', () => ({
 }))
 
 import {
-  coerceLegacySnapshot,
   coerceVersionedSnapshot,
   dispatchExternalWrite,
   isExternalWriteAuthoritySwitched,
@@ -125,23 +124,6 @@ describe('legacy telemetry (client type / operation / time only)', () => {
 })
 
 describe('snapshot coercion', () => {
-  it('legacy payload is always coerced to a draft snapshot (published requested ignored)', async () => {
-    const { snapshot, autoSlug } = await coerceLegacySnapshot({
-      title: '  标题  ',
-      content: '---\nexcerpt: 摘要\n---\n\n# 正文',
-      status: 'published',
-      category: '  AI  ',
-    })
-    expect(autoSlug).toBe(true)
-    expect(snapshot.slug).toBe('')
-    expect(snapshot.title).toBe('标题')
-    expect(snapshot.content).toBe('# 正文')
-    expect(snapshot.status).toBe('draft')
-    expect(snapshot.description).toBe('摘要')
-    expect(snapshot.category).toBe('AI')
-    expect(snapshot.html).toContain('<h1>正文</h1>')
-  })
-
   it('versioned snapshot is coerced to draft and renders html from markdown when absent', async () => {
     const { snapshot, autoSlug } = await coerceVersionedSnapshot({
       slug: 'My Slug!',

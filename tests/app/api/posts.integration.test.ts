@@ -181,50 +181,42 @@ describe('app/api/posts — external write integration', { timeout: 600_000 }, (
     expect(post.published_at).not.toBeNull()
   })
 
-  it('legacy create becomes a draft (published ignored) + upgrade signal + privacy-safe telemetry', async () => {
+  it('legacy create is rejected after writer removal (upgrade signal, no write)', async () => {
     const title = '旧客户端标题'
     const content = '# 旧正文'
     const response = await POST(await postReq('POST', body({
       title, content, status: 'published', category: 'AI 工具',
     }), 'obsidian/1.0'))
     const result = await response.json() as {
-      success: boolean; status: string; legacy: boolean; upgrade: { protocol: string; required: boolean }
+      error: string; upgrade: { protocol: string; required: boolean }
     }
 
-    expect(result.success).toBe(true)
-    expect(result.status).toBe('draft')
-    expect(result.legacy).toBe(true)
+    expect(response.status).toBe(409)
+    expect(result.error).toContain('已停用')
     expect(result.upgrade.protocol).toBe('v1')
-    expect(result.upgrade.required).toBe(false)
+    expect(result.upgrade.required).toBe(true)
 
-    const post = (await query<Record<string, unknown>>(`SELECT status, title FROM posts WHERE title = '${title}'`))[0]
-    expect(post.status).toBe('draft')
-
-    // Telemetry: client type / operation / time only — no content.
-    const telemetry = (await query<Record<string, unknown>>(`SELECT value FROM site_settings WHERE key = '${LEGACY_TELEMETRY_KEY}'`))[0]?.value as string
-    expect(telemetry).toContain('"obsidian"')
-    expect(telemetry).toContain('"create"')
-    expect(telemetry).not.toContain(title)
-    expect(telemetry).not.toContain(content)
-    expect(telemetry).not.toContain('apiToken')
+    // No row lands and no legacy telemetry is recorded.
+    const posts = await query<Record<string, unknown>>(`SELECT status FROM posts WHERE title = '${title}'`)
+    expect(posts).toHaveLength(0)
+    const telemetry = (await query<Record<string, unknown>>(`SELECT value FROM site_settings WHERE key = '${LEGACY_TELEMETRY_KEY}'`))[0]?.value as string | undefined
+    expect(telemetry ?? '').not.toContain('"create"')
   })
 
-  it('authority switch rejects legacy versionless writes but keeps versioned writes working', async () => {
-    // New versioned article first (works before and after switch).
+  it('authority switch is moot after removal: legacy versionless writes rejected, versioned writes keep working', async () => {
     const slug = fresh('auth')
     const created = await (await POST(await postReq('POST', body({
       protocol: 'v1', action: 'create', creationId: fresh('auth-c'),
       snapshot: snapshot(slug, '版本化文章'),
     }), 'agent/1.0'))).json() as { articleId: number }
 
-    // Flip the external-write authority to versioned.
     await query(`INSERT OR REPLACE INTO site_settings (key, value) VALUES ('${AUTHORITY_KEY}', '${AUTHORITY_VERSIONED}')`)
 
-    // Legacy create → rejected.
+    // Legacy create → rejected (no authority gate needed to refuse it now).
     const legacyCreate = await POST(await postReq('POST', body({ title: '不支持', content: '正文' }), 'chrome/1.0'))
     expect(legacyCreate.status).toBe(409)
     const legacyErr = await legacyCreate.json() as { error: string }
-    expect(legacyErr.error).toContain('versioned')
+    expect(legacyErr.error).toContain('protocol=v1')
 
     // Legacy update → rejected.
     const legacyPatch = await PATCH(await postReq('PATCH', body({ current_slug: slug, title: '旧更新' }), 'chrome/1.0'))
@@ -241,7 +233,7 @@ describe('app/api/posts — external write integration', { timeout: 600_000 }, (
     await query(`DELETE FROM site_settings WHERE key = '${AUTHORITY_KEY}'`)
   })
 
-  it('legacy update routes through the kernel as a draft-only versioned save', async () => {
+  it('legacy update is rejected after writer removal (no versionless save)', async () => {
     const slug = fresh('lpatch')
     const created = await (await POST(await postReq('POST', body({
       protocol: 'v1', action: 'create', creationId: fresh('lpatch-c'),
@@ -251,19 +243,16 @@ describe('app/api/posts — external write integration', { timeout: 600_000 }, (
     const response = await PATCH(await postReq('PATCH', body({
       current_slug: slug, title: '旧更新标题', status: 'published',
     }), 'obsidian/1.0'))
-    const result = await response.json() as { success: boolean; status: string; version: number; legacy: boolean }
+    const result = await response.json() as { error: string; upgrade?: { required: boolean } }
 
-    expect(result.success).toBe(true)
-    expect(result.status).toBe('draft') // published requested → still draft
-    expect(result.version).toBe(2)
-    expect(result.legacy).toBe(true)
+    expect(response.status).toBe(409)
+    expect(result.error).toContain('已停用')
+    expect(result.upgrade?.required).toBe(true)
 
+    // The article was not mutated by the legacy update and no version advanced.
     const post = (await query<Record<string, unknown>>(`SELECT title, status FROM posts WHERE slug = '${slug}'`))[0]
-    expect(post.title).toBe('旧更新标题')
+    expect(post.title).toBe('草稿基底')
     expect(post.status).toBe('draft')
-    expect((await articleVersions(created.articleId)).map((r) => r.version)).toEqual([1, 2])
-
-    const telemetry = (await query<Record<string, unknown>>(`SELECT value FROM site_settings WHERE key = '${LEGACY_TELEMETRY_KEY}'`))[0]?.value as string
-    expect(telemetry).toContain('"update"')
+    expect((await articleVersions(created.articleId)).map((r) => r.version)).toEqual([1])
   })
 })
