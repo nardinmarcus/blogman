@@ -40,7 +40,6 @@ import {
   buildAutoDescription,
   extractMarkdownDescription,
   normalizePostSlug,
-  stripMarkdownFrontmatter,
 } from '@/lib/post-utils'
 import { isAuthorityEnabled } from '@/lib/rollout-controls'
 
@@ -257,63 +256,7 @@ export async function coerceVersionedSnapshot(raw: unknown): Promise<CoercedSnap
   }
 }
 
-/**
- * Coerce a legacy (unversioned) create payload into a draft-only kernel
- * snapshot. Retains the old payload semantics (frontmatter strip, markdown
- * rendering, auto-description, `未分类` default) so existing integrations keep
- * their byte-level behaviour — minus the status honouring, which is forced to
- * draft.
- */
-export async function coerceLegacySnapshot(raw: unknown): Promise<CoercedSnapshot> {
-  const p = (raw ?? {}) as Record<string, unknown>
-  const title = typeof p.title === 'string' ? p.title.trim() : ''
-  const rawContent = typeof p.content === 'string' ? p.content.trim() : ''
-  const content = stripMarkdownFrontmatter(rawContent).trim()
-  const customSlug =
-    typeof p.slug === 'string' ? normalizePostSlug(p.slug) : ''
-  const tags = Array.isArray(p.tags)
-    ? (p.tags as unknown[])
-        .filter((tag): tag is string => typeof tag === 'string')
-        .map((tag) => tag.trim())
-        .filter(Boolean)
-        .slice(0, 10)
-    : []
-  const html =
-    typeof p.html === 'string' && p.html.trim()
-      ? p.html.trim()
-      : content
-        ? await renderHtml(content)
-        : ''
-  const description =
-    typeof p.description === 'string' && p.description.trim()
-      ? p.description.trim()
-      : content
-        ? extractMarkdownDescription(rawContent) || buildAutoDescription(content)
-        : null
-  return {
-    autoSlug: !customSlug,
-    snapshot: {
-      slug: customSlug,
-      title,
-      content,
-      html,
-      description,
-      category: typeof p.category === 'string' && p.category.trim() ? p.category.trim() : '未分类',
-      tags: tags.length > 0 ? tags : null,
-      status: 'draft',
-      password: typeof p.password === 'string' && p.password.trim() ? p.password.trim() : null,
-      is_pinned: p.is_pinned === 1 ? 1 : 0,
-      is_hidden: p.is_hidden === 1 ? 1 : 0,
-      cover_image:
-        typeof p.cover_image === 'string' && p.cover_image.trim() ? p.cover_image.trim() : null,
-      deleted_at: null,
-      published_at: null,
-      updated_at: null,
-    },
-  }
-}
-
-/** Same auto-slug shape as the legacy POST /api/posts (date + nanoid suffix). */
+/** Same auto-slug shape as the versioned POST /api/posts (date + nanoid suffix). */
 export function autoSlug(): string {
   const date = new Date().toISOString().split('T')[0]
   return `${date}-${nanoid(6)}`
@@ -400,86 +343,6 @@ function parseTags(raw: unknown): string[] {
   } catch {
     return []
   }
-}
-
-/* ------------------------------------------------------------------ */
-/* Legacy draft-only adapter (still routed through the kernel)        */
-/* ------------------------------------------------------------------ */
-
-/**
- * The create outcomes a legacy draft can actually produce. A legacy (one-shot)
- * create never carries a `source`, so it can never return `invalid-source` or
- * `source-linked` — this narrow keeps the legacy route's post-condition checks
- * sound without spurious union members.
- */
-export type UnsourcedCreateResult = Exclude<
-  CreateResult,
-  { outcome: 'invalid-source' } | { outcome: 'source-linked' }
->
-
-/** Legacy create → kernel draft-only create with a server-side idempotency key. */
-export async function createLegacyDraft(
-  db: Database,
-  raw: unknown,
-  projections?: ArticleCommandProjections,
-): Promise<{ result: UnsourcedCreateResult; snapshot: ArticleCommandSnapshot; creationId: string }> {
-  const { snapshot, autoSlug: needsAutoSlug } = await coerceLegacySnapshot(raw)
-  if (needsAutoSlug) snapshot.slug = autoSlug()
-  const creationId = `legacy:${nanoid(16)}`
-  // No `source` is ever passed for a legacy one-shot draft, so the result can
-  // never be `invalid-source` or `source-linked`.
-  const result = (await create(db, { creationId, snapshot, projections })) as UnsourcedCreateResult
-  return { result, snapshot, creationId }
-}
-
-/**
- * Legacy PATCH → full-snapshot merge routed through kernel `save` with the
- * server-resolved version. Draft-only. Returns null when the article is not
- * under versioned authority (caller should reject with an upgrade signal).
- */
-export async function updateLegacyDraft(
-  db: Database,
-  currentSlug: string,
-  raw: Record<string, unknown>,
-  projections?: ArticleCommandProjections,
-): Promise<{ result: SaveResult; snapshot: ArticleCommandSnapshot } | null> {
-  const resolved = await resolveArticleBySlug(db, currentSlug)
-  if (!resolved) return null
-
-  const s = resolved.snapshot
-  const rawContent = typeof raw.content === 'string' ? raw.content.trim() : s.content
-  const nextContent =
-    typeof raw.content === 'string' && raw.content.trim()
-      ? stripMarkdownFrontmatter(rawContent).trim()
-      : s.content
-  s.slug =
-    typeof raw.new_slug === 'string' && raw.new_slug.trim()
-      ? normalizePostSlug(raw.new_slug)
-      : s.slug
-  if (typeof raw.title === 'string') s.title = raw.title.trim()
-  if (typeof raw.content === 'string') s.content = nextContent
-  if (typeof raw.html === 'string') s.html = raw.html.trim()
-  if (typeof raw.description === 'string') {
-    const d = raw.description.trim()
-    s.description = d || (nextContent ? nextContent : s.description)
-  }
-  if (typeof raw.category === 'string') s.category = raw.category.trim() || s.category
-  if (Array.isArray(raw.tags)) s.tags = raw.tags as string[]
-  if (typeof raw.cover_image === 'string') s.cover_image = raw.cover_image.trim() || null
-  if (raw.is_hidden === 0 || raw.is_hidden === 1) s.is_hidden = raw.is_hidden
-  if (typeof raw.password === 'string') {
-    s.password = raw.password.trim() ? raw.password.trim() : null
-  }
-  s.status = 'draft' // legacy 更新永不直接发布。
-
-  const result = await save(db, {
-    articleId: resolved.articleId,
-    expectedVersion: resolved.version,
-    operationId: `legacy:${nanoid(16)}`,
-    snapshot: s,
-    projections,
-  })
-  return { result, snapshot: s }
 }
 
 /* ------------------------------------------------------------------ */
