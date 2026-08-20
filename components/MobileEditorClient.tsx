@@ -24,11 +24,11 @@ import {
 import {
   suggestionActions,
   suggestionStatusLabel,
-} from '@/lib/mobile-ai-suggestion'
+} from '@/lib/mobile-ai-suggestion/ui-model'
 import type {
   MobileAiSuggestionState,
   MobileAiSuggestionRead,
-} from '@/lib/mobile-ai-suggestion'
+} from '@/lib/mobile-ai-suggestion/types'
 
 /**
  * B8-02 — mobile small-edit editor (issue #61).
