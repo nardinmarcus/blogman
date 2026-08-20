@@ -10,7 +10,7 @@
  */
 
 import type { FidelityClass } from '@/lib/article-identity'
-import type { SourceFacts } from '@/lib/source-identity'
+import type { SourceFacts, SourceLinkRole } from '@/lib/source-identity'
 
 /** Status vocabulary carried by the legacy posts projection. */
 export type ArticleCommandStatus = 'draft' | 'published'
@@ -61,8 +61,12 @@ export interface CreateArticleInput {
    * kernel also records the 源稿 identity + a PENDING association (待确认关联,
    * not auto-effective). A URL already live-linked to an article converges on
    * that existing article instead of creating a duplicate.
+   *
+   * B7-01 (issue #57): `role` defaults to `primary` (writable source). The
+   * Chrome 剪藏 entry passes `role: 'clip'` so a clipped reference page never
+   * becomes the primary source (来源网页不成为主要源稿).
    */
-  source?: { url: string }
+  source?: { url: string; role?: SourceLinkRole }
 }
 
 export interface SaveArticleInput {

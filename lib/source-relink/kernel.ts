@@ -60,6 +60,7 @@ interface LinkRow {
   source_identity_id: number
   article_id: number
   status: string
+  role: string | null
   operation_id: string
   created_at: number
   resolved_at: number | null
@@ -71,13 +72,14 @@ function mapLink(row: LinkRow): SourceLink {
     sourceIdentityId: row.source_identity_id,
     articleId: row.article_id,
     status: row.status as SourceLink['status'],
+    role: (row.role ?? 'primary') as SourceLink['role'],
     operationId: row.operation_id,
     createdAt: row.created_at,
     resolvedAt: row.resolved_at,
   }
 }
 
-const LINK_COLUMNS = `id, source_identity_id, article_id, status, operation_id, created_at, resolved_at`
+const LINK_COLUMNS = `id, source_identity_id, article_id, status, role, operation_id, created_at, resolved_at`
 
 async function findArticle(db: Database, articleId: number): Promise<ArticleRow | null> {
   return db.prepare('SELECT id, post_ref FROM articles WHERE id = ?').bind(articleId).first<ArticleRow>()

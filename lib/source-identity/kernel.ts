@@ -36,6 +36,7 @@ import type {
   SourceFacts,
   SourceIdentity,
   SourceLink,
+  SourceLinkRole,
 } from './types'
 
 function unixNow(): number {
@@ -99,6 +100,7 @@ interface LinkRow {
   source_identity_id: number
   article_id: number
   status: string
+  role: string | null
   operation_id: string
   created_at: number
   resolved_at: number | null
@@ -110,6 +112,7 @@ function mapLink(row: LinkRow): SourceLink {
     sourceIdentityId: row.source_identity_id,
     articleId: row.article_id,
     status: row.status as SourceLink['status'],
+    role: (row.role ?? 'primary') as SourceLinkRole,
     operationId: row.operation_id,
     createdAt: row.created_at,
     resolvedAt: row.resolved_at,
@@ -119,7 +122,7 @@ function mapLink(row: LinkRow): SourceLink {
 async function linkByOperation(db: Database, operationId: string): Promise<SourceLink | null> {
   const row = await db
     .prepare(
-      `SELECT id, source_identity_id, article_id, status, operation_id, created_at, resolved_at
+      `SELECT id, source_identity_id, article_id, status, role, operation_id, created_at, resolved_at
        FROM article_source_links WHERE operation_id = ?`,
     )
     .bind(operationId)
@@ -130,7 +133,7 @@ async function linkByOperation(db: Database, operationId: string): Promise<Sourc
 async function liveLinkForIdentity(db: Database, sourceIdentityId: number): Promise<SourceLink | null> {
   const row = await db
     .prepare(
-      `SELECT id, source_identity_id, article_id, status, operation_id, created_at, resolved_at
+      `SELECT id, source_identity_id, article_id, status, role, operation_id, created_at, resolved_at
        FROM article_source_links
        WHERE source_identity_id = ? AND status != 'cancelled'
        ORDER BY id ASC LIMIT 1`,
@@ -148,7 +151,7 @@ async function liveLinkForPair(
 ): Promise<SourceLink | null> {
   const row = await db
     .prepare(
-      `SELECT id, source_identity_id, article_id, status, operation_id, created_at, resolved_at
+      `SELECT id, source_identity_id, article_id, status, role, operation_id, created_at, resolved_at
        FROM article_source_links
        WHERE source_identity_id = ? AND article_id = ? AND status != 'cancelled'
        ORDER BY id ASC LIMIT 1`,
@@ -227,7 +230,7 @@ export async function linkSourceToArticle(
   db: Database,
   input: AttachSourceInput,
 ): Promise<LinkResult> {
-  const { operationId, url, articleId } = input
+  const { operationId, url, articleId, role = 'primary' } = input
   if (!operationId || !url || !articleId) {
     return { outcome: 'invalid-source', url }
   }
@@ -254,10 +257,10 @@ export async function linkSourceToArticle(
     await db
       .prepare(
         `INSERT INTO article_source_links
-           (source_identity_id, article_id, status, operation_id, created_at)
-         VALUES (?, ?, 'pending', ?, ?)`,
+           (source_identity_id, article_id, status, role, operation_id, created_at)
+         VALUES (?, ?, 'pending', ?, ?, ?)`,
       )
-      .bind(identity.id, articleId, operationId, unixNow())
+      .bind(identity.id, articleId, role, operationId, unixNow())
       .run()
   } catch {
     // Concurrent identical registration converged on a UNIQUE constraint.

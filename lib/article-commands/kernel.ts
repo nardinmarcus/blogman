@@ -252,12 +252,14 @@ async function ensureSourceFacts(
   url: string,
   articleId: number,
   creationId: string,
+  role: 'primary' | 'clip' = 'primary',
 ): Promise<SourceFacts | null> {
   if (!url) return null
   const linkResult = await linkSourceToArticle(db, {
     operationId: `source:${creationId}`,
     url,
     articleId,
+    role,
   })
   if (linkResult.outcome === 'applied' || linkResult.outcome === 'replayed') {
     return sourceFactsFor(db, url, articleId)
@@ -275,9 +277,12 @@ async function existingResult(
   operationId: string,
   sourceUrl: string | null,
   creationId: string,
+  sourceRole: 'primary' | 'clip' = 'primary',
 ): Promise<CreateResult> {
   const sourceFacts =
-    sourceUrl != null ? await ensureSourceFacts(db, sourceUrl, article.id, creationId).catch(() => null) : null
+    sourceUrl != null
+      ? await ensureSourceFacts(db, sourceUrl, article.id, creationId, sourceRole).catch(() => null)
+      : null
   return {
     outcome: 'existing' as const,
     articleId: article.id,
@@ -311,6 +316,7 @@ export async function create(
 
   // B6-01 — optional writable-primary-source URL driving the identity + pending link.
   const sourceUrl = source?.url?.trim() || null
+  const sourceRole = source?.role ?? 'primary'
 
   const operationId = createOperationId(creationId)
 
@@ -323,7 +329,7 @@ export async function create(
   // Fast idempotent return: same creation id -> same article.
   const existing = await findArticleByCreationId(db, creationId)
   if (existing) {
-    return existingResult(db, existing, operationId, sourceUrl, creationId)
+    return existingResult(db, existing, operationId, sourceUrl, creationId, sourceRole)
   }
 
   // B6-01 — repeated clip / duplicate source: the normalized URL already owns a
@@ -428,7 +434,7 @@ export async function create(
     // concurrent identical create). Resolve the real state and report it.
     const byCreation = await findArticleByCreationId(db, creationId)
     if (byCreation) {
-      return existingResult(db, byCreation, operationId, sourceUrl, creationId)
+      return existingResult(db, byCreation, operationId, sourceUrl, creationId, sourceRole)
     }
     if (await slugTaken(db, row.slug)) {
       return { outcome: 'slug-conflict', slug: row.slug }
@@ -464,7 +470,7 @@ export async function create(
   // hidden orphan: replaying the same creation id re-converges the pending link,
   // which stays visible until the author confirms or cancels it.
   if (sourceUrl) {
-    result.source = await ensureSourceFacts(db, sourceUrl, article.id, creationId)
+    result.source = await ensureSourceFacts(db, sourceUrl, article.id, creationId, sourceRole)
   }
 
   result.projectionFailures = await runProjections(input.projections, result)
