@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { Suspense, useState, type FormEvent } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import { safeRedirectTarget } from '@/lib/mobile-nav/login-restore'
 
 function AdminLoginForm() {
   const [password, setPassword] = useState('')
@@ -28,9 +29,10 @@ function AdminLoginForm() {
       const data = await res.json().catch(() => null) as { error?: string } | null
 
       if (res.ok) {
-        const redirectTo = searchParams.get('redirect_to') || '/admin'
-        // 安全检查：只允许跳转到本站路径
-        const safePath = redirectTo.startsWith('/') ? redirectTo : '/admin'
+        // B8-01 — restore the deep-link target and re-read current state; the
+        // shared guard only accepts a same-origin path and falls back to today.
+        const redirectTo = searchParams.get('redirect_to')
+        const safePath = safeRedirectTarget(redirectTo)
         router.push(safePath)
         router.refresh()
       } else {
