@@ -2,14 +2,16 @@ import { getPostBySlug } from '@/lib/db'
 import { getByPostRef, listVersions } from '@/lib/repositories/articles'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { isAdminAuthenticated, COOKIE_NAME } from '@/lib/admin-auth'
-import { cookies } from 'next/headers'
+import { cookies, headers } from 'next/headers'
 import { redirect } from 'next/navigation'
 import { NovelEditorClient } from '@/components/NovelEditorClient'
+import { MobileEditorClientEntry } from '@/components/MobileEditorClientEntry'
+import { isMobileUserAgent, wantsDesktop } from '@/lib/mobile-edit/is-mobile'
 
 export default async function EditorPage({
   searchParams,
 }: {
-  searchParams: Promise<{ edit?: string; slug?: string; new?: string }>
+  searchParams: Promise<{ edit?: string; slug?: string; new?: string; desktop?: string }>
 }) {
   // 鉴权：只有登录的管理员才能访问编辑器
   const cookieStore = await cookies()
@@ -26,6 +28,12 @@ export default async function EditorPage({
   const params = await searchParams
   const edit = params.edit ?? params.slug
   const isNew = params.new === '1'
+
+  // B8-02 — mobile small-edit surface. A mobile UA gets the lightweight
+  // editor (title/paragraph/inline marks; complex blocks read-only + desktop
+  // handoff). `?desktop=1` forces the full editor for the desktop handoff link.
+  const headerList = await headers()
+  const isMobile = isMobileUserAgent(headerList.get('user-agent')) && !wantsDesktop(params.desktop)
 
   let initialData: {
     slug: string
@@ -146,6 +154,10 @@ export default async function EditorPage({
         }
       }
     }
+  }
+
+  if (isMobile) {
+    return <MobileEditorClientEntry initialData={initialData} skipDraftRestore={isNew} />
   }
 
   return <NovelEditorClient initialData={initialData} skipDraftRestore={isNew} />
