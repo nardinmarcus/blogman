@@ -19,18 +19,50 @@
  *   - the UNIQUE (article_id, version, account_id) key is the hard idempotency
  *     enforcer — a duplicate derivation lands in the SAME row and returns the
  *     same task id.
+ *
+ * B5-02 (issue #47) — provider failure / retry / result-unknown state machine.
+ *
+ * Every provider execution (the derivation hand-off, the executor's
+ * submission, a reconcile query) records ONE immutable attempt row with a
+ * SANITIZED classification. The task row carries the retry lifecycle in
+ * additive columns (the B5-01 status CHECK keeps its four values):
+ *
+ *   - 'ok'            → remote draft accepted; `remote_draft_id` (the WeChat
+ *                       media_id) is PERMANENTLY stored and never overwritten,
+ *   - 'retryable'     → transient failure; re-armed with next_attempt_at under
+ *                       a cap + exponential backoff via `runWechatDraftExecutor`
+ *                       (retries share the task's stable id / operation id and
+ *                       are lease-guarded — duplicates converge on one winner),
+ *   - 'needs-author'  → permanent / configuration / unclassified rejection;
+ *                       author todo (needs_author=1), never auto-retried,
+ *   - 'unknown'       → response lost; the request MAY have landed. Blind
+ *                       retry is FORBIDDEN — the task freezes as an author
+ *                       todo until `reconcileWechatDraft` queries the remote
+ *                       and resolves found / not-found / still-unknown.
+ *
+ * The executor is kill-switchable (`WECHAT_DRAFT_EXECUTOR_DISABLED`) and
+ * never touches blog facts — a WeChat failure can never roll back a blog
+ * result.
  */
 
 import { createHash } from 'node:crypto'
 import type { Database } from '@/lib/repositories/schema'
 import type { ArticleIdentitySnapshot } from '@/lib/article-identity'
 import { projectWechatDraft } from './projection'
-import { sanitizeWechatProviderError } from './provider'
+import { normalizeWechatClassification, sanitizeWechatProviderError, WechatProviderError } from './provider'
 import type {
   DeriveWechatDraftInput,
   DeriveWechatDraftResult,
   ReadWechatDraftTaskResult,
+  WechatDraftAttemptClassification,
+  WechatDraftAttemptRow,
+  WechatDraftExecutorInput,
+  WechatDraftExecutorResult,
   WechatDraftProjection,
+  WechatDraftProvider,
+  WechatDraftProviderResult,
+  WechatDraftReconcileInput,
+  WechatDraftReconcileResult,
   WechatDraftSubmitPayload,
   WechatDraftTaskRow,
 } from './types'
@@ -94,6 +126,90 @@ export function buildSubmitPayload(
 }
 
 /* ------------------------------------------------------------------ */
+/* B5-02 — retry policy, lease, kill-switch, classification           */
+/* ------------------------------------------------------------------ */
+
+export const WECHAT_DRAFT_DEFAULT_MAX_ATTEMPTS = 5
+export const WECHAT_DRAFT_DEFAULT_LEASE_SECONDS = 600
+export const WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_SECONDS = 60
+export const WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_FACTOR = 2
+export const WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_MAX_SECONDS = 3600
+export const WECHAT_DRAFT_EXECUTOR_DISABLED_ENV = 'WECHAT_DRAFT_EXECUTOR_DISABLED'
+export const WECHAT_DRAFT_ERROR_LIMIT = 500
+
+/**
+ * Deterministic submission-attempt key — ONE execution, ONE immutable row.
+ * The task's stable id + running attempt number make a repeated command
+ * idempotent: re-claiming the same attempt writes the same key and can only
+ * ever produce one immutable attempt row.
+ */
+export function wechatDraftAttemptKey(taskId: string, attemptNo: number): string {
+  return `wechat-attempt:${taskId}:submit:${attemptNo}`
+}
+
+/** Deterministic reconcile-attempt key (separate namespace from submissions). */
+export function wechatDraftReconcileKey(taskId: string, seq: number): string {
+  return `wechat-attempt:${taskId}:reconcile:${seq}`
+}
+
+/**
+ * Exponential backoff for retry attempt `attemptNo` (1-based): the first
+ * retry waits `base` seconds, each subsequent retry multiplies by `factor`,
+ * capped at `maxSeconds`. Mirrors the B4-03 scheduled-publish policy so the
+ * two durable-delivery channels behave identically.
+ */
+export function wechatRetryBackoffSeconds(
+  attemptNo: number,
+  base: number = WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_SECONDS,
+  factor: number = WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_FACTOR,
+  maxSeconds: number = WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_MAX_SECONDS,
+): number {
+  if (attemptNo <= 1) return Math.min(Math.max(1, Math.round(base)), maxSeconds)
+  const growth = base * Math.pow(factor, attemptNo - 1)
+  return Math.min(Math.max(1, Math.round(growth)), maxSeconds)
+}
+
+/** Kill-switch: when set, the channel executor is OFF but tasks/attempts stay. */
+export function isWechatDraftExecutorDisabled(): boolean {
+  const value = process.env[WECHAT_DRAFT_EXECUTOR_DISABLED_ENV]
+  return value != null && value !== '' && value !== '0' && value.toLowerCase() !== 'false'
+}
+
+export type WechatExecutionVerdict =
+  | { kind: 'accepted'; remoteDraftId: string | null }
+  | { kind: 'rejected'; classification: Exclude<WechatDraftAttemptClassification, 'ok'>; error: string }
+
+/**
+ * Classify a provider execution into the retry state machine. Rules:
+ *   - accepted → 'ok'-style accepted with the remote identity (media_id),
+ *   - a rejection with an explicit classification → that classification,
+ *   - a rejection WITHOUT a classification → 'needs-author' (an untyped
+ *     rejection is author-actionable, never blindly retried),
+ *   - a thrown `WechatProviderError` → its classification,
+ *   - any other thrown error → 'retryable' (a transport-level exception is
+ *     transient by default).
+ */
+export function classifyWechatExecution(result: WechatDraftProviderResult | Error): WechatExecutionVerdict {
+  if (result instanceof Error) {
+    const classification =
+      result instanceof WechatProviderError ? normalizeWechatClassification(result.classification) : null
+    return {
+      kind: 'rejected',
+      classification: classification ?? 'retryable',
+      error: result.message,
+    }
+  }
+  if (result.accepted) {
+    return { kind: 'accepted', remoteDraftId: result.remoteDraftId ?? null }
+  }
+  return {
+    kind: 'rejected',
+    classification: normalizeWechatClassification(result.classification) ?? 'needs-author',
+    error: result.error || 'provider rejected the draft',
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* reads                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -115,7 +231,8 @@ interface VersionRow {
 const TASK_COLUMNS = `id, task_id, article_id, post_ref, version, account_id, status,
   title, html_projection, plaintext_projection, cover_image_url, digest,
   content_sha256, projection_sha256, source_url, remote_draft_id, provider_error,
-  created_at, updated_at`
+  created_at, updated_at, revision, attempt_count, classification, needs_author,
+  next_attempt_at, last_error, claimed_at, lease_token, lease_expires_at`
 
 async function findFormalPublication(db: Database, articleId: number): Promise<FormalPublicationRow | null> {
   return db
@@ -135,6 +252,13 @@ async function findVersionRow(db: Database, articleId: number, version: number):
     )
     .bind(articleId, version)
     .first<VersionRow>()
+}
+
+async function findTaskRow(db: Database, taskId: string): Promise<WechatDraftTaskRow | null> {
+  return db
+    .prepare(`SELECT ${TASK_COLUMNS} FROM wechat_draft_tasks WHERE task_id = ?`)
+    .bind(taskId)
+    .first<WechatDraftTaskRow>()
 }
 
 export async function readWechatDraftTask(
@@ -178,6 +302,17 @@ export function projectionFromRow(row: WechatDraftTaskRow): WechatDraftProjectio
     digest: row.digest ?? '',
     sourceUrl: row.source_url,
   }
+}
+
+/** Immutable execution evidence for one task (newest first). */
+export async function listWechatDraftAttempts(db: Database, taskId: string): Promise<WechatDraftAttemptRow[]> {
+  const rows = await db
+    .prepare(
+      `SELECT * FROM wechat_draft_attempts WHERE task_id = ? ORDER BY id DESC`,
+    )
+    .bind(taskId)
+    .all<WechatDraftAttemptRow>()
+  return rows.results ?? []
 }
 
 /* ------------------------------------------------------------------ */
@@ -262,14 +397,17 @@ export async function deriveWechatDraft(
   const digest = projectionDigest(projection, contentSha256)
   const taskId = wechatDraftTaskIdFor(input.articleId, input.version, accountId)
   const now = input.now ?? unixNow()
+  const maxAttempts = input.maxAttempts ?? WECHAT_DRAFT_DEFAULT_MAX_ATTEMPTS
 
   // One live target per account: a NEWER version may replace an older one, but
   // an older version can never be re-derivable as a second live draft once a
   // newer version is already live — the current live target is the newer one.
+  // B5-02: a newer task that is still failing / unknown / re-arming is just as
+  // live as a submitted one (its frozen facts are preserved and being converged).
   const newerLive = await db
     .prepare(
       `SELECT 1 FROM wechat_draft_tasks
-       WHERE article_id = ? AND account_id = ? AND version > ? AND status IN ('draft', 'submitted')
+       WHERE article_id = ? AND account_id = ? AND version > ? AND status IN ('draft', 'submitted', 'failed')
        LIMIT 1`,
     )
     .bind(input.articleId, accountId, input.version)
@@ -330,10 +468,7 @@ export async function deriveWechatDraft(
       .run()
   }
 
-  const current = await db
-    .prepare(`SELECT ${TASK_COLUMNS} FROM wechat_draft_tasks WHERE article_id = ? AND version = ? AND account_id = ?`)
-    .bind(input.articleId, input.version, accountId)
-    .first<WechatDraftTaskRow>()
+  const current = await findTaskRow(db, taskId)
   if (!current) {
     return {
       outcome: 'not-found',
@@ -345,74 +480,69 @@ export async function deriveWechatDraft(
   }
 
   // Provider invocation happens ONLY on a fresh derivation — an existing row
-  // (idempotent replay) is never re-submitted to the WeChat draft box.
+  // (idempotent replay) is never re-submitted to the WeChat draft box. The
+  // hand-off is B5-02-classified: it records the first immutable attempt row
+  // and arms the retry lifecycle (retryable → rearmed, needs-author/unknown →
+  // author todo / reconcile) exactly like the executor would.
   if (created && input.provider) {
     const payload = buildSubmitPayload(current, projection)
+    let verdict: WechatExecutionVerdict
     try {
-      const providerResult = await input.provider.createDraft(payload)
-      if (providerResult.accepted) {
-        await db
+      verdict = classifyWechatExecution(await input.provider.createDraft(payload))
+    } catch (error) {
+      verdict = classifyWechatExecution(error instanceof Error ? error : new Error(String(error)))
+    }
+
+    if (verdict.kind === 'accepted') {
+      await db.batch([
+        insertAttemptRow(
+          db,
+          taskId,
+          1,
+          'ok',
+          'submitted',
+          now,
+          now,
+          verdict.remoteDraftId,
+          null,
+        ),
+        db
           .prepare(
-            `UPDATE wechat_draft_tasks SET status = 'submitted', remote_draft_id = ?, provider_error = NULL, updated_at = ?
+            `UPDATE wechat_draft_tasks
+             SET status = 'submitted', remote_draft_id = ?, provider_error = NULL,
+                 classification = 'ok', needs_author = 0, next_attempt_at = NULL,
+                 last_error = NULL, attempt_count = attempt_count + 1, revision = revision + 1,
+                 updated_at = ?
              WHERE task_id = ?`,
           )
-          .bind(providerResult.remoteDraftId ?? null, now, taskId)
-          .run()
-        current.status = 'submitted'
-        current.remote_draft_id = providerResult.remoteDraftId ?? null
-        current.provider_error = null
-        current.updated_at = now
-        return {
-          outcome: 'submitted',
-          articleId: input.articleId,
-          version: input.version,
-          accountId,
-          taskId,
-          task: { ...current },
-          created: true,
-          projection,
-        }
-      }
-      await db
-        .prepare(
-          `UPDATE wechat_draft_tasks SET status = 'failed', provider_error = ?, updated_at = ? WHERE task_id = ?`,
-        )
-        .bind(sanitizeWechatProviderError(providerResult.error || 'provider rejected the draft'), now, taskId)
-        .run()
-      current.status = 'failed'
-      current.provider_error = providerResult.error || 'provider rejected the draft'
-      current.updated_at = now
+          .bind(verdict.remoteDraftId, now, taskId),
+      ])
+      const task = (await findTaskRow(db, taskId)) ?? { ...current }
       return {
-        outcome: 'failed',
+        outcome: 'submitted',
         articleId: input.articleId,
         version: input.version,
         accountId,
         taskId,
-        task: { ...current },
+        task,
         created: true,
         projection,
+        classification: 'ok',
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      await db
-        .prepare(
-          `UPDATE wechat_draft_tasks SET status = 'failed', provider_error = ?, updated_at = ? WHERE task_id = ?`,
-        )
-        .bind(sanitizeWechatProviderError(message), now, taskId)
-        .run()
-      current.status = 'failed'
-      current.provider_error = sanitizeWechatProviderError(message)
-      current.updated_at = now
-      return {
-        outcome: 'failed',
-        articleId: input.articleId,
-        version: input.version,
-        accountId,
-        taskId,
-        task: { ...current },
-        created: true,
-        projection,
-      }
+    }
+
+    await recordFailedHandoff(db, taskId, { verdict, now, attemptNo: 1, maxAttempts })
+    const task = (await findTaskRow(db, taskId)) ?? { ...current }
+    return {
+      outcome: verdict.classification === 'unknown' ? 'unknown' : 'failed',
+      articleId: input.articleId,
+      version: input.version,
+      accountId,
+      taskId,
+      task,
+      created: true,
+      projection,
+      classification: verdict.classification,
     }
   }
 
@@ -426,4 +556,655 @@ export async function deriveWechatDraft(
     created,
     projection,
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* B5-02 — immutable attempt helpers                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Insert one immutable attempt row in its final state. `attempt_key` is
+ * deterministic, so a repeated command (duplicate derivation, duplicate
+ * executor claim, duplicate reconcile) lands on the SAME row and the
+ * `ON CONFLICT DO NOTHING` makes the replay a no-op — one execution, one
+ * durable fact, no duplicates.
+ */
+function insertAttemptRow(
+  db: Database,
+  taskId: string,
+  attemptNo: number,
+  classification: WechatDraftAttemptClassification,
+  outcome: WechatDraftAttemptRow['outcome'],
+  startedAt: number,
+  finishedAt: number,
+  remoteDraftId: string | null,
+  error: string | null,
+  attemptKey = wechatDraftAttemptKey(taskId, attemptNo),
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO wechat_draft_attempts
+         (attempt_key, task_id, attempt_no, classification, outcome,
+          started_at, finished_at, remote_draft_id, error, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(attempt_key) DO NOTHING`,
+    )
+    .bind(
+      attemptKey,
+      taskId,
+      attemptNo,
+      classification,
+      outcome,
+      startedAt,
+      finishedAt,
+      remoteDraftId,
+      error === null ? null : sanitizeWechatProviderError(error),
+      startedAt,
+      finishedAt,
+    )
+}
+
+/** Finalize the running attempt row of THIS execution with its true verdict. */
+function finalizeRunningAttempt(
+  db: Database,
+  attemptKey: string,
+  classification: WechatDraftAttemptClassification,
+  outcome: WechatDraftAttemptRow['outcome'],
+  remoteDraftId: string | null,
+  error: string | null,
+  now: number,
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE wechat_draft_attempts
+       SET finished_at = ?, classification = ?, outcome = ?, remote_draft_id = ?,
+           error = ?, updated_at = ?
+       WHERE attempt_key = ? AND finished_at IS NULL`,
+    )
+    .bind(
+      now,
+      classification,
+      outcome,
+      remoteDraftId,
+      error === null ? null : sanitizeWechatProviderError(error),
+      now,
+      attemptKey,
+    )
+}
+
+/** Finalize (or insert-and-finalize) a failed hand-off with classification. */
+function transitionFailedTask(
+  db: Database,
+  taskId: string,
+  opts: {
+    classification: Exclude<WechatDraftAttemptClassification, 'ok'>
+    lastError: string
+    needsAuthor: boolean
+    nextAttemptAt: number | null
+    now: number
+  },
+) {
+  return db
+    .prepare(
+      `UPDATE wechat_draft_tasks
+       SET status = 'failed',
+           classification = ?,
+           needs_author = ?,
+           last_error = ?,
+           provider_error = ?,
+           next_attempt_at = ?,
+           claimed_at = NULL,
+           lease_token = NULL,
+           lease_expires_at = NULL,
+           revision = revision + 1,
+           updated_at = ?
+       WHERE task_id = ?`,
+    )
+    .bind(
+      opts.classification,
+      opts.needsAuthor ? 1 : 0,
+      sanitizeWechatProviderError(opts.lastError, WECHAT_DRAFT_ERROR_LIMIT),
+      sanitizeWechatProviderError(opts.lastError),
+      opts.nextAttemptAt,
+      opts.now,
+      taskId,
+    )
+}
+
+/**
+ * Apply a rejected verdict (retryable / needs-author / unknown) to a task and
+ * write its immutable attempt row. Used by BOTH the derivation hand-off (no
+ * running row → the attempt is inserted already-finalized) and the executor
+ * (the claim-time running row is finalized in place) so the two surfaces share
+ * one state machine.
+ * Returns the fresh task row + the classified outcome for the caller.
+ */
+async function recordFailedHandoff(
+  db: Database,
+  taskId: string,
+  opts: {
+    verdict: Extract<WechatExecutionVerdict, { kind: 'rejected' }>
+    now: number
+    attemptNo: number
+    maxAttempts: number
+    /** When set, THIS running row is finalized instead of inserting a new one. */
+    runningAttemptKey?: string
+    backoffSeconds?: number
+    backoffFactor?: number
+    backoffMaxSeconds?: number
+  },
+): Promise<{ task: WechatDraftTaskRow; outcome: 'retried' | 'failed' | 'needs-author' | 'unknown' }> {
+  const { verdict, now, attemptNo, maxAttempts } = opts
+  const backoffSeconds = opts.backoffSeconds ?? WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_SECONDS
+  const backoffFactor = opts.backoffFactor ?? WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_FACTOR
+  const backoffMax = opts.backoffMaxSeconds ?? WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_MAX_SECONDS
+
+  const attemptStmt = opts.runningAttemptKey
+    ? finalizeRunningAttempt(
+        db,
+        opts.runningAttemptKey,
+        'unknown',
+        'unknown',
+        null,
+        verdict.error,
+        now,
+      )
+    : insertAttemptRow(db, taskId, attemptNo, 'unknown', 'unknown', now, now, null, verdict.error)
+
+  if (verdict.classification === 'unknown') {
+    await db.batch([
+      attemptStmt,
+      transitionFailedTask(db, taskId, {
+        classification: 'unknown',
+        lastError: verdict.error,
+        needsAuthor: true,
+        nextAttemptAt: null,
+        now,
+      }),
+    ])
+    return { task: (await findTaskRow(db, taskId))!, outcome: 'unknown' }
+  }
+
+  if (verdict.classification === 'needs-author') {
+    await db.batch([
+      opts.runningAttemptKey
+        ? finalizeRunningAttempt(db, opts.runningAttemptKey, 'needs-author', 'failed', null, verdict.error, now)
+        : insertAttemptRow(db, taskId, attemptNo, 'needs-author', 'failed', now, now, null, verdict.error),
+      transitionFailedTask(db, taskId, {
+        classification: 'needs-author',
+        lastError: verdict.error,
+        needsAuthor: true,
+        nextAttemptAt: null,
+        now,
+      }),
+    ])
+    return { task: (await findTaskRow(db, taskId))!, outcome: 'needs-author' }
+  }
+
+  // retryable: re-arm below the cap, stop (→ author todo) at the cap.
+  if (attemptNo >= maxAttempts) {
+    await db.batch([
+      opts.runningAttemptKey
+        ? finalizeRunningAttempt(db, opts.runningAttemptKey, 'retryable', 'failed', null, verdict.error, now)
+        : insertAttemptRow(db, taskId, attemptNo, 'retryable', 'failed', now, now, null, verdict.error),
+      transitionFailedTask(db, taskId, {
+        classification: 'needs-author',
+        lastError: `retries-exhausted: ${verdict.error}`,
+        needsAuthor: true,
+        nextAttemptAt: null,
+        now,
+      }),
+    ])
+    return { task: (await findTaskRow(db, taskId))!, outcome: 'failed' }
+  }
+
+  const nextAttemptAt = now + wechatRetryBackoffSeconds(attemptNo, backoffSeconds, backoffFactor, backoffMax)
+  await db.batch([
+    opts.runningAttemptKey
+      ? finalizeRunningAttempt(db, opts.runningAttemptKey, 'retryable', 'retried', null, verdict.error, now)
+      : insertAttemptRow(db, taskId, attemptNo, 'retryable', 'retried', now, now, null, verdict.error),
+    transitionFailedTask(db, taskId, {
+      classification: 'retryable',
+      lastError: verdict.error,
+      needsAuthor: false,
+      nextAttemptAt,
+      now,
+    }),
+  ])
+  return { task: (await findTaskRow(db, taskId))!, outcome: 'retried' }
+}
+
+/* ------------------------------------------------------------------ */
+/* B5-02 — runWechatDraftExecutor (channel executor/retry loop)       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The channel executor: claims every due draft task (a fresh zero-production
+ * `draft` row, or a `failed` row re-armed 'retryable'), submits it through the
+ * injected provider under a per-claim lease, and records one immutable,
+ * classified attempt row per execution. Contracts:
+ *
+ *   - kill-switch (`WECHAT_DRAFT_EXECUTOR_DISABLED`) or no provider → returns
+ *     `disabled` WITHOUT touching any task or attempt (可关闭渠道执行器,
+ *     保留任务、尝试和远端身份),
+ *   - the D1 conditional claim (lease + next_attempt_at + needs_author guard)
+ *     makes overlapping executor runs converge on exactly ONE submission per
+ *     task — duplicates can never create a second remote draft,
+ *   - a claimed-but-crashed run is reclaimed after lease expiry; its orphaned
+ *     attempt is finalized 'abandoned' before the new attempt is recorded,
+ *   - the retry policy is cap + exponential backoff: transient failures re-arm
+ *     via next_attempt_at; exhausting the cap (or a needs-author / unknown
+ *     verdict) freezes the task as an author todo and NEVER auto-retries,
+ *   - the executor writes ONLY `wechat_draft_tasks` + `wechat_draft_attempts`
+ *     — a WeChat failure can never roll back a blog result.
+ */
+export async function runWechatDraftExecutor(
+  db: Database,
+  input: WechatDraftExecutorInput = {},
+): Promise<WechatDraftExecutorResult> {
+  const result: WechatDraftExecutorResult = {
+    disabled: false,
+    scanned: 0,
+    claimed: 0,
+    submitted: 0,
+    retried: 0,
+    failed: 0,
+    needsAuthor: 0,
+    unknown: 0,
+  }
+  if (isWechatDraftExecutorDisabled()) {
+    result.disabled = true
+    return result
+  }
+  const { provider } = input
+  if (!provider) {
+    // Zero production: no adapter bound ⇒ the executor stays inert. Tasks,
+    // attempts and remote identities are untouched (只建草稿, 不发布).
+    result.disabled = true
+    return result
+  }
+
+  const now = input.now ?? unixNow()
+  const limit = input.limit ?? 20
+  const leaseSeconds = input.leaseSeconds ?? WECHAT_DRAFT_DEFAULT_LEASE_SECONDS
+  const maxAttempts = input.maxAttempts ?? WECHAT_DRAFT_DEFAULT_MAX_ATTEMPTS
+  const backoffSeconds = input.retryBackoffSeconds ?? WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_SECONDS
+  const backoffFactor = input.retryBackoffFactor ?? WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_FACTOR
+  const backoffMax = input.retryBackoffMaxSeconds ?? WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_MAX_SECONDS
+
+  const { results: candidates } = await db
+    .prepare(
+      `SELECT ${TASK_COLUMNS} FROM wechat_draft_tasks
+       WHERE needs_author = 0
+         AND status IN ('draft', 'failed')
+         AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+         AND ((status = 'draft' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+              OR (status = 'failed' AND classification = 'retryable' AND next_attempt_at <= ?))
+       ORDER BY id ASC
+       LIMIT ?`,
+    )
+    .bind(now, now, now, limit)
+    .all<WechatDraftTaskRow>()
+
+  result.scanned = candidates?.length ?? 0
+
+  for (const row of candidates ?? []) {
+    const claimed = await claimWechatTask(db, row, { now, leaseSeconds, maxAttempts })
+    if (!claimed) continue // another runner already owns or advanced this row
+
+    result.claimed += 1
+    // A reclaimed crashed execution leaves its attempt running — finalize it
+    // accordingly (immutable row, never deleted) before the new one.
+    await abandonOrphanedWechatAttempts(db, row.task_id, now)
+
+    await db
+      .prepare(
+        `INSERT INTO wechat_draft_attempts
+           (attempt_key, task_id, attempt_no, classification, outcome,
+            started_at, created_at, updated_at)
+         VALUES (?, ?, ?, 'retryable', 'retried', ?, ?, ?)
+         ON CONFLICT(attempt_key) DO NOTHING`,
+      )
+      .bind(
+        wechatDraftAttemptKey(row.task_id, claimed.attempt_count),
+        row.task_id,
+        claimed.attempt_count,
+        now,
+        now,
+        now,
+      )
+      .run()
+
+    const outcome = await executeWechatSubmission(db, claimed, {
+      provider,
+      now,
+      maxAttempts,
+      backoffSeconds,
+      backoffFactor,
+      backoffMax,
+    })
+
+    if (outcome === 'submitted') result.submitted += 1
+    else if (outcome === 'retried') result.retried += 1
+    else if (outcome === 'failed') result.failed += 1
+    else if (outcome === 'needs-author') result.needsAuthor += 1
+    else if (outcome === 'unknown') result.unknown += 1
+  }
+
+  return result
+}
+
+/**
+ * Atomically claim a due task for THIS runner. Returns the claimed row
+ * (attempt_count already incremented, lease held) only when the runner truly
+ * owns the lease; otherwise null (a concurrent runner won or advanced it).
+ */
+async function claimWechatTask(
+  db: Database,
+  row: WechatDraftTaskRow,
+  opts: { now: number; leaseSeconds: number; maxAttempts: number },
+): Promise<WechatDraftTaskRow | null> {
+  const { now, leaseSeconds } = opts
+  const token = crypto.randomUUID()
+  await db
+    .prepare(
+      `UPDATE wechat_draft_tasks
+       SET claimed_at = ?, lease_expires_at = ?, lease_token = ?,
+           attempt_count = attempt_count + 1, revision = revision + 1, updated_at = ?
+       WHERE task_id = ?
+         AND needs_author = 0
+         AND status IN ('draft', 'failed')
+         AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+         AND ((status = 'draft' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+              OR (status = 'failed' AND classification = 'retryable' AND next_attempt_at <= ?))`,
+    )
+    .bind(now, now + leaseSeconds, token, now, row.task_id, now, now, now)
+    .run()
+  const after = await findTaskRow(db, row.task_id)
+  if (!after || after.lease_token !== token) return null // our conditional UPDATE matched nothing
+  return after
+}
+
+/** A reclaimed crashed run leaves its attempt running — finalize it abandoned. */
+async function abandonOrphanedWechatAttempts(db: Database, taskId: string, now: number): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE wechat_draft_attempts
+       SET finished_at = ?, outcome = 'abandoned', error = ?, updated_at = ?, classification = 'retryable'
+       WHERE task_id = ? AND finished_at IS NULL`,
+    )
+    .bind(now, 'abandoned: lease expired before the run completed (crash?)', now, taskId)
+    .run()
+}
+
+/**
+ * Submit one claimed task through the provider and converge the task row +
+ * immutable attempt fact in ONE batch. Returns the classified outcome.
+ */
+async function executeWechatSubmission(
+  db: Database,
+  row: WechatDraftTaskRow,
+  opts: {
+    provider: WechatDraftProvider
+    now: number
+    maxAttempts: number
+    backoffSeconds: number
+    backoffFactor: number
+    backoffMax: number
+  },
+): Promise<'submitted' | 'retried' | 'failed' | 'needs-author' | 'unknown'> {
+  const { provider, now, maxAttempts, backoffSeconds, backoffFactor, backoffMax } = opts
+  const taskId = row.task_id
+  const attemptNo = row.attempt_count
+  const projection = projectionFromRow(row)
+  const payload = buildSubmitPayload(row, projection)
+
+  let verdict: WechatExecutionVerdict
+  try {
+    verdict = classifyWechatExecution(await provider.createDraft(payload))
+  } catch (error) {
+    verdict = classifyWechatExecution(error instanceof Error ? error : new Error(String(error)))
+  }
+
+  if (verdict.kind === 'accepted') {
+    await db.batch([
+      finalizeRunningAttempt(
+        db,
+        wechatDraftAttemptKey(taskId, attemptNo),
+        'ok',
+        'submitted',
+        verdict.remoteDraftId,
+        null,
+        now,
+      ),
+      db
+        .prepare(
+          `UPDATE wechat_draft_tasks
+           SET status = 'submitted',
+               remote_draft_id = COALESCE(remote_draft_id, ?),
+               provider_error = NULL,
+               classification = 'ok',
+               needs_author = 0,
+               next_attempt_at = NULL,
+               last_error = NULL,
+               claimed_at = NULL,
+               lease_token = NULL,
+               lease_expires_at = NULL,
+               revision = revision + 1,
+               updated_at = ?
+           WHERE task_id = ?`,
+        )
+        .bind(verdict.remoteDraftId, now, taskId),
+    ])
+    return 'submitted'
+  }
+
+  const { outcome } = await recordFailedHandoff(db, taskId, {
+    verdict,
+    now,
+    attemptNo,
+    maxAttempts,
+    runningAttemptKey: wechatDraftAttemptKey(taskId, attemptNo),
+    backoffSeconds,
+    backoffFactor,
+    backoffMaxSeconds: backoffMax,
+  })
+  return outcome
+}
+
+/* ------------------------------------------------------------------ */
+/* B5-02 — reconcileWechatDraft (query first, then act)               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Resolve a result-unknown task by QUERYING the remote BEFORE any further
+ * submission — a possibly-non-idempotent call is never blindly retried
+ * (非幂等不确定结果停止自动重试). Outcomes:
+ *
+ *   - found:true   → the earlier submission DID land; the task is recorded
+ *                    'submitted' and the remote identity (media_id) is saved —
+ *                    an existing media_id is NEVER overwritten (不丢失覆盖),
+ *   - found:false  → the draft was provably NEVER created; the task is
+ *                    re-armed as a fresh 'draft' so the executor may safely
+ *                    re-submit exactly once under the retry policy,
+ *   - unknown:true / thrown query → the query itself lost its response; the
+ *                    task STAYS frozen as an author todo (no blind conclusion).
+ *
+ * Reconcile is idempotent: once the task leaves the unknown state, a repeated
+ * reconcile is a `replayed` no-op that writes nothing; concurrent reconciles
+ * share one deterministic attempt key (`ON CONFLICT DO NOTHING`).
+ */
+export async function reconcileWechatDraft(
+  db: Database,
+  input: WechatDraftReconcileInput,
+): Promise<WechatDraftReconcileResult> {
+  const { taskId, now = unixNow() } = input
+  if (!taskId || taskId.trim() === '') return { outcome: 'invalid', reason: 'taskId is required' }
+
+  const task = await findTaskRow(db, taskId)
+  if (!task) return { outcome: 'not-found', taskId }
+
+  // Already delivered — a late result of a previously accepted call (or a
+  // reconcile that already resolved): nothing to do, nothing overwritten.
+  if (task.status === 'submitted') {
+    return { outcome: 'replayed', taskId, task: { ...task } }
+  }
+  // Only result-unknown tasks are reconcilable; anything else is a replay.
+  if (task.status !== 'failed' || task.classification !== 'unknown' || task.needs_author !== 1) {
+    return { outcome: 'not-unknown', taskId, task: { ...task } }
+  }
+
+  const provider = input.provider
+  if (!provider) {
+    return { outcome: 'no-provider', taskId, task: { ...task } }
+  }
+
+  // Deterministic reconcile sequence id: the max existing attempt_no + 1.
+  const { results: countRows } = await db
+    .prepare(`SELECT COALESCE(MAX(attempt_no), 0) AS n FROM wechat_draft_attempts WHERE task_id = ?`)
+    .bind(taskId)
+    .all<{ n: number }>()
+  const seq = (countRows?.[0]?.n ?? 0) + 1
+  const attemptKey = wechatDraftReconcileKey(taskId, seq)
+
+  await db
+    .prepare(
+      `INSERT INTO wechat_draft_attempts
+         (attempt_key, task_id, attempt_no, classification, outcome,
+          started_at, created_at, updated_at)
+       VALUES (?, ?, ?, 'unknown', 'unknown', ?, ?, ?)
+       ON CONFLICT(attempt_key) DO NOTHING`,
+    )
+    .bind(attemptKey, taskId, seq, now, now, now)
+    .run()
+
+  let query
+  try {
+    query = await provider.queryDraft({
+      taskId: task.task_id,
+      articleId: task.article_id,
+      version: task.version,
+      accountId: task.account_id,
+      sourceUrl: task.source_url,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    await db.batch([
+      finalizeReconcileAttempt(db, attemptKey, 'unknown', 'unknown', null, message, now),
+      transitionFailedTask(db, taskId, {
+        classification: 'unknown',
+        lastError: `reconcile-query-lost: ${message}`,
+        needsAuthor: true,
+        nextAttemptAt: null,
+        now,
+      }),
+    ])
+    return { outcome: 'unknown-still', taskId, reason: message, task: (await findTaskRow(db, taskId))! }
+  }
+
+  if (query.unknown) {
+    const message = query.error ?? 'reconcile query result unknown'
+    await db.batch([
+      finalizeReconcileAttempt(db, attemptKey, 'unknown', 'unknown', null, message, now),
+      transitionFailedTask(db, taskId, {
+        classification: 'unknown',
+        lastError: `reconcile-query-lost: ${message}`,
+        needsAuthor: true,
+        nextAttemptAt: null,
+        now,
+      }),
+    ])
+    return { outcome: 'unknown-still', taskId, reason: message, task: (await findTaskRow(db, taskId))! }
+  }
+
+  if (query.found) {
+    const remoteId = query.remoteDraftId ?? null
+    await db.batch([
+      finalizeReconcileAttempt(db, attemptKey, 'ok', 'reconciled', remoteId, null, now),
+      db
+        .prepare(
+          `UPDATE wechat_draft_tasks
+           SET status = 'submitted',
+               remote_draft_id = COALESCE(remote_draft_id, ?),
+               provider_error = NULL,
+               classification = 'ok',
+               needs_author = 0,
+               next_attempt_at = NULL,
+               last_error = NULL,
+               claimed_at = NULL,
+               lease_token = NULL,
+               lease_expires_at = NULL,
+               revision = revision + 1,
+               updated_at = ?
+           WHERE task_id = ? AND status = 'failed'`,
+        )
+        .bind(remoteId, now, taskId),
+    ])
+    const taskAfter = (await findTaskRow(db, taskId))!
+    return {
+      outcome: 'reconciled',
+      found: true,
+      taskId,
+      remoteDraftId: remoteId ?? taskAfter.remote_draft_id,
+      task: taskAfter,
+    }
+  }
+
+  // Found:false — provably never created. Re-arm as a fresh zero-production
+  // draft so the executor can re-submit once under the retry policy. No
+  // second task row is ever created (the UNIQUE key already prevents it).
+  await db.batch([
+    finalizeReconcileAttempt(db, attemptKey, 'retryable', 'reconciled', null, 'confirmed-not-created', now),
+    db
+      .prepare(
+        `UPDATE wechat_draft_tasks
+         SET status = 'draft',
+             classification = NULL,
+             needs_author = 0,
+             next_attempt_at = NULL,
+             last_error = NULL,
+             provider_error = NULL,
+             claimed_at = NULL,
+             lease_token = NULL,
+             lease_expires_at = NULL,
+             revision = revision + 1,
+             updated_at = ?
+         WHERE task_id = ? AND status = 'failed'`,
+      )
+      .bind(now, taskId),
+  ])
+  return {
+    outcome: 'reconciled',
+    found: false,
+    taskId,
+    remoteDraftId: null,
+    task: (await findTaskRow(db, taskId))!,
+  }
+}
+
+function finalizeReconcileAttempt(
+  db: Database,
+  attemptKey: string,
+  classification: WechatDraftAttemptClassification,
+  outcome: WechatDraftAttemptRow['outcome'],
+  remoteDraftId: string | null,
+  error: string | null,
+  now: number,
+) {
+  return db
+    .prepare(
+      `UPDATE wechat_draft_attempts
+       SET finished_at = ?, classification = ?, outcome = ?, remote_draft_id = ?,
+           error = ?, updated_at = ?
+       WHERE attempt_key = ?`,
+    )
+    .bind(
+      now,
+      classification,
+      outcome,
+      remoteDraftId,
+      error === null ? null : sanitizeWechatProviderError(error),
+      now,
+      attemptKey,
+    )
 }
