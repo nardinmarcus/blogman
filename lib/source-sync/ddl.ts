@@ -28,6 +28,7 @@
  */
 
 import type { Database } from '@/lib/repositories/schema'
+import { ensureSourceIdentityTables } from '@/lib/source-identity'
 
 export const SOURCE_SYNC_DDL_STATEMENTS: string[] = [
   `CREATE TABLE IF NOT EXISTS media_assets (
@@ -83,8 +84,16 @@ export const SOURCE_SYNC_DDL_STATEMENTS: string[] = [
      ON source_sync_baselines(article_id)`,
 ]
 
-/** Idempotently create the source-sync tables if absent. Never drops/alters. */
+/**
+ * Idempotently create the source-sync tables if absent, AFTER the B6-01
+ * source-identity tables they reference (先 identity 后 source-sync). Every
+ * object is `CREATE ... IF NOT EXISTS`, so applying this DDL next to
+ * `apply-article-identity-ddl` / `apply-source-identity-ddl` on the same DB is
+ * a repeat-safe no-op and never drops or alters an existing object.
+ */
 export async function ensureSourceSyncTables(db: Database): Promise<void> {
+  // B6-02 facts reference source identities — guarantee the B6-01 surface first.
+  await ensureSourceIdentityTables(db)
   for (const statement of SOURCE_SYNC_DDL_STATEMENTS) {
     await db.prepare(statement).run()
   }
