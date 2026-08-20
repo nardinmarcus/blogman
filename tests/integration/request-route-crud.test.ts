@@ -26,7 +26,12 @@ vi.mock('@/lib/cloudflare', () => ({
   getAppCloudflareContext: mocks.getAppCloudflareContext,
 }))
 
-import { DELETE as deleteToken, GET as getTokens, POST as createToken } from '@/app/api/admin/tokens/route'
+import {
+  DELETE as deleteToken,
+  GET as getTokens,
+  POST as createToken,
+} from '@/app/api/admin/tokens/route'
+import { POST as articleCommands } from '@/app/api/article-commands/route'
 import {
   DELETE as deleteTextProfile,
   GET as getTextProfiles,
@@ -100,6 +105,14 @@ function applyLedger(state: string) {
 function applyContentEnvelopeDdl(state: string) {
   const result = spawnSync(process.execPath, [
     join(repoRoot, 'scripts', 'apply-content-envelope-ddl.mjs'),
+    '--local', '--persist-to', state, '--database', 'DB', '--config', join(repoRoot, 'wrangler.toml'),
+  ], { cwd: repoRoot, encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(result.stderr || result.stdout)
+}
+
+function applyArticleIdentityDdl(state: string) {
+  const result = spawnSync(process.execPath, [
+    join(repoRoot, 'scripts', 'apply-article-identity-ddl.mjs'),
     '--local', '--persist-to', state, '--database', 'DB', '--config', join(repoRoot, 'wrangler.toml'),
   ], { cwd: repoRoot, encoding: 'utf8' })
   if (result.status !== 0) throw new Error(result.stderr || result.stdout)
@@ -246,6 +259,9 @@ describe('real route CRUD on a ledger-migrated D1', () => {
     // B2-01b: envelope columns arrive via the independent DDL channel (not a
     // ledger migration), so the write path needs them applied before POST.
     applyContentEnvelopeDdl(state)
+    // L1 (#66): the legacy direct-`posts` writer is removed, so versioned
+    // writes need the B2-02 identity tables present.
+    applyArticleIdentityDdl(state)
     const db = createDatabase(state)
     const env = { DB: db }
     mocks.getAppCloudflareEnv.mockResolvedValue(env)
@@ -253,10 +269,16 @@ describe('real route CRUD on a ledger-migrated D1', () => {
     const schemaBefore = query(state, "SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name")
     const postContext = { params: Promise.resolve({ slug: 'route-post' }) }
 
-    expect((await createPost(request('/api/posts', 'POST', {
-      slug: 'route-post', title: 'Original title', content: 'original searchable body',
-      html: '<p>original searchable body</p>', status: 'draft',
-    }))).status).toBe(200)
+    // Versioned create (protocol v1) → article identity + version 1 + posts projection.
+    const created = await (await createPost(request('/api/posts', 'POST', {
+      protocol: 'v1', action: 'create', creationId: 'route-crud-create',
+      snapshot: {
+        slug: 'route-post', title: 'Original title', content: 'original searchable body',
+        html: '<p>original searchable body</p>', status: 'draft',
+      },
+    }))).json() as { outcome: string; articleId: number; version: number; postRef: number }
+    expect(created.outcome).toBe('created')
+    expect(created.version).toBe(1)
     expect(query(state, "SELECT rowid, title, content FROM posts_fts WHERE posts_fts MATCH 'original'"))
       .toEqual([{ rowid: 1, title: 'Original title', content: 'original searchable body' }])
     // B2-01b: dual-write produced a canonical envelope + both hashes on the same row.
@@ -265,16 +287,41 @@ describe('real route CRUD on a ledger-migrated D1', () => {
     expect(String(envelopeRow[0].content_envelope)).toContain('blogman-content-envelope/v1')
     expect(envelopeRow[0].content_snapshot_sha256).toMatch(/^[0-9a-f]{64}$/)
     expect(envelopeRow[0].source_sync_sha256).toMatch(/^[0-9a-f]{64}$/)
+
+    // Negative probe: an unversioned direct create is rejected (writer removed).
+    const legacyCreate = await createPost(request('/api/posts', 'POST', {
+      slug: 'legacy-rejected', title: 'Legacy', content: 'should not land', status: 'draft',
+    }))
+    expect(legacyCreate.status).toBe(409)
+    expect(query(state, "SELECT slug FROM posts WHERE slug = 'legacy-rejected'")).toEqual([])
+
     expect((await getAdminPost(request('/api/admin/posts/route-post', 'GET'), postContext)).status).toBe(200)
-    expect((await updateAdminPost(request('/api/admin/posts/route-post', 'PUT', {
-      title: 'Updated title', content: 'updated searchable body', html: '<p>updated searchable body</p>', status: 'published',
-    }), postContext)).status).toBe(200)
+    // Versioned content save through the command kernel.
+    const saved = await (await articleCommands(request('/api/article-commands', 'POST', {
+      action: 'save', articleId: created.articleId, expectedVersion: 1, operationId: 'route-crud-save-1',
+      snapshot: {
+        slug: 'route-post', title: 'Updated title', content: 'updated searchable body',
+        html: '<p>updated searchable body</p>', status: 'draft',
+      },
+    }))).json() as { outcome: string; version: number }
+    expect(saved.outcome).toBe('applied')
+    expect(saved.version).toBe(2)
     expect(query(state, "SELECT title, content, status FROM posts WHERE slug = 'route-post'"))
-      .toEqual([{ title: 'Updated title', content: 'updated searchable body', status: 'published' }])
+      .toEqual([{ title: 'Updated title', content: 'updated searchable body', status: 'draft' }])
     expect(query(state, "SELECT rowid, title, content FROM posts_fts WHERE posts_fts MATCH 'updated'"))
       .toEqual([{ rowid: 1, title: 'Updated title', content: 'updated searchable body' }])
     expect(query(state, "SELECT rowid FROM posts_fts WHERE posts_fts MATCH 'original'"))
       .toEqual([])
+
+    // Versioned publish (publishTemp) – status transition only, no content write.
+    const published = await (await articleCommands(request('/api/article-commands', 'POST', {
+      action: 'publishTemp', articleId: created.articleId, expectedVersion: 2, currentStatus: 'draft',
+      operationId: 'route-crud-pub-1', status: 'published',
+    }))).json() as { outcome: string; version: number }
+    expect(published.outcome).toBe('applied')
+    expect(query(state, "SELECT status FROM posts WHERE slug = 'route-post'"))
+      .toEqual([{ status: 'published' }])
+
     expect((await deleteAdminPost(request('/api/admin/posts/route-post', 'DELETE'), postContext)).status).toBe(200)
     expect(query(state, "SELECT status FROM posts WHERE slug = 'route-post'")).toEqual([])
     expect(query(state, "SELECT rowid FROM posts_fts WHERE posts_fts MATCH 'updated'"))

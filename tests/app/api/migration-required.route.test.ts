@@ -177,7 +177,7 @@ describe('migration-required route responses', () => {
 
   it('returns a fixed 503 from the real article POST when the posts table is missing', async () => {
     const db = missingSchemaDb(
-      'D1_ERROR: no such table: posts; token=nm_post_secret; content=private article body',
+      'D1_ERROR: no such table: articles; token=nm_post_secret; content=private article body',
     )
     mocks.getAppCloudflareContext.mockResolvedValue({ env: { DB: db }, ctx: {} })
     const request = new NextRequest('http://test.local/api/posts', {
@@ -186,11 +186,14 @@ describe('migration-required route responses', () => {
         Authorization: 'Bearer nm_post_secret',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ title: 'Private title', content: 'private article body' }),
+      body: JSON.stringify({
+        protocol: 'v1', action: 'create', creationId: 'nm-post-secret-create',
+        snapshot: { slug: 'private-post', title: 'Private title', content: 'private article body' },
+      }),
     })
 
     await expectMigrationRequired(await createPost(request), [
-      'posts',
+      'articles',
       'nm_post_secret',
       'private article body',
     ])
@@ -207,7 +210,10 @@ describe('migration-required route responses', () => {
         Authorization: 'Bearer nm_patch_secret',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ current_slug: 'private-post', content: 'private patch body' }),
+      body: JSON.stringify({
+        protocol: 'v1', action: 'save', articleId: 1, expectedVersion: 1, operationId: 'nm-patch-secret-op',
+        snapshot: { slug: 'private-post', title: 'Private title', content: 'private patch body' },
+      }),
     })
 
     await expectMigrationRequired(await patchPost(request), [
