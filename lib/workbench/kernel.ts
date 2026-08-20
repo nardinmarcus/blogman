@@ -8,7 +8,8 @@
  * without affecting any source task (drafts, schedules, publish facts).
  *
  * Grouping (责任方 → 组):
- *   - author · drafts         `posts.status='draft'` (not deleted)
+ *   - author · drafts         canonical draft articles (latest version snapshot
+ *                              fields.status='draft', not deleted)
  *   - author · schedules      `publish_schedules.status='pending'` (future intents)
  *   - system · in-progress    `publish_schedules.status='claimed'` (leased/processing)
  *   - author · todos          `publish_schedules.status IN ('stale','paused')`
@@ -66,7 +67,16 @@ export async function setWorkbenchEnabled(
 /* authoritative fact reads                                            */
 /* ------------------------------------------------------------------ */
 
+interface ArticleVersionFacts {
+  article_id: number
+  post_ref: number
+  version: number
+  snapshot_json: string
+  created_at: number
+}
+
 interface DraftRow {
+  /** Canonical article id (deep-link + entry identity). */
   id: number
   slug: string
   title: string
@@ -85,19 +95,83 @@ interface ScheduleRow {
   updated_at: number
 }
 
-/** Author drafts — authoritative `posts` rows that are drafts and not deleted. */
-async function listAuthorDrafts(db: Database): Promise<DraftRow[]> {
+interface SnapshotFields {
+  status?: string | null
+  slug?: string | null
+  title?: string | null
+  deleted_at?: number | null
+  updated_at?: number | null
+}
+
+function parseSnapshotFields(snapshotJson: string): SnapshotFields {
+  try {
+    const parsed = JSON.parse(snapshotJson) as { fields?: SnapshotFields }
+    return parsed.fields ?? {}
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * Canonical article facts — latest `article_versions` snapshot per article
+ * (`articles` identity + current version fields). Never reads legacy `posts`.
+ */
+async function listLatestArticleFacts(db: Database): Promise<ArticleVersionFacts[]> {
   const { results } = await db
     .prepare(
-      `SELECT id, slug, title, updated_at FROM posts
-       WHERE status = 'draft' AND deleted_at IS NULL
-       ORDER BY updated_at DESC LIMIT 100`,
+      `SELECT a.id AS article_id, a.post_ref, v.version, v.snapshot_json, v.created_at
+       FROM articles a
+       JOIN article_versions v ON v.article_id = a.id
+       WHERE v.version = (
+         SELECT MAX(v2.version) FROM article_versions v2 WHERE v2.article_id = a.id
+       )
+       ORDER BY v.created_at DESC LIMIT 100`,
     )
-    .all<DraftRow>()
+    .all<ArticleVersionFacts>()
   return results ?? []
 }
 
-/** Map schedule rows to titled entries by joining the article title. */
+/** Canonical author drafts — draft articles whose current version is a draft and not deleted. */
+async function listAuthorDrafts(db: Database): Promise<DraftRow[]> {
+  const facts = await listLatestArticleFacts(db)
+  // A formal article (published OR unpublished) is never a `draft` — the
+  // canonical "is a draft" fact is `NOT formally published`, not fields.status.
+  const formalIds = new Set<number>()
+  const { results: formalResults } = await db
+    .prepare('SELECT article_id FROM formal_publications')
+    .all<{ article_id: number }>()
+  for (const row of formalResults ?? []) formalIds.add(row.article_id)
+
+  const drafts: DraftRow[] = []
+  for (const fact of facts) {
+    if (formalIds.has(fact.article_id)) continue
+    const fields = parseSnapshotFields(fact.snapshot_json)
+    if (fields.deleted_at != null) continue
+    if (fields.status !== 'draft') continue
+    drafts.push({
+      id: fact.article_id,
+      slug: fields.slug ?? '',
+      title: fields.title ?? '',
+      updated_at: fields.updated_at ?? fact.created_at,
+    })
+  }
+  return drafts
+}
+
+/** Canonical article titles keyed by article id (from latest version snapshot). */
+async function canonicalArticleTitles(db: Database): Promise<Map<number, string>> {
+  const facts = await listLatestArticleFacts(db)
+  const map = new Map<number, string>()
+  for (const fact of facts) {
+    map.set(
+      fact.article_id,
+      parseSnapshotFields(fact.snapshot_json).title ?? '',
+    )
+  }
+  return map
+}
+
+/** Map schedule rows to titled entries; titles come from canonical article facts. */
 async function listSchedulesByStatus(
   db: Database,
   statuses: string[],
@@ -107,17 +181,18 @@ async function listSchedulesByStatus(
   const { results } = await db
     .prepare(
       `SELECT s.schedule_id, s.article_id, s.version, s.scheduled_at, s.status,
-              s.stale_reason, s.last_error, s.created_at, s.updated_at,
-              COALESCE(p.title, '') AS title
+              s.stale_reason, s.last_error, s.created_at, s.updated_at
        FROM publish_schedules s
-       LEFT JOIN articles a ON a.id = s.article_id
-       LEFT JOIN posts p ON p.id = a.post_ref
        WHERE s.status IN (${placeholders})
        ORDER BY s.updated_at DESC LIMIT 100`,
     )
     .bind(...statuses)
-    .all<ScheduleRow & { title: string }>()
-  return (results ?? []).map((r) => ({ row: r, title: r.title }))
+    .all<ScheduleRow>()
+  const titles = await canonicalArticleTitles(db)
+  return (results ?? []).map((r) => ({
+    row: r,
+    title: titles.get(r.article_id) ?? '',
+  }))
 }
 
 /* ------------------------------------------------------------------ */
