@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * B5-01 — idempotent WeChat draft-task DDL (issue #46).
+ * B5-01/B5-02 — idempotent WeChat draft-task DDL (issues #46 + #47).
  *
  * Delivers the ADDITIVE `wechat_draft_tasks` table through the same
  * independent DDL channel as every earlier batch (application/apply-*.mjs) so
@@ -8,9 +8,17 @@
  * untouched. Safe to run repeatedly: `CREATE ... IF NOT EXISTS`; missing
  * objects are created exactly once, then reported. Never drops/alters.
  *
- * B5-01 is zero-production: the script is the deployment channel only and is
- * NOT run in this batch. Tests apply the same DDL idempotently through the
- * module's exported `ensureWechatDraftTables`.
+ * B5-02 (issue #47) adds the immutable `wechat_draft_attempts` execution table
+ * and nine additive columns on `wechat_draft_tasks` (revision, attempt_count,
+ * classification, needs_author, next_attempt_at, last_error, claimed_at,
+ * lease_token, lease_expires_at) that carry the provider failure / retry /
+ * result-unknown state machine. A B5-01-era install is upgraded through
+ * PRAGMA-driven conditional `ALTER TABLE ADD COLUMN`; the B5-01 status CHECK
+ * intentionally keeps its four values (a CHECK cannot be altered in place).
+ *
+ * B5-01/B5-02 are zero-production: the script is the deployment channel only
+ * and is NOT run in this batch. Tests apply the same DDL idempotently through
+ * the module's exported `ensureWechatDraftTables`.
  *
  * Usage:
  *   node scripts/apply-wechat-draft-ddl.mjs --local
@@ -47,6 +55,15 @@ const STATEMENTS = [
       provider_error TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 0,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      classification TEXT,
+      needs_author INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER,
+      last_error TEXT,
+      claimed_at INTEGER,
+      lease_token TEXT,
+      lease_expires_at INTEGER,
       UNIQUE (article_id, version, account_id)
     ) STRICT`,
   },
@@ -55,6 +72,45 @@ const STATEMENTS = [
     sql: `CREATE INDEX IF NOT EXISTS idx_wechat_draft_tasks_article
       ON wechat_draft_tasks(article_id, account_id, version)`,
   },
+  {
+    name: 'wechat_draft_attempts',
+    sql: `CREATE TABLE IF NOT EXISTS wechat_draft_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      attempt_key TEXT UNIQUE NOT NULL CHECK(length(attempt_key) > 0),
+      task_id TEXT NOT NULL CHECK(length(task_id) > 0),
+      attempt_no INTEGER NOT NULL CHECK(attempt_no > 0),
+      classification TEXT NOT NULL CHECK(
+        classification IN ('ok', 'retryable', 'needs-author', 'unknown')
+      ),
+      outcome TEXT NOT NULL CHECK(
+        outcome IN ('submitted', 'retried', 'failed', 'unknown', 'reconciled', 'abandoned', 'cancelled')
+      ),
+      started_at INTEGER NOT NULL CHECK(started_at > 0),
+      finished_at INTEGER,
+      remote_draft_id TEXT,
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    ) STRICT`,
+  },
+  {
+    name: 'idx_wechat_draft_attempts_task',
+    sql: `CREATE INDEX IF NOT EXISTS idx_wechat_draft_attempts_task
+      ON wechat_draft_attempts(task_id, id)`,
+  },
+]
+
+/** Additive B5-02 columns for a B5-01-era wechat_draft_tasks (PRAGMA-guarded). */
+const TASK_COLUMNS = [
+  ['revision', 'INTEGER NOT NULL DEFAULT 0'],
+  ['attempt_count', 'INTEGER NOT NULL DEFAULT 0'],
+  ['classification', 'TEXT'],
+  ['needs_author', 'INTEGER NOT NULL DEFAULT 0'],
+  ['next_attempt_at', 'INTEGER'],
+  ['last_error', 'TEXT'],
+  ['claimed_at', 'INTEGER'],
+  ['lease_token', 'TEXT'],
+  ['lease_expires_at', 'INTEGER'],
 ]
 
 function usage() {
@@ -131,7 +187,46 @@ async function main() {
     console.log(`created: ${statement.name}`)
   }
 
-  console.log(`done: ${created.length} object(s) created`)
+  // Additive column upgrade for a B5-01-era wechat_draft_tasks (PRAGMA-driven,
+  // ALTER only columns that are missing — idempotent across repeated runs; the
+  // B5-01 status CHECK keeps its four values and is never altered).
+  const addedColumns = []
+  const columnsProbe = spawnSync(
+    join(repoRoot, 'node_modules', '.bin', 'wrangler'),
+    [...wranglerArgs(args), '--command', 'PRAGMA table_info(wechat_draft_tasks)'],
+    { cwd: repoRoot, encoding: 'utf8' },
+  )
+  if (columnsProbe.status === 0) {
+    let rows = []
+    try {
+      rows = JSON.parse(columnsProbe.stdout)[0]?.results ?? []
+    } catch {
+      rows = []
+    }
+    const existingColumns = new Set(rows.map((row) => row.name))
+    for (const [name, type] of TASK_COLUMNS) {
+      if (existingColumns.has(name)) {
+        console.log(`column exists: wechat_draft_tasks.${name}`)
+        continue
+      }
+      const result = spawnSync(
+        join(repoRoot, 'node_modules', '.bin', 'wrangler'),
+        [...wranglerArgs(args), '--command', `ALTER TABLE wechat_draft_tasks ADD COLUMN ${name} ${type}`],
+        { cwd: repoRoot, encoding: 'utf8' },
+      )
+      if (result.status !== 0) {
+        console.error(`failed: wechat_draft_tasks.${name}`)
+        console.error(result.stderr || result.stdout)
+        process.exit(1)
+      }
+      addedColumns.push(name)
+      console.log(`column added: wechat_draft_tasks.${name}`)
+    }
+  } else {
+    console.warn('WARN: could not read wechat_draft_tasks columns; assuming full B5-02 shape already present')
+  }
+
+  console.log(`done: ${created.length} object(s) created, ${addedColumns.length} column(s) added`)
 }
 
 main().catch((error) => {
