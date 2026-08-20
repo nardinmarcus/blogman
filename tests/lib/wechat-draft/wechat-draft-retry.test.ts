@@ -281,7 +281,7 @@ describe('lib/wechat-draft — 失败/重试/结果未知状态机 (B5-02)', { t
     expect(late.scanned).toBe(0)
     const replay = await reconcileWechatDraft(db, { taskId, provider, now: T0 + 60 })
     expect(replay.outcome).toBe('replayed')
-    expect(replay.outcome === 'replayed' && replay.task.remote_draft_id).toBe('media_7')
+    expect(replay.outcome === 'replayed' && replay.task?.remote_draft_id).toBe('media_7')
 
     // media_id 不丢失覆盖 after replays and late runs.
     const finalTask = await readWechatDraftTaskTask(db, taskId)
@@ -487,7 +487,7 @@ describe('lib/wechat-draft — 失败/重试/结果未知状态机 (B5-02)', { t
     // that never touches the permanent media_id (superseded is not unknown).
     const replay = await reconcileWechatDraft(db, { taskId: v1.taskId, provider, now: T0 })
     expect(['replayed', 'not-unknown']).toContain(replay.outcome)
-    expect(replay.outcome !== 'invalid' && replay.outcome !== 'not-found' && replay.task.remote_draft_id).toBe('media_v1')
+    expect(replay.outcome !== 'invalid' && replay.outcome !== 'not-found' && replay.task?.remote_draft_id).toBe('media_v1')
   })
 
   it('脱敏分类: 尝试与任务事实只存脱敏错误，绝不留存密钥', async () => {

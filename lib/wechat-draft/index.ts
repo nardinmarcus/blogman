@@ -18,25 +18,46 @@
  * submission — a non-idempotent uncertain call is never blindly retried; the
  * unknown freezes as an author todo until the query settles it. `listWechatDraftAttempts`
  * exposes the immutable execution evidence per task (脱敏分类).
+ *
+ * B5-03 (issue #48) — 交付前设置调整、替代草稿与历史.
+ *
+ * `saveWechatDraftSettings` / `readWechatDraftSettings` manage the per-(article,
+ * account) deliverable settings (设置修订与正文版本/代次分离); pre-delivery
+ * re-derivation applies them to the SAME task (沿用代次) and a delivered row is
+ * never modified. `replaceWechatDraft` is the ONLY explicit post-delivery path
+ * to a new draft: next generation, prior-generation reference, history and
+ * media_id preserved, delivered to the draft box only (待微信确认, never 已发布).
+ * `listWechatDeliveries` / `readWechatDeliveryView` expose the human-readable
+ * 组 → 代次 → 行 history, and `WECHAT_DRAFT_ADMIN_WRITES_DISABLED` closes the
+ * settings/replace WRITE commands while every read stays available.
  */
 
 export {
   buildSubmitPayload,
   classifyWechatExecution,
   deriveWechatDraft,
+  isWechatDraftAdminWritesDisabled,
   isWechatDraftExecutorDisabled,
+  listWechatDeliveries,
   listWechatDraftAttempts,
   listWechatDraftTasks,
   normalizeWechatAccountId,
   projectionDigest,
   projectionFromRow,
+  projectionFromView,
+  readWechatDeliveryView,
+  readWechatDraftSettings,
   readWechatDraftTask,
   reconcileWechatDraft,
+  replaceWechatDraft,
   runWechatDraftExecutor,
+  saveWechatDraftSettings,
+  wechatDeliveryView,
   wechatDraftAttemptKey,
   wechatDraftReconcileKey,
   wechatDraftTaskIdFor,
   wechatRetryBackoffSeconds,
+  WECHAT_DRAFT_ADMIN_WRITES_DISABLED_ENV,
   WECHAT_DRAFT_DEFAULT_LEASE_SECONDS,
   WECHAT_DRAFT_DEFAULT_MAX_ATTEMPTS,
   WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_FACTOR,
@@ -60,15 +81,23 @@ export {
   WECHAT_PROVIDER_ERROR_LIMIT,
 } from './provider'
 export { projectWechatDraft, wrapWechatExportFragment } from './projection'
+export type { WechatProjectionSettings } from './projection'
 export type {
   DeriveWechatDraftInput,
   DeriveWechatDraftResult,
   ReadWechatDraftTaskResult,
+  ReplaceWechatDraftInput,
+  ReplaceWechatDraftResult,
+  SaveWechatDraftSettingsInput,
+  SaveWechatDraftSettingsResult,
+  WechatDeliveryHistoryRow,
+  WechatDeliveryView,
   WechatDraftAttemptClassification,
   WechatDraftAttemptOutcome,
   WechatDraftAttemptRow,
   WechatDraftExecutorInput,
   WechatDraftExecutorResult,
+  WechatDraftGenerationRow,
   WechatDraftProjection,
   WechatDraftProvider,
   WechatDraftProviderResult,
@@ -76,8 +105,11 @@ export type {
   WechatDraftQueryResult,
   WechatDraftReconcileInput,
   WechatDraftReconcileResult,
+  WechatDraftReplacementRow,
+  WechatDraftSettingsRow,
   WechatDraftSubmitPayload,
   WechatDraftTaskRow,
   WechatDraftTaskStatus,
+  WechatLifecycleRowView,
 } from './types'
 export type { WechatExecutionVerdict } from './kernel'
