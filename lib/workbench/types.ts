@@ -3,7 +3,7 @@
  *
  * The today workbench is a REBUILDABLE READ ONLY projection grouped by
  * responsible party (author vs system). It is derived fresh from the
- * authoritative fact tables (`posts`, `articles`, `publish_schedules`,
+ * authoritative fact tables (`articles`, `article_versions`, `publish_schedules`,
  * `formal_publications`) on every read — it never writes to a source table
  * and is never a recovery source. Rebuilding just re-queries; disabling the
  * projection (a single control flag) stops presenting it without touching any
@@ -11,7 +11,8 @@
  *
  * Grouping contract (责任方 → 组):
  *
- *   - author · drafts        — draft articles (`posts.status = 'draft'`)
+ *   - author · drafts        — draft articles (latest canonical version snapshot
+ *                              fields.status = 'draft')
  *   - author · schedules     — future version-bound publish intents the author
  *                              armed (`publish_schedules.status = 'pending'`)
  *   - system · in-progress   — intents the system is currently processing

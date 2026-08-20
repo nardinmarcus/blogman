@@ -56,6 +56,26 @@ beforeEach(async () => {
 })
 
 describe('workbench grouping (责任方)', () => {
+  it('reads canonical article facts, not the legacy posts projection (reader source assertion)', async () => {
+    // B2-07/B3 — the workbench draft reader must source from canonical
+    // articles + article_versions, never from the legacy `posts` compat rows.
+    // A draft is created through the versioned write kernel (identity + version)
+    // and then its legacy posts projection row is erased: the workbench must
+    // still list it from the canonical layer.
+    const draft = await createDraftArticle('wb-src-1', '来源断言草稿')
+    await createDatabase()
+      .prepare('DELETE FROM posts WHERE id = ?')
+      .bind(draft.postRef)
+      .run()
+
+    const wb = await buildTodayWorkbench(createDatabase(), { now: T0 })
+    const drafts = wb.groups.find((g) => g.group === 'drafts')
+    expect(drafts).toBeDefined()
+    expect(drafts!.items.map((i) => i.title)).toContain('来源断言草稿')
+    expect(drafts!.items[0].sourceType).toBe('article')
+    expect(drafts!.items[0].sourceId).toBe(String(draft.articleId))
+  })
+
   it('groups drafts, schedules, system in-progress and author todos by responsible party', async () => {
     const draft = await createDraftArticle('wb-draft-1', '草稿A')
     await createFormalArticle('wb-formal-1', '正式B')
