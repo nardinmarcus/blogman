@@ -12,6 +12,9 @@
 
 import type { Database } from '@/lib/repositories/schema'
 import { resolveArticleAddress } from '@/lib/slug-address'
+import { getPostBySlug, getPosts, getPostsCount, getPostsByCategory, getPostsCountByCategory } from '@/lib/repositories/posts'
+import { searchPosts } from '@/lib/repositories/search'
+import type { PostWithTags } from '@/lib/repositories/types'
 import type {
   PublicArticle,
   PublicArticleResolution,
@@ -89,6 +92,58 @@ function deriveStatus(lifecycle: PublicLifecycle, deletedAt: number): 'draft' | 
   if (deletedAt !== 0) return 'deleted'
   if (lifecycle === 'published') return 'published'
   return 'draft'
+}
+
+/* ------------------------------------------------------------------ */
+/* soft-switch fallback (canonical tables absent)                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * True when the canonical fact tables exist on this DB. Canonical read paths
+ * SOFT-SWITCH: when the migration/DDL is not yet applied they fall back to the
+ * legacy `posts` projection so a read never 500s just because a new table is
+ * missing (a requirement for pre-migration / rolling environments).
+ */
+async function canonicalAvailable(db: Database): Promise<boolean> {
+  try {
+    const row = await db
+      .prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='formal_publications'`,
+      )
+      .first<{ name: string }>()
+    return Boolean(row)
+  } catch {
+    return false
+  }
+}
+
+/** Rebuild a PublicArticle read model from a legacy posts projection row. */
+function fromLegacyPost(post: PostWithTags, articleId = 0): PublicArticle {
+  const published = post.status === 'published' && post.deleted_at == null
+  return {
+    id: post.id,
+    articleId: articleId || post.id,
+    slug: post.slug,
+    version: 1,
+    lifecycle: published ? 'published' : 'unpublished',
+    live: published,
+    status: post.deleted_at ? 'deleted' : published ? 'published' : 'draft',
+    deleted_at: post.deleted_at,
+    title: post.title,
+    content: post.content,
+    html: post.html,
+    description: post.description,
+    category: post.category,
+    tags: post.tags,
+    password: post.password,
+    is_pinned: post.is_pinned,
+    is_hidden: post.is_hidden,
+    cover_image: post.cover_image,
+    first_published_at: post.published_at,
+    published_at: post.published_at,
+    updated_at: post.updated_at,
+    view_count: post.view_count,
+  }
 }
 
 /**
@@ -202,6 +257,14 @@ export async function resolvePublicArticle(
   db: Database,
   slug: string,
 ): Promise<PublicArticleResolution> {
+  // Soft-switch: without the canonical fact tables, fall back to the legacy
+  // posts read so a detail page never 500s on a pre-migration DB.
+  if (!(await canonicalAvailable(db))) {
+    const post = await getPostBySlug(db, slug).catch(() => null)
+    if (!post) return { article: null, redirectSlug: null }
+    return { article: fromLegacyPost(post), redirectSlug: null }
+  }
+
   const address = await resolveArticleAddress(db, slug).catch(() => null)
 
   let articleId: number | null = address?.articleId ?? null
@@ -273,6 +336,16 @@ export async function listPublicArticles(
     category,
   } = options
 
+  // Soft-switch: fall back to the legacy posts list before canonical DDL.
+  if (!(await canonicalAvailable(db))) {
+    if (category && category.trim()) {
+      const rows = await getPostsByCategory(db, category, limit, offset)
+      return rows.map((row) => fromLegacyPost(row))
+    }
+    const rows = await getPosts(db, limit, offset, false, !includePassword, !includeHidden)
+    return rows.map((row) => fromLegacyPost(row))
+  }
+
   const conditions: string[] = [
     `f.lifecycle = 'published'`,
     `COALESCE(${F.deleted_at}, 0) = 0`,
@@ -320,6 +393,12 @@ export async function countPublicArticles(
   options: Omit<PublicListOptions, 'limit' | 'offset'> = {},
 ): Promise<number> {
   const { includePassword = false, includeHidden = false, category } = options
+
+  // Soft-switch fallback.
+  if (!(await canonicalAvailable(db))) {
+    if (category && category.trim()) return getPostsCountByCategory(db, category)
+    return getPostsCount(db, false, !includePassword, !includeHidden)
+  }
   const conditions: string[] = [
     `f.lifecycle = 'published'`,
     `COALESCE(${F.deleted_at}, 0) = 0`,
@@ -356,6 +435,12 @@ export async function searchPublicArticles(
   limit = 50,
 ): Promise<PublicArticle[]> {
   if (!query.trim()) return []
+
+  // Soft-switch: fall back to the legacy FTS-backed search projection.
+  if (!(await canonicalAvailable(db))) {
+    const rows = await searchPosts(db, query, limit)
+    return rows.map((row) => fromLegacyPost(row))
+  }
 
   let candidates: { post_ref: number }[] = []
   try {

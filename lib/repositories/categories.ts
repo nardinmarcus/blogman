@@ -11,6 +11,32 @@ export async function getCategories(db: Database): Promise<CategoryRow[]> {
 }
 
 export async function getPublicCategories(db: Database): Promise<CategoryRow[]> {
+  // Soft-switch: before the canonical DDL is applied, fall back to the legacy
+  // posts projection so the site header / sitemap never 500 on a pre-migration DB.
+  try {
+    const has = await db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='formal_publications'`)
+      .first<{ name: string }>()
+    if (!has) {
+      const { results } = await db
+        .prepare(
+          `SELECT categories.name, categories.slug, COUNT(posts.id) AS post_count
+           FROM categories
+           JOIN posts ON posts.category = categories.name
+           WHERE posts.status = 'published'
+             AND posts.password IS NULL
+             AND posts.is_hidden = 0
+             AND posts.deleted_at IS NULL
+           GROUP BY categories.name, categories.slug
+           ORDER BY categories.name`,
+        )
+        .all<CategoryRow>()
+      return results ?? []
+    }
+  } catch {
+    // fall through to the canonical query only if it exists
+  }
+
   // L2: the public category reader list derives from the CANONICAL formal
   // surface (lifecycle published + frozen-snapshot password/hidden/deleted),
   // grouped by the version snapshot's category — not the posts projection.
