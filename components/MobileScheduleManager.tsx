@@ -124,6 +124,14 @@ export function MobileScheduleManager({
       setFeedback({ type: 'error', message: blockReason })
       return
     }
+    // B8-05 (#64): 卡片不直接执行 —— 立即发布必须先在完整发布确认页确认。
+    // A card never force-fires a scheduled intent; it routes to the full-page
+    // confirm so the PUBLISH goes through the SHARED #33/#34 kernel with a
+    // single exact event + receipt, never a raw schedule-control force-fire.
+    if (action === 'publish_now') {
+      router.push(`/admin/publish/${view.articleId}`)
+      return
+    }
     const rescheduleChecked =
       action === 'reschedule'
         ? parseScheduleDatetime(String(extra.newScheduledAt ?? ''))
@@ -160,9 +168,8 @@ export function MobileScheduleManager({
       const okMessage =
         action === 'reschedule' ? '已改期'
           : action === 'cancel' ? '已取消排期'
-            : action === 'publish_now' ? '已立即发布'
-              : action === 'reconfirm' ? '已重新确认'
-                : '已暂停'
+            : action === 'reconfirm' ? '已重新确认'
+              : '已暂停'
       setFeedback({
         type: outcome === 'conflict' || outcome === 'invalid' ? 'error' : 'success',
         message: outcome === 'conflict' || outcome === 'invalid' ? (data.result?.reason ?? '操作被拒绝') : okMessage,
