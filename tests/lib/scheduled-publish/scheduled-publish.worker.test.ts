@@ -70,4 +70,49 @@ describe('runScheduledPublishScan (the Cron wake contract)', () => {
     const ev = await query<{ c: number }>(`SELECT COUNT(*) AS c FROM publish_events WHERE article_id = ${articleId}`)
     expect(ev[0].c).toBe(1)
   })
+
+  it('a disabled executor skips without touching tasks or attempts, and converges after re-enable', async () => {
+    const { articleId } = await createDraftArticle(freshSlug('sched-disabled'))
+    await schedulePublish(createDatabase(), {
+      scheduleId: 's-disabled',
+      articleId,
+      version: 1,
+      scheduledAt: T0 + 5,
+      actor: 'author',
+      now: T0,
+    })
+
+    const wait = { now: T0 + 10 }
+    const disabled = await runScheduledPublishScan(
+      { DB: createDatabase(), SCHEDULED_PUBLISH_DISABLED: '1', NEXT_PUBLIC_SITE_URL: 'https://blog.example.test' },
+      wait,
+    )
+    expect(disabled.skipped).toBe(true)
+    expect(disabled.reason).toContain('disabled')
+
+    // Task fact retained untouched — no attempt was ever opened.
+    const row = (
+      await query<{ status: string; attempt_count: number }>(
+        `SELECT status, attempt_count FROM publish_schedules WHERE schedule_id = 's-disabled'`,
+      )
+    )[0]
+    expect(row.status).toBe('pending')
+    expect(row.attempt_count).toBe(0)
+    const attemptCount = await query<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM publish_attempts WHERE schedule_id = 's-disabled'`,
+    )
+    expect(attemptCount[0].c).toBe(0)
+    const events = await query<{ c: number }>(`SELECT COUNT(*) AS c FROM publish_events WHERE article_id = ${articleId}`)
+    expect(events[0].c).toBe(0)
+
+    // Re-enabled: the same wake converges to exactly one event.
+    const enabled = await runScheduledPublishScan(
+      { DB: createDatabase(), NEXT_PUBLIC_SITE_URL: 'https://blog.example.test' },
+      wait,
+    )
+    expect(enabled.skipped).toBe(false)
+    expect(enabled.result).toMatchObject({ scanned: 1, claimed: 1, fired: 1 })
+    const after = await query<{ c: number }>(`SELECT COUNT(*) AS c FROM publish_events WHERE article_id = ${articleId}`)
+    expect(after[0].c).toBe(1)
+  })
 })

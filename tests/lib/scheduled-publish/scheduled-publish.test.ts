@@ -302,7 +302,7 @@ describe('cancelSchedule (issue #41 seam)', () => {
 describe('scanDueSchedules (per-minute compensation)', () => {
   it('returns all zeros when nothing is due', async () => {
     const res = await scanDueSchedules(createDatabase(), { now: T0 })
-    expect(res).toEqual({ scanned: 0, claimed: 0, fired: 0, stale: 0, retried: 0 })
+    expect(res).toEqual({ scanned: 0, claimed: 0, fired: 0, stale: 0, retried: 0, failed: 0 })
   })
 
   it('fires a due schedule through the real publish kernel exactly once', async () => {

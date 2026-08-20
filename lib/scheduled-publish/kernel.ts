@@ -26,6 +26,18 @@
  *
  * Queue / Cron are NEVER a fact source here: they only wake the D1 scan; the
  * claim, idempotency, retry and terminal states are all D1 conditional updates.
+ *
+ * B4-03 (issue #42) adds the durable execution facts: every due-schedule
+ * execution records an IMMUTABLE attempt row (idempotent key, start/finish,
+ * classified outcome, sanitized error) in `publish_attempts` — the core facts
+ * (schedule / events) stay separate from attempts. Transient failures retry
+ * under a policy (attempt cap + exponential backoff via `next_attempt_at`),
+ * business mismatches stay stale, and retries never duplicate a publish event
+ * (the confirm kernel's deterministic intent id is the single-event guard).
+ * The lease is ownership-checked with a per-claim `lease_token` so concurrent
+ * multi-instance grabs converge on exactly ONE winner (B4-01's time-equality
+ * check could not distinguish two same-instant claims), it is extendable by
+ * heartbeat, reclaimed on expiry, and every transition bumps `revision`.
  */
 
 import type { Database } from '@/lib/repositories/schema'
@@ -35,8 +47,11 @@ import {
   preparePublish,
 } from '@/lib/first-publish'
 import type {
+  AttemptOutcome,
   CancelScheduleInput,
   CancelScheduleResult,
+  HeartbeatInput,
+  HeartbeatResult,
   ScanInput,
   ScanResult,
   ScheduledScanOutcome,
@@ -47,6 +62,16 @@ import type {
 
 export const SCHEDULED_PUBLISH_DEFAULT_TIMEZONE = 'Asia/Shanghai' as const
 export const SCHEDULED_PUBLISH_DEFAULT_LEASE_SECONDS = 600
+/** Retry cap — a schedule stops retrying once this many executions have run. */
+export const SCHEDULED_PUBLISH_DEFAULT_MAX_ATTEMPTS = 5
+/** Base backoff (seconds); attempt n waits base * factor^(n-1), capped. */
+export const SCHEDULED_PUBLISH_DEFAULT_RETRY_BACKOFF_SECONDS = 60
+export const SCHEDULED_PUBLISH_DEFAULT_RETRY_BACKOFF_FACTOR = 2
+export const SCHEDULED_PUBLISH_DEFAULT_RETRY_BACKOFF_MAX_SECONDS = 3600
+/** Sanitized error length caps (logs must never leak secrets or huge blobs). */
+export const SCHEDULED_PUBLISH_SCHEDULE_ERROR_LIMIT = 300
+export const SCHEDULED_PUBLISH_ATTEMPT_ERROR_LIMIT = 500
+export const SCHEDULED_PUBLISH_STALE_REASON_LIMIT = 200
 export const SCHEDULED_PUBLISH_ACTOR = 'scheduled-cron' as const
 
 function unixNow(): number {
@@ -61,6 +86,62 @@ export function scheduledIntentId(scheduleId: string): string {
 /** Deterministic prepare id for the fire-time prepare of this schedule. */
 export function scheduledPrepareId(scheduleId: string): string {
   return `sched-prepare:${scheduleId}`
+}
+
+/** Deterministic attempt idempotency key — one execution, one immutable row. */
+export function scheduledAttemptKey(scheduleId: string, attemptNo: number): string {
+  return `sched-attempt:${scheduleId}:${attemptNo}`
+}
+
+/* ------------------------------------------------------------------ */
+/* retry policy: cap + exponential backoff                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Exponential backoff for retry attempt `attemptNo` (1-based): the first
+ * retry waits `base` seconds, each subsequent retry multiplies by `factor`,
+ * capped at `maxSeconds`. Never below one second (a rearmed schedule is
+ * never due again in the same second it failed).
+ */
+export function retryBackoffSeconds(
+  attemptNo: number,
+  base: number = SCHEDULED_PUBLISH_DEFAULT_RETRY_BACKOFF_SECONDS,
+  factor: number = SCHEDULED_PUBLISH_DEFAULT_RETRY_BACKOFF_FACTOR,
+  maxSeconds: number = SCHEDULED_PUBLISH_DEFAULT_RETRY_BACKOFF_MAX_SECONDS,
+): number {
+  if (attemptNo <= 1) return Math.min(Math.max(1, Math.round(base)), maxSeconds)
+  const growth = base * Math.pow(factor, attemptNo - 1)
+  return Math.min(Math.max(1, Math.round(growth)), maxSeconds)
+}
+
+/* ------------------------------------------------------------------ */
+/* error sanitization — attempt/error facts never carry secrets       */
+/* ------------------------------------------------------------------ */
+
+const SECRET_PATTERNS: ReadonlyArray<[RegExp, string]> = [
+  // Authorization header / Bearer tokens
+  [/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]'],
+  // key=value / key: value secret assignments
+  [
+    /(\b(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|authorization|auth)\b\s*[:=]\s*)([^\s,;&]+)/gi,
+    '$1[REDACTED]',
+  ],
+  // URL embedded credentials (scheme://user:pass@)
+  [/(https?:\/\/)[^/\s:@]+:[^@\s/]+@/gi, '$1[REDACTED]@'],
+]
+
+/**
+ * Sanitize an error/outcome detail before it becomes a durable fact: redact
+ * common secret shapes, collapse whitespace and cap the length. Attempt rows
+ * and the schedule `last_error` only ever store sanitized text.
+ */
+export function sanitizeError(message: string, maxLength: number = SCHEDULED_PUBLISH_ATTEMPT_ERROR_LIMIT): string {
+  let out = String(message ?? '')
+  for (const [pattern, replacement] of SECRET_PATTERNS) {
+    out = out.replace(pattern, replacement)
+  }
+  out = out.replace(/\s+/g, ' ').trim()
+  return out.slice(0, maxLength)
 }
 
 function isValidIanaTimezone(timezone: string): boolean {
@@ -94,7 +175,8 @@ interface VersionFacts {
 }
 
 const SCHEDULE_COLUMNS = `id, schedule_id, article_id, version, scheduled_at, timezone, status,
-  attempt_count, last_error, claimed_at, lease_expires_at, stale_reason, fired_event_id, created_at, updated_at`
+  attempt_count, last_error, claimed_at, lease_expires_at, lease_token, revision, next_attempt_at,
+  stale_reason, fired_event_id, created_at, updated_at`
 
 async function findSchedule(db: Database, scheduleId: string): Promise<ScheduleRow | null> {
   return db
@@ -236,14 +318,24 @@ export async function cancelSchedule(db: Database, input: CancelScheduleInput): 
   if (existing.status === 'fired' || existing.status === 'stale') {
     return { outcome: 'conflict', scheduleId, reason: `schedule is ${existing.status} and cannot be cancelled` }
   }
-  // pending / claimed → terminal cancel; a claimed row is released for good.
-  await db
-    .prepare(
-      `UPDATE publish_schedules SET status = 'cancelled', claimed_at = NULL, lease_expires_at = NULL, updated_at = ?
-       WHERE schedule_id = ? AND status IN ('pending', 'claimed')`,
-    )
-    .bind(now, scheduleId)
-    .run()
+  // pending / claimed → terminal cancel; a claimed row is released for good and
+  // its still-running attempt (if any) is finalized as `cancelled` in the SAME
+  // batch — the schedule and its attempt facts stay consistent atomically.
+  await db.batch([
+    finalizeAttemptStatement(
+      db,
+      scheduledAttemptKey(scheduleId, existing.attempt_count),
+      'cancelled',
+      'cancelled by author before completion',
+      now,
+    ),
+    db
+      .prepare(
+        `UPDATE publish_schedules SET status = 'cancelled', claimed_at = NULL, lease_expires_at = NULL, lease_token = NULL, updated_at = ?
+         WHERE schedule_id = ? AND status IN ('pending', 'claimed')`,
+      )
+      .bind(now, scheduleId),
+  ])
   return { outcome: 'cancelled', scheduleId, cancelledAt: now }
 }
 
@@ -264,88 +356,271 @@ export async function scanDueSchedules(db: Database, input: ScanInput = {}): Pro
   const limit = input.limit ?? 20
   const leaseSeconds = input.leaseSeconds ?? SCHEDULED_PUBLISH_DEFAULT_LEASE_SECONDS
   const siteUrl = input.siteUrl
+  const maxAttempts = input.maxAttempts ?? SCHEDULED_PUBLISH_DEFAULT_MAX_ATTEMPTS
+  const backoffSeconds = input.retryBackoffSeconds ?? SCHEDULED_PUBLISH_DEFAULT_RETRY_BACKOFF_SECONDS
+  const backoffFactor = input.retryBackoffFactor ?? SCHEDULED_PUBLISH_DEFAULT_RETRY_BACKOFF_FACTOR
+  const backoffMax = input.retryBackoffMaxSeconds ?? SCHEDULED_PUBLISH_DEFAULT_RETRY_BACKOFF_MAX_SECONDS
 
   const { results: candidates } = await db
     .prepare(
       `SELECT ${SCHEDULE_COLUMNS} FROM publish_schedules
        WHERE scheduled_at <= ?
-         AND (status = 'pending' OR (status = 'claimed' AND lease_expires_at <= ?))
+         AND ((status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+              OR (status = 'claimed' AND lease_expires_at <= ?))
        ORDER BY scheduled_at ASC, id ASC
        LIMIT ?`,
     )
-    .bind(now, now, limit)
+    .bind(now, now, now, limit)
     .all<ScheduleRow>()
 
-  const result: ScanResult = { scanned: 0, claimed: 0, fired: 0, stale: 0, retried: 0 }
+  const result: ScanResult = { scanned: 0, claimed: 0, fired: 0, stale: 0, retried: 0, failed: 0 }
   for (const row of candidates ?? []) {
     result.scanned += 1
 
-    // Atomic conditional claim — one winner per row across overlapping ticks.
-    // This repo's DB surface deliberately does NOT expose `changes` (see
-    // cloudflare-env.d.ts), so the winner is resolved by re-reading the row:
-    // the conditional UPDATE is atomic — a concurrent runner's WHERE clause
-    // stops matching the instant the winner claims — so only the runner that
-    // owns `claimed_at`/`lease_expires_at` proceeds.
-    await db
-      .prepare(
-        `UPDATE publish_schedules
-         SET status = 'claimed', claimed_at = ?, lease_expires_at = ?, updated_at = ?
-         WHERE schedule_id = ?
-           AND scheduled_at <= ?
-           AND (status = 'pending' OR (status = 'claimed' AND lease_expires_at <= ?))`,
-      )
-      .bind(now, now + leaseSeconds, now, row.schedule_id, now, now)
-      .run()
-    const after = await findSchedule(db, row.schedule_id)
-    if (!after || after.status !== 'claimed' || after.lease_expires_at !== now + leaseSeconds) {
-      continue // another runner already owns or advanced this row
-    }
+    // Atomic conditional claim under a lease. Ownership is resolved by a
+    // per-claim `lease_token` (this repo's DB surface deliberately does not
+    // expose `changes`): a concurrent runner's conditional UPDATE stops
+    // matching the instant the winner claims, and only the runner whose token
+    // lands in the row proceeds — even when two scans use the same `now` and
+    // `leaseSeconds`, at most one winner emerges.
+    const claimed = await claimSchedule(db, row, { now, leaseSeconds })
+    if (!claimed) continue // another runner already owns or advanced this row
 
     result.claimed += 1
-    const outcome = await processSchedule(db, row, { now, siteUrl })
+    // A reclaimed crashed execution leaves its attempt `running` — finalize it
+    // as `abandoned` (immutable, never deleted) before opening a new one.
+    await abandonOrphanedAttempts(db, row.schedule_id, now)
+    // Every Cron-triggered execution records exactly one immutable attempt row.
+    await insertAttempt(db, row.schedule_id, claimed.attempt_count, now)
+
+    const outcome = await processSchedule(db, claimed, {
+      now,
+      siteUrl,
+      maxAttempts,
+      backoffSeconds,
+      backoffFactor,
+      backoffMax,
+    })
     if (outcome.outcome === 'fired') result.fired += 1
     else if (outcome.outcome === 'stale') result.stale += 1
+    else if (outcome.outcome === 'failed') result.failed += 1
     else result.retried += 1
   }
 
   return result
 }
 
+/**
+ * Atomically claim a due schedule for THIS runner. Returns the claimed row
+ * (attempt_count already incremented) only when the runner truly owns the
+ * lease token; otherwise null (a concurrent runner won or advanced the row).
+ */
+async function claimSchedule(
+  db: Database,
+  row: ScheduleRow,
+  opts: { now: number; leaseSeconds: number },
+): Promise<ScheduleRow | null> {
+  const { now, leaseSeconds } = opts
+  const token = crypto.randomUUID()
+  await db
+    .prepare(
+      `UPDATE publish_schedules
+       SET status = 'claimed', claimed_at = ?, lease_expires_at = ?, lease_token = ?,
+           attempt_count = attempt_count + 1, revision = revision + 1, updated_at = ?
+       WHERE schedule_id = ?
+         AND scheduled_at <= ?
+         AND ((status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+              OR (status = 'claimed' AND lease_expires_at <= ?))`,
+    )
+    .bind(now, now + leaseSeconds, token, now, row.schedule_id, now, now, now)
+    .run()
+  const after = await findSchedule(db, row.schedule_id)
+  if (!after || after.status !== 'claimed' || after.lease_token !== token) {
+    return null // our conditional UPDATE matched nothing — another runner owns it
+  }
+  return after
+}
+
+/* ------------------------------------------------------------------ */
+/* immutable attempt lifecycle                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One immutable row per execution: written `running` at claim time (started_at
+ * = the claim instant), finalized exactly once with `finished_at` + outcome + a
+ * SANITIZED error. The `finished_at IS NULL` guard makes the running→terminal
+ * transition single-shot — a terminal row can never be touched again, so later
+ * scans can only ever append new rows.
+ */
+async function insertAttempt(db: Database, scheduleId: string, attemptNo: number, now: number): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO publish_attempts
+         (attempt_key, schedule_id, attempt_no, started_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(scheduledAttemptKey(scheduleId, attemptNo), scheduleId, attemptNo, now, now, now)
+    .run()
+}
+
+/** Finalize a still-running attempt (no-op once terminal — immutability guard). */
+function finalizeAttemptStatement(
+  db: Database,
+  attemptKey: string,
+  outcome: AttemptOutcome,
+  error: string | null,
+  now: number,
+) {
+  return db
+    .prepare(
+      `UPDATE publish_attempts
+       SET finished_at = ?, outcome = ?, error = ?, updated_at = ?
+       WHERE attempt_key = ? AND finished_at IS NULL`,
+    )
+    .bind(now, outcome, error === null ? null : sanitizeError(error), now, attemptKey)
+}
+
+/** A reclaimed crashed run leaves its attempt `running` — finalize it abandoned. */
+async function abandonOrphanedAttempts(db: Database, scheduleId: string, now: number): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE publish_attempts
+       SET finished_at = ?, outcome = 'abandoned', error = ?, updated_at = ?
+       WHERE schedule_id = ? AND finished_at IS NULL`,
+    )
+    .bind(now, 'abandoned: lease expired before the run completed (crash?)', now, scheduleId)
+    .run()
+}
+
+/* ------------------------------------------------------------------ */
+/* terminal transitions — attempt finalize + schedule update, atomic  */
+/* ------------------------------------------------------------------ */
+
+async function fireSchedule(db: Database, row: ScheduleRow, eventId: string, now: number): Promise<void> {
+  await db.batch([
+    finalizeAttemptStatement(db, scheduledAttemptKey(row.schedule_id, row.attempt_count), 'fired', null, now),
+    db
+      .prepare(
+        `UPDATE publish_schedules
+         SET status = 'fired', fired_event_id = ?, claimed_at = NULL, lease_expires_at = NULL, lease_token = NULL, updated_at = ?
+         WHERE schedule_id = ? AND status = 'claimed'`,
+      )
+      .bind(eventId, now, row.schedule_id),
+  ])
+}
+
+async function markStale(db: Database, row: ScheduleRow, now: number, reason: string): Promise<void> {
+  await db.batch([
+    finalizeAttemptStatement(db, scheduledAttemptKey(row.schedule_id, row.attempt_count), 'stale', reason, now),
+    db
+      .prepare(
+        `UPDATE publish_schedules
+         SET status = 'stale', stale_reason = ?, claimed_at = NULL, lease_expires_at = NULL, lease_token = NULL, updated_at = ?
+         WHERE schedule_id = ? AND status = 'claimed'`,
+      )
+      .bind(reason.slice(0, SCHEDULED_PUBLISH_STALE_REASON_LIMIT), now, row.schedule_id),
+  ])
+}
+
+/** Transient failure below the retry cap — re-arm with a backoff window. */
+async function rearmSchedule(
+  db: Database,
+  row: ScheduleRow,
+  now: number,
+  message: string,
+  nextAttemptAt: number,
+): Promise<void> {
+  await db.batch([
+    finalizeAttemptStatement(db, scheduledAttemptKey(row.schedule_id, row.attempt_count), 'retried', message, now),
+    db
+      .prepare(
+        `UPDATE publish_schedules
+         SET status = 'pending', last_error = ?, next_attempt_at = ?,
+             claimed_at = NULL, lease_expires_at = NULL, lease_token = NULL, updated_at = ?
+         WHERE schedule_id = ? AND status = 'claimed'`,
+      )
+      .bind(sanitizeError(message, SCHEDULED_PUBLISH_SCHEDULE_ERROR_LIMIT), nextAttemptAt, now, row.schedule_id),
+  ])
+}
+
+/** Retry cap exhausted — the schedule stops retrying and becomes an author todo. */
+async function exhaustSchedule(
+  db: Database,
+  row: ScheduleRow,
+  now: number,
+  message: string,
+): Promise<void> {
+  await db.batch([
+    finalizeAttemptStatement(db, scheduledAttemptKey(row.schedule_id, row.attempt_count), 'failed', message, now),
+    db
+      .prepare(
+        `UPDATE publish_schedules
+         SET status = 'stale', stale_reason = ?, last_error = ?,
+             claimed_at = NULL, lease_expires_at = NULL, lease_token = NULL, updated_at = ?
+         WHERE schedule_id = ? AND status = 'claimed'`,
+      )
+      .bind(
+        'retries-exhausted',
+        sanitizeError(message, SCHEDULED_PUBLISH_SCHEDULE_ERROR_LIMIT),
+        now,
+        row.schedule_id,
+      ),
+  ])
+}
+
 async function processSchedule(
   db: Database,
   row: ScheduleRow,
-  opts: { now: number; siteUrl?: string },
+  opts: {
+    now: number
+    siteUrl?: string
+    maxAttempts: number
+    backoffSeconds: number
+    backoffFactor: number
+    backoffMax: number
+  },
 ): Promise<ScheduledScanOutcome> {
-  const { now, siteUrl } = opts
+  const { now, siteUrl, maxAttempts, backoffSeconds, backoffFactor, backoffMax } = opts
   const base = { scheduleId: row.schedule_id, articleId: row.article_id, version: row.version }
 
   const article = await findArticleById(db, row.article_id)
-  if (!article) return markStale(db, row, now, 'article-missing')
+  if (!article) {
+    await markStale(db, row, now, 'article-missing')
+    return { ...base, outcome: 'stale', reason: 'article-missing' }
+  }
 
   // Already formally published — never a second first-publish event.
-  if (await findFormal(db, row.article_id)) return markStale(db, row, now, 'already-published')
+  if (await findFormal(db, row.article_id)) {
+    await markStale(db, row, now, 'already-published')
+    return { ...base, outcome: 'stale', reason: 'already-published' }
+  }
 
   // The exact-bound version must STILL be the version fact for the article.
   const latest = await latestVersion(db, row.article_id)
-  if (latest !== row.version) return markStale(db, row, now, 'version-drift')
+  if (latest !== row.version) {
+    await markStale(db, row, now, 'version-drift')
+    return { ...base, outcome: 'stale', reason: 'version-drift' }
+  }
 
   const verdict = await deliverBoundVersion(db, row, { now, siteUrl })
   if (verdict.delivered) {
-    await db
-      .prepare(
-        `UPDATE publish_schedules
-         SET status = 'fired', fired_event_id = ?, claimed_at = NULL, lease_expires_at = NULL, updated_at = ?
-         WHERE schedule_id = ? AND status = 'claimed'`,
-      )
-      .bind(verdict.eventId, now, row.schedule_id)
-      .run()
+    await fireSchedule(db, row, verdict.eventId, now)
     return { ...base, outcome: 'fired', eventId: verdict.eventId }
   }
   if (verdict.staleReason !== null) {
-    return markStale(db, row, now, verdict.staleReason)
+    await markStale(db, row, now, verdict.staleReason)
+    return { ...base, outcome: 'stale', reason: verdict.staleReason }
   }
-  // Transient / core failure — re-arm for the next tick (reliable retry).
-  return rearmSchedule(db, row, now, verdict.error)
+  // Transient / core failure: retry per policy — cap + backoff. Below the cap
+  // the schedule is re-armed with a next_attempt_at window; at the cap it
+  // stops retrying and becomes an author todo (`retries-exhausted` stale).
+  if (row.attempt_count >= maxAttempts) {
+    await exhaustSchedule(db, row, now, verdict.error)
+    return { ...base, outcome: 'failed', reason: verdict.error }
+  }
+  const nextAttemptAt = now + retryBackoffSeconds(row.attempt_count, backoffSeconds, backoffFactor, backoffMax)
+  await rearmSchedule(db, row, now, verdict.error, nextAttemptAt)
+  return { ...base, outcome: 'retried', reason: verdict.error }
 }
 
 /**
@@ -410,33 +685,50 @@ async function deliverBoundVersion(
   }
 }
 
-async function markStale(db: Database, row: ScheduleRow, now: number, reason: string): Promise<ScheduledScanOutcome> {
-  await db
-    .prepare(
-      `UPDATE publish_schedules
-       SET status = 'stale', stale_reason = ?, claimed_at = NULL, lease_expires_at = NULL, updated_at = ?
-       WHERE schedule_id = ? AND status = 'claimed'`,
-    )
-    .bind(reason.slice(0, 200), now, row.schedule_id)
-    .run()
-  return { scheduleId: row.schedule_id, articleId: row.article_id, version: row.version, outcome: 'stale', reason }
-}
+/* ------------------------------------------------------------------ */
+/* heartbeat — extend a lease the runner still owns                    */
+/* ------------------------------------------------------------------ */
 
-async function rearmSchedule(db: Database, row: ScheduleRow, now: number, message: string): Promise<ScheduledScanOutcome> {
+/**
+ * Extend the lease of a schedule THIS runner still owns. Ownership is proven
+ * by the per-claim `lease_token` plus a still-valid lease, so a crashed
+ * runner whose lease was reclaimed can never resurrect it (the reclaim
+ * rotated the token). Returns `extended` with the new expiry when the lease
+ * was renewed, or `lost` with the reason otherwise — the runner must stop.
+ */
+export async function heartbeatScheduleLease(
+  db: Database,
+  input: HeartbeatInput,
+): Promise<HeartbeatResult> {
+  const { scheduleId, leaseToken } = input
+  const now = input.now ?? unixNow()
+  const leaseSeconds = input.leaseSeconds ?? SCHEDULED_PUBLISH_DEFAULT_LEASE_SECONDS
+  if (!scheduleId || scheduleId.trim() === '' || !leaseToken || leaseToken.trim() === '') {
+    return { outcome: 'lost', scheduleId, reason: 'not-claimed' }
+  }
+
+  const newExpiry = now + leaseSeconds
   await db
     .prepare(
       `UPDATE publish_schedules
-       SET status = 'pending', attempt_count = attempt_count + 1, last_error = ?,
-           claimed_at = NULL, lease_expires_at = NULL, updated_at = ?
-       WHERE schedule_id = ? AND status = 'claimed'`,
+       SET lease_expires_at = ?, revision = revision + 1, updated_at = ?
+       WHERE schedule_id = ? AND status = 'claimed' AND lease_token = ? AND lease_expires_at > ?`,
     )
-    .bind(message.slice(0, 300), now, row.schedule_id)
+    .bind(newExpiry, now, scheduleId, leaseToken, now)
     .run()
-  return {
-    scheduleId: row.schedule_id,
-    articleId: row.article_id,
-    version: row.version,
-    outcome: 'retried',
-    reason: message,
+
+  const after = await findSchedule(db, scheduleId)
+  if (!after) {
+    return { outcome: 'lost', scheduleId, reason: 'not-claimed' }
   }
+  if (after.status !== 'claimed' || after.lease_token !== leaseToken) {
+    // The row is gone / no longer ours — a reclaim (or terminal transition by
+    // another owner) rotated the token. This runner must stop.
+    return { outcome: 'lost', scheduleId, reason: 'reclaimed' }
+  }
+  if (after.lease_expires_at !== newExpiry) {
+    // Still ours but the lease had already lapsed, so the guard blocked renewal.
+    return { outcome: 'lost', scheduleId, reason: 'lease-expired' }
+  }
+  return { outcome: 'extended', scheduleId, leaseExpiresAt: after.lease_expires_at, revision: after.revision }
 }

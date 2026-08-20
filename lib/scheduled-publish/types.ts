@@ -26,8 +26,40 @@ export interface ScheduleRow {
   last_error: string | null
   claimed_at: number | null
   lease_expires_at: number | null
+  /** Per-claim lease ownership token — only the runner holding it proceeds. */
+  lease_token: string | null
+  /** Task revision — bumped on every state transition (optimistic guard). */
+  revision: number
+  /** Earliest instant a re-armed schedule may be claimed again (backoff). */
+  next_attempt_at: number | null
   stale_reason: string | null
   fired_event_id: string | null
+  created_at: number
+  updated_at: number
+}
+
+/* ------------------------------------------------------------------ */
+/* immutable attempt facts                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Result classification of ONE execution of a schedule (written once).
+ * `fired` delivered the event; `stale` hit a business mismatch; `retried`
+ * failed transiently below the cap; `failed` exhausted the retry cap;
+ * `abandoned` was reclaimed after a crash (lease expiry); `cancelled` was
+ * terminated by the author while claimed.
+ */
+export type AttemptOutcome = 'fired' | 'stale' | 'retried' | 'failed' | 'abandoned' | 'cancelled'
+
+export interface AttemptRow {
+  id: number
+  attempt_key: string
+  schedule_id: string
+  attempt_no: number
+  started_at: number
+  finished_at: number | null
+  outcome: AttemptOutcome | null
+  error: string | null
   created_at: number
   updated_at: number
 }
@@ -106,6 +138,14 @@ export interface ScanInput {
   siteUrl?: string
   /** Lease duration (seconds) before a crashed runner's claim may be reclaimed. */
   leaseSeconds?: number
+  /** Retry cap — a schedule stops retrying after this many execution attempts. */
+  maxAttempts?: number
+  /** Base backoff (seconds) after the first failed attempt. */
+  retryBackoffSeconds?: number
+  /** Exponential growth factor per retry attempt (attempt n waits base*factor^(n-1)). */
+  retryBackoffFactor?: number
+  /** Ceiling (seconds) for a single retry wait. */
+  retryBackoffMaxSeconds?: number
 }
 
 export interface ScanResult {
@@ -119,9 +159,11 @@ export interface ScanResult {
   stale: number
   /** Transient failures re-armed for a later scan (reliable retry). */
   retried: number
+  /** Schedules stopped after exhausting the retry cap (author todo). */
+  failed: number
 }
 
-export type ScheduleOutcomeKind = 'fired' | 'stale' | 'retried'
+export type ScheduleOutcomeKind = 'fired' | 'stale' | 'retried' | 'failed'
 
 export interface ScheduledScanOutcome {
   scheduleId: string
@@ -131,3 +173,31 @@ export interface ScheduledScanOutcome {
   reason?: string
   eventId?: string
 }
+
+/* ------------------------------------------------------------------ */
+/* lease heartbeat                                                    */
+/* ------------------------------------------------------------------ */
+
+export interface HeartbeatInput {
+  scheduleId: string
+  /** The per-claim lease token this runner holds — proves ownership. */
+  leaseToken: string
+  /** New lease window (seconds) counted from `now`. */
+  leaseSeconds?: number
+  now?: number
+}
+
+export type HeartbeatResult =
+  | {
+      outcome: 'extended'
+      scheduleId: string
+      leaseExpiresAt: number
+      /** The row's revision after the heartbeat (each transition bumps it). */
+      revision: number
+    }
+  | {
+      outcome: 'lost'
+      scheduleId: string
+      /** `not-claimed` row gone/not claimed; `reclaimed` another runner owns it; `lease-expired` our lease already lapsed. */
+      reason: 'not-claimed' | 'reclaimed' | 'lease-expired'
+    }

@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 /**
- * B4-01 — idempotent scheduled-publish DDL (issue #40).
+ * B4-01/B4-03 — idempotent scheduled-publish DDL (issues #40 + #42).
  *
- * Delivers the `publish_schedules` fact table (+ its due-scan index) through
- * the same independent DDL channel as B2-01b/B2-02/B2-G/B3-01/B3-02/B3-05 so
- * the issue-23 delivery canonical migration freeze (exactly 001..007) and the
+ * Delivers the `publish_schedules` fact table (+ its due-scan index) and the
+ * immutable `publish_attempts` execution table through the same independent
+ * DDL channel as B2-01b/B2-02/B2-G/B3-01/B3-02/B3-05 so the issue-23
+ * delivery canonical migration freeze (exactly 001..007) and the
  * first-publish/revision/lifecycle tables stay untouched. Safe to run
- * repeatedly: `CREATE ... IF NOT EXISTS`, missing objects are created exactly
- * once, then reported.
+ * repeatedly: missing objects are created exactly once; a B4-01-era
+ * `publish_schedules` (without the B4-03 `lease_token` / `revision` /
+ * `next_attempt_at` columns) is upgraded through PRAGMA-driven conditional
+ * `ALTER TABLE ADD COLUMN` — never drops or alters existing rows.
  *
- * B4-01 is zero-production: this script is the deployment channel only and is
- * NOT run in this batch (the Cron trigger / remote execution land in a later
- * batch). Tests apply the same DDL idempotently through the module's exported
- * `ensureScheduledPublishTables`.
+ * B4-01/B4-03 are zero-production: this script is the deployment channel only
+ * and is NOT run in this batch (the Cron trigger / remote execution land in a
+ * later batch). Tests apply the same DDL idempotently through the module's
+ * exported `ensureScheduledPublishTables`.
  *
  * Usage:
  *   node scripts/apply-scheduled-publish-ddl.mjs --local
@@ -41,6 +44,9 @@ const STATEMENTS = [
       last_error TEXT,
       claimed_at INTEGER,
       lease_expires_at INTEGER,
+      lease_token TEXT,
+      revision INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER,
       stale_reason TEXT,
       fired_event_id TEXT,
       created_at INTEGER NOT NULL,
@@ -52,6 +58,34 @@ const STATEMENTS = [
     sql: `CREATE INDEX IF NOT EXISTS idx_publish_schedules_due
       ON publish_schedules(status, scheduled_at)`,
   },
+  {
+    name: 'publish_attempts',
+    sql: `CREATE TABLE IF NOT EXISTS publish_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      attempt_key TEXT UNIQUE NOT NULL CHECK(length(attempt_key) > 0),
+      schedule_id TEXT NOT NULL CHECK(length(schedule_id) > 0),
+      attempt_no INTEGER NOT NULL CHECK(attempt_no > 0),
+      started_at INTEGER NOT NULL CHECK(started_at > 0),
+      finished_at INTEGER,
+      outcome TEXT CHECK(outcome IN ('fired', 'stale', 'retried', 'failed', 'abandoned', 'cancelled')),
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(schedule_id, attempt_no)
+    ) STRICT`,
+  },
+  {
+    name: 'idx_publish_attempts_schedule',
+    sql: `CREATE INDEX IF NOT EXISTS idx_publish_attempts_schedule
+      ON publish_attempts(schedule_id, attempt_no)`,
+  },
+]
+
+/** Additive B4-03 columns for a B4-01-era publish_schedules install. */
+const SCHEDULE_COLUMNS = [
+  ['lease_token', 'TEXT'],
+  ['revision', 'INTEGER NOT NULL DEFAULT 0'],
+  ['next_attempt_at', 'INTEGER'],
 ]
 
 function usage() {
@@ -131,7 +165,45 @@ async function main() {
     console.log(`created: ${statement.name}`)
   }
 
-  console.log(`done: ${created.length} object(s) created`)
+  // Additive column upgrade for a B4-01-era publish_schedules (PRAGMA-driven,
+  // ALTER only columns that are missing — idempotent across repeated runs).
+  const addedColumns = []
+  const columnsProbe = spawnSync(
+    join(repoRoot, 'node_modules', '.bin', 'wrangler'),
+    [...wranglerArgs(args), '--command', 'PRAGMA table_info(publish_schedules)'],
+    { cwd: repoRoot, encoding: 'utf8' },
+  )
+  if (columnsProbe.status === 0) {
+    let rows = []
+    try {
+      rows = JSON.parse(columnsProbe.stdout)[0]?.results ?? []
+    } catch {
+      rows = []
+    }
+    const existingColumns = new Set(rows.map((row) => row.name))
+    for (const [name, type] of SCHEDULE_COLUMNS) {
+      if (existingColumns.has(name)) {
+        console.log(`column exists: publish_schedules.${name}`)
+        continue
+      }
+      const result = spawnSync(
+        join(repoRoot, 'node_modules', '.bin', 'wrangler'),
+        [...wranglerArgs(args), '--command', `ALTER TABLE publish_schedules ADD COLUMN ${name} ${type}`],
+        { cwd: repoRoot, encoding: 'utf8' },
+      )
+      if (result.status !== 0) {
+        console.error(`failed: publish_schedules.${name}`)
+        console.error(result.stderr || result.stdout)
+        process.exit(1)
+      }
+      addedColumns.push(name)
+      console.log(`column added: publish_schedules.${name}`)
+    }
+  } else {
+    console.warn('WARN: could not read publish_schedules columns; assuming full B4-03 shape already present')
+  }
+
+  console.log(`done: ${created.length} object(s) created, ${addedColumns.length} column(s) added`)
 }
 
 main().catch((error) => {
