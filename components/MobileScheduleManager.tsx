@@ -27,8 +27,8 @@ import {
   terminalReason,
   toDatetimeLocalValue,
   type MobileScheduleAction,
-  type MobileScheduleView,
-} from '@/lib/mobile-schedule'
+} from '@/lib/mobile-schedule/model'
+import type { MobileScheduleView } from '@/lib/mobile-schedule/view'
 
 /**
  * B8-04 — mobile schedule manager (issue #63).
