@@ -1,4 +1,4 @@
-import { searchPosts } from '@/lib/db'
+import { searchPublicArticles } from '@/lib/public-read'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import Link from 'next/link'
 import { SiteHeader } from '@/components/SiteHeader'
@@ -29,7 +29,7 @@ export default async function SearchPage({
   const { q } = await searchParams
   const query = q?.trim() || ''
 
-  let posts: Awaited<ReturnType<typeof searchPosts>> = []
+  let posts: Awaited<ReturnType<typeof searchPublicArticles>> = []
   let navLinks: SiteNavLink[] = []
   let categories: SiteCategoryLink[] = []
   let defaultTheme: Theme = 'default'
@@ -43,7 +43,7 @@ export default async function SearchPage({
       defaultTheme = headerData.defaultTheme
 
       if (query) {
-        posts = await searchPosts(env.DB, query, 100)
+        posts = await searchPublicArticles(env.DB, query, 100)
       }
     }
   } catch (e) {

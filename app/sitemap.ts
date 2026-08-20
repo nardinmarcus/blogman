@@ -1,6 +1,7 @@
 import type { MetadataRoute } from 'next'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
-import { getPosts, getPublicCategories } from '@/lib/db'
+import { getPublicCategories } from '@/lib/db'
+import { listPublicArticles } from '@/lib/public-read'
 import { getSiteUrl } from '@/lib/site-config'
 import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 
@@ -15,9 +16,10 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   try {
     const env = await getAppCloudflareEnv()
     if (env?.DB) {
-      // Only published, non-deleted, non-hidden, non-password posts
+      // Sitemap reads the CANONICAL public surface (live, non-hidden, public)
+      // with the canonical first-published time as lastModified.
       const [posts, categories] = await Promise.all([
-        getPosts(env.DB, 1000, 0, false, false, false, false),
+        listPublicArticles(env.DB, { limit: 1000 }),
         getPublicCategories(env.DB),
       ])
       for (const post of posts) {
