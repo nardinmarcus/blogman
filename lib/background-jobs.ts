@@ -1,9 +1,10 @@
-import { invalidatePublicContentCache } from '@/lib/cache'
 import { processPost, getAiRuntimeEnv } from '@/lib/ai'
 import { isAutoDescription } from '@/lib/post-utils'
 import { deletePostFromRelatedIndex, syncPostToRelatedIndex } from '@/lib/related-content'
-import { save, type ArticleCommandSnapshot } from '@/lib/article-commands'
-import { findActiveRevision, snapshotContentHash } from '@/lib/publish-revision'
+import type { ArticleCommandSnapshot } from '@/lib/article-commands'
+import { findActiveRevision } from '@/lib/publish-revision'
+import { recordPreparedSuggestions } from '@/lib/publish-suggestions'
+import type { PreparedSuggestion } from '@/lib/publish-suggestions/types'
 import type { ArticleIdentitySnapshot } from '@/lib/article-identity'
 import { parsePostTags } from '@/lib/repositories/post-mappers'
 
@@ -83,6 +84,7 @@ interface ArticleIdentityRef {
 interface VersionSnapshotRow {
   version: number
   snapshot_json: string
+  content_snapshot_sha256: string | null
 }
 
 async function resolveArticleIdentity(
@@ -115,37 +117,11 @@ async function findVersionSnapshot(
 ): Promise<VersionSnapshotRow | null> {
   return db
     .prepare(
-      `SELECT version, snapshot_json FROM article_versions
+      `SELECT version, snapshot_json, content_snapshot_sha256 FROM article_versions
        WHERE article_id = ? AND version = ?`,
     )
     .bind(articleId, expectedVersion)
     .first<VersionSnapshotRow>()
-}
-
-/** Rebuild the full authoring snapshot from a version fact, applying AI metadata. */
-function snapshotFromVersionRecord(
-  record: ArticleIdentitySnapshot,
-  overrides: Partial<ArticleCommandSnapshot> = {},
-): ArticleCommandSnapshot {
-  const fields = record.fields
-  return {
-    slug: fields.slug,
-    title: fields.title,
-    content: record.original_content ?? '',
-    html: record.original_html ?? '',
-    description: fields.description,
-    category: fields.category,
-    tags: fields.tags ? parsePostTags(fields.tags) : null,
-    status: fields.status === 'published' ? 'published' : 'draft',
-    password: fields.password,
-    is_pinned: fields.is_pinned ?? 0,
-    is_hidden: fields.is_hidden ?? 0,
-    cover_image: fields.cover_image,
-    deleted_at: fields.deleted_at,
-    published_at: fields.published_at,
-    updated_at: fields.updated_at,
-    ...overrides,
-  }
 }
 
 async function runProcessPostAiJob(env: BackgroundJobEnv, job: Extract<BackgroundJob, { type: 'process-post-ai' }>) {
@@ -223,47 +199,34 @@ async function runProcessPostAiJob(env: BackgroundJobEnv, job: Extract<Backgroun
     )
     if (!aiResult) return
 
-    // Same gap-fill merge policy (never overwrite author-authored metadata),
-    // evaluated against the revision's current facts.
-    const overrides: Partial<ArticleCommandSnapshot> = {}
+    // B3-06 (issue #38): the AI NEVER writes a live fact. It records
+    // VERSION-BOUND suggestions the author previews/applies/revokes/ignores;
+    // a suggestion whose bound version / body / field has moved is stale and
+    // is never silently applied.
+    const prepared: PreparedSuggestion[] = []
     if (!baseSnapshot.category || baseSnapshot.category === '未分类') {
-      overrides.category = aiResult.category
+      prepared.push({ field: 'category', value: JSON.stringify(aiResult.category), fieldBefore: JSON.stringify(baseSnapshot.category ?? null) })
     }
     if (currentTags.length === 0 && aiResult.tags.length > 0) {
-      overrides.tags = aiResult.tags
+      prepared.push({ field: 'tags', value: JSON.stringify(aiResult.tags), fieldBefore: '[]' })
     }
     if (!baseSnapshot.description || isAutoDescription(baseSnapshot.description, baseSnapshot.content)) {
-      overrides.description = aiResult.description
+      prepared.push({ field: 'description', value: JSON.stringify(aiResult.description), fieldBefore: JSON.stringify(baseSnapshot.description ?? null) })
     }
-    if (Object.keys(overrides).length === 0) return
+    if (prepared.length === 0) return
 
-    const snapshot: ArticleCommandSnapshot = { ...baseSnapshot, ...overrides }
-    const result = await save(env.DB, {
+    const rec = await recordPreparedSuggestions(env.DB, {
       articleId: article.id,
-      expectedVersion,
-      operationId,
-      snapshot,
-      projections: {
-        afterCommit: async () => {
-          await invalidatePublicContentCache(env)
-          await syncPostToRelatedIndex(env, article.post_ref)
-        },
-      },
+      postRef: article.post_ref,
+      boundVersion: expectedVersion,
+      boundRevision: activeRevision.revision_id,
+      source: operationId,
+      basisSha256: activeRevision.content_sha256,
+      suggestions: prepared,
     })
-    if (result.outcome === 'applied' || result.outcome === 'replayed') {
-      console.log(
-        `background-jobs: AI metadata committed into revision for post ${article.post_ref} (rev ${result.version}, ${result.outcome})`,
-      )
-    } else if (result.outcome === 'conflict') {
-      const hash = snapshotContentHash(snapshot)
-      console.warn(
-        `background-jobs: discarding stale AI result for post ${article.post_ref} (expected rev ${expectedVersion}, server rev ${result.serverVersion}, body ${hash === activeRevision.content_sha256 ? 'matches' : 'diverged'})`,
-      )
-    } else {
-      console.warn(
-        `background-jobs: AI metadata not applied into revision for post ${article.post_ref}: ${result.outcome}`,
-      )
-    }
+    console.log(
+      `background-jobs: recorded AI suggestions for post ${article.post_ref} (rev ${expectedVersion}, ${rec.outcome})`,
+    )
     return
   }
 
@@ -309,57 +272,29 @@ async function runProcessPostAiJob(env: BackgroundJobEnv, job: Extract<Backgroun
   )
   if (!aiResult) return
 
-  // Same merge policy as the legacy job — only fill gaps, never overwrite
-  // author-authored metadata — evaluated against the anchored version facts.
-  const overrides: Partial<ArticleCommandSnapshot> = {}
+  // B3-06 (issue #38): record version-bound suggestions — never write directly.
   const currentTags = fields.tags ? parsePostTags(fields.tags) : []
-
+  const prepared: PreparedSuggestion[] = []
   if (!fields.category || fields.category === '未分类') {
-    overrides.category = aiResult.category
+    prepared.push({ field: 'category', value: JSON.stringify(aiResult.category), fieldBefore: JSON.stringify(fields.category ?? null) })
   }
   if (currentTags.length === 0 && aiResult.tags.length > 0) {
-    overrides.tags = aiResult.tags
+    prepared.push({ field: 'tags', value: JSON.stringify(aiResult.tags), fieldBefore: '[]' })
   }
   if (!fields.description || isAutoDescription(fields.description, record.original_content ?? '')) {
-    overrides.description = aiResult.description
+    prepared.push({ field: 'description', value: JSON.stringify(aiResult.description), fieldBefore: JSON.stringify(fields.description ?? null) })
   }
+  if (prepared.length === 0) return
 
-  if (Object.keys(overrides).length === 0) return
-
-  const snapshot = snapshotFromVersionRecord(record, overrides)
-
-  // Commit the full snapshot through the versioned write kernel. The kernel's
-  // expected-version guard is the staleness gate: an author who advanced the
-  // version since enqueue gets a conflict — the AI result expires without a
-  // single byte written to `posts`.
-  const result = await save(env.DB, {
+  await recordPreparedSuggestions(env.DB, {
     articleId: article.id,
-    expectedVersion,
-    operationId,
-    snapshot,
-    projections: {
-      afterCommit: async () => {
-        await invalidatePublicContentCache(env)
-        await syncPostToRelatedIndex(env, article.post_ref)
-      },
-    },
+    postRef: article.post_ref,
+    boundVersion: expectedVersion,
+    boundRevision: null,
+    source: operationId,
+    basisSha256: anchored.content_snapshot_sha256 ?? '',
+    suggestions: prepared,
   })
-
-  if (result.outcome === 'applied' || result.outcome === 'replayed') {
-    console.log(
-      `background-jobs: AI metadata committed for post ${article.post_ref} (version ${result.version}, ${result.outcome})`,
-    )
-  } else if (result.outcome === 'conflict') {
-    // Author advanced the version while AI was running — the late result is
-    // stale and discarded. Nothing was written, nothing is overwritten.
-    console.warn(
-      `background-jobs: discarding stale AI result for post ${article.post_ref} (expected v${expectedVersion}, server v${result.serverVersion})`,
-    )
-  } else {
-    console.warn(
-      `background-jobs: AI metadata not applied for post ${article.post_ref}: ${result.outcome}`,
-    )
-  }
 }
 
 async function runSyncPostRelatedIndexJob(env: BackgroundJobEnv, postId: number) {
