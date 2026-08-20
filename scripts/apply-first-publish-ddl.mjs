@@ -143,7 +143,7 @@ function parseArgs(argv) {
 }
 
 function wranglerArgs(args) {
-  const out = ['d1', 'execute', args.database, '--command', '--config', args.config]
+  const out = ['d1', 'execute', args.database, '--config', args.config]
   if (args.local) out.push('--local')
   if (args.remote) out.push('--remote')
   if (args.persistTo) {
