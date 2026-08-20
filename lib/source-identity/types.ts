@@ -12,6 +12,18 @@
 /** Lifecycle of one source↔article association. */
 export type SourceLinkStatus = 'pending' | 'confirmed' | 'cancelled'
 
+/**
+ * The link's ROLE — what this source means to the article (B7-01, issue #57).
+ *
+ *   - `primary` — the writable PRIMARY 源稿 (作者选归属, B6-01). Its live link
+ *     drives the B6 primary-source sync / write-back / conflict machinery.
+ *   - `clip`    — a Chrome 剪藏 reference source page (B7-01). Never promoted
+ *     to the primary source; it exists for重现/比较 and does NOT join the
+ *     primary-source write chain. The same article can hold a `primary` link
+ *     AND a `clip` link to different URLs (主要源稿与一个来源网页可共存).
+ */
+export type SourceLinkRole = 'primary' | 'clip'
+
 /** One `source_identities` row surface. */
 export interface SourceIdentity {
   id: number
@@ -28,6 +40,7 @@ export interface SourceLink {
   sourceIdentityId: number
   articleId: number
   status: SourceLinkStatus
+  role: SourceLinkRole
   /** Stable idempotency key that created this link. */
   operationId: string
   createdAt: number
@@ -113,4 +126,8 @@ export interface AttachSourceInput {
   operationId: string
   url: string
   articleId: number
+  /** The link's role — defaults to `primary` (B6-01 writable source). The Chrome
+   *  clip entry (B7-01) passes `clip` so a clipped page never becomes the
+   *  primary source. */
+  role?: SourceLinkRole
 }

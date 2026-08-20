@@ -41,10 +41,16 @@ const DDL = [
     source_identity_id INTEGER NOT NULL,
     article_id INTEGER NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('pending', 'confirmed', 'cancelled')),
+    role TEXT NOT NULL DEFAULT 'primary' CHECK(role IN ('primary', 'clip')),
     operation_id TEXT NOT NULL UNIQUE CHECK(length(operation_id) > 0),
     created_at INTEGER NOT NULL,
     resolved_at INTEGER
   ) STRICT`,
+  // B7-01 — additive `role` column for pre-existing tables (issue #57): a
+  // CREATE TABLE IF NOT EXISTS never adds a column to an existing table, so
+  // the clip/link role is provisioned here when absent. Existing rows default
+  // to 'primary' (writable source); the Chrome clip entry inserts 'clip'.
+  `ALTER TABLE article_source_links ADD COLUMN role TEXT NOT NULL DEFAULT 'primary' CHECK(role IN ('primary', 'clip'))`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_article_source_live
      ON article_source_links(source_identity_id) WHERE status != 'cancelled'`,
   `CREATE INDEX IF NOT EXISTS idx_article_source_article
@@ -106,7 +112,7 @@ function runWrangler(args, command) {
   return result.stdout
 }
 
-function existingObjectNames(args, names) {
+function objectsPresent(args, names) {
   const stdout = runWrangler(
     args,
     `SELECT name FROM sqlite_schema WHERE type IN ('table','index')
@@ -119,6 +125,20 @@ function existingObjectNames(args, names) {
     rows = []
   }
   return new Set(rows.map((row) => row.name))
+}
+
+/** True when `article_source_links.role` already exists (B7-01 clip role). */
+function hasRoleColumn(args) {
+  try {
+    const stdout = runWrangler(
+      args,
+      "SELECT name FROM pragma_table_info('article_source_links') WHERE name = 'role'",
+    )
+    const rows = JSON.parse(stdout)[0]?.results ?? []
+    return rows.length > 0
+  } catch {
+    return true // cannot inspect → assume present (skip the additive ALTER)
+  }
 }
 
 const OBJECT_NAMES = [
@@ -135,7 +155,7 @@ function main() {
   const args = parseArgs(process.argv.slice(2))
   let existing
   try {
-    existing = existingObjectNames(args, OBJECT_NAMES)
+    existing = objectsPresent(args, OBJECT_NAMES)
   } catch (error) {
     console.error(`WARN: could not read object list (${error.message}); assuming absent`)
     existing = new Set()
@@ -145,15 +165,23 @@ function main() {
     ['source_url_variants', DDL[1]],
     ['idx_source_url_variants_identity', DDL[2]],
     ['article_source_links', DDL[3]],
-    ['idx_article_source_live', DDL[4]],
-    ['idx_article_source_article', DDL[5]],
-    ['idx_article_source_identity', DDL[6]],
+    // DDL[4] is the additive `role` ALTER — applied only when the column is
+    // missing and the table already exists (CREATE TABLE IF NOT EXISTS cannot
+    // alter an existing table).
+    ['idx_article_source_live', DDL[5]],
+    ['idx_article_source_article', DDL[6]],
+    ['idx_article_source_identity', DDL[7]],
   ]
   const applied = []
   for (const [name, sql] of statementToName) {
     if (existing.has(name)) continue
     runWrangler(args, sql)
     applied.push(name)
+  }
+  // Add the `role` column to an existing table when absent (B7-01, #57).
+  if (existing.has('article_source_links') && !hasRoleColumn(args)) {
+    runWrangler(args, DDL[4])
+    applied.push('article_source_links.role')
   }
   if (applied.length === 0) {
     console.log('source identity DDL already present; nothing to do')

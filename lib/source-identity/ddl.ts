@@ -46,6 +46,7 @@ export const SOURCE_IDENTITY_DDL_STATEMENTS: string[] = [
     source_identity_id INTEGER NOT NULL,
     article_id INTEGER NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('pending', 'confirmed', 'cancelled')),
+    role TEXT NOT NULL DEFAULT 'primary' CHECK(role IN ('primary', 'clip')),
     operation_id TEXT NOT NULL UNIQUE CHECK(length(operation_id) > 0),
     created_at INTEGER NOT NULL,
     resolved_at INTEGER
