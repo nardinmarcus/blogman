@@ -41,7 +41,7 @@ describe('Verify workflow test partition', () => {
     const quickJob = workflowJob(workflow, 'verify')
     const longJob = workflowJob(workflow, 'verify-migrations')
 
-    expect(quickJob).toContain('timeout-minutes: 20')
+    expect(quickJob).toContain('timeout-minutes: 30')
     expect(quickJob.split('\n')).toContain('        run: npm run verify:quick')
 
     expect(longJob).toContain('timeout-minutes: 55')
