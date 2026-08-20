@@ -11,22 +11,26 @@ export async function getCategories(db: Database): Promise<CategoryRow[]> {
 }
 
 export async function getPublicCategories(db: Database): Promise<CategoryRow[]> {
+  // L2: the public category reader list derives from the CANONICAL formal
+  // surface (lifecycle published + frozen-snapshot password/hidden/deleted),
+  // grouped by the version snapshot's category — not the posts projection.
   const { results } = await db
     .prepare(
-      `SELECT categories.name, categories.slug, COUNT(posts.id) as post_count
-       FROM categories
-       JOIN posts
-         ON posts.category = categories.name
-       WHERE posts.status = 'published'
-         AND posts.password IS NULL
-         AND posts.is_hidden = 0
-         AND posts.deleted_at IS NULL
-       GROUP BY categories.name, categories.slug
-       ORDER BY categories.name`,
+      `SELECT cat.name, cat.slug, COUNT(*) AS post_count
+       FROM formal_publications f
+       JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+       JOIN categories cat ON cat.name = json_extract(v.snapshot_json, '$.fields.category')
+       WHERE f.lifecycle = 'published'
+         AND COALESCE(json_extract(v.snapshot_json, '$.fields.password'), '') = ''
+         AND COALESCE(json_extract(v.snapshot_json, '$.fields.is_hidden'), 0) = 0
+         AND COALESCE(json_extract(v.snapshot_json, '$.fields.deleted_at'), 0) = 0
+         AND COALESCE(json_extract(v.snapshot_json, '$.fields.category'), '') <> ''
+       GROUP BY cat.name, cat.slug
+       ORDER BY cat.name`,
     )
     .all<CategoryRow>()
 
-  return results
+  return results ?? []
 }
 
 // 创建分类

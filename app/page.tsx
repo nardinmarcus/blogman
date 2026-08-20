@@ -1,9 +1,9 @@
-import { getPosts, getPostsCount } from '@/lib/db'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { type Theme } from '@/lib/appearance'
 import type { SiteCategoryLink, SiteNavLink } from '@/lib/site'
 import { getSiteHeaderData } from '@/lib/site'
 import { HomeClient } from '@/components/HomeClient'
+import { listPublicArticles, countPublicArticles } from '@/lib/public-read'
 import { getSiteUrl } from '@/lib/site-config'
 import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 
@@ -28,7 +28,7 @@ export default async function Home({
   const { page: pageStr } = await searchParams
   const currentPage = Math.max(1, parseInt(pageStr ?? '1', 10) || 1)
 
-  let posts: Awaited<ReturnType<typeof getPosts>> = []
+  let posts: Awaited<ReturnType<typeof listPublicArticles>> = []
   let totalCount = 0
   let navLinks: SiteNavLink[] = []
   let categories: SiteCategoryLink[] = []
@@ -38,8 +38,8 @@ export default async function Home({
     if (env?.DB) {
       const headerData = await getSiteHeaderData(env.DB)
       ;[posts, totalCount] = await Promise.all([
-        getPosts(env.DB, PAGE_SIZE, (currentPage - 1) * PAGE_SIZE),
-        getPostsCount(env.DB),
+        listPublicArticles(env.DB, { limit: PAGE_SIZE, offset: (currentPage - 1) * PAGE_SIZE }),
+        countPublicArticles(env.DB),
       ])
       navLinks = headerData.navLinks
       categories = headerData.categories

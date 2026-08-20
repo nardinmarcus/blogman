@@ -1,4 +1,3 @@
-import { getPostBySlug, incrementViewCount, isPubliclyAccessiblePost, isSearchIndexablePost } from '@/lib/db'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { verifyPassword } from '@/lib/password'
 import { notFound, permanentRedirect } from 'next/navigation'
@@ -12,10 +11,9 @@ import { CopyArticleLink } from '@/components/CopyArticleLink'
 import { TwitterEmbedsEnhancer } from '@/components/TwitterEmbedsEnhancer'
 import { ArticleOutline } from '@/components/ArticleOutline'
 import { getSiteHeaderData } from '@/lib/site'
-import { resolveArticleAddress } from '@/lib/slug-address'
+import { resolvePublicArticle } from '@/lib/public-read'
 import { getRelatedPosts } from '@/lib/related-content'
-import { getByPostRef, listVersions } from '@/lib/repositories/articles'
-import { getPublicContentCacheNamespace } from '@/lib/cache'
+import { incrementViewCount } from '@/lib/repositories/posts'
 import { getSiteUrl } from '@/lib/site-config'
 import { resolvePostCoverImage } from '@/lib/default-cover-images'
 import { buildArticleOutline } from '@/lib/article-outline'
@@ -39,12 +37,14 @@ export async function generateMetadata({
 
     if (!env?.DB) return {}
 
-    const post = await getPostBySlug(env.DB, slug, getPublicContentCacheNamespace(env)).catch((error) => {
+    // L2: read the canonical article; historical addresses single-hop here too.
+    const resolved = await resolvePublicArticle(env.DB, slug).catch((error) => {
       rethrowIfDatabaseMigrationRequired(error)
-      return null
+      return { article: null, redirectSlug: null }
     })
-    if (!post || !isPubliclyAccessiblePost(post)) return {}
-    const searchIndexable = isSearchIndexablePost(post)
+    const post = resolved.article
+    if (!post || !post.live) return {}
+    const searchIndexable = post.live && !post.password && post.is_hidden === 0
 
     const ogImage = resolvePostCoverImage(post, { baseUrl })
 
@@ -107,37 +107,29 @@ export default async function PostPage({
   if (!env?.DB) notFound()
   const db = env!.DB
 
-  // B3-04: a historical address permanently single-hops (301) to the article's
-  // current address. The registry resolves straight to the CURRENT slug, so a
-  // slug renamed several times never chains — always one hop.
-  try {
-    const resolved = await resolveArticleAddress(db, slug)
-    if (resolved?.redirect) {
-      permanentRedirect(`/${resolved.currentSlug}`)
-    }
-  } catch (error) {
+  // L2: read the CANONICAL article from D1 facts:
+  // lifecycle + current/historical address + first-publish time come from
+  // `formal_publications` + `article_slug_addresses` (single-hop), and the
+  // content/access-control/pinned come from the frozen `article_versions`
+  // snapshot. No legacy `posts` decision gate here.
+  const resolved = await resolvePublicArticle(db, slug).catch((error) => {
     rethrowIfDatabaseMigrationRequired(error)
-  }
-
-  const post = await getPostBySlug(db, slug, getPublicContentCacheNamespace(env)).catch((error) => {
-    rethrowIfDatabaseMigrationRequired(error)
-    return null
+    return { article: null, redirectSlug: null }
   })
-  if (!post) notFound()
-  if (!isPubliclyAccessiblePost(post)) notFound()
-
-  // B2-05: resolve the article identity + latest version so the inline editor
-  // drives versioned save (expected version + operation id) against the kernel.
-  let articleIdentity: { articleId: number | null; version: number | null } = { articleId: null, version: null }
-  const identity = await getByPostRef(db, post.id).catch(() => null)
-  if (identity) {
-    const versions = await listVersions(db, identity.id).catch(() => [])
-    articleIdentity = { articleId: identity.id, version: versions[0]?.version ?? null }
+  // B3-04: a historical address permanently single-hops (301) to the article's
+  // CURRENT address — always one hop, never a redirect chain.
+  if (resolved.redirectSlug) {
+    permanentRedirect(`/${resolved.redirectSlug}`)
   }
+  const post = resolved.article
+  if (!post || !post.live) notFound()
+
+  // B2-05: canonical versioned facts for the inline editor (expected version
+  // + operation id) drive versioned save against the kernel.
   const inlineEditorFacts = {
-    articleId: articleIdentity.articleId,
-    version: articleIdentity.version,
-    status: post.deleted_at ? 'draft' as const : ((post.status === 'draft' ? 'draft' : 'published') as 'draft' | 'published'),
+    articleId: post.articleId,
+    version: post.version,
+    status: (post.live ? 'published' : 'draft') as 'draft' | 'published',
     description: post.description,
     tags: post.tags,
     isHidden: post.is_hidden,
@@ -237,7 +229,7 @@ export default async function PostPage({
   // 阅读时间估算（中文按 400 字/分钟）
   const textLength = post.content?.length || 0
   const readingMinutes = Math.max(1, Math.ceil(textLength / 400))
-  const searchIndexable = isSearchIndexablePost(post)
+  const searchIndexable = post.live && !post.password && post.is_hidden === 0
   const related = !post.password
     ? await getRelatedPosts(db, env, post, 3).catch((error) => {
         rethrowIfDatabaseMigrationRequired(error)

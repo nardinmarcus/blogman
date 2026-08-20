@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { getPostsByCategory, getPostsCountByCategory, getPublicCategories } from '@/lib/db'
+import { getPublicCategories } from '@/lib/db'
+import { listPublicArticles, countPublicArticles } from '@/lib/public-read'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
@@ -69,8 +70,8 @@ export default async function CategoryPage({
   if (!category) notFound()
 
   const [posts, totalCount, headerData] = await Promise.all([
-    getPostsByCategory(env.DB, category.name, PAGE_SIZE, (currentPage - 1) * PAGE_SIZE),
-    getPostsCountByCategory(env.DB, category.name),
+    listPublicArticles(env.DB, { limit: PAGE_SIZE, offset: (currentPage - 1) * PAGE_SIZE, category: category.name }),
+    countPublicArticles(env.DB, { category: category.name }),
     getSiteHeaderData(env.DB),
   ])
 

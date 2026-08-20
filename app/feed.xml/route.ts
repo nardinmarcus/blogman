@@ -1,4 +1,5 @@
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
+import { listPublicArticles } from '@/lib/public-read'
 import { getSiteUrl } from '@/lib/site-config'
 import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 
@@ -30,17 +31,17 @@ export async function GET() {
   try {
     const env = await getAppCloudflareEnv()
     if (env?.DB) {
-      // RSS needs html field; query directly to include it
-      const { results } = await env.DB
-        .prepare(
-          `SELECT slug, title, description, html, category, published_at
-           FROM posts
-           WHERE status = 'published' AND deleted_at IS NULL AND password IS NULL AND is_hidden = 0
-           ORDER BY published_at DESC
-           LIMIT 50`
-        )
-        .all()
-      posts = results as unknown as RssPost[]
+      // RSS reads the CANONICAL public surface (lifecycle published, public,
+      // non-hidden) and the frozen version body — not the legacy posts row.
+      const canonical = await listPublicArticles(env.DB, { limit: 50 })
+      posts = canonical.map((p) => ({
+        slug: p.slug,
+        title: p.title,
+        description: p.description,
+        html: p.html,
+        category: p.category,
+        published_at: p.published_at,
+      }))
     }
   } catch (error) {
     rethrowIfDatabaseMigrationRequired(error)
