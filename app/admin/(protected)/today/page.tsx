@@ -146,6 +146,14 @@ function GroupCard({ group }: { group: WorkbenchGroupView }) {
                 {item.sourceType} · {item.sourceId}
               </p>
             </div>
+            {item.sourceType === 'schedule' && (
+              <Link
+                href={`/admin/schedule/${encodeURIComponent(item.sourceId)}`}
+                className="inline-flex items-center gap-1 text-xs text-[var(--editor-accent)] hover:underline shrink-0"
+              >
+                管理排期 <ArrowRight className="w-3 h-3" />
+              </Link>
+            )}
             <Link
               href={`/admin/today?focus=${item.key}`}
               className="inline-flex items-center gap-1 text-xs text-[var(--editor-accent)] hover:underline shrink-0"
