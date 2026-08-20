@@ -59,6 +59,10 @@ export interface WechatDraftTaskRow {
   lease_token: string | null
   /** B5-02 — instant the in-flight lease expires (crash reclaim). */
   lease_expires_at: number | null
+  /** B5-03 — 交付代次 within the (article, account) channel delivery group. */
+  generation: number
+  /** B5-03 — 设置修订 used to build this task's projection (0 = no settings). */
+  settings_revision: number
 }
 
 /** The WeChat-adapted projection body built from one frozen version snapshot. */
@@ -190,7 +194,7 @@ export type DeriveWechatDraftResult =
       accountId: string
     }
   | {
-      outcome: 'created' | 'existing' | 'submitted' | 'failed' | 'unknown'
+      outcome: 'created' | 'existing' | 'updated' | 'submitted' | 'failed' | 'unknown'
       articleId: number
       version: number
       accountId: string
@@ -198,6 +202,10 @@ export type DeriveWechatDraftResult =
       task: WechatDraftTaskRow
       created: boolean
       projection: WechatDraftProjection
+      /** B5-03 — 交付代次 (沿用代次 on pre-delivery settings updates). */
+      generation?: number
+      /** B5-03 — 设置修订 used (0 = no settings). */
+      settingsRevision?: number
       /** B5-02 — classification of the immediate provider hand-off (if any). */
       classification?: WechatDraftAttemptClassification
     }
@@ -254,17 +262,19 @@ export type WechatDraftReconcileResult =
   | { outcome: 'invalid'; reason: string }
   | { outcome: 'not-found'; taskId: string }
   /** The task is not result-unknown — nothing to reconcile (idempotent no-op). */
-  | { outcome: 'not-unknown'; taskId: string; task: WechatDraftTaskRow }
+  | { outcome: 'not-unknown'; taskId: string; delivery: WechatLifecycleRowView; task?: WechatDraftTaskRow; replacement?: WechatDraftReplacementRow }
   /** Already delivered / already resolved — late or duplicate command replay. */
-  | { outcome: 'replayed'; taskId: string; task: WechatDraftTaskRow }
+  | { outcome: 'replayed'; taskId: string; delivery: WechatLifecycleRowView; task?: WechatDraftTaskRow; replacement?: WechatDraftReplacementRow }
   /** No adapter — the task stays frozen as an author todo (never concluded). */
-  | { outcome: 'no-provider'; taskId: string; task: WechatDraftTaskRow }
+  | { outcome: 'no-provider'; taskId: string; delivery: WechatLifecycleRowView; task?: WechatDraftTaskRow; replacement?: WechatDraftReplacementRow }
   /** Query itself lost — the task stays frozen; no blind conclusion. */
   | {
       outcome: 'unknown-still'
       taskId: string
       reason: string
-      task: WechatDraftTaskRow
+      delivery: WechatLifecycleRowView
+      task?: WechatDraftTaskRow
+      replacement?: WechatDraftReplacementRow
     }
   /** Resolved: the remote draft exists (submitted + media_id saved) or was
    *  provably never created (re-armed as a fresh draft for one safe resubmit). */
@@ -274,7 +284,197 @@ export type WechatDraftReconcileResult =
       found: boolean
       /** The media_id when the remote draft exists; null when provably not created. */
       remoteDraftId: string | null
-      task: WechatDraftTaskRow
+      delivery: WechatLifecycleRowView
+      task?: WechatDraftTaskRow
+      replacement?: WechatDraftReplacementRow
     }
 
 export type { ArticleIdentitySnapshot }
+
+/* ------------------------------------------------------------------ */
+/* B5-03 — 交付前设置、替代草稿与历史 (issue #48)                      */
+/* ------------------------------------------------------------------ */
+
+/** 账号/设置修订 — 每（正式文章, 账号）一份可调设置。 */
+export interface WechatDraftSettingsRow {
+  id: number
+  article_id: number
+  account_id: string
+  /** 设置修订：首次保存映射为修订 1（初始配置映射初始修订，不猜历史）。 */
+  settings_revision: number
+  title_override: string | null
+  digest_override: string | null
+  cover_image_override: string | null
+  created_at: number
+  updated_at: number
+}
+
+/** 渠道交付组任务代次台账 — 每（文章, 账号）一串单调递增加法代次。 */
+export interface WechatDraftGenerationRow {
+  id: number
+  article_id: number
+  account_id: string
+  generation: number
+  version: number
+  task_id: string
+  /** 前代 task 键（wechat_draft_tasks.task_id 或 wechat_draft_replacements.replacement_key），
+   *  NULL 表示首代。 */
+  replaces_task_id: string | null
+  status: WechatDraftTaskStatus
+  settings_revision: number
+  created_at: number
+  updated_at: number
+}
+
+/** 交付后显式替代草稿 — 新代次行，完整生命周期列与 wechat_draft_tasks 一致。 */
+export interface WechatDraftReplacementRow {
+  id: number
+  replacement_key: string
+  article_id: number
+  version: number
+  account_id: string
+  replaces_task_id: string
+  generation: number
+  status: WechatDraftTaskStatus
+  title: string
+  html_projection: string
+  plaintext_projection: string
+  cover_image_url: string | null
+  digest: string | null
+  content_sha256: string
+  projection_sha256: string
+  source_url: string
+  remote_draft_id: string | null
+  provider_error: string | null
+  settings_revision: number
+  created_at: number
+  updated_at: number
+  revision: number
+  attempt_count: number
+  classification: WechatDraftAttemptClassification | null
+  needs_author: number
+  next_attempt_at: number | null
+  last_error: string | null
+  claimed_at: number | null
+  lease_token: string | null
+  lease_expires_at: number | null
+}
+
+/** 归一化的生命周期行 — 执行器/重试/对账统一处理任务与替代草稿。 */
+export interface WechatLifecycleRowView {
+  kind: 'task' | 'replacement'
+  key: string
+  articleId: number
+  version: number
+  accountId: string
+  status: WechatDraftTaskStatus
+  title: string
+  htmlProjection: string
+  plaintextProjection: string
+  coverImageUrl: string | null
+  digest: string | null
+  contentSha256: string
+  projectionSha256: string
+  sourceUrl: string
+  remoteDraftId: string | null
+  providerError: string | null
+  settingsRevision: number
+  generation: number
+  replacesTaskId: string | null
+  revision: number
+  attemptCount: number
+  classification: WechatDraftAttemptClassification | null
+  needsAuthor: number
+  nextAttemptAt: number | null
+  lastError: string | null
+  claimedAt: number | null
+  leaseToken: string | null
+  leaseExpiresAt: number | null
+}
+
+export interface SaveWechatDraftSettingsInput {
+  articleId: number
+  accountId: string
+  /** 留空/未传 = 保留该字段现有覆盖（或保持空白）。 */
+  title?: string
+  digest?: string
+  coverImageUrl?: string
+  now?: number
+}
+
+export type SaveWechatDraftSettingsResult =
+  | { outcome: 'invalid'; reason: string }
+  | { outcome: 'disabled'; reason: string }
+  | {
+      outcome: 'saved'
+      settings: WechatDraftSettingsRow
+      /** true 时本次保存新建了设置（初始修订 = 1，不猜历史）。 */
+      created: boolean
+      /** 设置修订自增后仍是同一正文版本、同一交付代次。 */
+      settingsRevision: number
+    }
+
+export interface ReplaceWechatDraftInput {
+  /** 要替代的当前已交付行键（task_id 或 replacement_key）；缺省时按 articleId+accountId 解析当前代。 */
+  taskId?: string
+  articleId?: number
+  accountId?: string
+  /** 注入适配器（测试用 mock；生产 null → 只建替代草稿，不调外部）。 */
+  provider?: WechatDraftProvider | null
+  now?: number
+  siteUrl?: string
+  maxAttempts?: number
+  retryBackoffSeconds?: number
+  retryBackoffFactor?: number
+  retryBackoffMaxSeconds?: number
+}
+
+export type ReplaceWechatDraftResult =
+  | { outcome: 'invalid'; reason: string }
+  | { outcome: 'disabled'; reason: string }
+  | { outcome: 'not-found'; reason: string; articleId?: number; accountId?: string }
+  | {
+      outcome: 'not-delivered'
+      reason: string
+      current: WechatLifecycleRowView
+    }
+  | {
+      outcome: 'created' | 'existing' | 'submitted' | 'failed' | 'unknown'
+      articleId: number
+      version: number
+      accountId: string
+      generation: number
+      replacesTaskId: string
+      taskId: string
+      replacement: WechatDraftReplacementRow
+      projection: WechatDraftProjection
+      /** true 时本次调用了 provider 并产生首个尝试（与派生路径一致）。 */
+      handout: boolean
+      classification?: WechatDraftAttemptClassification
+    }
+
+export interface WechatDeliveryHistoryRow {
+  generation: WechatDraftGenerationRow
+  /** 该代对应的任务/替代草稿归一化视图。 */
+  delivery: WechatLifecycleRowView
+  /** 前代键（首代为 null）。 */
+  replacesTaskId: string | null
+}
+
+/** 人类可读的交付视图 — 待微信确认, 永不声称已发布。 */
+export interface WechatDeliveryView {
+  kind: 'task' | 'replacement'
+  key: string
+  articleId: number
+  version: number
+  accountId: string
+  generation: number
+  replacesTaskId: string | null
+  status: WechatDraftTaskStatus
+  /** true 仅当草稿已交付到微信草稿箱（submitted）— 待作者在微信确认，绝不等于已发布。 */
+  awaitingWechatConfirmation: boolean
+  humanLabel: string
+  remoteDraftId: string | null
+  settingsRevision: number
+  title: string
+}

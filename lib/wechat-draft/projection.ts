@@ -66,9 +66,20 @@ export function wrapWechatExportFragment(title: string, contentHtml: string): st
   ].join('')
 }
 
+export interface WechatProjectionSettings {
+  /** 交付前设置覆盖标题（为空/未传 → 使用冻结快照标题）。 */
+  title?: string
+  /** 交付前设置覆盖摘要（为空/未传 → 使用快照 description / 正文首段）。 */
+  digest?: string
+  /** 交付前设置覆盖封面（为空/未传 → 使用快照封面或默认封面）。 */
+  coverImageUrl?: string
+}
+
 export interface ProjectWechatDraftOptions {
   sourceUrl: string
   siteUrl?: string
+  /** B5-03 — 交付前设置修订（与正文版本/代次分离）。 */
+  settings?: WechatProjectionSettings
 }
 
 /** Build the WeChat-adapted projection from a frozen version snapshot. */
@@ -76,7 +87,7 @@ export function projectWechatDraft(
   snapshot: ArticleIdentitySnapshot,
   options: ProjectWechatDraftOptions,
 ): WechatDraftProjection {
-  const title = (snapshot.fields.title || '').trim() || FALLBACK_TITLE
+  const title = (options.settings?.title ?? snapshot.fields.title ?? '').trim() || FALLBACK_TITLE
 
   let bodyHtml: string
   let plain: string
@@ -90,15 +101,19 @@ export function projectWechatDraft(
   }
 
   const description = (snapshot.fields.description ?? '').trim()
-  const digest = description || plain.trim() || title
-  const coverImageUrl = resolvePostCoverImage(
-    {
-      slug: snapshot.fields.slug,
-      title: snapshot.fields.title,
-      cover_image: snapshot.fields.cover_image,
-    },
-    { baseUrl: options.siteUrl },
-  )
+  const digest = (options.settings?.digest || '').trim()
+    ? (options.settings?.digest || '').trim()
+    : description || plain.trim() || title
+  const coverImageUrl = (options.settings?.coverImageUrl || '').trim()
+    ? (options.settings?.coverImageUrl || '').trim()
+    : resolvePostCoverImage(
+        {
+          slug: snapshot.fields.slug,
+          title: snapshot.fields.title,
+          cover_image: snapshot.fields.cover_image,
+        },
+        { baseUrl: options.siteUrl },
+      )
 
   return {
     title,

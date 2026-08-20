@@ -16,6 +16,14 @@
  * PRAGMA-driven conditional `ALTER TABLE ADD COLUMN`; the B5-01 status CHECK
  * intentionally keeps its four values (a CHECK cannot be altered in place).
  *
+ * B5-03 (issue #48) adds the delivery-settings / generation / replacement
+ * surface: two more additive columns on `wechat_draft_tasks` (generation,
+ * settings_revision) plus `wechat_draft_settings` (设置修订, 初始映射修订 1),
+ * `wechat_draft_generations` (渠道交付组任务代次台账 with replaces_task_id chain),
+ * and `wechat_draft_replacements` (交付后显式替代草稿, full lifecycle columns so
+ * the shared executor/retry state machine can process them). Old rows, media_ids
+ * and generations are never deleted or overwritten.
+ *
  * B5-01/B5-02 are zero-production: the script is the deployment channel only
  * and is NOT run in this batch. Tests apply the same DDL idempotently through
  * the module's exported `ensureWechatDraftTables`.
@@ -98,9 +106,97 @@ const STATEMENTS = [
     sql: `CREATE INDEX IF NOT EXISTS idx_wechat_draft_attempts_task
       ON wechat_draft_attempts(task_id, id)`,
   },
+  {
+    name: 'wechat_draft_settings',
+    sql: `CREATE TABLE IF NOT EXISTS wechat_draft_settings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      article_id INTEGER NOT NULL CHECK(article_id > 0),
+      account_id TEXT NOT NULL CHECK(length(account_id) > 0),
+      settings_revision INTEGER NOT NULL CHECK(settings_revision > 0),
+      title_override TEXT,
+      digest_override TEXT,
+      cover_image_override TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE (article_id, account_id)
+    ) STRICT`,
+  },
+  {
+    name: 'idx_wechat_draft_settings_article',
+    sql: `CREATE INDEX IF NOT EXISTS idx_wechat_draft_settings_article
+      ON wechat_draft_settings(article_id, account_id)`,
+  },
+  {
+    name: 'wechat_draft_generations',
+    sql: `CREATE TABLE IF NOT EXISTS wechat_draft_generations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      article_id INTEGER NOT NULL CHECK(article_id > 0),
+      account_id TEXT NOT NULL CHECK(length(account_id) > 0),
+      generation INTEGER NOT NULL CHECK(generation > 0),
+      version INTEGER NOT NULL CHECK(version > 0),
+      task_id TEXT NOT NULL CHECK(length(task_id) > 0),
+      replaces_task_id TEXT,
+      status TEXT NOT NULL CHECK(status IN ('draft', 'submitted', 'failed', 'superseded')),
+      settings_revision INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE (article_id, account_id, generation),
+      UNIQUE (task_id)
+    ) STRICT`,
+  },
+  {
+    name: 'idx_wechat_draft_generations_group',
+    sql: `CREATE INDEX IF NOT EXISTS idx_wechat_draft_generations_group
+      ON wechat_draft_generations(article_id, account_id, generation)`,
+  },
+  {
+    name: 'wechat_draft_replacements',
+    sql: `CREATE TABLE IF NOT EXISTS wechat_draft_replacements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      replacement_key TEXT UNIQUE NOT NULL CHECK(length(replacement_key) > 0),
+      article_id INTEGER NOT NULL CHECK(article_id > 0),
+      version INTEGER NOT NULL CHECK(version > 0),
+      account_id TEXT NOT NULL CHECK(length(account_id) > 0),
+      replaces_task_id TEXT NOT NULL CHECK(length(replaces_task_id) > 0),
+      generation INTEGER NOT NULL CHECK(generation > 0),
+      status TEXT NOT NULL CHECK(status IN ('draft', 'submitted', 'failed', 'superseded')),
+      title TEXT NOT NULL,
+      html_projection TEXT NOT NULL,
+      plaintext_projection TEXT NOT NULL,
+      cover_image_url TEXT,
+      digest TEXT,
+      content_sha256 TEXT NOT NULL CHECK(content_sha256 = '' OR length(content_sha256) = 64),
+      projection_sha256 TEXT NOT NULL CHECK(length(projection_sha256) = 64),
+      source_url TEXT NOT NULL CHECK(length(source_url) > 0),
+      remote_draft_id TEXT,
+      provider_error TEXT,
+      settings_revision INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 0,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      classification TEXT,
+      needs_author INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER,
+      last_error TEXT,
+      claimed_at INTEGER,
+      lease_token TEXT,
+      lease_expires_at INTEGER
+    ) STRICT`,
+  },
+  {
+    name: 'idx_wechat_draft_replacements_group',
+    sql: `CREATE INDEX IF NOT EXISTS idx_wechat_draft_replacements_group
+      ON wechat_draft_replacements(article_id, account_id, version)`,
+  },
+  {
+    name: 'idx_wechat_draft_replacements_status',
+    sql: `CREATE INDEX IF NOT EXISTS idx_wechat_draft_replacements_status
+      ON wechat_draft_replacements(status, next_attempt_at)`,
+  },
 ]
 
-/** Additive B5-02 columns for a B5-01-era wechat_draft_tasks (PRAGMA-guarded). */
+/** Additive B5-02/B5-03 columns for a B5-01-era wechat_draft_tasks (PRAGMA-guarded). */
 const TASK_COLUMNS = [
   ['revision', 'INTEGER NOT NULL DEFAULT 0'],
   ['attempt_count', 'INTEGER NOT NULL DEFAULT 0'],
@@ -111,6 +207,8 @@ const TASK_COLUMNS = [
   ['claimed_at', 'INTEGER'],
   ['lease_token', 'TEXT'],
   ['lease_expires_at', 'INTEGER'],
+  ['generation', 'INTEGER NOT NULL DEFAULT 1'],
+  ['settings_revision', 'INTEGER NOT NULL DEFAULT 0'],
 ]
 
 function usage() {

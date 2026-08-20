@@ -43,6 +43,23 @@
  * The executor is kill-switchable (`WECHAT_DRAFT_EXECUTOR_DISABLED`) and
  * never touches blog facts — a WeChat failure can never roll back a blog
  * result.
+ *
+ * B5-03 (issue #48) — 交付前设置调整、替代草稿与历史.
+ *
+ * The derivation kernel now applies the per-(article, account) settings
+ * (账号/设置修订) to the projection: a pre-delivery row is re-projected in place
+ * with the same task id / version / generation (沿用代次), and a DELIVERED row
+ * is never re-projected. `saveWechatDraftSettings` maps the first save to
+ * settings revision 1 (不猜历史) and never touches the body version.
+ * `replaceWechatDraft` is the ONLY post-delivery way to create a new draft: it
+ * registers the next monotonic generation (task 代次) in the
+ * `wechat_draft_generations` ledger, references the prior generation
+ * (replaces_task_id), preserves the old row + media_id as superseded (旧
+ * media_id/代次不可删除或假装覆盖), and delivers the replacement to the WeChat
+ * DRAFT BOX only. The executor and reconcile now process BOTH base tasks and
+ * replacements through one lifecycle-target-aware state machine, and the
+ * admin WRITE commands (settings save + replace) are kill-switchable
+ * (`WECHAT_DRAFT_ADMIN_WRITES_DISABLED`) while every read surface stays live.
  */
 
 import { createHash } from 'node:crypto'
@@ -54,18 +71,28 @@ import type {
   DeriveWechatDraftInput,
   DeriveWechatDraftResult,
   ReadWechatDraftTaskResult,
+  ReplaceWechatDraftInput,
+  ReplaceWechatDraftResult,
+  SaveWechatDraftSettingsInput,
+  SaveWechatDraftSettingsResult,
+  WechatDeliveryView,
   WechatDraftAttemptClassification,
   WechatDraftAttemptRow,
   WechatDraftExecutorInput,
   WechatDraftExecutorResult,
+  WechatDraftGenerationRow,
   WechatDraftProjection,
   WechatDraftProvider,
   WechatDraftProviderResult,
   WechatDraftReconcileInput,
   WechatDraftReconcileResult,
+  WechatDraftReplacementRow,
+  WechatDraftSettingsRow,
   WechatDraftSubmitPayload,
   WechatDraftTaskRow,
+  WechatLifecycleRowView,
 } from './types'
+import type { WechatProjectionSettings } from './projection'
 
 function unixNow(): number {
   return Math.floor(Date.now() / 1000)
@@ -135,7 +162,19 @@ export const WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_SECONDS = 60
 export const WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_FACTOR = 2
 export const WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_MAX_SECONDS = 3600
 export const WECHAT_DRAFT_EXECUTOR_DISABLED_ENV = 'WECHAT_DRAFT_EXECUTOR_DISABLED'
+export const WECHAT_DRAFT_ADMIN_WRITES_DISABLED_ENV = 'WECHAT_DRAFT_ADMIN_WRITES_DISABLED'
 export const WECHAT_DRAFT_ERROR_LIMIT = 500
+
+/**
+ * B5-03 kill-switch — closes the ADMIN WRITE commands (settings save + explicit
+ * replacement) so an anomaly can freeze new delivery facts while every existing
+ * group / generation / identity / reminder stays readable. Mirrors the
+ * executor kill-switch pattern: empty/0/false means enabled.
+ */
+export function isWechatDraftAdminWritesDisabled(): boolean {
+  const value = process.env[WECHAT_DRAFT_ADMIN_WRITES_DISABLED_ENV]
+  return value != null && value !== '' && value !== '0' && value.toLowerCase() !== 'false'
+}
 
 /**
  * Deterministic submission-attempt key — ONE execution, ONE immutable row.
@@ -232,7 +271,19 @@ const TASK_COLUMNS = `id, task_id, article_id, post_ref, version, account_id, st
   title, html_projection, plaintext_projection, cover_image_url, digest,
   content_sha256, projection_sha256, source_url, remote_draft_id, provider_error,
   created_at, updated_at, revision, attempt_count, classification, needs_author,
-  next_attempt_at, last_error, claimed_at, lease_token, lease_expires_at`
+  next_attempt_at, last_error, claimed_at, lease_token, lease_expires_at,
+  generation, settings_revision`
+
+/** B5-03 — replacement rows share the SAME lifecycle column names as tasks. */
+const REPLACEMENT_COLUMNS = `id, replacement_key, article_id, version, account_id,
+  replaces_task_id, status, title, html_projection, plaintext_projection,
+  cover_image_url, digest, content_sha256, projection_sha256, source_url,
+  remote_draft_id, provider_error, settings_revision, created_at, updated_at,
+  revision, attempt_count, classification, needs_author, next_attempt_at,
+  last_error, claimed_at, lease_token, lease_expires_at, generation`
+
+const GENERATION_COLUMNS = `id, article_id, account_id, generation, version, task_id,
+  replaces_task_id, status, settings_revision, created_at, updated_at`
 
 async function findFormalPublication(db: Database, articleId: number): Promise<FormalPublicationRow | null> {
   return db
@@ -259,6 +310,273 @@ async function findTaskRow(db: Database, taskId: string): Promise<WechatDraftTas
     .prepare(`SELECT ${TASK_COLUMNS} FROM wechat_draft_tasks WHERE task_id = ?`)
     .bind(taskId)
     .first<WechatDraftTaskRow>()
+}
+
+/* ------------------------------------------------------------------ */
+/* B5-03 — lifecycle view (tasks + replacements normalized)            */
+/* ------------------------------------------------------------------ */
+
+async function findReplacementRow(db: Database, key: string): Promise<WechatDraftReplacementRow | null> {
+  return db
+    .prepare(`SELECT ${REPLACEMENT_COLUMNS} FROM wechat_draft_replacements WHERE replacement_key = ?`)
+    .bind(key)
+    .first<WechatDraftReplacementRow>()
+}
+
+function taskToLifecycle(row: WechatDraftTaskRow): WechatLifecycleRowView {
+  return {
+    kind: 'task',
+    key: row.task_id,
+    articleId: row.article_id,
+    version: row.version,
+    accountId: row.account_id,
+    status: row.status,
+    title: row.title,
+    htmlProjection: row.html_projection,
+    plaintextProjection: row.plaintext_projection,
+    coverImageUrl: row.cover_image_url,
+    digest: row.digest,
+    contentSha256: row.content_sha256,
+    projectionSha256: row.projection_sha256,
+    sourceUrl: row.source_url,
+    remoteDraftId: row.remote_draft_id,
+    providerError: row.provider_error,
+    settingsRevision: row.settings_revision,
+    generation: row.generation,
+    replacesTaskId: null,
+    revision: row.revision,
+    attemptCount: row.attempt_count,
+    classification: row.classification,
+    needsAuthor: row.needs_author,
+    nextAttemptAt: row.next_attempt_at,
+    lastError: row.last_error,
+    claimedAt: row.claimed_at,
+    leaseToken: row.lease_token,
+    leaseExpiresAt: row.lease_expires_at,
+  }
+}
+
+function replacementToLifecycle(row: WechatDraftReplacementRow): WechatLifecycleRowView {
+  return {
+    kind: 'replacement',
+    key: row.replacement_key,
+    articleId: row.article_id,
+    version: row.version,
+    accountId: row.account_id,
+    status: row.status,
+    title: row.title,
+    htmlProjection: row.html_projection,
+    plaintextProjection: row.plaintext_projection,
+    coverImageUrl: row.cover_image_url,
+    digest: row.digest,
+    contentSha256: row.content_sha256,
+    projectionSha256: row.projection_sha256,
+    sourceUrl: row.source_url,
+    remoteDraftId: row.remote_draft_id,
+    providerError: row.provider_error,
+    settingsRevision: row.settings_revision,
+    generation: row.generation,
+    replacesTaskId: row.replaces_task_id,
+    revision: row.revision,
+    attemptCount: row.attempt_count,
+    classification: row.classification,
+    needsAuthor: row.needs_author,
+    nextAttemptAt: row.next_attempt_at,
+    lastError: row.last_error,
+    claimedAt: row.claimed_at,
+    leaseToken: row.lease_token,
+    leaseExpiresAt: row.lease_expires_at,
+  }
+}
+
+/** Resolve ANY lifecycle row (base task or replacement) by its key. */
+async function findLifecycleRow(db: Database, key: string): Promise<WechatLifecycleRowView | null> {
+  if (!key) return null
+  const task = await findTaskRow(db, key)
+  if (task) return taskToLifecycle(task)
+  const replacement = await findReplacementRow(db, key)
+  if (replacement) return replacementToLifecycle(replacement)
+  return null
+}
+
+/**
+ * The CURRENT live delivery of a (article, account) group: the highest
+ * generation that is NOT superseded. Returns the lifecycle view for it.
+ */
+async function findCurrentLiveDelivery(
+  db: Database,
+  articleId: number,
+  accountId: string,
+): Promise<WechatLifecycleRowView | null> {
+  const { results: gens } = await db
+    .prepare(
+      `SELECT ${GENERATION_COLUMNS} FROM wechat_draft_generations
+       WHERE article_id = ? AND account_id = ? AND status != 'superseded'
+       ORDER BY generation DESC LIMIT 1`,
+    )
+    .bind(articleId, accountId)
+    .all<WechatDraftGenerationRow>()
+  const gen = gens?.[0]
+  if (!gen) return null
+  return findLifecycleRow(db, gen.task_id)
+}
+
+/** The projection shape for a lifecycle view (read API parity). */
+export function projectionFromView(view: Pick<WechatLifecycleRowView, 'title' | 'htmlProjection' | 'plaintextProjection' | 'coverImageUrl' | 'digest' | 'sourceUrl'>): WechatDraftProjection {
+  return {
+    title: view.title,
+    html: view.htmlProjection,
+    plaintext: view.plaintextProjection,
+    coverImageUrl: view.coverImageUrl ?? '',
+    digest: view.digest ?? '',
+    sourceUrl: view.sourceUrl,
+  }
+}
+
+/**
+ * B5-03 — human-readable delivery view: a delivered draft NEVER claims to be
+ * published. `submitted` maps to 待微信确认; every other state is 未交付.
+ */
+export function wechatDeliveryView(row: WechatLifecycleRowView): WechatDeliveryView {
+  const awaiting = row.status === 'submitted'
+  const humanLabel = awaiting
+    ? '待微信确认'
+    : row.status === 'superseded'
+      ? '历史代次（已交付）'
+      : '未交付'
+  return {
+    kind: row.kind,
+    key: row.key,
+    articleId: row.articleId,
+    version: row.version,
+    accountId: row.accountId,
+    generation: row.generation,
+    replacesTaskId: row.replacesTaskId,
+    status: row.status,
+    awaitingWechatConfirmation: awaiting,
+    humanLabel,
+    remoteDraftId: row.remoteDraftId,
+    settingsRevision: row.settingsRevision,
+    title: row.title,
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* B5-03 — 交付前设置修订 (账号/设置修订, 与正文版本/代次分离)          */
+/* ------------------------------------------------------------------ */
+
+async function findSettingsRow(db: Database, articleId: number, accountId: string): Promise<WechatDraftSettingsRow | null> {
+  return db
+    .prepare(
+      `SELECT id, article_id, account_id, settings_revision, title_override,
+              digest_override, cover_image_override, created_at, updated_at
+       FROM wechat_draft_settings WHERE article_id = ? AND account_id = ?`,
+    )
+    .bind(articleId, accountId)
+    .first<WechatDraftSettingsRow>()
+}
+
+/** Projection settings from a settings row (empty overrides → no override). */
+function settingsToProjection(settings: WechatDraftSettingsRow | null): WechatProjectionSettings | undefined {
+  if (!settings) return undefined
+  const out: WechatProjectionSettings = {}
+  if ((settings.title_override ?? '').trim()) out.title = settings.title_override!.trim()
+  if ((settings.digest_override ?? '').trim()) out.digest = settings.digest_override!.trim()
+  if ((settings.cover_image_override ?? '').trim()) out.coverImageUrl = settings.cover_image_override!.trim()
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+/**
+ * B5-03 — save (or update) the deliverable settings for (article, account).
+ *
+ * The FIRST save maps to settings revision 1 (初始配置映射初始修订, 不猜历史);
+ * every later save bumps the revision. Adjusting settings NEVER changes the
+ * article body version and NEVER advances the delivery generation — the
+ * pre-delivery derivation re-applies them to the SAME task (沿用代次). After
+ * delivery the settings only feed an EXPLICIT replacement draft.
+ */
+export async function saveWechatDraftSettings(
+  db: Database,
+  input: SaveWechatDraftSettingsInput,
+): Promise<SaveWechatDraftSettingsResult> {
+  if (isWechatDraftAdminWritesDisabled()) {
+    return { outcome: 'disabled', reason: 'wechat admin writes are disabled by WECHAT_DRAFT_ADMIN_WRITES_DISABLED' }
+  }
+  if (!Number.isInteger(input.articleId) || input.articleId <= 0) {
+    return { outcome: 'invalid', reason: 'saveWechatDraftSettings: articleId is required' }
+  }
+  const accountId = normalizeWechatAccountId(input.accountId ?? '')
+  if (!accountId) {
+    return { outcome: 'invalid', reason: 'saveWechatDraftSettings: accountId is required (letters/digits/-/_)' }
+  }
+  const now = input.now ?? unixNow()
+  const existing = await findSettingsRow(db, input.articleId, accountId)
+  const title = (input.title ?? '').trim()
+  const digest = (input.digest ?? '').trim()
+  const coverImageUrl = (input.coverImageUrl ?? '').trim()
+  if (!existing) {
+    const { meta } = (await db
+      .prepare(
+        `INSERT INTO wechat_draft_settings
+           (article_id, account_id, settings_revision, title_override, digest_override,
+            cover_image_override, created_at, updated_at)
+         VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+         ON CONFLICT(article_id, account_id) DO NOTHING`,
+      )
+      .bind(
+        input.articleId,
+        accountId,
+        title || null,
+        digest || null,
+        coverImageUrl || null,
+        now,
+        now,
+      )
+      .run()) as { meta: { changes?: number } }
+    const settings = await findSettingsRow(db, input.articleId, accountId)
+    return {
+      outcome: 'saved',
+      created: (meta.changes ?? 0) > 0,
+      settingsRevision: settings?.settings_revision ?? 1,
+      settings: settings ?? {
+        id: 0,
+        article_id: input.articleId,
+        account_id: accountId,
+        settings_revision: 1,
+        title_override: title || null,
+        digest_override: digest || null,
+        cover_image_override: coverImageUrl || null,
+        created_at: now,
+        updated_at: now,
+      },
+    }
+  }
+
+  await db
+    .prepare(
+      `UPDATE wechat_draft_settings
+       SET settings_revision = settings_revision + 1,
+           title_override = ?, digest_override = ?, cover_image_override = ?,
+           updated_at = ?
+       WHERE article_id = ? AND account_id = ?`,
+    )
+    .bind(title || null, digest || null, coverImageUrl || null, now, input.articleId, accountId)
+    .run()
+  const settings = await findSettingsRow(db, input.articleId, accountId)
+  return {
+    outcome: 'saved',
+    created: false,
+    settingsRevision: settings?.settings_revision ?? existing.settings_revision + 1,
+    settings: settings ?? existing,
+  }
+}
+
+export async function readWechatDraftSettings(
+  db: Database,
+  articleId: number,
+  accountId: string,
+): Promise<WechatDraftSettingsRow | null> {
+  return findSettingsRow(db, articleId, normalizeWechatAccountId(accountId) ?? '')
 }
 
 export async function readWechatDraftTask(
@@ -318,6 +636,70 @@ export async function listWechatDraftAttempts(db: Database, taskId: string): Pro
 /* ------------------------------------------------------------------ */
 /* derivation command                                                 */
 /* ------------------------------------------------------------------ */
+
+/** Next monotonic generation number for the (article, account) delivery group. */
+async function nextWechatGeneration(db: Database, articleId: number, accountId: string): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COALESCE(MAX(generation), 0) + 1 AS next
+       FROM wechat_draft_generations WHERE article_id = ? AND account_id = ?`,
+    )
+    .bind(articleId, accountId)
+    .first<{ next: number }>()
+  return row?.next ?? 1
+}
+
+/** Register one delivery-generation ledger row (idempotent, 旧代次不删除). */
+function registerWechatGeneration(
+  db: Database,
+  opts: {
+    articleId: number
+    accountId: string
+    generation: number
+    version: number
+    taskId: string
+    replacesTaskId: string | null
+    status: WechatDraftTaskRow['status']
+    settingsRevision: number
+    now: number
+  },
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO wechat_draft_generations
+         (article_id, account_id, generation, version, task_id, replaces_task_id,
+          status, settings_revision, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(article_id, account_id, generation) DO NOTHING`,
+    )
+    .bind(
+      opts.articleId,
+      opts.accountId,
+      opts.generation,
+      opts.version,
+      opts.taskId,
+      opts.replacesTaskId,
+      opts.status,
+      opts.settingsRevision,
+      opts.now,
+      opts.now,
+    )
+}
+
+/** Keep the generation ledger status in lockstep with the delivery row status. */
+function syncGenerationStatus(
+  db: Database,
+  taskKey: string,
+  status: WechatDraftTaskRow['status'],
+  now: number,
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE wechat_draft_generations SET status = ?, updated_at = ? WHERE task_id = ?`,
+    )
+    .bind(status, now, taskKey)
+}
+
 
 export async function deriveWechatDraft(
   db: Database,
@@ -389,10 +771,13 @@ export async function deriveWechatDraft(
     }
   }
 
+  const settings = await findSettingsRow(db, input.articleId, accountId)
+  const settingsRevision = settings?.settings_revision ?? 0
   const contentSha256 = snapshot.content_snapshot_sha256 ?? versionRow.content_snapshot_sha256 ?? ''
   const projection = projectWechatDraft(snapshot, {
     sourceUrl: formal.public_url,
     siteUrl: input.siteUrl,
+    settings: settingsToProjection(settings),
   })
   const digest = projectionDigest(projection, contentSha256)
   const taskId = wechatDraftTaskIdFor(input.articleId, input.version, accountId)
@@ -425,14 +810,16 @@ export async function deriveWechatDraft(
   // D1 mirrors SQLite `changes()`: an `ON CONFLICT DO NOTHING` skip reports 0,
   // a real insert reports 1 — the truthful created flag that gates the
   // provider hand-off below (a duplicate derivation must never re-submit).
+  const generation = await nextWechatGeneration(db, input.articleId, accountId)
   const insert = (await db
     .prepare(
       `INSERT INTO wechat_draft_tasks
          (task_id, article_id, post_ref, version, account_id, status,
           title, html_projection, plaintext_projection, cover_image_url, digest,
-          content_sha256, projection_sha256, source_url, created_at, updated_at)
+          content_sha256, projection_sha256, source_url,
+          generation, settings_revision, created_at, updated_at)
        VALUES (?, ?, (SELECT COALESCE((SELECT post_ref FROM articles WHERE id = ?), 0)), ?, ?, 'draft',
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(article_id, version, account_id) DO NOTHING`,
     )
     .bind(
@@ -449,6 +836,8 @@ export async function deriveWechatDraft(
       contentSha256,
       digest,
       projection.sourceUrl,
+      generation,
+      settingsRevision,
       now,
       now,
     )
@@ -457,15 +846,39 @@ export async function deriveWechatDraft(
   const created = (insert.meta?.changes ?? 0) > 0
 
   if (created) {
-    // An older derived task for the same (article, account) is superseded —
-    // one live target per account, history retained.
-    await db
-      .prepare(
-        `UPDATE wechat_draft_tasks SET status = 'superseded', updated_at = ?
-         WHERE article_id = ? AND account_id = ? AND version < ? AND status != 'superseded'`,
-      )
-      .bind(now, input.articleId, accountId, input.version)
-      .run()
+    // Register the new generation ledger row, then supersede older versions of
+    // the same (article, account) — one live target per account, history kept.
+    await db.batch([
+      registerWechatGeneration(db, {
+        articleId: input.articleId,
+        accountId,
+        generation,
+        version: input.version,
+        taskId,
+        replacesTaskId: null,
+        status: 'draft',
+        settingsRevision,
+        now,
+      }),
+      db
+        .prepare(
+          `UPDATE wechat_draft_tasks SET status = 'superseded', updated_at = ?
+           WHERE article_id = ? AND account_id = ? AND version < ? AND status != 'superseded'`,
+        )
+        .bind(now, input.articleId, accountId, input.version),
+      db
+        .prepare(
+          `UPDATE wechat_draft_replacements SET status = 'superseded', updated_at = ?
+           WHERE article_id = ? AND account_id = ? AND version < ? AND status IN ('draft', 'submitted', 'failed')`,
+        )
+        .bind(now, input.articleId, accountId, input.version),
+      db
+        .prepare(
+          `UPDATE wechat_draft_generations SET status = 'superseded', updated_at = ?
+           WHERE article_id = ? AND account_id = ? AND version < ? AND status != 'superseded'`,
+        )
+        .bind(now, input.articleId, accountId, input.version),
+    ])
   }
 
   const current = await findTaskRow(db, taskId)
@@ -516,6 +929,7 @@ export async function deriveWechatDraft(
              WHERE task_id = ?`,
           )
           .bind(verdict.remoteDraftId, now, taskId),
+        syncGenerationStatus(db, taskId, 'submitted', now),
       ])
       const task = (await findTaskRow(db, taskId)) ?? { ...current }
       return {
@@ -527,11 +941,13 @@ export async function deriveWechatDraft(
         task,
         created: true,
         projection,
+        generation,
+        settingsRevision,
         classification: 'ok',
       }
     }
 
-    await recordFailedHandoff(db, taskId, { verdict, now, attemptNo: 1, maxAttempts })
+    await recordFailedHandoff(db, TARGET_TASK, taskId, { verdict, now, attemptNo: 1, maxAttempts })
     const task = (await findTaskRow(db, taskId)) ?? { ...current }
     return {
       outcome: verdict.classification === 'unknown' ? 'unknown' : 'failed',
@@ -542,7 +958,54 @@ export async function deriveWechatDraft(
       task,
       created: true,
       projection,
+      generation,
+      settingsRevision,
       classification: verdict.classification,
+    }
+  }
+
+  // B5-03 — 交付前设置调整沿用代次: a NOT-YET-DELIVERED row (draft/failed) is
+  // re-projected in place when the settings revision or projection changed.
+  // The task id / version / generation all stay — only the delivery body and
+  // settings_revision move. A DELIVERED row is NEVER touched here (the caller
+  // must explicitly create a replacement draft instead).
+  if (!created && (current.status === 'draft' || current.status === 'failed')) {
+    const changed = settingsRevision !== current.settings_revision || digest !== current.projection_sha256
+    if (changed) {
+      await db
+        .prepare(
+          `UPDATE wechat_draft_tasks
+           SET title = ?, html_projection = ?, plaintext_projection = ?,
+               cover_image_url = ?, digest = ?, projection_sha256 = ?,
+               settings_revision = ?, updated_at = ?
+           WHERE task_id = ? AND status IN ('draft', 'failed')`,
+        )
+        .bind(
+          projection.title,
+          projection.html,
+          projection.plaintext,
+          projection.coverImageUrl || null,
+          projection.digest,
+          digest,
+          settingsRevision,
+          now,
+          taskId,
+        )
+        .run()
+      const updated = await findTaskRow(db, taskId)
+      const latest = updated ?? { ...current }
+      return {
+        outcome: 'updated',
+        articleId: input.articleId,
+        version: input.version,
+        accountId,
+        taskId,
+        task: latest,
+        created: false,
+        projection,
+        generation: latest.generation,
+        settingsRevision: latest.settings_revision,
+      }
     }
   }
 
@@ -555,6 +1018,8 @@ export async function deriveWechatDraft(
     task: { ...current },
     created,
     projection,
+    generation: current.generation,
+    settingsRevision: current.settings_revision,
   }
 }
 
@@ -632,10 +1097,20 @@ function finalizeRunningAttempt(
     )
 }
 
+/* B5-03 — one lifecycle target (base task table or replacement table). */
+export interface LifecycleTarget {
+  table: 'wechat_draft_tasks' | 'wechat_draft_replacements'
+  keyColumn: 'task_id' | 'replacement_key'
+}
+
+const TARGET_TASK: LifecycleTarget = { table: 'wechat_draft_tasks', keyColumn: 'task_id' }
+const TARGET_REPLACEMENT: LifecycleTarget = { table: 'wechat_draft_replacements', keyColumn: 'replacement_key' }
+
 /** Finalize (or insert-and-finalize) a failed hand-off with classification. */
 function transitionFailedTask(
   db: Database,
-  taskId: string,
+  target: LifecycleTarget,
+  key: string,
   opts: {
     classification: Exclude<WechatDraftAttemptClassification, 'ok'>
     lastError: string
@@ -646,7 +1121,7 @@ function transitionFailedTask(
 ) {
   return db
     .prepare(
-      `UPDATE wechat_draft_tasks
+      `UPDATE ${target.table}
        SET status = 'failed',
            classification = ?,
            needs_author = ?,
@@ -658,7 +1133,7 @@ function transitionFailedTask(
            lease_expires_at = NULL,
            revision = revision + 1,
            updated_at = ?
-       WHERE task_id = ?`,
+       WHERE ${target.keyColumn} = ?`,
     )
     .bind(
       opts.classification,
@@ -667,21 +1142,22 @@ function transitionFailedTask(
       sanitizeWechatProviderError(opts.lastError),
       opts.nextAttemptAt,
       opts.now,
-      taskId,
+      key,
     )
 }
 
 /**
- * Apply a rejected verdict (retryable / needs-author / unknown) to a task and
- * write its immutable attempt row. Used by BOTH the derivation hand-off (no
- * running row → the attempt is inserted already-finalized) and the executor
- * (the claim-time running row is finalized in place) so the two surfaces share
- * one state machine.
- * Returns the fresh task row + the classified outcome for the caller.
+ * Apply a rejected verdict (retryable / needs-author / unknown) to a task or
+ * replacement and write its immutable attempt row. Used by the derivation /
+ * replacement hand-off (no running row → the attempt is inserted already-
+ * finalized) and the executor (the claim-time running row is finalized in
+ * place) so the two surfaces share one state machine.
+ * Returns the classified outcome for the caller.
  */
 async function recordFailedHandoff(
   db: Database,
-  taskId: string,
+  target: LifecycleTarget,
+  key: string,
   opts: {
     verdict: Extract<WechatExecutionVerdict, { kind: 'rejected' }>
     now: number
@@ -693,11 +1169,25 @@ async function recordFailedHandoff(
     backoffFactor?: number
     backoffMaxSeconds?: number
   },
-): Promise<{ task: WechatDraftTaskRow; outcome: 'retried' | 'failed' | 'needs-author' | 'unknown' }> {
+): Promise<'retried' | 'failed' | 'needs-author' | 'unknown'> {
   const { verdict, now, attemptNo, maxAttempts } = opts
   const backoffSeconds = opts.backoffSeconds ?? WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_SECONDS
   const backoffFactor = opts.backoffFactor ?? WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_FACTOR
   const backoffMax = opts.backoffMaxSeconds ?? WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_MAX_SECONDS
+  const syncFailed = syncGenerationStatus(db, key, 'failed', now)
+  // On a fresh hand-off (no running attempt) the row's attempt_count was NOT
+  // incremented by a claim — advance it here so the next executor claim uses a
+  // fresh attempt number and its own immutable attempt row (one execution,
+  // one fact; never a reused/overwritten attempt key).
+  const countStmt = opts.runningAttemptKey
+    ? null
+    : db
+        .prepare(
+          `UPDATE ${target.table}
+           SET attempt_count = attempt_count + 1, revision = revision + 1, updated_at = ?
+           WHERE ${target.keyColumn} = ?`,
+        )
+        .bind(now, key)
 
   const attemptStmt = opts.runningAttemptKey
     ? finalizeRunningAttempt(
@@ -709,36 +1199,40 @@ async function recordFailedHandoff(
         verdict.error,
         now,
       )
-    : insertAttemptRow(db, taskId, attemptNo, 'unknown', 'unknown', now, now, null, verdict.error)
+    : insertAttemptRow(db, key, attemptNo, 'unknown', 'unknown', now, now, null, verdict.error)
 
   if (verdict.classification === 'unknown') {
     await db.batch([
       attemptStmt,
-      transitionFailedTask(db, taskId, {
+      transitionFailedTask(db, target, key, {
         classification: 'unknown',
         lastError: verdict.error,
         needsAuthor: true,
         nextAttemptAt: null,
         now,
       }),
+      syncFailed,
+      ...(countStmt ? [countStmt] : []),
     ])
-    return { task: (await findTaskRow(db, taskId))!, outcome: 'unknown' }
+    return 'unknown'
   }
 
   if (verdict.classification === 'needs-author') {
     await db.batch([
       opts.runningAttemptKey
         ? finalizeRunningAttempt(db, opts.runningAttemptKey, 'needs-author', 'failed', null, verdict.error, now)
-        : insertAttemptRow(db, taskId, attemptNo, 'needs-author', 'failed', now, now, null, verdict.error),
-      transitionFailedTask(db, taskId, {
+        : insertAttemptRow(db, key, attemptNo, 'needs-author', 'failed', now, now, null, verdict.error),
+      transitionFailedTask(db, target, key, {
         classification: 'needs-author',
         lastError: verdict.error,
         needsAuthor: true,
         nextAttemptAt: null,
         now,
       }),
+      syncFailed,
+      ...(countStmt ? [countStmt] : []),
     ])
-    return { task: (await findTaskRow(db, taskId))!, outcome: 'needs-author' }
+    return 'needs-author'
   }
 
   // retryable: re-arm below the cap, stop (→ author todo) at the cap.
@@ -746,32 +1240,36 @@ async function recordFailedHandoff(
     await db.batch([
       opts.runningAttemptKey
         ? finalizeRunningAttempt(db, opts.runningAttemptKey, 'retryable', 'failed', null, verdict.error, now)
-        : insertAttemptRow(db, taskId, attemptNo, 'retryable', 'failed', now, now, null, verdict.error),
-      transitionFailedTask(db, taskId, {
+        : insertAttemptRow(db, key, attemptNo, 'retryable', 'failed', now, now, null, verdict.error),
+      transitionFailedTask(db, target, key, {
         classification: 'needs-author',
         lastError: `retries-exhausted: ${verdict.error}`,
         needsAuthor: true,
         nextAttemptAt: null,
         now,
       }),
+      syncFailed,
+      ...(countStmt ? [countStmt] : []),
     ])
-    return { task: (await findTaskRow(db, taskId))!, outcome: 'failed' }
+    return 'failed'
   }
 
   const nextAttemptAt = now + wechatRetryBackoffSeconds(attemptNo, backoffSeconds, backoffFactor, backoffMax)
   await db.batch([
     opts.runningAttemptKey
       ? finalizeRunningAttempt(db, opts.runningAttemptKey, 'retryable', 'retried', null, verdict.error, now)
-      : insertAttemptRow(db, taskId, attemptNo, 'retryable', 'retried', now, now, null, verdict.error),
-    transitionFailedTask(db, taskId, {
+      : insertAttemptRow(db, key, attemptNo, 'retryable', 'retried', now, now, null, verdict.error),
+    transitionFailedTask(db, target, key, {
       classification: 'retryable',
       lastError: verdict.error,
       needsAuthor: false,
       nextAttemptAt,
       now,
     }),
+    syncFailed,
+    ...(countStmt ? [countStmt] : []),
   ])
-  return { task: (await findTaskRow(db, taskId))!, outcome: 'retried' }
+  return 'retried'
 }
 
 /* ------------------------------------------------------------------ */
@@ -832,7 +1330,10 @@ export async function runWechatDraftExecutor(
   const backoffFactor = input.retryBackoffFactor ?? WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_FACTOR
   const backoffMax = input.retryBackoffMaxSeconds ?? WECHAT_DRAFT_DEFAULT_RETRY_BACKOFF_MAX_SECONDS
 
-  const { results: candidates } = await db
+  // Scan BOTH lifecycle surfaces — base tasks AND explicit replacement drafts
+  // — under the SAME due/lease/needs-author conditions. A replacement is just
+  // another delivery generation awaiting the draft-box hand-off (自动化止于草稿).
+  const { results: baseCandidates } = await db
     .prepare(
       `SELECT ${TASK_COLUMNS} FROM wechat_draft_tasks
        WHERE needs_author = 0
@@ -846,16 +1347,33 @@ export async function runWechatDraftExecutor(
     .bind(now, now, now, limit)
     .all<WechatDraftTaskRow>()
 
-  result.scanned = candidates?.length ?? 0
+  const { results: replacementCandidates } = await db
+    .prepare(
+      `SELECT ${REPLACEMENT_COLUMNS} FROM wechat_draft_replacements
+       WHERE needs_author = 0
+         AND status IN ('draft', 'failed')
+         AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+         AND ((status = 'draft' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+              OR (status = 'failed' AND classification = 'retryable' AND next_attempt_at <= ?))
+       ORDER BY id ASC
+       LIMIT ?`,
+    )
+    .bind(now, now, now, limit)
+    .all<WechatDraftReplacementRow>()
 
-  for (const row of candidates ?? []) {
-    const claimed = await claimWechatTask(db, row, { now, leaseSeconds, maxAttempts })
-    if (!claimed) continue // another runner already owns or advanced this row
+  result.scanned = (baseCandidates?.length ?? 0) + (replacementCandidates?.length ?? 0)
+
+  const runClaim = async (
+    target: LifecycleTarget,
+    key: string,
+  ): Promise<string | null> => {
+    const claimed = await claimLifecycleTask(db, target, key, { now, leaseSeconds, maxAttempts })
+    if (!claimed) return null // another runner already owns or advanced this row
 
     result.claimed += 1
     // A reclaimed crashed execution leaves its attempt running — finalize it
     // accordingly (immutable row, never deleted) before the new one.
-    await abandonOrphanedWechatAttempts(db, row.task_id, now)
+    await abandonOrphanedWechatAttempts(db, claimed.key, now)
 
     await db
       .prepare(
@@ -866,16 +1384,16 @@ export async function runWechatDraftExecutor(
          ON CONFLICT(attempt_key) DO NOTHING`,
       )
       .bind(
-        wechatDraftAttemptKey(row.task_id, claimed.attempt_count),
-        row.task_id,
-        claimed.attempt_count,
+        wechatDraftAttemptKey(claimed.key, claimed.attemptCount),
+        claimed.key,
+        claimed.attemptCount,
         now,
         now,
         now,
       )
       .run()
 
-    const outcome = await executeWechatSubmission(db, claimed, {
+    return executeWechatSubmission(db, target, claimed, {
       provider,
       now,
       maxAttempts,
@@ -883,7 +1401,9 @@ export async function runWechatDraftExecutor(
       backoffFactor,
       backoffMax,
     })
+  }
 
+  const tally = (outcome: string) => {
     if (outcome === 'submitted') result.submitted += 1
     else if (outcome === 'retried') result.retried += 1
     else if (outcome === 'failed') result.failed += 1
@@ -891,37 +1411,48 @@ export async function runWechatDraftExecutor(
     else if (outcome === 'unknown') result.unknown += 1
   }
 
+  for (const row of baseCandidates ?? []) {
+    const outcome = await runClaim(TARGET_TASK, row.task_id)
+    if (outcome) tally(outcome)
+  }
+  for (const row of replacementCandidates ?? []) {
+    const outcome = await runClaim(TARGET_REPLACEMENT, row.replacement_key)
+    if (outcome) tally(outcome)
+  }
+
   return result
 }
 
 /**
- * Atomically claim a due task for THIS runner. Returns the claimed row
- * (attempt_count already incremented, lease held) only when the runner truly
- * owns the lease; otherwise null (a concurrent runner won or advanced it).
+ * Atomically claim a due lifecycle row (task or replacement) for THIS runner.
+ * Returns the claimed row (attempt_count already incremented, lease held) only
+ * when the runner truly owns the lease; otherwise null (a concurrent runner
+ * won or advanced it).
  */
-async function claimWechatTask(
+async function claimLifecycleTask(
   db: Database,
-  row: WechatDraftTaskRow,
+  target: LifecycleTarget,
+  key: string,
   opts: { now: number; leaseSeconds: number; maxAttempts: number },
-): Promise<WechatDraftTaskRow | null> {
+): Promise<WechatLifecycleRowView | null> {
   const { now, leaseSeconds } = opts
   const token = crypto.randomUUID()
   await db
     .prepare(
-      `UPDATE wechat_draft_tasks
+      `UPDATE ${target.table}
        SET claimed_at = ?, lease_expires_at = ?, lease_token = ?,
            attempt_count = attempt_count + 1, revision = revision + 1, updated_at = ?
-       WHERE task_id = ?
+       WHERE ${target.keyColumn} = ?
          AND needs_author = 0
          AND status IN ('draft', 'failed')
          AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
          AND ((status = 'draft' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
               OR (status = 'failed' AND classification = 'retryable' AND next_attempt_at <= ?))`,
     )
-    .bind(now, now + leaseSeconds, token, now, row.task_id, now, now, now)
+    .bind(now, now + leaseSeconds, token, now, key, now, now, now)
     .run()
-  const after = await findTaskRow(db, row.task_id)
-  if (!after || after.lease_token !== token) return null // our conditional UPDATE matched nothing
+  const after = await findLifecycleRow(db, key)
+  if (!after || after.leaseToken !== token) return null // our conditional UPDATE matched nothing
   return after
 }
 
@@ -938,12 +1469,13 @@ async function abandonOrphanedWechatAttempts(db: Database, taskId: string, now: 
 }
 
 /**
- * Submit one claimed task through the provider and converge the task row +
+ * Submit one claimed lifecycle row through the provider and converge the row +
  * immutable attempt fact in ONE batch. Returns the classified outcome.
  */
 async function executeWechatSubmission(
   db: Database,
-  row: WechatDraftTaskRow,
+  target: LifecycleTarget,
+  row: WechatLifecycleRowView,
   opts: {
     provider: WechatDraftProvider
     now: number
@@ -954,10 +1486,19 @@ async function executeWechatSubmission(
   },
 ): Promise<'submitted' | 'retried' | 'failed' | 'needs-author' | 'unknown'> {
   const { provider, now, maxAttempts, backoffSeconds, backoffFactor, backoffMax } = opts
-  const taskId = row.task_id
-  const attemptNo = row.attempt_count
-  const projection = projectionFromRow(row)
-  const payload = buildSubmitPayload(row, projection)
+  const taskId = row.key
+  const attemptNo = row.attemptCount
+  const projection = projectionFromView(row)
+  const payload = buildSubmitPayload(
+    {
+      task_id: taskId,
+      article_id: row.articleId,
+      version: row.version,
+      account_id: row.accountId,
+      content_sha256: row.contentSha256,
+    },
+    projection,
+  )
 
   let verdict: WechatExecutionVerdict
   try {
@@ -979,7 +1520,7 @@ async function executeWechatSubmission(
       ),
       db
         .prepare(
-          `UPDATE wechat_draft_tasks
+          `UPDATE ${target.table}
            SET status = 'submitted',
                remote_draft_id = COALESCE(remote_draft_id, ?),
                provider_error = NULL,
@@ -992,14 +1533,15 @@ async function executeWechatSubmission(
                lease_expires_at = NULL,
                revision = revision + 1,
                updated_at = ?
-           WHERE task_id = ?`,
+           WHERE ${target.keyColumn} = ?`,
         )
         .bind(verdict.remoteDraftId, now, taskId),
+      syncGenerationStatus(db, taskId, 'submitted', now),
     ])
     return 'submitted'
   }
 
-  const { outcome } = await recordFailedHandoff(db, taskId, {
+  return recordFailedHandoff(db, target, taskId, {
     verdict,
     now,
     attemptNo,
@@ -1009,7 +1551,6 @@ async function executeWechatSubmission(
     backoffFactor,
     backoffMaxSeconds: backoffMax,
   })
-  return outcome
 }
 
 /* ------------------------------------------------------------------ */
@@ -1041,22 +1582,23 @@ export async function reconcileWechatDraft(
   const { taskId, now = unixNow() } = input
   if (!taskId || taskId.trim() === '') return { outcome: 'invalid', reason: 'taskId is required' }
 
-  const task = await findTaskRow(db, taskId)
-  if (!task) return { outcome: 'not-found', taskId }
+  const row = await findLifecycleRow(db, taskId)
+  if (!row) return { outcome: 'not-found', taskId }
+  const target: LifecycleTarget = row.kind === 'task' ? TARGET_TASK : TARGET_REPLACEMENT
 
   // Already delivered — a late result of a previously accepted call (or a
   // reconcile that already resolved): nothing to do, nothing overwritten.
-  if (task.status === 'submitted') {
-    return { outcome: 'replayed', taskId, task: { ...task } }
+  if (row.status === 'submitted') {
+    return { outcome: 'replayed', taskId, ...(await withRawRefs(db, row, { delivery: row })) }
   }
-  // Only result-unknown tasks are reconcilable; anything else is a replay.
-  if (task.status !== 'failed' || task.classification !== 'unknown' || task.needs_author !== 1) {
-    return { outcome: 'not-unknown', taskId, task: { ...task } }
+  // Only result-unknown rows are reconcilable; anything else is a replay.
+  if (row.status !== 'failed' || row.classification !== 'unknown' || row.needsAuthor !== 1) {
+    return { outcome: 'not-unknown', taskId, ...(await withRawRefs(db, row, { delivery: row })) }
   }
 
   const provider = input.provider
   if (!provider) {
-    return { outcome: 'no-provider', taskId, task: { ...task } }
+    return { outcome: 'no-provider', taskId, ...(await withRawRefs(db, row, { delivery: row })) }
   }
 
   // Deterministic reconcile sequence id: the max existing attempt_no + 1.
@@ -1081,40 +1623,44 @@ export async function reconcileWechatDraft(
   let query
   try {
     query = await provider.queryDraft({
-      taskId: task.task_id,
-      articleId: task.article_id,
-      version: task.version,
-      accountId: task.account_id,
-      sourceUrl: task.source_url,
+      taskId: row.key,
+      articleId: row.articleId,
+      version: row.version,
+      accountId: row.accountId,
+      sourceUrl: row.sourceUrl,
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     await db.batch([
       finalizeReconcileAttempt(db, attemptKey, 'unknown', 'unknown', null, message, now),
-      transitionFailedTask(db, taskId, {
+      transitionFailedTask(db, target, taskId, {
         classification: 'unknown',
         lastError: `reconcile-query-lost: ${message}`,
         needsAuthor: true,
         nextAttemptAt: null,
         now,
       }),
+      syncGenerationStatus(db, taskId, 'failed', now),
     ])
-    return { outcome: 'unknown-still', taskId, reason: message, task: (await findTaskRow(db, taskId))! }
+    const after = (await findLifecycleRow(db, taskId))!
+    return { outcome: 'unknown-still', taskId, reason: message, ...(await withRawRefs(db, after, { delivery: after })) }
   }
 
   if (query.unknown) {
     const message = query.error ?? 'reconcile query result unknown'
     await db.batch([
       finalizeReconcileAttempt(db, attemptKey, 'unknown', 'unknown', null, message, now),
-      transitionFailedTask(db, taskId, {
+      transitionFailedTask(db, target, taskId, {
         classification: 'unknown',
         lastError: `reconcile-query-lost: ${message}`,
         needsAuthor: true,
         nextAttemptAt: null,
         now,
       }),
+      syncGenerationStatus(db, taskId, 'failed', now),
     ])
-    return { outcome: 'unknown-still', taskId, reason: message, task: (await findTaskRow(db, taskId))! }
+    const after = (await findLifecycleRow(db, taskId))!
+    return { outcome: 'unknown-still', taskId, reason: message, ...(await withRawRefs(db, after, { delivery: after })) }
   }
 
   if (query.found) {
@@ -1123,7 +1669,7 @@ export async function reconcileWechatDraft(
       finalizeReconcileAttempt(db, attemptKey, 'ok', 'reconciled', remoteId, null, now),
       db
         .prepare(
-          `UPDATE wechat_draft_tasks
+          `UPDATE ${target.table}
            SET status = 'submitted',
                remote_draft_id = COALESCE(remote_draft_id, ?),
                provider_error = NULL,
@@ -1136,28 +1682,29 @@ export async function reconcileWechatDraft(
                lease_expires_at = NULL,
                revision = revision + 1,
                updated_at = ?
-           WHERE task_id = ? AND status = 'failed'`,
+           WHERE ${target.keyColumn} = ? AND status = 'failed'`,
         )
         .bind(remoteId, now, taskId),
+      syncGenerationStatus(db, taskId, 'submitted', now),
     ])
-    const taskAfter = (await findTaskRow(db, taskId))!
+    const after = (await findLifecycleRow(db, taskId))!
     return {
       outcome: 'reconciled',
       found: true,
       taskId,
-      remoteDraftId: remoteId ?? taskAfter.remote_draft_id,
-      task: taskAfter,
+      remoteDraftId: remoteId ?? after.remoteDraftId,
+      ...(await withRawRefs(db, after, { delivery: after })),
     }
   }
 
   // Found:false — provably never created. Re-arm as a fresh zero-production
   // draft so the executor can re-submit once under the retry policy. No
-  // second task row is ever created (the UNIQUE key already prevents it).
+  // second row is ever created (the UNIQUE key already prevents it).
   await db.batch([
     finalizeReconcileAttempt(db, attemptKey, 'retryable', 'reconciled', null, 'confirmed-not-created', now),
     db
       .prepare(
-        `UPDATE wechat_draft_tasks
+        `UPDATE ${target.table}
          SET status = 'draft',
              classification = NULL,
              needs_author = 0,
@@ -1169,17 +1716,38 @@ export async function reconcileWechatDraft(
              lease_expires_at = NULL,
              revision = revision + 1,
              updated_at = ?
-         WHERE task_id = ? AND status = 'failed'`,
+         WHERE ${target.keyColumn} = ? AND status = 'failed'`,
       )
       .bind(now, taskId),
+    syncGenerationStatus(db, taskId, 'draft', now),
   ])
+  const after = (await findLifecycleRow(db, taskId))!
   return {
     outcome: 'reconciled',
     found: false,
     taskId,
     remoteDraftId: null,
-    task: (await findTaskRow(db, taskId))!,
+    ...(await withRawRefs(db, after, { delivery: after })),
   }
+}
+
+function rawRowRefs(db: Database, row: WechatLifecycleRowView) {
+  if (row.kind === 'task') {
+    return findTaskRow(db, row.key)
+  }
+  return findReplacementRow(db, row.key)
+}
+
+/** Async spread helper for the raw back-ref (task or replacement row). */
+async function withRawRefs<T extends object>(
+  db: Database,
+  row: WechatLifecycleRowView,
+  extra: T,
+): Promise<T & { task?: WechatDraftTaskRow; replacement?: WechatDraftReplacementRow }> {
+  const raw = await rawRowRefs(db, row)
+  if (!raw) return { ...extra }
+  if (row.kind === 'task') return { ...extra, task: raw as WechatDraftTaskRow }
+  return { ...extra, replacement: raw as WechatDraftReplacementRow }
 }
 
 function finalizeReconcileAttempt(
@@ -1207,4 +1775,294 @@ function finalizeReconcileAttempt(
       now,
       attemptKey,
     )
+}
+/* ------------------------------------------------------------------ */
+/* B5-03 — 显式替代草稿 (交付后) 与历史读取                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * B5-03 — explicitly create a REPLACEMENT draft for an already DELIVERED
+ * generation (交付后只能显式建替代草稿, 引用前代并保留历史).
+ *
+ * Contracts:
+ *
+ *   - only a DELIVERED live generation ('submitted', 待微信确认) can be
+ *     replaced; a pre-delivery row (draft/failed) is adjusted via settings +
+ *     re-derivation (沿用代次) instead and is REJECTED here,
+ *   - the replacement is the NEXT monotonic generation of the (article,
+ *     account) group; its ledger row references the prior generation
+ *     (replaces_task_id = 前代键), so the chain is traceable,
+ *   - the OLD row is NEVER deleted or overwritten — its status flips to
+ *     'superseded' but its media_id / attempts / identity are preserved
+ *     (旧 media_id/代次不可删除或假装覆盖),
+ *   - the replacement is deterministic per prior live generation
+ *     (`wechat-replacement:<priorKey>`): repeating the command for the SAME
+ *     live generation returns the SAME replacement ('existing'), never a
+ *     duplicate draft,
+ *   - a provider hand-off (mock in tests, null in production) delivers the
+ *     replacement to the WeChat DRAFT BOX only — automation stops at the
+ *     draft (绝不自动群发或声称已发布).
+ */
+export async function replaceWechatDraft(
+  db: Database,
+  input: ReplaceWechatDraftInput,
+): Promise<ReplaceWechatDraftResult> {
+  if (isWechatDraftAdminWritesDisabled()) {
+    return { outcome: 'disabled', reason: 'wechat admin writes are disabled by WECHAT_DRAFT_ADMIN_WRITES_DISABLED' }
+  }
+  const now = input.now ?? unixNow()
+  const maxAttempts = input.maxAttempts ?? WECHAT_DRAFT_DEFAULT_MAX_ATTEMPTS
+
+  let current: WechatLifecycleRowView | null = null
+  let resolvedAccount: string | null = null
+  if (input.taskId) {
+    current = await findLifecycleRow(db, input.taskId)
+    if (current) resolvedAccount = current.accountId
+  } else if (input.articleId != null && input.accountId) {
+    resolvedAccount = normalizeWechatAccountId(input.accountId)
+    if (!resolvedAccount) {
+      return { outcome: 'invalid', reason: 'replaceWechatDraft: accountId is required (letters/digits/-/_)' }
+    }
+    current = await findCurrentLiveDelivery(db, input.articleId, resolvedAccount)
+  } else {
+    return { outcome: 'invalid', reason: 'replaceWechatDraft: taskId or articleId+accountId is required' }
+  }
+
+  if (!current) {
+    return {
+      outcome: 'not-found',
+      reason: 'no current live delivery exists to replace',
+      articleId: input.articleId,
+      accountId: resolvedAccount ?? undefined,
+    }
+  }
+  if (current.status !== 'submitted') {
+    return {
+      outcome: 'not-delivered',
+      reason: '只能替代已交付草稿（交付前用设置调整沿用代次，交付后才可显式建替代草稿）',
+      current,
+    }
+  }
+
+  const articleId = current.articleId
+  const account = current.accountId
+  const formal = await findFormalPublication(db, articleId)
+  const versionRow = await findVersionRow(db, articleId, current.version)
+  if (!formal || formal.lifecycle !== 'published' || !versionRow) {
+    return { outcome: 'not-found', reason: 'frozen version facts are missing for the current delivery' }
+  }
+  let snapshot: ArticleIdentitySnapshot
+  try {
+    snapshot = JSON.parse(versionRow.snapshot_json) as ArticleIdentitySnapshot
+  } catch {
+    return { outcome: 'not-found', reason: 'version snapshot is not valid JSON' }
+  }
+  if (!snapshot || typeof snapshot !== 'object' || !snapshot.fields) {
+    return { outcome: 'not-found', reason: 'version snapshot is malformed' }
+  }
+
+  const settings = await findSettingsRow(db, articleId, account)
+  const settingsRevision = settings?.settings_revision ?? 0
+  const contentSha256 = snapshot.content_snapshot_sha256 ?? versionRow.content_snapshot_sha256 ?? ''
+  const projection = projectWechatDraft(snapshot, {
+    sourceUrl: formal.public_url,
+    siteUrl: input.siteUrl,
+    settings: settingsToProjection(settings),
+  })
+  const digest = projectionDigest(projection, contentSha256)
+
+  // Deterministic key: at most ONE explicit replacement of the same live
+  // generation. To create a NEW generation, replace the NEW live generation.
+  const replacementKey = `wechat-replacement:${current.key}`
+  const existingReplacement = await findReplacementRow(db, replacementKey)
+  if (existingReplacement) {
+    return {
+      outcome: 'existing',
+      articleId,
+      version: current.version,
+      accountId: account,
+      generation: existingReplacement.generation,
+      replacesTaskId: existingReplacement.replaces_task_id,
+      taskId: replacementKey,
+      replacement: existingReplacement,
+      projection: projectionFromView(replacementToLifecycle(existingReplacement)),
+      handout: false,
+    }
+  }
+
+  const generation = await nextWechatGeneration(db, articleId, account)
+  const priorTarget: LifecycleTarget = current.kind === 'task' ? TARGET_TASK : TARGET_REPLACEMENT
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO wechat_draft_replacements
+           (replacement_key, article_id, version, account_id, replaces_task_id,
+            generation, status, title, html_projection, plaintext_projection,
+            cover_image_url, digest, content_sha256, projection_sha256, source_url,
+            settings_revision, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        replacementKey,
+        articleId,
+        current.version,
+        account,
+        current.key,
+        generation,
+        projection.title,
+        projection.html,
+        projection.plaintext,
+        projection.coverImageUrl || null,
+        projection.digest,
+        contentSha256,
+        digest,
+        projection.sourceUrl,
+        settingsRevision,
+        now,
+        now,
+      ),
+    registerWechatGeneration(db, {
+      articleId,
+      accountId: account,
+      generation,
+      version: current.version,
+      taskId: replacementKey,
+      replacesTaskId: current.key,
+      status: 'draft',
+      settingsRevision,
+      now,
+    }),
+    // The prior live generation is superseded in PLACE — never deleted, its
+    // media_id / attempts / identity stay intact (旧代次不假覆盖).
+    db
+      .prepare(
+        `UPDATE ${priorTarget.table}
+         SET status = 'superseded', updated_at = ?
+         WHERE ${priorTarget.keyColumn} = ? AND status = 'submitted'`,
+      )
+      .bind(now, current.key),
+    syncGenerationStatus(db, current.key, 'superseded', now),
+  ])
+
+  const replacement = await findReplacementRow(db, replacementKey)
+  if (!replacement) {
+    return { outcome: 'not-found', reason: 'replacement row vanished after insert' }
+  }
+
+  // Provider hand-off happens ONLY on creation — the replacement is delivered
+  // to the WeChat DRAFT BOX (mock) or stays an in-DB draft (zero production).
+  if (input.provider) {
+    const payload = buildSubmitPayload(
+      {
+        task_id: replacementKey,
+        article_id: articleId,
+        version: current.version,
+        account_id: account,
+        content_sha256: contentSha256,
+      },
+      projection,
+    )
+    let verdict: WechatExecutionVerdict
+    try {
+      verdict = classifyWechatExecution(await input.provider.createDraft(payload))
+    } catch (error) {
+      verdict = classifyWechatExecution(error instanceof Error ? error : new Error(String(error)))
+    }
+
+    if (verdict.kind === 'accepted') {
+      await db.batch([
+        insertAttemptRow(db, replacementKey, 1, 'ok', 'submitted', now, now, verdict.remoteDraftId, null),
+        db
+          .prepare(
+            `UPDATE wechat_draft_replacements
+             SET status = 'submitted', remote_draft_id = ?, provider_error = NULL,
+                 classification = 'ok', needs_author = 0, next_attempt_at = NULL,
+                 last_error = NULL, attempt_count = attempt_count + 1, revision = revision + 1,
+                 updated_at = ?
+             WHERE replacement_key = ?`,
+          )
+          .bind(verdict.remoteDraftId, now, replacementKey),
+        syncGenerationStatus(db, replacementKey, 'submitted', now),
+      ])
+      const delivered = (await findReplacementRow(db, replacementKey)) ?? replacement
+      return {
+        outcome: 'submitted',
+        articleId,
+        version: current.version,
+        accountId: account,
+        generation,
+        replacesTaskId: current.key,
+        taskId: replacementKey,
+        replacement: delivered,
+        projection,
+        handout: true,
+        classification: 'ok',
+      }
+    }
+
+    await recordFailedHandoff(db, TARGET_REPLACEMENT, replacementKey, {
+      verdict,
+      now,
+      attemptNo: 1,
+      maxAttempts,
+    })
+    const failed = (await findReplacementRow(db, replacementKey)) ?? replacement
+    return {
+      outcome: verdict.classification === 'unknown' ? 'unknown' : 'failed',
+      articleId,
+      version: current.version,
+      accountId: account,
+      generation,
+      replacesTaskId: current.key,
+      taskId: replacementKey,
+      replacement: failed,
+      projection,
+      handout: true,
+      classification: verdict.classification,
+    }
+  }
+
+  return {
+    outcome: 'created',
+    articleId,
+    version: current.version,
+    accountId: account,
+    generation,
+    replacesTaskId: current.key,
+    taskId: replacementKey,
+    replacement,
+    projection,
+    handout: false,
+  }
+}
+
+/** B5-03 — full delivery history (groups → generations → rows) in generation order. */
+export async function listWechatDeliveries(
+  db: Database,
+  articleId: number,
+  accountId: string,
+): Promise<Array<{ generation: WechatDraftGenerationRow; delivery: WechatLifecycleRowView; replacesTaskId: string | null }>> {
+  const normalized = normalizeWechatAccountId(accountId)
+  if (!normalized) return []
+  const { results: gens } = await db
+    .prepare(
+      `SELECT ${GENERATION_COLUMNS} FROM wechat_draft_generations
+       WHERE article_id = ? AND account_id = ? ORDER BY generation`,
+    )
+    .bind(articleId, normalized)
+    .all<WechatDraftGenerationRow>()
+  const out = []
+  for (const gen of gens ?? []) {
+    const row = await findLifecycleRow(db, gen.task_id)
+    if (!row) continue
+    out.push({ generation: gen, delivery: row, replacesTaskId: gen.replaces_task_id })
+  }
+  return out
+}
+
+/** B5-03 — read ONE delivery as a human-facing view (待微信确认, never 已发布). */
+export async function readWechatDeliveryView(db: Database, key: string): Promise<WechatDeliveryView | null> {
+  if (!key || key.trim() === '') return null
+  const row = await findLifecycleRow(db, key)
+  return row ? wechatDeliveryView(row) : null
 }
