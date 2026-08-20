@@ -10,6 +10,7 @@
  */
 
 import type { FidelityClass } from '@/lib/article-identity'
+import type { SourceFacts } from '@/lib/source-identity'
 
 /** Status vocabulary carried by the legacy posts projection. */
 export type ArticleCommandStatus = 'draft' | 'published'
@@ -55,6 +56,13 @@ export interface CreateArticleInput {
   creationId: string
   snapshot: ArticleCommandSnapshot
   projections?: ArticleCommandProjections
+  /**
+   * B6-01 — optional writable-primary-source URL (issue #50). When present the
+   * kernel also records the 源稿 identity + a PENDING association (待确认关联,
+   * not auto-effective). A URL already live-linked to an article converges on
+   * that existing article instead of creating a duplicate.
+   */
+  source?: { url: string }
 }
 
 export interface SaveArticleInput {
@@ -89,6 +97,8 @@ export interface AppliedVersionResult {
   existing: boolean
   /** Errors from out-of-transaction projections (never fatal). */
   projectionFailures: string[]
+  /** B6-01 — source identity + pending-link facts when the create carried a `source.url`. */
+  source?: SourceFacts | null
 }
 
 /** Server-side facts for conflict comparison (never a partial write). */
@@ -118,6 +128,21 @@ export type CreateResult =
   | AppliedVersionResult
   | { outcome: 'skipped'; reason: 'blank-session' }
   | { outcome: 'slug-conflict'; slug: string }
+  | { outcome: 'invalid-source'; url: string }
+  /**
+   * B6-01 — the source URL is already live-linked to an EXISTING article
+   * (pending or confirmed). A repeated clip / duplicated source converges on
+   * that article's identity + version instead of creating a duplicate.
+   */
+  | {
+      outcome: 'source-linked'
+      articleId: number
+      postRef: number
+      version: number
+      operationId: string
+      existing: true
+      source: SourceFacts
+    }
 
 export type SaveResult =
   | AppliedVersionResult
