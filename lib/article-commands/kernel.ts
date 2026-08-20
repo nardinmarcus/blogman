@@ -60,6 +60,13 @@ import type {
 } from './types'
 import { resolveFormalAnchor, revisionSnapshotFromSave, saveRevision } from '@/lib/publish-revision'
 import type { FormalAnchor } from '@/lib/publish-revision/types'
+import {
+  linkSourceToArticle,
+  liveLinkForUrl,
+  sourceFactsFor,
+  type SourceFacts,
+} from '@/lib/source-identity'
+import { normalizeSourceUrl } from '@/lib/source-identity/url'
 
 /** Monotonic version facts for one article (article_versions row surface). */
 interface VersionRow {
@@ -233,6 +240,56 @@ async function runProjections(
   return failures
 }
 
+/**
+ * B6-01 — ensure the 待确认 (pending) source link exists for a created/replayed
+ * article and return the facts. Idempotent by the stable `source:<creationId>`
+ * operation id: a present link replays (zero new rows), a MISSING link is
+ * converged so a failed write-back never leaves a hidden orphan — the pending
+ * link stays visible until the author confirms or cancels it.
+ */
+async function ensureSourceFacts(
+  db: Database,
+  url: string,
+  articleId: number,
+  creationId: string,
+): Promise<SourceFacts | null> {
+  if (!url) return null
+  const linkResult = await linkSourceToArticle(db, {
+    operationId: `source:${creationId}`,
+    url,
+    articleId,
+  })
+  if (linkResult.outcome === 'applied' || linkResult.outcome === 'replayed') {
+    return sourceFactsFor(db, url, articleId)
+  }
+  if (linkResult.outcome === 'collision') {
+    // A concurrent clip claimed the URL — report the owner facts, no duplicate link.
+    return { sourceIdentity: linkResult.sourceIdentity, link: null }
+  }
+  return null
+}
+
+async function existingResult(
+  db: Database,
+  article: ArticleRow,
+  operationId: string,
+  sourceUrl: string | null,
+  creationId: string,
+): Promise<CreateResult> {
+  const sourceFacts =
+    sourceUrl != null ? await ensureSourceFacts(db, sourceUrl, article.id, creationId).catch(() => null) : null
+  return {
+    outcome: 'existing' as const,
+    articleId: article.id,
+    postRef: article.post_ref,
+    version: 1,
+    operationId,
+    existing: true,
+    projectionFailures: [],
+    ...(sourceFacts ? { source: sourceFacts } : {}),
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* create                                                              */
 /* ------------------------------------------------------------------ */
@@ -241,7 +298,7 @@ export async function create(
   db: Database,
   input: CreateArticleInput,
 ): Promise<CreateResult> {
-  const { creationId, snapshot } = input
+  const { creationId, snapshot, source } = input
   if (!creationId || creationId.trim() === '') {
     throw new Error('create: creationId is required')
   }
@@ -252,19 +309,44 @@ export async function create(
     return { outcome: 'skipped', reason: 'blank-session' }
   }
 
+  // B6-01 — optional writable-primary-source URL driving the identity + pending link.
+  const sourceUrl = source?.url?.trim() || null
+
   const operationId = createOperationId(creationId)
+
+  // B6-01 — a URL that cannot become a source identity (unparseable / not http)
+  // is refused up-front: we never guess a source out of an invalid URL.
+  if (sourceUrl && !normalizeSourceUrl(sourceUrl)) {
+    return { outcome: 'invalid-source', url: sourceUrl }
+  }
 
   // Fast idempotent return: same creation id -> same article.
   const existing = await findArticleByCreationId(db, creationId)
   if (existing) {
-    return {
-      outcome: 'existing',
-      articleId: existing.id,
-      postRef: existing.post_ref,
-      version: 1,
-      operationId,
-      existing: true,
-      projectionFailures: [],
+    return existingResult(db, existing, operationId, sourceUrl, creationId)
+  }
+
+  // B6-01 — repeated clip / duplicate source: the normalized URL already owns a
+  // live (pending | confirmed) link to an EXISTING article, so we converge on
+  // that article's identity + version instead of creating a duplicate.
+  if (sourceUrl) {
+    const owned = await liveLinkForUrl(db, sourceUrl).catch(() => null)
+    if (owned) {
+      const owner = await findArticleById(db, owned.articleId)
+      if (owner) {
+        const ownerVersion = (await findLatestVersion(db, owned.articleId))?.version ?? 0
+        const sourceFacts = await sourceFactsFor(db, sourceUrl, owned.articleId)
+        return {
+          outcome: 'source-linked' as const,
+          articleId: owned.articleId,
+          postRef: owner.post_ref,
+          version: ownerVersion,
+          operationId,
+          existing: true,
+          // A live link exists, so the source facts are always resolvable here.
+          source: sourceFacts!,
+        }
+      }
     }
   }
 
@@ -346,15 +428,7 @@ export async function create(
     // concurrent identical create). Resolve the real state and report it.
     const byCreation = await findArticleByCreationId(db, creationId)
     if (byCreation) {
-      return {
-        outcome: 'existing',
-        articleId: byCreation.id,
-        postRef: byCreation.post_ref,
-        version: 1,
-        operationId,
-        existing: true,
-        projectionFailures: [],
-      }
+      return existingResult(db, byCreation, operationId, sourceUrl, creationId)
     }
     if (await slugTaken(db, row.slug)) {
       return { outcome: 'slug-conflict', slug: row.slug }
@@ -375,15 +449,24 @@ export async function create(
     )
   }
 
-  const result = {
-    outcome: 'created' as const,
+  const result: AppliedVersionResult = {
+    outcome: 'created',
     articleId: article.id,
     postRef: article.post_ref,
     version: version.version,
     operationId,
     existing: false,
-    projectionFailures: [] as string[],
+    projectionFailures: [],
   }
+
+  // B6-01 — record the 待确认 (pending, not auto-effective) source link AFTER
+  // the article + version commit. A failed/retried write-back never leaves a
+  // hidden orphan: replaying the same creation id re-converges the pending link,
+  // which stays visible until the author confirms or cancels it.
+  if (sourceUrl) {
+    result.source = await ensureSourceFacts(db, sourceUrl, article.id, creationId)
+  }
+
   result.projectionFailures = await runProjections(input.projections, result)
   return result
 }

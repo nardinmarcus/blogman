@@ -406,16 +406,29 @@ function parseTags(raw: unknown): string[] {
 /* Legacy draft-only adapter (still routed through the kernel)        */
 /* ------------------------------------------------------------------ */
 
+/**
+ * The create outcomes a legacy draft can actually produce. A legacy (one-shot)
+ * create never carries a `source`, so it can never return `invalid-source` or
+ * `source-linked` — this narrow keeps the legacy route's post-condition checks
+ * sound without spurious union members.
+ */
+export type UnsourcedCreateResult = Exclude<
+  CreateResult,
+  { outcome: 'invalid-source' } | { outcome: 'source-linked' }
+>
+
 /** Legacy create → kernel draft-only create with a server-side idempotency key. */
 export async function createLegacyDraft(
   db: Database,
   raw: unknown,
   projections?: ArticleCommandProjections,
-): Promise<{ result: CreateResult; snapshot: ArticleCommandSnapshot; creationId: string }> {
+): Promise<{ result: UnsourcedCreateResult; snapshot: ArticleCommandSnapshot; creationId: string }> {
   const { snapshot, autoSlug: needsAutoSlug } = await coerceLegacySnapshot(raw)
   if (needsAutoSlug) snapshot.slug = autoSlug()
   const creationId = `legacy:${nanoid(16)}`
-  const result = await create(db, { creationId, snapshot, projections })
+  // No `source` is ever passed for a legacy one-shot draft, so the result can
+  // never be `invalid-source` or `source-linked`.
+  const result = (await create(db, { creationId, snapshot, projections })) as UnsourcedCreateResult
   return { result, snapshot, creationId }
 }
 
@@ -486,7 +499,17 @@ export async function dispatchExternalWrite(
     if (!creationId) return { error: 'create: creationId 不能为空', status: 400 }
     const { snapshot, autoSlug: needsAutoSlug } = await coerceVersionedSnapshot(payload.snapshot)
     if (!snapshot.slug && needsAutoSlug) snapshot.slug = autoSlug()
-    return await create(db, { creationId, snapshot, projections })
+    // B6-01 — optional writable-primary-source URL (issue #50): when present the
+    // kernel records the 源稿 identity + a pending (not auto-effective) link.
+    const sourceUrl =
+      typeof payload.source === 'object' && payload.source !== null
+        ? (payload.source as { url?: unknown }).url
+        : undefined
+    const source =
+      typeof sourceUrl === 'string' && sourceUrl.trim()
+        ? { url: sourceUrl.trim() }
+        : undefined
+    return await create(db, { creationId, snapshot, projections, ...(source ? { source } : {}) })
   }
 
   if (action === 'save') {
