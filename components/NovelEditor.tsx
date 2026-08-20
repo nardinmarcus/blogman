@@ -935,12 +935,13 @@ export function NovelEditor({ initialData, skipDraftRestore = false }: NovelEdit
       <header className="sticky top-0 z-40 h-14 border-b border-[var(--editor-line)] bg-[color-mix(in_srgb,var(--background)_90%,transparent)] backdrop-blur-lg">
         <div className="flex h-full items-center gap-2 px-4">
           {/* Left: Back */}
+          {/* B8-01 — short tasks (new/edit) return explicitly to 今天. */}
           <Link
-            href="/admin/posts"
+            href="/admin/today"
             className="flex items-center gap-1 shrink-0 text-sm text-[var(--editor-muted)] hover:text-[var(--editor-ink)] transition-colors"
           >
             <ArrowLeft className="h-4 w-4" />
-            <span className="hidden sm:inline">文章列表</span>
+            <span className="hidden sm:inline">今天工作台</span>
           </Link>
 
           <div className="mx-1 h-4 w-px bg-[var(--editor-line)]" />
