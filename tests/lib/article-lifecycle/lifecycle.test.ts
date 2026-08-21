@@ -74,11 +74,39 @@ function snapshot(overrides: Partial<ArticleCommandSnapshot> = {}): ArticleComma
   }
 }
 
+/** Live formal status — derived from lifecycle + latest frozen snapshot (canonical). */
 async function postState(postRef: number) {
-  const [row] = await query<{ status: string | null; deleted_at: number | null; published_at: number | null }>(
-    `SELECT status, deleted_at, published_at FROM posts WHERE id = ${postRef}`,
+  const [row] = await query<{ snapshot_json: string; lifecycle: string }>(
+    `SELECT v.snapshot_json, f.lifecycle FROM articles a
+     JOIN formal_publications f ON f.article_id = a.id
+     JOIN article_versions v ON v.article_id = a.id
+      AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
+     WHERE a.post_ref = ${postRef} LIMIT 1`,
   )
-  return row
+  if (!row) return null
+  const fields = (JSON.parse(row.snapshot_json) as { fields?: Record<string, unknown> }).fields ?? {}
+  const deletedAt = (fields.deleted_at as number | null) ?? null
+  const status =
+    deletedAt != null
+      ? 'deleted'
+      : row.lifecycle === 'published' && fields.status !== 'draft'
+        ? 'published'
+        : 'draft'
+  return {
+    status,
+    deleted_at: deletedAt,
+    published_at: (fields.published_at as number | null) ?? null,
+  }
+}
+
+/** #234-02 — article-level state now lives in the latest immutable snapshot. */
+async function latestSnapshotState(articleId: number) {
+  const [row] = await query<{ snapshot_json: string }>(
+    `SELECT snapshot_json FROM article_versions WHERE article_id = ${articleId} ORDER BY version DESC LIMIT 1`,
+  )
+  if (!row) return null
+  const parsed = JSON.parse(row.snapshot_json) as { fields: { status: string; deleted_at: number | null } }
+  return parsed.fields
 }
 
 async function formalState(articleId: number) {
@@ -167,8 +195,13 @@ describe('unpublish — 取消发布', () => {
 
   it('blocks a soft-deleted article', async () => {
     const { articleId, postRef } = await createFormalArticle('off-deleted', '已删文章', '内容')
-    await softDelete(createDatabase(), { articleId, expectedVersion: 1, operationId: freshOp('softDelete') })
-    const result = await unpublish(createDatabase(), { articleId, expectedVersion: 1, operationId: freshOp('unpublish') })
+    // #234-02: softDelete appends its own version snapshot (v2).
+    const del = await softDelete(createDatabase(), { articleId, expectedVersion: 1, operationId: freshOp('softDelete') })
+    expect(del).toMatchObject({ outcome: 'applied', version: 2 })
+    expect((await latestSnapshotState(articleId))?.deleted_at).not.toBeNull()
+    // The lifecycle kernel's blocked guard reads the canonical deletion fact:
+    // unpublish on a soft-deleted article is refused (blocked), never applied.
+    const result = await unpublish(createDatabase(), { articleId, expectedVersion: 2, operationId: freshOp('unpublish') })
     expect(result.outcome).toBe('blocked')
     expect((await postState(postRef))?.deleted_at).not.toBeNull()
   })
@@ -228,7 +261,12 @@ describe('relive — 重新上线', () => {
     expect(result.version).toBe(2)
 
     expect((await postState(postRef))?.status).toBe('published')
-    const [content] = await query<{ title: string }>(`SELECT title FROM posts WHERE id = ${postRef}`)
+    const [content] = await query<{ title: string }>(
+      `SELECT json_extract(v.snapshot_json, '$.fields.title') AS title
+       FROM formal_publications f
+       JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+       WHERE f.article_id = ${articleId}`,
+    )
     expect(content?.title).toBe('修订版标题')
     expect((await formalState(articleId))?.lifecycle).toBe('published')
     const [promotion] = await query<{ promoted_version: number }>(
@@ -260,14 +298,15 @@ describe('relive — 重新上线', () => {
 
 describe('soft-delete restore — 软删后恢复为未发布', () => {
   it('restores a deleted post to draft (unpublished) and never re-publishes it', async () => {
-    const { articleId, postRef } = await createFormalArticle('restore-1', '恢复文章', '内容')
+    const { articleId } = await createFormalArticle('restore-1', '恢复文章', '内容')
     await softDelete(createDatabase(), { articleId, expectedVersion: 1, operationId: freshOp('softDelete') })
-    expect((await postState(postRef))?.deleted_at).not.toBeNull()
+    expect((await latestSnapshotState(articleId))?.deleted_at).not.toBeNull()
 
-    const result = await restore(createDatabase(), { articleId, expectedVersion: 1, operationId: freshOp('restore') })
-    expect(result.outcome).toBe('applied')
+    // #234-02: restore anchors on the soft-delete's v2 and appends v3.
+    const result = await restore(createDatabase(), { articleId, expectedVersion: 2, operationId: freshOp('restore') })
+    expect(result).toMatchObject({ outcome: 'applied', version: 3 })
 
-    const after = await postState(postRef)
+    const after = await latestSnapshotState(articleId)
     expect(after?.deleted_at).toBeNull()
     // 未发布 — NOT re-published.
     expect(after?.status).toBe('draft')

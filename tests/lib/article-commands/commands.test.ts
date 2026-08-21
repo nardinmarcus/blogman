@@ -593,7 +593,7 @@ describe('lib/article-commands — projections', { timeout: 600_000 }, () => {
   })
 })
 
-describe('lib/article-commands — B2-06 article-level commands', { timeout: 600_000 }, () => {
+describe('lib/article-commands — #234-02 versioned article-level commands', { timeout: 600_000 }, () => {
   async function createdArticle(title: string): Promise<{ articleId: number; postRef: number; categoriesCount: () => Promise<Record<string, number>> }> {
     const creationId = fresh('b206-base')
     const snap = snapshot({ title, slug: fresh('b206-slug'), category: 'AI工具', status: 'published' })
@@ -610,31 +610,95 @@ describe('lib/article-commands — B2-06 article-level commands', { timeout: 600
     }
   }
 
-  it('setPinned appends an immutable version carrying the patched state (ADR 0007)', async () => {
-    const { articleId, postRef } = await createdArticle('置顶文章')
+  /** Latest snapshot's fields — the canonical state every public read resolves. */
+  async function latestFields(articleId: number): Promise<Record<string, unknown> & { fields: Record<string, unknown> }> {
+    const rows = await articleVersions(articleId)
+    return JSON.parse(rows[0].snapshot_json as string)
+  }
+
+  it('setPinned appends an immutable version snapshot and advances the body version', async () => {
+    const { articleId } = await createdArticle('置顶文章')
     const db = createDatabase()
 
     const result = await setPinned(db, { articleId, expectedVersion: 1, operationId: fresh('op'), is_pinned: 1 })
-    expect(result).toMatchObject({ outcome: 'applied', postRef, version: 2, existing: false })
+    expect(result).toMatchObject({ outcome: 'applied', postRef: (await findPostRef(articleId)), version: 2, existing: false })
 
-    // The new version carries the pin; the public canonical read sees it immediately.
-    expect((await postRow(postRef))!.is_pinned).toBe(1)
+    // The new snapshot carries the pinned state for the canonical public read.
+    expect((await latestFields(articleId)).fields.is_pinned).toBe(1)
+    expect((await articleVersions(articleId)).map((r) => r.version)).toEqual([2, 1])
+
+    // Repeating the SAME operation id replays the original fact without writing.
+    const replayOp = fresh('op')
+    const first = await setHidden(db, { articleId, expectedVersion: 2, operationId: replayOp, is_hidden: 1 })
+    expect(first).toMatchObject({ outcome: 'applied', version: 3 })
+    const repeated = await setHidden(db, { articleId, expectedVersion: 3, operationId: replayOp, is_hidden: 1 })
+    expect(repeated).toMatchObject({ outcome: 'replayed', existing: true, version: 3 })
+    expect((await articleVersions(articleId)).map((r) => r.version)).toEqual([3, 2, 1])
+
+    // A DIFFERENT operation whose target value is already live replays without writing.
+    const noop = await setPinned(db, { articleId, expectedVersion: 3, operationId: fresh('op'), is_pinned: 1 })
+    expect(noop).toMatchObject({ outcome: 'replayed', existing: true, version: 3 })
+    expect(await articleVersions(articleId)).toHaveLength(3)
+  })
+
+  it('setPassword appends a snapshot; empty password == null (no-password state)', async () => {
+    const { articleId } = await createdArticle('密码')
+    const db = createDatabase()
+    const result = await setPassword(db, { articleId, expectedVersion: 1, operationId: fresh('op'), password: 'secret' })
+    expect(result).toMatchObject({ outcome: 'applied', version: 2 })
+    expect((await latestFields(articleId)).fields.password).toBe('secret')
+
+    const cleared = await setPassword(db, { articleId, expectedVersion: 2, operationId: fresh('op'), password: '' })
+    expect(cleared).toMatchObject({ outcome: 'applied', version: 3 })
+    expect((await latestFields(articleId)).fields.password).toBeNull()
+  })
+
+  it('softDelete keeps the first deletion timestamp; restore returns to draft; both append snapshots', async () => {
+    const { articleId } = await createdArticle('软删除')
+    const db = createDatabase()
+
+    const first = await softDelete(db, { articleId, expectedVersion: 1, operationId: 'del-op' })
+    expect(first).toMatchObject({ outcome: 'applied', version: 2 })
+    const stamp = (await latestFields(articleId)).fields.deleted_at
+    expect(stamp).not.toBeNull()
+
+    // Repeating the same operation id is a replay; the FIRST timestamp is preserved.
+    const repeated = await softDelete(db, { articleId, expectedVersion: 2, operationId: 'del-op' })
+    expect(repeated).toMatchObject({ outcome: 'replayed', existing: true })
+    expect((await latestFields(articleId)).fields.deleted_at).toBe(stamp)
     expect(await articleVersions(articleId)).toHaveLength(2)
 
-    // Repeating the SAME operation id is a response-lost replay.
-    const sameOp = await setPinned(db, { articleId, expectedVersion: 2, operationId: 'same-op' , is_pinned: 1 })
-    expect(sameOp.outcome).toBe('replayed')
+    const restored = await restore(db, { articleId, expectedVersion: 2, operationId: 're-op' })
+    expect(restored).toMatchObject({ outcome: 'applied', version: 3 })
+    const fields = (await latestFields(articleId)).fields
+    expect(fields.status).toBe('draft')
+    expect(fields.deleted_at).toBeNull()
+  })
 
-    // A no-op (already pinned) replays without writing a new version.
-    const noop = await setPinned(db, { articleId, expectedVersion: 2, operationId: fresh('op'), is_pinned: 1 })
-    expect(noop).toMatchObject({ outcome: 'replayed', version: 2, existing: true })
-    expect(await articleVersions(articleId)).toHaveLength(2)
+  it('setCategory appends a snapshot and moves categories.post_count deltas in the same transaction', async () => {
+    const { articleId, categoriesCount } = await createdArticle('分类')
+    const db = createDatabase()
+    await query("INSERT OR IGNORE INTO categories (name, slug, post_count) VALUES ('随笔', 'essay', 0)")
+    const before = await categoriesCount()
+
+    const result = await setCategory(db, { articleId, expectedVersion: 1, operationId: fresh('op'), category: '随笔' })
+    expect(result).toMatchObject({ outcome: 'applied', version: 2 })
+    expect((await latestFields(articleId)).fields.category).toBe('随笔')
+
+    const after = await categoriesCount()
+    expect((after['AI工具'] ?? 0) - (before['AI工具'] ?? 0)).toBe(-1)
+    expect((after['随笔'] ?? 0) - (before['随笔'] ?? 0)).toBe(1)
+
+    // Moving back to NULL decrements only the source category.
+    const back = await setCategory(db, { articleId, expectedVersion: 2, operationId: fresh('op'), category: null })
+    expect(back).toMatchObject({ outcome: 'applied', version: 3 })
+    const finalCounts = await categoriesCount()
+    expect((finalCounts['随笔'] ?? 0) - after['随笔']).toBe(-1)
   })
 
   it('rejects a stale expected version as a conflict with zero writes (旧请求拒绝)', async () => {
-    const { articleId, postRef } = await createdArticle('旧请求')
+    const { articleId } = await createdArticle('旧请求')
     const db = createDatabase()
-    // A content revision moves the body to v2 first.
     await save(db, { articleId, expectedVersion: 1, operationId: fresh('op'), snapshot: snapshot({ title: '第二版' }) })
 
     const stale = await setHidden(db, { articleId, expectedVersion: 1, operationId: fresh('op'), is_hidden: 1 })
@@ -642,72 +706,9 @@ describe('lib/article-commands — B2-06 article-level commands', { timeout: 600
     if (stale.outcome !== 'conflict') return
     expect(stale.serverVersion).toBe(2)
 
-    // Nothing changed: still exactly two versions, is_hidden still 0.
+    // Nothing changed: still exactly two versions, hidden still 0.
     expect(await articleVersions(articleId)).toHaveLength(2)
-    expect((await postRow(postRef))!.is_hidden).toBe(0)
-  })
-
-  it('setPassword appends versions; empty == null', async () => {
-    const { articleId, postRef } = await createdArticle('密码')
-    const db = createDatabase()
-    const result = await setPassword(db, { articleId, expectedVersion: 1, operationId: fresh('op'), password: 'secret' })
-    expect(result).toMatchObject({ outcome: 'applied', version: 2 })
-    expect((await postRow(postRef))!.password).toBe('secret')
-    expect(await articleVersions(articleId)).toHaveLength(2)
-
-    const cleared = await setPassword(db, { articleId, expectedVersion: 2, operationId: fresh('op'), password: '' })
-    expect(cleared).toMatchObject({ outcome: 'applied', version: 3 })
-    expect((await postRow(postRef))!.password).toBeNull()
-    expect(await articleVersions(articleId)).toHaveLength(3)
-  })
-
-  it('soft-delete keeps the first deletion timestamp; repeated lifecycle commands are idempotent and advance versions', async () => {
-    const { articleId, postRef } = await createdArticle('软删除')
-    const db = createDatabase()
-
-    const first = await softDelete(db, { articleId, expectedVersion: 1, operationId: 'del-op' })
-    expect(first).toMatchObject({ outcome: 'applied', version: 2 })
-    const stamp = (await postRow(postRef))!.deleted_at
-    expect(stamp).not.toBeNull()
-    expect(await articleVersions(articleId)).toHaveLength(2)
-
-    // Repeating the same operation id (response-lost / double-click) is a replay;
-    // the FIRST deletion timestamp is preserved across it.
-    const repeated = await softDelete(db, { articleId, expectedVersion: 2, operationId: 'del-op' })
-    expect(repeated).toMatchObject({ outcome: 'replayed', version: 2, existing: true })
-    expect((await postRow(postRef))!.deleted_at).toBe(stamp)
-    expect(await articleVersions(articleId)).toHaveLength(2)
-
-    // A second delete command with a fresh op id is a no-op replay (already deleted).
-    const noop = await softDelete(db, { articleId, expectedVersion: 2, operationId: fresh('op') })
-    expect(noop).toMatchObject({ outcome: 'replayed', version: 2 })
-    expect(await articleVersions(articleId)).toHaveLength(2)
-
-    // Restore returns to draft with a NULL deletion timestamp as version 3.
-    const restored = await restore(db, { articleId, expectedVersion: 2, operationId: 're-op' })
-    expect(restored).toMatchObject({ outcome: 'applied', version: 3 })
-    const row = await postRow(postRef)
-    expect(row!.status).toBe('draft')
-    expect(row!.deleted_at).toBeNull()
-    expect(await articleVersions(articleId)).toHaveLength(3)
-  })
-
-  it('setCategory keeps categories.post_count (deltas) and appends a version', async () => {
-    const { articleId, postRef, categoriesCount } = await createdArticle('分类')
-    const db = createDatabase()
-    // Ensure the target category row exists so the count increment applies.
-    await query("INSERT OR IGNORE INTO categories (name, slug, post_count) VALUES ('随笔', 'essay', 0)")
-    const before = await categoriesCount()
-
-    const result = await setCategory(db, { articleId, expectedVersion: 1, operationId: fresh('op'), category: '随笔' })
-    expect(result).toMatchObject({ outcome: 'applied', version: 2 })
-    expect((await postRow(postRef))!.category).toBe('随笔')
-    expect(await articleVersions(articleId)).toHaveLength(2)
-
-    const after = await categoriesCount()
-    // The article left 'AI工具' and entered '随笔'.
-    expect((after['AI工具'] ?? 0) - (before['AI工具'] ?? 0)).toBe(-1)
-    expect((after['随笔'] ?? 0) - (before['随笔'] ?? 0)).toBe(1)
+    expect((await latestFields(articleId)).fields.is_hidden).toBe(0)
   })
 
   it('batch classification returns per-article applied/conflict, never blocking each other or silently overwriting', async () => {
@@ -715,7 +716,6 @@ describe('lib/article-commands — B2-06 article-level commands', { timeout: 600
     const conflicting = await createdArticle('批量冲突')
     const db = createDatabase()
 
-    // Conflict article: content saved elsewhere (v2), so expectedVersion 1 is stale.
     const saved = await save(db, {
       articleId: conflicting.articleId,
       expectedVersion: 1,
@@ -739,45 +739,40 @@ describe('lib/article-commands — B2-06 article-level commands', { timeout: 600
     expect(result.items[2].outcome).toBe('not-found')
 
     // The good article moved; the conflicting article was NOT silently overwritten.
-    expect((await postRow(good.postRef))!.category).toBe('随笔')
-    expect((await postRow(conflicting.postRef))!.category).toBe('AI工具')
+    expect((await latestFields(good.articleId)).fields.category).toBe('随笔')
+    expect((await latestFields(conflicting.articleId)).fields.category).toBe('AI工具')
   })
 
-  it('an article-level action ADVANCES the version; the editor must re-anchor on the latest before saving (ADR 0007)', async () => {
-    const { articleId, postRef } = await createdArticle('修订')
+  it('an article-level action advances the version so a long-open editor save conflicts (编辑端冲突属预期)', async () => {
+    const { articleId } = await createdArticle('修订')
     const db = createDatabase()
 
-    const v2 = await save(db, {
+    const pin = await setPinned(db, { articleId, expectedVersion: 1, operationId: fresh('op'), is_pinned: 1 })
+    expect(pin).toMatchObject({ outcome: 'applied', version: 2 })
+
+    // The editor's pending save anchored on v1 now conflicts — refresh + replay.
+    const staleSave = await save(db, {
       articleId,
       expectedVersion: 1,
       operationId: fresh('op'),
-      snapshot: snapshot({ title: '完整第二版', category: 'AI工具' }),
+      snapshot: snapshot({ title: '第三版' }),
     })
-    expect(v2.outcome).toBe('applied')
-    if (v2.outcome !== 'applied') return
-    expect(v2.version).toBe(2)
+    expect(staleSave).toMatchObject({ outcome: 'conflict', serverVersion: 2 })
 
-    // Pin at version 2 -> appends version 3.
-    const pin = await setPinned(db, { articleId, expectedVersion: 2, operationId: fresh('op'), is_pinned: 1 })
-    expect(pin).toMatchObject({ outcome: 'applied', version: 3 })
-
-    // A save still anchored on v2 conflicts; re-anchored on v3 it lands.
-    const stale = await save(db, {
+    // Re-anchored on v2 the save lands as v3.
+    const v3 = await save(db, {
       articleId,
       expectedVersion: 2,
       operationId: fresh('op'),
-      snapshot: snapshot({ title: '锚在旧版本' }),
-    })
-    expect(stale).toMatchObject({ outcome: 'conflict', serverVersion: 3 })
-
-    const v4 = await save(db, {
-      articleId,
-      expectedVersion: 3,
-      operationId: fresh('op'),
       snapshot: snapshot({ title: '第三版' }),
     })
-    expect(v4).toMatchObject({ outcome: 'applied', version: 4 })
-    expect(await articleVersions(articleId)).toHaveLength(4)
-    expect((await postRow(postRef))!.title).toBe('第三版')
+    expect(v3).toMatchObject({ outcome: 'applied', version: 3 })
+    expect((await articleVersions(articleId)).map((r) => r.version)).toEqual([3, 2, 1])
+    expect((await latestFields(articleId)).fields.title).toBe('第三版')
   })
+
+  async function findPostRef(articleId: number): Promise<number> {
+    const rows = await query<{ post_ref: number }>(`SELECT post_ref FROM articles WHERE id = ${articleId}`)
+    return rows[0]!.post_ref
+  }
 })

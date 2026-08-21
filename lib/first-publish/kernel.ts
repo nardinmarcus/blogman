@@ -583,6 +583,20 @@ export async function confirmPublish(db: Database, input: ConfirmInput): Promise
            AND NOT EXISTS (SELECT 1 FROM article_slug_addresses WHERE slug = ?)`,
       )
       .bind(slug, articleId, now, now, articleId, eventId, slug),
+    // (7) The frozen snapshot's authoring status follows the formal fact —
+    // the draft becomes observably published (restore ≠ re-publish relies
+    // on this field being truthful).
+    db
+      .prepare(
+        `UPDATE article_versions
+         SET snapshot_json = json_set(snapshot_json,
+               '$.fields.status', 'published',
+               '$.fields.published_at', ?)
+         WHERE article_id = ?
+           AND version = (SELECT MAX(version) FROM article_versions WHERE article_id = ?)
+           AND EXISTS (SELECT 1 FROM formal_publications WHERE article_id = ? AND event_id = ?)`,
+      )
+      .bind(now, articleId, articleId, articleId, eventId),
   ]
 
   try {

@@ -234,7 +234,7 @@ describe('app/api/article-commands — real kernel + D1', { timeout: 600_000 }, 
     expect((await versions(articleId)).map((r) => r.version)).toEqual([1, 2])
   })
 
-  it('article-level command (setPinned) applies through the route WITHOUT advancing the body version (B2-06)', async () => {
+  it('article-level command (setHidden) appends a version snapshot through the route; public canonical read sees it (#234-02)', async () => {
     const slug = fresh('pin-slug')
     const creationId = fresh('pin-create')
     mocks.parseJsonBody.mockResolvedValue({
@@ -247,24 +247,27 @@ describe('app/api/article-commands — real kernel + D1', { timeout: 600_000 }, 
     const articleId = created.articleId
 
     mocks.parseJsonBody.mockResolvedValue({
-      action: 'setPinned',
+      action: 'setHidden',
       slug,
       articleId,
       expectedVersion: 1,
-      operationId: 'op-pin-d1',
-      is_pinned: 1,
+      operationId: 'op-hide-d1',
+      is_hidden: 1,
     })
     const outcome = (await (await POST({} as never)).json()) as { outcome: string; version: number }
     expect(outcome.outcome).toBe('applied')
-    expect(outcome.version).toBe(2) // ADR 0007: the pin appends its own version
+    expect(outcome.version).toBe(2) // hide advances the immutable version
 
-    // D1: the pin advanced the version counter and the latest snapshot carries it.
+    // D1: exactly [1, 2] — the hide appended its own snapshot.
     expect((await versions(articleId)).map((r) => r.version)).toEqual([1, 2])
-    const row = (await query<{ is_pinned: number }>(
-      `SELECT json_extract(snapshot_json, '$.fields.is_pinned') AS is_pinned
-       FROM article_versions WHERE article_id = ${articleId} ORDER BY version DESC LIMIT 1`,
-    ))[0]
-    expect(row.is_pinned).toBe(1)
+
+    // The public/canonical read path (latest snapshot) sees the hidden state immediately.
+    const got = (await (await GET(new Request(`http://localhost/api/article-commands?slug=${encodeURIComponent(slug)}`))).json()) as {
+      version: number
+      snapshot: { isHidden: number }
+    }
+    expect(got.version).toBe(2)
+    expect(got.snapshot.isHidden).toBe(1)
 
     // A stale article-level request (旧请求) is rejected as a conflict.
     mocks.parseJsonBody.mockResolvedValue({
@@ -277,11 +280,7 @@ describe('app/api/article-commands — real kernel + D1', { timeout: 600_000 }, 
     })
     const conflict = (await (await POST({} as never)).json()) as { outcome: string; serverVersion: number }
     expect(conflict.outcome).toBe('conflict')
-    expect(conflict.serverVersion).toBe(2) // the pin advanced the version
-    const hiddenRow = (await query<{ is_hidden: number }>(
-      `SELECT json_extract(snapshot_json, '$.fields.is_hidden') AS is_hidden
-       FROM article_versions WHERE article_id = ${articleId} ORDER BY version DESC LIMIT 1`,
-    ))[0]
-    expect(hiddenRow.is_hidden).toBe(0)
+    expect(conflict.serverVersion).toBe(2)
+    expect((await versions(articleId)).map((r) => r.version)).toEqual([1, 2])
   })
 })

@@ -163,11 +163,12 @@ export type PublishTempResult =
 /*                                                                    */
 /* Status toggles (publish/unpublish) already run through the         */
 /* versioned `publishTemp` command. The remaining admin-list actions   */
-/* (pin / hide / password / category / soft-delete / restore) are      */
-/* INDEPENDENT commands: they carry the same article identity +        */
-/* expected version + operation id preconditions but never write a     */
-/* new `article_versions` row — a non-revision article-level action    */
-/* must NOT advance the body version.                                  */
+/* (pin / hide / password / category / soft-delete / restore) each      */
+/* append ONE immutable version snapshot (#234 Phase A, ADR 0007): the */
+/* body version ADVANCES on every applied action so the canonical       */
+/* public read reflects the new state immediately; a long-open editor   */
+/* gets an expectedVersion conflict on its next save (expected —        */
+/* refresh + replay). Repeated operation ids replay without writing.    */
 /* ------------------------------------------------------------------ */
 
 /** Applied / replayed / conflict — the evidence surface of one article-level command. */
