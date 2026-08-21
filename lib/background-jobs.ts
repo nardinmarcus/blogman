@@ -1,4 +1,5 @@
 import { processPost, getAiRuntimeEnv } from '@/lib/ai'
+import { findLiveStateByPostRef } from '@/lib/canonical-live'
 import { isAutoDescription } from '@/lib/post-utils'
 import { deletePostFromRelatedIndex, syncPostToRelatedIndex } from '@/lib/related-content'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands'
@@ -140,10 +141,7 @@ async function runProcessPostAiJob(env: BackgroundJobEnv, job: Extract<Backgroun
 
   // A deleted post must not be re-enriched (legacy soft-deletes touch `posts`
   // without a version fact).
-  const live = await env.DB
-    .prepare('SELECT deleted_at FROM posts WHERE id = ?')
-    .bind(article.post_ref)
-    .first<{ deleted_at: number | null }>()
+  const live = await findLiveStateByPostRef(env.DB, article.post_ref)
   if (live?.deleted_at != null) return
 
   // B3-02 (issue #34): a formally published article with an ACTIVE pending

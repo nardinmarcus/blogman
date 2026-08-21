@@ -33,7 +33,7 @@ import { invalidatePublicContentCache } from '@/lib/cache'
 import { discardRevision, promoteRevision, readRevisionState, compareRevision, restoreRevisionSnapshot, saveRestorePoint, undoRestoreOperation } from '@/lib/publish-revision'
 import { getSiteUrl } from '@/lib/site-config'
 import { normalizePostSlug } from '@/lib/post-utils'
-import { getPostBySlug } from '@/lib/db'
+import { resolveArticleAddress } from '@/lib/slug-address'
 
 type RouteEnv = RouteDbEnv
 
@@ -176,14 +176,11 @@ export async function GET(req: NextRequest) {
     if (Number.isInteger(rawArticleId) && rawArticleId > 0) {
       articleId = rawArticleId
     } else if (slug) {
-      const post = await getPostBySlug(db, normalizePostSlug(slug))
-      if (!post) return jsonOk({ articleId: null, state: null })
-      const article = await db
-        .prepare('SELECT id FROM articles WHERE post_ref = ?')
-        .bind(post.id)
-        .first<{ id: number }>()
-      if (!article) return jsonOk({ articleId: null, state: null })
-      articleId = article.id
+      // Slug resolution through the permanent address registry (ADR 0009) —
+      // historical addresses single-hop to the article's current address.
+      const resolved = await resolveArticleAddress(db, normalizePostSlug(slug))
+      if (!resolved) return jsonOk({ articleId: null, state: null })
+      articleId = resolved.articleId
     }
     if (!articleId) return jsonError('GET /api/publish-revision: articleId 或 slug 必填', 400)
 

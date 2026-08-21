@@ -145,15 +145,46 @@ async function findFormalByArticle(db: Database, articleId: number): Promise<For
     .first<FormalRow>()
 }
 
-async function findPostById(db: Database, postRef: number): Promise<PostRow | null> {
-  return db
+/**
+ * The live formal snapshot — materialized from the FROZEN formal version
+ * (canonical), not from the retired posts projection.
+ */
+async function findLivePostRow(db: Database, articleId: number, version: number): Promise<PostRow | null> {
+  const row = await db
     .prepare(
-      `SELECT id, slug, title, content, html, description, category, tags, status,
-              password, is_pinned, is_hidden, cover_image, deleted_at, published_at, updated_at
-       FROM posts WHERE id = ?`,
+      `SELECT snapshot_json FROM article_versions WHERE article_id = ? AND version = ?`,
     )
-    .bind(postRef)
-    .first<PostRow>()
+    .bind(articleId, version)
+    .first<{ snapshot_json: string }>()
+  if (!row) return null
+  try {
+    const parsed = JSON.parse(row.snapshot_json) as {
+      fields?: Record<string, unknown>
+      original_content?: string | null
+      original_html?: string | null
+    }
+    const f = parsed.fields ?? {}
+    return {
+      id: 0,
+      slug: (f.slug as string) ?? '',
+      title: (f.title as string) ?? '',
+      content: parsed.original_content ?? '',
+      html: parsed.original_html ?? '',
+      description: (f.description as string | null) ?? null,
+      category: (f.category as string | null) ?? null,
+      tags: (f.tags as string | null) ?? null,
+      status: (f.status as string) ?? 'draft',
+      password: (f.password as string | null) ?? null,
+      is_pinned: (f.is_pinned as number | null) ?? 0,
+      is_hidden: (f.is_hidden as number | null) ?? 0,
+      cover_image: (f.cover_image as string | null) ?? null,
+      deleted_at: (f.deleted_at as number | null) ?? null,
+      published_at: (f.published_at as number | null) ?? null,
+      updated_at: (f.updated_at as number | null) ?? null,
+    }
+  } catch {
+    return null
+  }
 }
 
 export async function findActiveRevision(db: Database, articleId: number): Promise<RevisionRow | null> {
@@ -331,7 +362,7 @@ export async function saveRevision(
 
   const incomingHash = snapshotContentHash(snapshot)
   const baseHash = formal.contentHash ?? ''
-  const live = await findPostById(db, postRef)
+  const live = await findLivePostRow(db, articleId, formal.version)
   const formalSnapshot = live ? snapshotFromPost(live) : null
 
   const active = await findActiveRevision(db, articleId)
@@ -403,7 +434,7 @@ export async function saveRevision(
            WHERE NOT EXISTS (SELECT 1 FROM publish_revisions WHERE article_id = ? AND status = 'active')
              AND (SELECT version FROM formal_publications WHERE article_id = ?) = ?
              AND (SELECT COALESCE(MAX(version), 0) FROM article_versions WHERE article_id = ?) = ?
-             AND (SELECT id FROM posts WHERE id = ?) IS NOT NULL`,
+             AND (SELECT id FROM articles WHERE id = ?) IS NOT NULL`,
         )
         .bind(
           revisionId,
@@ -428,7 +459,7 @@ export async function saveRevision(
           formal.version,
           articleId,
           formal.version,
-          postRef,
+          articleId,
         )
         .run()
     } catch (error) {
@@ -661,7 +692,7 @@ async function promoteById(
   const evidenceSha256 = evidenceDigest(payload)
 
   // The exact live snapshot being replaced (the restore point material).
-  const live = await findPostById(db, postRef)
+  const live = await findLivePostRow(db, articleId, formal.version)
   const restoreSnapshot = live
     ? snapshotJson(
         buildInitialSnapshot({
@@ -771,41 +802,7 @@ async function promoteById(
         promotedVersion,
         promoteOperationId,
       ),
-    // (4) The posts projection follows the formal fact — content replaced, the
-    //     first-published time is preserved (only published_at moves).
-    db
-      .prepare(
-        `UPDATE posts SET
-           slug = ?, title = ?, content = ?, html = ?, description = ?, category = ?,
-           tags = ?, status = 'published', password = ?, is_pinned = ?, is_hidden = ?,
-           cover_image = ?, deleted_at = NULL, published_at = ?, updated_at = ?,
-           content_envelope = ?, content_snapshot_sha256 = ?, source_sync_sha256 = ?
-         WHERE id = ?
-           AND EXISTS (SELECT 1 FROM article_versions WHERE article_id = ? AND version = ? AND operation_id = ?)`,
-      )
-      .bind(
-        revision.slug,
-        revision.title,
-        revision.content,
-        revision.html,
-        revision.description,
-        revision.category,
-        revision.tags,
-        revision.password,
-        revision.is_pinned,
-        revision.is_hidden,
-        revision.cover_image,
-        now,
-        now,
-        record.envelope ? JSON.stringify(record.envelope) : null,
-        record.content_snapshot_sha256,
-        record.source_sync_sha256,
-        postRef,
-        articleId,
-        promotedVersion,
-        promoteOperationId,
-      ),
-    // (5) The revision leaves the active surface (immutable history).
+    // (4) The revision leaves the active surface (immutable history).
     db
       .prepare(
         `UPDATE publish_revisions SET status = 'promoted', updated_at = ?
@@ -982,11 +979,11 @@ export async function promoteRevision(db: Database, input: PromoteInput): Promis
     .prepare('SELECT article_id FROM formal_publications WHERE slug = ? AND article_id != ?')
     .bind(revision.slug, articleId)
     .first<{ article_id: number }>()
-  const rivalPublished = await db
-    .prepare("SELECT id FROM posts WHERE slug = ? AND id != ? AND status = 'published'")
-    .bind(revision.slug, article.post_ref)
-    .first<{ id: number }>()
-  if (rivalFormal || rivalPublished) failures.push('slug-conflict')
+  const rivalAddress = await db
+    .prepare('SELECT article_id FROM article_slug_addresses WHERE slug = ? AND article_id != ?')
+    .bind(revision.slug, articleId)
+    .first<{ article_id: number }>()
+  if (rivalFormal || rivalAddress) failures.push('slug-conflict')
   // B3-04: address registry exclusivity — a promoted slug must not be occupied
   // by ANOTHER article as its current / candidate / historical address, and an
   // article must not revert to one of its own permanently-reserved historical
@@ -1236,7 +1233,7 @@ export async function compareRevision(db: Database, input: CompareRevisionInput)
 
   const article = await findArticleById(db, articleId as number)
   if (!article) return { outcome: 'not-found', articleId: articleId as number, reason: `article ${articleId} not found` }
-  const live = await findPostById(db, article.post_ref)
+  const live = await findLivePostRow(db, articleId as number, serverVersion)
   const liveSnapshot = live ? snapshotFromPost(live) : null
 
   let targetSnapshot: RevisionSnapshotInput | null = null
@@ -1379,7 +1376,7 @@ export async function saveRestorePoint(db: Database, input: SaveRestorePointInpu
   if (!article) return { outcome: 'not-found', articleId: aId, reason: `article ${aId} not found` }
   const formal = await findFormalByArticle(db, aId)
   if (!formal) return { outcome: 'not-found', articleId: aId, reason: 'article has no formal publication' }
-  const live = await findPostById(db, article.post_ref)
+  const live = await findLivePostRow(db, aId, formal.version)
   if (!live) return { outcome: 'not-found', articleId: aId, reason: 'live post projection missing' }
 
   const restorePointId = `restore:${aId}:v${formal.version}:manual:${unixNow()}:${manualSnapSeq()}`
@@ -1754,7 +1751,6 @@ export async function undoRestoreOperation(db: Database, input: UndoRestoreInput
       .first<{ id: number; post_ref: number }>()
     if (draft) {
       await db.prepare('DELETE FROM articles WHERE id = ?').bind(draft.id).run()
-      if (draft.post_ref) await db.prepare('DELETE FROM posts WHERE id = ?').bind(draft.post_ref).run()
     }
   }
   await db

@@ -36,6 +36,7 @@
  */
 
 import type { Database } from '@/lib/repositories/schema'
+import { findLiveStateByPostRef, type CanonicalLiveState } from '@/lib/canonical-live'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands'
 import { save } from '@/lib/article-commands'
 import { resolveSourceUrl } from '@/lib/source-identity'
@@ -105,20 +106,8 @@ interface RecordRow {
   diff_json: string | null
 }
 
-interface PostRow {
-  slug: string
-  title: string
+interface PostRow extends CanonicalLiveState {
   content: string
-  category: string | null
-  tags: string | null
-  description: string | null
-  password: string | null
-  is_pinned: number
-  is_hidden: number
-  cover_image: string | null
-  status: string
-  published_at: number | null
-  deleted_at: number | null
 }
 
 interface LiveLinkRow {
@@ -156,14 +145,19 @@ async function liveClipLink(
 }
 
 async function findPost(db: Database, postRef: number): Promise<PostRow | null> {
-  return db
+  const live = await findLiveStateByPostRef(db, postRef)
+  if (!live) return null
+  // The body rides on the same frozen snapshot — fetch it alongside the fields.
+  const row = await db
     .prepare(
-      `SELECT slug, title, content, category, tags, description, password, is_pinned,
-              is_hidden, cover_image, status, published_at, deleted_at
-       FROM posts WHERE id = ?`,
+      `SELECT json_extract(v.snapshot_json, '$.original_content') AS content FROM articles a
+       JOIN article_versions v ON v.article_id = a.id
+        AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
+       WHERE a.post_ref = ?`,
     )
     .bind(postRef)
-    .first<PostRow>()
+    .first<{ content: string | null }>()
+  return { ...live, content: row?.content ?? '' }
 }
 
 async function findProposal(db: Database, operationId: string): Promise<ProposalRow | null> {

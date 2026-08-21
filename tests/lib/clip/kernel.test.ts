@@ -61,8 +61,22 @@ async function linkCount(): Promise<number> {
   return (await query<{ n: number }>('SELECT COUNT(*) AS n FROM article_source_links'))[0]?.n ?? 0
 }
 
+/** Latest frozen snapshot fields for an article (canonical, projection-free). */
+async function postFields(postRef: number): Promise<Record<string, unknown> | null> {
+  const rows = await query<Record<string, unknown>>(
+    `SELECT v.snapshot_json FROM articles a
+     JOIN article_versions v ON v.article_id = a.id
+      AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
+     WHERE a.post_ref = ${postRef} LIMIT 1`,
+  )
+  const raw = rows[0]
+  if (!raw) return null
+  const record = JSON.parse(raw.snapshot_json as string) as { fields: Record<string, unknown>; original_content: string | null }
+  return { ...record.fields, content: record.original_content ?? '' }
+}
+
 async function postsBody(postRef: number): Promise<string> {
-  return (await query<{ content: string }>(`SELECT content FROM posts WHERE id = ${postRef}`))[0]?.content ?? ''
+  return ((await postFields(postRef))?.content as string) ?? ''
 }
 
 describe('首次剪藏建文章 + 来源关系 (role=clip, pending)', { timeout: 120_000 }, () => {
@@ -90,11 +104,9 @@ describe('首次剪藏建文章 + 来源关系 (role=clip, pending)', { timeout:
     expect(await linkCount()).toBe(beforeLinks + 1)
 
     // the article was created as a draft.
-    const rows = await query<{ status: string; title: string }>(
-      `SELECT status, title FROM posts WHERE id = ${result.postRef}`,
-    )
-    expect(rows[0].status).toBe('draft')
-    expect(rows[0].title).toBe('剪藏标题')
+    const fields = await postFields(result.postRef)
+    expect(fields?.status).toBe('draft')
+    expect(fields?.title).toBe('剪藏标题')
   })
 
   it('refuses an invalid (non-http) source URL with invalid-source', async () => {

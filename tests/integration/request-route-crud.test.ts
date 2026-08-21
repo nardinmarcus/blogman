@@ -118,6 +118,22 @@ function applyArticleIdentityDdl(state: string) {
   if (result.status !== 0) throw new Error(result.stderr || result.stdout)
 }
 
+function applySlugAddressDdl(state: string) {
+  const result = spawnSync(process.execPath, [
+    join(repoRoot, 'scripts', 'apply-slug-address-ddl.mjs'),
+    '--local', '--persist-to', state, '--database', 'DB', '--config', join(repoRoot, 'wrangler.toml'),
+  ], { cwd: repoRoot, encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(result.stderr || result.stdout)
+}
+
+function applyArticleFtsDdl(state: string) {
+  const result = spawnSync(process.execPath, [
+    join(repoRoot, 'scripts', 'apply-article-fts-ddl.mjs'),
+    '--local', '--persist-to', state, '--database', 'DB', '--config', join(repoRoot, 'wrangler.toml'),
+  ], { cwd: repoRoot, encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(result.stderr || result.stdout)
+}
+
 function literal(value: unknown) {
   if (value === null || value === undefined) return 'NULL'
   if (typeof value === 'number') return String(value)
@@ -262,6 +278,9 @@ describe('real route CRUD on a ledger-migrated D1', () => {
     // L1 (#66): the legacy direct-`posts` writer is removed, so versioned
     // writes need the B2-02 identity tables present.
     applyArticleIdentityDdl(state)
+    // #234 Phase A — canonical slug registry + article FTS (kernel deps).
+    applySlugAddressDdl(state)
+    applyArticleFtsDdl(state)
     const db = createDatabase(state)
     const env = { DB: db }
     mocks.getAppCloudflareEnv.mockResolvedValue(env)
@@ -269,7 +288,8 @@ describe('real route CRUD on a ledger-migrated D1', () => {
     const schemaBefore = query(state, "SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name")
     const postContext = { params: Promise.resolve({ slug: 'route-post' }) }
 
-    // Versioned create (protocol v1) → article identity + version 1 + posts projection.
+    // Versioned create (protocol v1) → article identity + version 1 + registry
+    // reservation + canonical FTS index. The posts projection is retired.
     const created = await (await createPost(request('/api/posts', 'POST', {
       protocol: 'v1', action: 'create', creationId: 'route-crud-create',
       snapshot: {
@@ -279,21 +299,29 @@ describe('real route CRUD on a ledger-migrated D1', () => {
     }))).json() as { outcome: string; articleId: number; version: number; postRef: number }
     expect(created.outcome).toBe('created')
     expect(created.version).toBe(1)
-    expect(query(state, "SELECT rowid, title, content FROM posts_fts WHERE posts_fts MATCH 'original'"))
-      .toEqual([{ rowid: 1, title: 'Original title', content: 'original searchable body' }])
-    // B2-01b: dual-write produced a canonical envelope + both hashes on the same row.
-    const envelopeRow = query(state, "SELECT content_envelope, content_snapshot_sha256, source_sync_sha256 FROM posts WHERE slug = 'route-post'")
-    expect(envelopeRow).toHaveLength(1)
-    expect(String(envelopeRow[0].content_envelope)).toContain('blogman-content-envelope/v1')
-    expect(envelopeRow[0].content_snapshot_sha256).toMatch(/^[0-9a-f]{64}$/)
-    expect(envelopeRow[0].source_sync_sha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(query(state, "SELECT rowid, title, content FROM article_fts WHERE article_fts MATCH 'original'"))
+      .toEqual([{ rowid: created.articleId, title: 'Original title', content: 'original searchable body' }])
+    // The frozen v1 snapshot carries the canonical envelope + both hashes.
+    const v1 = query(state, "SELECT snapshot_json FROM article_versions WHERE article_id = 1 AND version = 1")
+    expect(v1).toHaveLength(1)
+    const v1record = JSON.parse(v1[0].snapshot_json) as {
+      envelope: { format?: string } | null
+      content_snapshot_sha256: string | null
+      source_sync_sha256: string | null
+    }
+    expect(String(v1record.envelope?.format)).toContain('blogman-content-envelope/v1')
+    expect(v1record.content_snapshot_sha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(v1record.source_sync_sha256).toMatch(/^[0-9a-f]{64}$/)
+    // The slug is reserved in the address registry for this article.
+    const reg = query(state, "SELECT article_id, kind FROM article_slug_addresses WHERE slug = 'route-post'")
+    expect(reg).toEqual([{ article_id: created.articleId, kind: 'candidate' }])
 
     // Negative probe: an unversioned direct create is rejected (writer removed).
     const legacyCreate = await createPost(request('/api/posts', 'POST', {
       slug: 'legacy-rejected', title: 'Legacy', content: 'should not land', status: 'draft',
     }))
     expect(legacyCreate.status).toBe(409)
-    expect(query(state, "SELECT slug FROM posts WHERE slug = 'legacy-rejected'")).toEqual([])
+    expect(query(state, "SELECT id FROM articles WHERE slug = 'legacy-rejected'")).toEqual([])
 
     expect((await getAdminPost(request('/api/admin/posts/route-post', 'GET'), postContext)).status).toBe(200)
     // Versioned content save through the command kernel.
@@ -306,11 +334,10 @@ describe('real route CRUD on a ledger-migrated D1', () => {
     }))).json() as { outcome: string; version: number }
     expect(saved.outcome).toBe('applied')
     expect(saved.version).toBe(2)
-    expect(query(state, "SELECT title, content, status FROM posts WHERE slug = 'route-post'"))
-      .toEqual([{ title: 'Updated title', content: 'updated searchable body', status: 'draft' }])
-    expect(query(state, "SELECT rowid, title, content FROM posts_fts WHERE posts_fts MATCH 'updated'"))
-      .toEqual([{ rowid: 1, title: 'Updated title', content: 'updated searchable body' }])
-    expect(query(state, "SELECT rowid FROM posts_fts WHERE posts_fts MATCH 'original'"))
+    // The canonical FTS index follows the latest version (trigger-fed).
+    expect(query(state, "SELECT rowid, title, content FROM article_fts WHERE article_fts MATCH 'updated'"))
+      .toEqual([{ rowid: created.articleId, title: 'Updated title', content: 'updated searchable body' }])
+    expect(query(state, "SELECT rowid FROM article_fts WHERE article_fts MATCH 'original'"))
       .toEqual([])
 
     // Versioned publish (publishTemp) – status transition only, no content write.
@@ -319,13 +346,17 @@ describe('real route CRUD on a ledger-migrated D1', () => {
       operationId: 'route-crud-pub-1', status: 'published',
     }))).json() as { outcome: string; version: number }
     expect(published.outcome).toBe('applied')
-    expect(query(state, "SELECT status FROM posts WHERE slug = 'route-post'"))
-      .toEqual([{ status: 'published' }])
+    const pubStatus = query(state, "SELECT json_extract(snapshot_json, '$.fields.status') AS status FROM article_versions WHERE article_id = 1 ORDER BY version DESC LIMIT 1")
+    expect(pubStatus).toEqual([{ status: 'published' }])
 
+    // Admin DELETE routes through the explicit softDelete command (canonical).
     expect((await deleteAdminPost(request('/api/admin/posts/route-post', 'DELETE'), postContext)).status).toBe(200)
-    expect(query(state, "SELECT status FROM posts WHERE slug = 'route-post'")).toEqual([])
-    expect(query(state, "SELECT rowid FROM posts_fts WHERE posts_fts MATCH 'updated'"))
-      .toEqual([])
+    const delStatus = query(state, "SELECT json_extract(snapshot_json, '$.fields.deleted_at') AS deleted_at FROM article_versions WHERE article_id = 1 ORDER BY version DESC LIMIT 1")
+    expect(delStatus[0]?.deleted_at).not.toBeNull()
+    // Soft delete keeps the index row — exclusion happens at read time via
+    // the snapshot's deleted_at (search filters access-control canonically).
+    expect(query(state, "SELECT rowid FROM article_fts WHERE article_fts MATCH 'updated'"))
+      .toEqual([{ rowid: created.articleId }])
     expect(query(state, "SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"))
       .toEqual(schemaBefore)
   })

@@ -3,6 +3,7 @@ import type { PostWithTags } from '@/lib/repositories/types'
 import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 import {
   CANONICAL_ROW_COLUMNS,
+  CANONICAL_LATEST_JOIN,
   canonicalFactsAvailable,
   type CanonicalPublicRow,
   postFromCanonicalRow,
@@ -47,7 +48,7 @@ export async function searchPosts(
   return searchCanonical(db, query, limit, includeDrafts, includeEncrypted, includeHidden, includeDeleted)
 }
 
-/** Canonical FTS: posts_fts → articles → formal_publications → article_versions. */
+/** Canonical FTS: article_fts → articles → formal_publications → article_versions. */
 async function searchCanonical(
   db: Database,
   query: string,
@@ -69,11 +70,12 @@ async function searchCanonical(
     const { results } = await db
       .prepare(
         `SELECT ${CANONICAL_ROW_COLUMNS}
-         FROM posts_fts
-         JOIN articles a ON a.post_ref = posts_fts.rowid
+         FROM article_fts
+         JOIN articles a ON a.id = article_fts.rowid
          JOIN formal_publications f ON f.article_id = a.id
          JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
-         WHERE posts_fts MATCH ?${whereClause}
+         ${CANONICAL_LATEST_JOIN}
+         WHERE article_fts MATCH ?${whereClause}
          ORDER BY rank
          LIMIT ?`,
       )

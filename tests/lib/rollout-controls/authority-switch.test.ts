@@ -102,6 +102,35 @@ async function switchRequestReset(): Promise<void> {
   await query(`DELETE FROM rollout_control_events`)
 }
 
+/** Canonical live state by slug — materialized from the latest frozen snapshot. */
+async function canonBySlug(slug: string): Promise<Record<string, unknown> | null> {
+  const rows = await query<Record<string, unknown>>(
+    `SELECT v.snapshot_json FROM article_slug_addresses s
+     JOIN articles a ON a.id = s.article_id
+     JOIN article_versions v ON v.article_id = a.id
+      AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
+     WHERE s.slug = '${slug}' LIMIT 1`,
+  )
+  const raw = rows[0]
+  if (!raw) return null
+  const record = JSON.parse(raw.snapshot_json as string) as {
+    fields: Record<string, unknown>
+    original_content: string | null
+    original_html: string | null
+    envelope: unknown
+    content_snapshot_sha256: string | null
+    source_sync_sha256: string | null
+  }
+  return {
+    ...record.fields,
+    content: record.original_content ?? '',
+    html: record.original_html ?? '',
+    envelope: record.envelope,
+    content_snapshot_sha256: record.content_snapshot_sha256,
+    source_sync_sha256: record.source_sync_sha256,
+  }
+}
+
 describe('rollout-controls — authority switch acceptance', { timeout: 600_000 }, () => {
   it('默认未切换时 producer 开放、authority 关闭（预切换兼容行为）', async () => {
     const db = createDatabase()
@@ -137,10 +166,10 @@ describe('rollout-controls — authority switch acceptance', { timeout: 600_000 
     expect(rows.at(-1)?.n).toBe(1)
     void versions
 
-    // posts projection is a readable draft (kernel create keeps the draft status).
-    const post = (await query<{ status: string; title: string }>(`SELECT status, title FROM posts WHERE slug = '${slug}'`))[0]
-    expect(post.status).toBe('draft')
-    expect(post.title).toBe('幂等草稿')
+    // The canonical state is a readable draft.
+    const post = await canonBySlug(slug)
+    expect(post?.status).toBe('draft')
+    expect(post?.title).toBe('幂等草稿')
   })
 
   it('保存确认：version 单调递增，replay 不膨胀版本，投影跟随最新版本', async () => {
@@ -164,9 +193,9 @@ describe('rollout-controls — authority switch acceptance', { timeout: 600_000 
     const vs = await query<{ version: number }>(`SELECT version FROM article_versions WHERE article_id = ${articleId} ORDER BY version`)
     expect(vs.map((r) => r.version)).toEqual([1, 2])
 
-    const post = (await query<{ title: string; content: string }>(`SELECT title, content FROM posts WHERE slug = '${slug}'`))[0]
-    expect(post.title).toBe('第二版')
-    expect(post.content).toBe('二稿')
+    const post = await canonBySlug(slug)
+    expect(post?.title).toBe('第二版')
+    expect(post?.content).toBe('二稿')
   })
 
   it('跨入口冲突：两个 writer 同 expectedVersion，一个 applied、一个 conflict，零部分写入', async () => {
@@ -191,7 +220,7 @@ describe('rollout-controls — authority switch acceptance', { timeout: 600_000 
     const winner = (aApplied ? a : b) as { articleId: number; version: number }
     const vs = await query<{ version: number }>(`SELECT version FROM article_versions WHERE article_id = ${articleId} ORDER BY version`)
     expect(vs.map((r) => r.version)).toEqual([1, 2])
-    const winnerTitle = (await query<{ title: string }>(`SELECT title FROM posts WHERE slug = '${slug}'`))[0].title
+    const winnerTitle = (await canonBySlug(slug))?.title
     expect(winnerTitle).toBe('A 写入')
     void winner
   })
@@ -207,19 +236,19 @@ describe('rollout-controls — authority switch acceptance', { timeout: 600_000 
     })
     expect(pub.outcome).toBe('applied')
     expect((pub as { version: number }).version).toBe(2)
-    const post = (await query<{ status: string; published_at: string | null }>(`SELECT status, published_at FROM posts WHERE slug = '${slug}'`))[0]
-    expect(post.status).toBe('published')
-    expect(post.published_at).not.toBeNull()
+    const post = await canonBySlug(slug)
+    expect(post?.status).toBe('published')
+    expect(post?.published_at).not.toBeNull()
 
     const unpub = await publishTemp(db, {
       articleId, expectedVersion: 2, currentStatus: 'published', operationId: 'op-pub-2', status: 'draft',
     })
     expect(unpub.outcome).toBe('applied')
-    const post2 = (await query<{ status: string }>(`SELECT status FROM posts WHERE slug = '${slug}'`))[0]
-    expect(post2.status).toBe('draft')
+    const post2 = await canonBySlug(slug)
+    expect(post2?.status).toBe('draft')
   })
 
-  it('公共读取兼容：posts 投影始终为可读的最新版本（公共读不依赖版本表）', async () => {
+  it('公共读取兼容：最新冻结版本始终可读（公共读不依赖投影）', async () => {
     const db = createDatabase()
     const slug = fresh('pubread')
     const created = await create(db, { creationId: fresh('pubread-c'), snapshot: snapshot(slug, '公开标题', '公开正文') })
@@ -228,17 +257,14 @@ describe('rollout-controls — authority switch acceptance', { timeout: 600_000 
       articleId, expectedVersion: 1, operationId: 'op-pubread-1', snapshot: snapshot(slug, '公开标题2', '公开正文2'),
     })
 
-    // The public read surface only touches posts.
-    const post = (await query<{ slug: string; title: string; content: string; content_envelope: string | null }>(
-      `SELECT slug, title, content, content_envelope FROM posts WHERE slug = '${slug}'`,
-    ))[0]
-    expect(post.slug).toBe(slug)
-    expect(post.title).toBe('公开标题2')
-    expect(post.content).toBe('公开正文2')
-    expect(post.content_envelope).not.toBeNull()
+    const post = await canonBySlug(slug)
+    expect(post?.slug).toBe(slug)
+    expect(post?.title).toBe('公开标题2')
+    expect(post?.content).toBe('公开正文2')
+    expect(post?.envelope).not.toBeNull()
   })
 
-  it('投影/哈希对账：posts 的 envelope/哈希/正文与最新版本事实一致', async () => {
+  it('canonical 自洽：最新版本快照携带 envelope/哈希，注册表登记地址', async () => {
     const db = createDatabase()
     const slug = fresh('recon')
     const created = await create(db, { creationId: fresh('recon-c'), snapshot: snapshot(slug, '对账', '对账正文') })
@@ -256,19 +282,15 @@ describe('rollout-controls — authority switch acceptance', { timeout: 600_000 
       source_sync_sha256: string
       envelope: unknown
     }
-    const post = (await query<{
-      slug: string; title: string; content: string; status: string
-      content_snapshot_sha256: string | null; source_sync_sha256: string | null; content_envelope: string | null
-    }>(
-      `SELECT slug, title, content, status, content_snapshot_sha256, source_sync_sha256, content_envelope FROM posts WHERE slug = '${slug}'`,
+    const registry = (await query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM article_slug_addresses WHERE slug = '${slug}'`,
     ))[0]
-
-    expect(post.slug).toBe(record.fields.slug)
-    expect(post.title).toBe(record.fields.title)
-    expect(post.status).toBe(record.fields.status)
-    expect(post.content_snapshot_sha256).toBe(record.content_snapshot_sha256)
-    expect(post.source_sync_sha256).toBe(record.source_sync_sha256)
-    expect(post.content_envelope).toBe(JSON.stringify(record.envelope))
+    expect(registry.n).toBe(1)
+    expect(record.fields.slug).toBe(slug)
+    expect(record.fields.status).toBe('draft')
+    expect(record.content_snapshot_sha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(record.source_sync_sha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(record.envelope).not.toBeNull()
   })
 
   it('切换后 authority=on / producer=off：无版本写拒绝，版本化写仍工作', async () => {
@@ -321,9 +343,9 @@ describe('rollout-controls — authority switch acceptance', { timeout: 600_000 
     const guard = await versionedWriteGuard(db, { requireProducer: true, env: {} })
     expect(guard.refused).toBe(true)
 
-    // Compatible reads continue (posts projection intact).
-    const post = (await query<{ title: string }>(`SELECT title FROM posts WHERE slug = '${slug}'`))[0]
-    expect(post.title).toBe('回滚版本2')
+    // Compatible reads continue (canonical latest snapshot intact).
+    const post = await canonBySlug(slug)
+    expect(post?.title).toBe('回滚版本2')
 
     // All version facts preserved.
     const vs = await query<{ version: number }>(`SELECT version FROM article_versions WHERE article_id = ${articleId} ORDER BY version`)

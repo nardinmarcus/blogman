@@ -30,9 +30,9 @@ import {
   createFormalArticle,
   freshOp,
 } from './helpers'
-import { save } from '@/lib/article-commands'
+import { save, setPinned } from '@/lib/article-commands'
 import { discardRevision, promoteRevision, readRevisionState } from '@/lib/publish-revision'
-import { FormalArticleInPlaceUpdateError, updatePost, updatePostBySlug } from '@/lib/repositories/posts'
+
 import type { ArticleCommandSnapshot } from '@/lib/article-commands/types'
 import type { RevisionRow } from '@/lib/publish-revision/types'
 
@@ -79,8 +79,26 @@ function snapshot(overrides: Partial<ArticleCommandSnapshot> = {}): ArticleComma
   }
 }
 
+/** The live formal content — materialized from the FROZEN FORMAL version (canonical). */
 async function livePost(postRef: number) {
-  return (await query<Record<string, unknown>>(`SELECT * FROM posts WHERE id = ${postRef}`))[0] ?? null
+  const rows = await query<Record<string, unknown>>(
+    `SELECT v.snapshot_json FROM articles a
+     JOIN formal_publications f ON f.article_id = a.id
+     JOIN article_versions v ON v.article_id = a.id AND v.version = f.version
+     WHERE a.post_ref = ${postRef} LIMIT 1`,
+  )
+  const raw = rows[0]
+  if (!raw) return null
+  const record = JSON.parse(raw.snapshot_json as string) as {
+    fields: Record<string, unknown>
+    original_content: string | null
+    original_html: string | null
+  }
+  return {
+    ...record.fields,
+    content: record.original_content,
+    html: record.original_html,
+  }
 }
 
 async function activeRevisions(articleId: number) {
@@ -385,19 +403,29 @@ describe('lib/publish-revision — formal-article pending revision loop', { time
     expect((await livePost(article.postRef))?.title).toBe('第一修订')
   })
 
-  it('拒绝旧式原地更新：对正式文章的 legacy 直接 posts 写入抛错', async () => {
+  it('拒绝旧式原地更新：legacy 直接写已随投影退役（结构性移除）', async () => {
     const article = await createFormalArticle(fresh('inplace'))
-    await expect(
-      updatePost(createDatabase(), article.postRef, { title: '试图原地改标题', content: '试图原地改正文' }),
-    ).rejects.toBeInstanceOf(FormalArticleInPlaceUpdateError)
-    await expect(
-      updatePostBySlug(createDatabase(), article.slug, { title: '原地改' }),
-    ).rejects.toBeInstanceOf(FormalArticleInPlaceUpdateError)
-    // The live row is untouched.
+    // The legacy in-place helpers no longer exist — the posts write surface is
+    // retired with the projection (ADR 0008). The live formal content is
+    // untouched and remains reachable only through canonical reads.
+    const repo = (await import('@/lib/repositories/posts')) as Record<string, unknown>
+    expect(repo.updatePost).toBeUndefined()
+    expect(repo.updatePostBySlug).toBeUndefined()
     expect((await livePost(article.postRef))?.title).toBe('正式文章标题')
-    // A visibility-only toggle (pin/hidden) is NOT a content edit and stays allowed.
-    await updatePost(createDatabase(), article.postRef, { is_pinned: 1 })
-    expect((await livePost(article.postRef))?.is_pinned).toBe(1)
+    // A visibility-only toggle (pin) is NOT a content edit: it goes through
+    // the explicit command protocol and appends its own immutable version;
+    // public reads surface it from the LATEST snapshot immediately.
+    await setPinned(createDatabase(), {
+      articleId: article.articleId,
+      expectedVersion: 1,
+      operationId: freshOp('inplace-pin'),
+      is_pinned: 1,
+    })
+    const pinned = (await query<{ is_pinned: number }>(
+      `SELECT json_extract(snapshot_json, '$.fields.is_pinned') AS is_pinned
+       FROM article_versions WHERE article_id = ${article.articleId} ORDER BY version DESC LIMIT 1`,
+    ))[0]
+    expect(pinned?.is_pinned).toBe(1)
   })
 
   it('discard 可停用活动修订，保留正式版本且不改变线上', async () => {

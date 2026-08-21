@@ -121,6 +121,25 @@ async function createClippedDraft(url: string): Promise<{ articleId: number; pos
   return { articleId: created.articleId, postRef: created.postRef }
 }
 
+
+/** Latest frozen snapshot fields for an article (canonical, projection-free). */
+async function canonFields(postRef: number): Promise<Record<string, unknown> | null> {
+  const rows = await query<Record<string, unknown>>(
+    `SELECT v.snapshot_json FROM articles a
+     JOIN article_versions v ON v.article_id = a.id
+      AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
+     WHERE a.post_ref = ${postRef} LIMIT 1`,
+  )
+  const raw = rows[0]
+  if (!raw) return null
+  const record = JSON.parse(raw.snapshot_json as string) as {
+    fields: Record<string, unknown>
+    original_content: string | null
+    original_html: string | null
+  }
+  return { ...record.fields, content: record.original_content ?? '', html: record.original_html ?? '' }
+}
+
 describe('差异展示 + 确认后更新 (draft → 新版本)', { timeout: 120_000 }, () => {
   it('propose freezes the 标题/正文/媒体 diff WITHOUT writing; confirm applies as a new version', async () => {
     const url = `https://example.com/refresh/${fresh('r')}`
@@ -150,7 +169,7 @@ describe('差异展示 + 确认后更新 (draft → 新版本)', { timeout: 120_
     expect(proposed.diff.changed).toBe(true)
     // no article write on propose.
     expect(await versionCount(articleId)).toBe(1)
-    expect((await query<{ title: string }>(`SELECT title FROM posts WHERE id = ${postRef}`))[0].title).toBe('旧标题')
+    expect((await canonFields(postRef))?.title).toBe('旧标题')
 
     // 明确确认后才更新.
     const confirmed = await confirmRefresh(createDatabase(), {
@@ -170,7 +189,7 @@ describe('差异展示 + 确认后更新 (draft → 新版本)', { timeout: 120_
     expect(confirmed.projection.title).toBe('新标题(规范化)')
     expect(await versionCount(articleId)).toBe(2)
 
-    const post = (await query<{ title: string; content: string }>(`SELECT title, content FROM posts WHERE id = ${postRef}`))[0]
+    const post = await canonFields(postRef)
     expect(post.title).toBe('新标题(规范化)')
     expect(post.content).toContain('/api/images/source-media/')
     expect(post.content).not.toContain('assets/hero.png')
@@ -202,7 +221,7 @@ describe('差异展示 + 确认后更新 (draft → 新版本)', { timeout: 120_
     expect(confirmed.outcome).toBe('no-diff')
     // nothing written.
     expect(await versionCount(articleId)).toBe(1)
-    expect((await query<{ title: string }>(`SELECT title FROM posts WHERE id = ${postRef}`))[0].title).toBe('旧标题')
+    expect((await canonFields(postRef))?.title).toBe('旧标题')
   })
 })
 
@@ -226,7 +245,7 @@ describe('版本变化要求重新比较 (stale)', { timeout: 120_000 }, () => {
       expectedVersion: 1,
       operationId: fresh('author-edit'),
       snapshot: {
-        slug: (await query<{ slug: string }>(`SELECT slug FROM posts WHERE id = (SELECT post_ref FROM articles WHERE id = ${articleId})`))[0].slug,
+        slug: (await query<{ slug: string }>(`SELECT slug FROM articles WHERE id = ${articleId}`))[0].slug,
         title: '作者手改', content: '# 作者手改', html: '<h1>作者手改</h1>',
         description: null, category: null, tags: null, status: 'draft', password: null,
         is_pinned: 0, is_hidden: 0, cover_image: null, deleted_at: null, published_at: null, updated_at: null,
@@ -348,7 +367,7 @@ describe('刷新记录幂等', { timeout: 120_000 }, () => {
     expect(await refreshRecordCount(articleId)).toBe(1)
     // replay never writes a second version.
     expect(await versionCount(articleId)).toBe(2)
-    expect((await query<{ title: string }>(`SELECT title FROM posts WHERE id = ${postRef}`))[0].title).toBe('新标题')
+    expect((await canonFields(postRef))?.title).toBe('新标题')
   })
 })
 
@@ -387,7 +406,7 @@ describe('正式文章只形成修订 + 来源网页不取得持续写作权威'
     expect(await versionCount(articleId)).toBe(1)
     const active = (await query<{ n: number }>(`SELECT COUNT(*) AS n FROM publish_revisions WHERE article_id = ${articleId} AND status = 'active'`))[0].n
     expect(active).toBe(1)
-    const post = (await query<{ title: string }>(`SELECT title FROM posts WHERE id = ${postRef}`))[0]
+    const post = await canonFields(postRef)
     expect(post.title).toBe('正式文章标题')
 
     // 来源网页永不取得持续写作权威 — role stays clip, no primary link, baseline untouched.

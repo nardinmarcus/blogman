@@ -176,19 +176,24 @@ function findLatestVersion(db: Database, articleId: number): Promise<VersionRow 
     .first<VersionRow>()
 }
 
-function slugTakenByOther(db: Database, slug: string, excludePostRef: number): Promise<boolean> {
+/**
+ * Slug exclusivity through the permanent address registry (ADR 0009): the slug
+ * is taken when ANY kind row exists for a DIFFERENT article. Own historical /
+ * candidate rows never block (revert / re-reserve).
+ */
+function slugOwnedByOther(db: Database, slug: string, articleId: number): Promise<boolean> {
   return db
-    .prepare('SELECT id FROM posts WHERE slug = ? AND id != ?')
-    .bind(slug, excludePostRef)
-    .first<{ id: number }>()
-    .then((row) => row !== null)
+    .prepare('SELECT article_id FROM article_slug_addresses WHERE slug = ?')
+    .bind(slug)
+    .first<{ article_id: number }>()
+    .then((row) => row !== null && row.article_id !== articleId)
 }
 
 function slugTaken(db: Database, slug: string): Promise<boolean> {
   return db
-    .prepare('SELECT id FROM posts WHERE slug = ?')
+    .prepare('SELECT article_id FROM article_slug_addresses WHERE slug = ?')
     .bind(slug)
-    .first<{ id: number }>()
+    .first<{ article_id: number }>()
     .then((row) => row !== null)
 }
 
@@ -370,47 +375,19 @@ export async function create(
   const record = buildVersionRecord(row, 1)
   // post_ref is patched into the stored JSON inside the transaction (json_set).
   const recordJson = snapshotJson({ ...record, post_ref: 0 })
-  const { content_envelope, content_snapshot_sha256, source_sync_sha256 } =
-    envelopeColumns(record)
+  const { content_snapshot_sha256 } = envelopeColumns(record)
 
   const batch = [
-    db
-      .prepare(
-        `INSERT INTO posts
-           (slug, title, content, html, description, category, tags, status, password,
-            is_pinned, is_hidden, cover_image, deleted_at, published_at, updated_at,
-            content_envelope, content_snapshot_sha256, source_sync_sha256)
-         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-         WHERE NOT EXISTS (SELECT 1 FROM articles WHERE draft_ref = ?)`,
-      )
-      .bind(
-        row.slug,
-        row.title,
-        row.content,
-        row.html,
-        row.description,
-        row.category,
-        row.tags,
-        row.status,
-        row.password,
-        row.is_pinned,
-        row.is_hidden,
-        row.cover_image,
-        row.deleted_at,
-        row.published_at,
-        row.updated_at,
-        content_envelope,
-        content_snapshot_sha256,
-        source_sync_sha256,
-        creationId,
-      ),
+    // (1) The article identity — post_ref is synthesized as MAX(post_ref)+1
+    // (ADR 0008): a legacy numeric identifier whose only job is uniqueness;
+    // it is no longer derived from (or mirrored into) the posts projection.
     db
       .prepare(
         `INSERT INTO articles (post_ref, slug, draft_ref)
-         SELECT id, ?, ? FROM posts WHERE slug = ?
-           AND NOT EXISTS (SELECT 1 FROM articles WHERE draft_ref = ?)`,
+         SELECT COALESCE((SELECT MAX(post_ref) FROM articles), 0) + 1, ?, ?
+         WHERE NOT EXISTS (SELECT 1 FROM articles WHERE draft_ref = ?)`,
       )
-      .bind(row.slug, creationId, row.slug, creationId),
+      .bind(row.slug, creationId, creationId),
     db
       .prepare(
         `INSERT INTO article_versions
@@ -427,6 +404,19 @@ export async function create(
         creationId,
         operationId,
       ),
+    // (3) Reserve the draft slug in the address registry (ADR 0009). No
+    // guard against a RIVAL's row: the registry's slug UNIQUE is the hard
+    // enforcement — a concurrent registration aborts the whole batch.
+    db
+      .prepare(
+        `INSERT INTO article_slug_addresses (slug, article_id, kind, created_at, updated_at)
+         SELECT ?, a.id, 'candidate', ?, ?
+         FROM articles a WHERE a.draft_ref = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM article_slug_addresses s WHERE s.slug = ? AND s.article_id = a.id
+           )`,
+      )
+      .bind(row.slug, now, now, creationId, row.slug),
   ]
 
   try {
@@ -558,8 +548,9 @@ export async function save(db: Database, input: SaveArticleInput): Promise<SaveR
     }
   }
 
-  // Slug precondition (belt; the batch UNIQUE constraint is the suspenders).
-  if (await slugTakenByOther(db, snapshot.slug, postRef)) {
+  // Slug precondition through the address registry (ADR 0009); the batch's
+  // registry UNIQUE constraint is the suspenders.
+  if (await slugOwnedByOther(db, snapshot.slug, articleId)) {
     return { outcome: 'slug-conflict', slug: snapshot.slug }
   }
 
@@ -569,8 +560,7 @@ export async function save(db: Database, input: SaveArticleInput): Promise<SaveR
   const row = snapshotRow({ ...snapshot, published_at: publishedAt }, postRef, now)
   const record = buildVersionRecord(row, expectedVersion + 1)
   const recordJson = snapshotJson(record)
-  const { content_envelope, content_snapshot_sha256, source_sync_sha256 } =
-    envelopeColumns(record)
+  const { content_snapshot_sha256 } = envelopeColumns(record)
 
   const batch = [
     db
@@ -594,44 +584,24 @@ export async function save(db: Database, input: SaveArticleInput): Promise<SaveR
         expectedVersion,
         operationId,
       ),
+    // Reserve the saved slug as this article's candidate. Own rows (from
+    // create or a prior save) skip via the NOT EXISTS; a RIVAL's row trips
+    // the registry slug UNIQUE and aborts the whole batch.
     db
       .prepare(
-        `UPDATE posts SET
-           slug = ?, title = ?, content = ?, html = ?, description = ?, category = ?,
-           tags = ?, status = ?, password = ?, is_pinned = ?, is_hidden = ?,
-           cover_image = ?, deleted_at = ?, published_at = ?, updated_at = ?,
-           content_envelope = ?, content_snapshot_sha256 = ?, source_sync_sha256 = ?
-         WHERE id = ?
-           AND EXISTS (SELECT 1 FROM article_versions WHERE operation_id = ?)`,
+        `INSERT INTO article_slug_addresses (slug, article_id, kind, created_at, updated_at)
+         SELECT ?, ?, 'candidate', ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM article_slug_addresses WHERE slug = ? AND article_id = ?
+         )`,
       )
-      .bind(
-        row.slug,
-        row.title,
-        row.content,
-        row.html,
-        row.description,
-        row.category,
-        row.tags,
-        row.status,
-        row.password,
-        row.is_pinned,
-        row.is_hidden,
-        row.cover_image,
-        row.deleted_at,
-        row.published_at,
-        row.updated_at,
-        content_envelope,
-        content_snapshot_sha256,
-        source_sync_sha256,
-        postRef,
-        operationId,
-      ),
+      .bind(row.slug, articleId, now, now, row.slug, articleId),
   ]
 
   try {
     await db.batch(batch)
   } catch (error) {
-    // Atomic abort — most likely a slug UNIQUE race on the posts projection.
+    // Atomic abort — most likely a registry slug UNIQUE race.
     const byOperation = await findVersionByOperationId(db, operationId)
     if (byOperation) {
       return {
@@ -644,7 +614,7 @@ export async function save(db: Database, input: SaveArticleInput): Promise<SaveR
         projectionFailures: [],
       }
     }
-    if (await slugTakenByOther(db, snapshot.slug, postRef)) {
+    if (await slugOwnedByOther(db, snapshot.slug, articleId)) {
       return { outcome: 'slug-conflict', slug: snapshot.slug }
     }
     throw new Error(
@@ -732,28 +702,25 @@ export async function publishTemp(
     }
   }
 
-  // Status precondition against the live posts projection (legacy PATCH can
-  // change posts.status outside the command layer).
-  const post = await db
-    .prepare('SELECT status, published_at FROM posts WHERE id = ?')
-    .bind(postRef)
-    .first<{ status: string | null; published_at: number | null }>()
-  if (!post || post.status !== currentStatus) {
+  // Status precondition anchored on the latest version snapshot — the
+  // canonical lifecycle fact (the legacy posts projection is retired).
+  const current = JSON.parse(latest!.snapshot_json) as ArticleIdentitySnapshot
+  const liveStatus = current.fields.status ?? null
+  if (liveStatus !== currentStatus) {
     return {
       outcome: 'status-conflict',
       articleId,
       postRef,
       expectedVersion,
       serverVersion,
-      currentStatus: post?.status ?? null,
+      currentStatus: liveStatus,
     }
   }
 
   // Legacy-compatible published_at: keep on unpublish, first-now on publish.
   const now = unixNow()
   const nextPublishedAt =
-    status === 'published' ? (post.published_at ?? now) : post.published_at
-  const current = JSON.parse(latest!.snapshot_json) as ArticleIdentitySnapshot
+    status === 'published' ? (latest!.published_at ?? now) : latest!.published_at
   const nextRow: PostAuthorityRow = {
     id: postRef,
     slug: current.fields.slug,
@@ -786,7 +753,8 @@ export async function publishTemp(
          GROUP BY article_id
          HAVING COALESCE(MAX(version), 0) = ?
            AND NOT EXISTS (SELECT 1 FROM article_versions WHERE operation_id = ?)
-           AND (SELECT status FROM posts WHERE id = ?) = ?`,
+           AND COALESCE(json_extract((SELECT snapshot_json FROM article_versions
+                 WHERE article_id = ? ORDER BY version DESC LIMIT 1), '$.fields.status'), '') = ?`,
       )
       .bind(
         articleId,
@@ -797,16 +765,9 @@ export async function publishTemp(
         articleId,
         expectedVersion,
         operationId,
-        postRef,
+        articleId,
         currentStatus,
       ),
-    db
-      .prepare(
-        `UPDATE posts SET status = ?, published_at = ?, updated_at = strftime('%s', 'now')
-         WHERE id = ?
-           AND EXISTS (SELECT 1 FROM article_versions WHERE operation_id = ?)`,
-      )
-      .bind(status, nextPublishedAt, postRef, operationId),
   ]
 
   try {
@@ -917,6 +878,34 @@ function authorityRowFromSnapshot(
     deleted_at: fields.deleted_at,
     published_at: fields.published_at,
     updated_at: fields.updated_at,
+  }
+}
+
+/** Rebuild a full authority row from the latest frozen snapshot + a field patch. */
+function nextAuthorityRow(
+  postRef: number,
+  current: ArticleIdentitySnapshot,
+  patch: Partial<ArticleSnapshotFields>,
+  now: number,
+): PostAuthorityRow {
+  const fields = { ...current.fields, ...patch }
+  return {
+    id: postRef,
+    slug: fields.slug,
+    title: fields.title,
+    content: current.original_content ?? '',
+    html: current.original_html ?? '',
+    description: fields.description,
+    category: fields.category,
+    tags: fields.tags,
+    status: fields.status,
+    password: fields.password,
+    is_pinned: fields.is_pinned ?? 0,
+    is_hidden: fields.is_hidden ?? 0,
+    cover_image: fields.cover_image,
+    deleted_at: fields.deleted_at,
+    published_at: fields.published_at,
+    updated_at: now,
   }
 }
 

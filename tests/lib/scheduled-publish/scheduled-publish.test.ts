@@ -334,9 +334,10 @@ describe('scanDueSchedules (per-minute compensation)', () => {
     expect(formal[0].c).toBe(1)
     expect(await countEvents(articleId)).toBe(1)
 
-    // The article's post is actually live now.
+    // The article is actually live now (canonical: formal facts).
     const post = await query<{ status: string; published_at: number | null }>(
-      `SELECT status, published_at FROM posts WHERE id = (SELECT post_ref FROM articles WHERE id = ${articleId})`,
+      `SELECT f.lifecycle AS status, f.published_at AS published_at
+       FROM formal_publications f WHERE f.article_id = ${articleId}`,
     )
     expect(post[0].status).toBe('published')
     expect(post[0].published_at).not.toBeNull()

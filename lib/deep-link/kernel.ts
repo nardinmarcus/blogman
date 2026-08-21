@@ -19,6 +19,7 @@
  */
 
 import type { Database } from '@/lib/repositories/schema'
+import { findLiveStateByPostRef } from '@/lib/canonical-live'
 import type { ResponsibleParty } from '@/lib/workbench/types'
 import type { DeepLinkResolution, DeepLinkTarget } from './types'
 
@@ -26,13 +27,6 @@ interface ArticleRow {
   id: number
   slug: string | null
   post_ref: number
-}
-
-interface PostRow {
-  id: number
-  slug: string
-  title: string
-  status: string
 }
 
 interface FormalRow {
@@ -57,8 +51,9 @@ async function findArticleById(db: Database, articleId: number): Promise<Article
   return db.prepare('SELECT id, slug, post_ref FROM articles WHERE id = ?').bind(articleId).first<ArticleRow>()
 }
 
-async function findPostById(db: Database, postRef: number): Promise<PostRow | null> {
-  return db.prepare('SELECT id, slug, title, status FROM posts WHERE id = ?').bind(postRef).first<PostRow>()
+async function findPostById(db: Database, postRef: number): Promise<{ title: string; status: string | null } | null> {
+  const live = await findLiveStateByPostRef(db, postRef)
+  return live ? { title: live.title, status: live.status } : null
 }
 
 async function findFormal(db: Database, articleId: number): Promise<FormalRow | null> {

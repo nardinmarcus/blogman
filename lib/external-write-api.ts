@@ -281,14 +281,14 @@ export async function resolveArticleBySlug(
   db: Database,
   slug: string,
 ): Promise<ResolvedArticle | null> {
-  const post = await db
-    .prepare('SELECT id FROM posts WHERE slug = ?')
+  const bySlug = await db
+    .prepare('SELECT article_id FROM article_slug_addresses WHERE slug = ?')
     .bind(normalizePostSlug(slug))
-    .first<{ id: number }>()
-  if (!post) return null
+    .first<{ article_id: number }>()
+  if (!bySlug) return null
   const article = await db
-    .prepare('SELECT id, post_ref FROM articles WHERE post_ref = ?')
-    .bind(post.id)
+    .prepare('SELECT id, post_ref FROM articles WHERE id = ?')
+    .bind(bySlug.article_id)
     .first<{ id: number; post_ref: number }>()
   if (!article) return null
   const latest = await db

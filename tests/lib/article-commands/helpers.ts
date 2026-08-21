@@ -51,8 +51,18 @@ export function splitSqlFile(filePath: string): string[] {
   return statements
 }
 
+export interface BootstrapOptions {
+  /**
+   * #234 Phase A — drop the legacy `posts` / `posts_fts` tables (and their FTS
+   * triggers) after the ledger migration so any residual kernel reference
+   * fails loudly. Proves the write kernels work against canonical facts only.
+   */
+  postsless?: boolean
+}
+
 /** Bootstrap the shared in-process D1 for the whole test file. */
-export async function bootstrapState(stateDir: string): Promise<void> {
+export async function bootstrapState(stateDir: string, options: BootstrapOptions = {}): Promise<void> {
+  const { postsless = false } = options
   mf = new Miniflare({
     modules: true,
     script: 'export default { fetch() { return new Response("ok") } }',
@@ -87,6 +97,24 @@ export async function bootstrapState(stateDir: string): Promise<void> {
     )`,
   ]
   for (const statement of identityDdl) await sharedDb.prepare(statement).run()
+
+  // B3-04 slug address registry — the single slug authority (ADR 0009).
+  // Idempotent; applied in both modes so every suite sees the same surfaces.
+  const { SLUG_ADDRESS_DDL_STATEMENTS } = await import('@/lib/slug-address/ddl')
+  for (const statement of SLUG_ADDRESS_DDL_STATEMENTS) await sharedDb.prepare(statement).run()
+
+  // #234 — canonical article search index (rebuildable, projection-free).
+  const { ARTICLE_FTS_DDL_STATEMENTS } = await import('@/lib/article-fts/ddl')
+  for (const statement of ARTICLE_FTS_DDL_STATEMENTS) await sharedDb.prepare(statement).run()
+
+  if (postsless) {
+    for (const trigger of ['posts_ai', 'posts_au', 'posts_ad']) {
+      await sharedDb.prepare(`DROP TRIGGER IF EXISTS ${trigger}`).run()
+    }
+    await sharedDb.prepare('DROP TABLE IF EXISTS posts_fts').run()
+    await sharedDb.prepare('DROP TABLE IF EXISTS posts').run()
+    return
+  }
 
   for (const column of ['content_envelope', 'content_snapshot_sha256', 'source_sync_sha256']) {
     await sharedDb.prepare(`ALTER TABLE posts ADD COLUMN ${column} TEXT`).run()

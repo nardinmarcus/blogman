@@ -97,12 +97,25 @@ async function revisionGet(payload: string) {
   return res.json()
 }
 
+/** The live formal content — materialized from the frozen formal version (canonical). */
 async function livePostRow(postRef: number) {
-  return (await query<Record<string, unknown>>(`SELECT * FROM posts WHERE id = ${postRef}`))[0] ?? null
+  const rows = await query<Record<string, unknown>>(
+    `SELECT v.snapshot_json FROM articles a
+     JOIN formal_publications f ON f.article_id = a.id
+     JOIN article_versions v ON v.article_id = a.id AND v.version = f.version
+     WHERE a.post_ref = ${postRef} LIMIT 1`,
+  )
+  const raw = rows[0]
+  if (!raw) return null
+  const record = JSON.parse(raw.snapshot_json as string) as {
+    fields: Record<string, unknown>
+    original_content: string | null
+  }
+  return { ...record.fields, content: record.original_content }
 }
 
 describe('app/api revision loop — browser autosave never changes live', { timeout: 600_000 }, () => {
-  it('自动保存不改变线上：编辑中 posts 保持正式投影，promote 才上线', async () => {
+  it('自动保存不改变线上：编辑中正式版本保持不变，promote 才上线', async () => {
     const article = await createFormalArticle(fresh('route-slug'), '线上标题', '线上正文')
     const liveBefore = await livePostRow(article.postRef)
 

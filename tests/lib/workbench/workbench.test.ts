@@ -185,7 +185,14 @@ describe('workbench rebuild + projection toggle (可重建/可关闭)', () => {
     expect(wb.projectionEnabled).toBe(false)
     expect(wb.groups).toHaveLength(0)
 
-    const draftCount = (await query<{ c: number }>(`SELECT COUNT(*) AS c FROM posts WHERE status='draft'`))[0]?.c ?? 0
+    // Source drafts live in canonical facts (latest snapshot status = draft).
+    const draftCount = (await query<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM articles a
+       JOIN article_versions v ON v.article_id = a.id
+        AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
+       WHERE json_extract(v.snapshot_json, '$.fields.status') = 'draft'
+         AND NOT EXISTS (SELECT 1 FROM formal_publications f WHERE f.article_id = a.id AND f.lifecycle = 'published')`,
+    ))[0]?.c ?? 0
     const schedCount = (await query<{ c: number }>(`SELECT COUNT(*) AS c FROM publish_schedules`))[0]?.c ?? 0
     expect(draftCount).toBe(1)
     expect(schedCount).toBe(1)

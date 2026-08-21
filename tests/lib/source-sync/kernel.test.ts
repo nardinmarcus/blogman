@@ -126,6 +126,25 @@ async function baselineCount(articleId: number): Promise<number> {
   return (await query<{ n: number }>(`SELECT COUNT(*) AS n FROM source_sync_baselines WHERE article_id = ${articleId}`))[0]?.n ?? 0
 }
 
+
+/** Latest frozen snapshot fields for an article (canonical, projection-free). */
+async function canonFields(postRef: number): Promise<Record<string, unknown> | null> {
+  const rows = await query<Record<string, unknown>>(
+    `SELECT v.snapshot_json FROM articles a
+     JOIN article_versions v ON v.article_id = a.id
+      AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
+     WHERE a.post_ref = ${postRef} LIMIT 1`,
+  )
+  const raw = rows[0]
+  if (!raw) return null
+  const record = JSON.parse(raw.snapshot_json as string) as {
+    fields: Record<string, unknown>
+    original_content: string | null
+    original_html: string | null
+  }
+  return { ...record.fields, content: record.original_content ?? '', html: record.original_html ?? '' }
+}
+
 describe('syncSourceAhead — 草稿写新版本', () => {
   it('同步规范化标题、正文与引用媒体, 草稿写新版本, 全部成功推进基线', async () => {
     const url = 'https://src.example.test/guide/a'
@@ -155,10 +174,10 @@ describe('syncSourceAhead — 草稿写新版本', () => {
     expect(await baselineCount(articleId)).toBe(1)
 
     // 正文确实写入了文章版本(不产生半同步, 全量成功)。
-    const post = (await query<{ title: string; content: string }>(`SELECT title, content FROM posts WHERE id = ${postRef}`))[0]
-    expect(post.title).toBe('新款手机 评测')
-    expect(post.content).toContain('![')
-    expect(post.content).not.toContain('assets/hero.png')
+    const post = await canonFields(postRef)
+    expect(post?.title).toBe('新款手机 评测')
+    expect(String(post?.content)).toContain('![')
+    expect(String(post?.content)).not.toContain('assets/hero.png')
   })
 
   it('同内容媒体跨路径文章复用: 不凭文件名推断、不重复存储', async () => {
@@ -295,7 +314,7 @@ describe('syncSourceAhead — 正式文章只更新唯一修订', () => {
     const active = (await query<{ n: number }>(`SELECT COUNT(*) AS n FROM publish_revisions WHERE article_id = ${articleId} AND status = 'active'`))[0].n
     expect(active).toBe(1)
     // 线上 posts 投影不被改写。
-    const post = (await query<{ title: string }>(`SELECT title FROM posts WHERE id = ${postRef}`))[0]
+    const post = await canonFields(postRef)
     expect(post.title).toBe('正式文章标题')
     expect(await baselineCount(articleId)).toBe(1)
   })

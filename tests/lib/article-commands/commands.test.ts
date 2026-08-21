@@ -58,14 +58,64 @@ function snapshot(overrides: Partial<ArticleCommandSnapshot> = {}): ArticleComma
   }
 }
 
+/**
+ * Materialize the legacy-compatible article state from CANONICAL facts
+ * (latest immutable version snapshot) — the projection is retired (ADR 0008).
+ */
 async function postRow(postRef: number): Promise<Record<string, unknown> | null> {
   const rows = await query<Record<string, unknown>>(
-    `SELECT slug, title, content, html, description, category, tags, status, password,
-            is_pinned, is_hidden, cover_image, deleted_at, published_at, updated_at,
-            content_envelope, content_snapshot_sha256, source_sync_sha256
-     FROM posts WHERE id = ${postRef}`,
+    `SELECT v.snapshot_json FROM articles a
+     JOIN article_versions v ON v.article_id = a.id
+     WHERE a.post_ref = ${postRef} ORDER BY v.version DESC LIMIT 1`,
   )
-  return rows[0] ?? null
+  const raw = rows[0]
+  if (!raw) return null
+  const record = JSON.parse(raw.snapshot_json as string) as {
+    fields: Record<string, unknown>
+    original_content: string | null
+    original_html: string | null
+    envelope: unknown
+    content_snapshot_sha256: string | null
+  }
+  return {
+    slug: record.fields.slug,
+    title: record.fields.title,
+    content: record.original_content,
+    html: record.original_html,
+    description: record.fields.description,
+    category: record.fields.category,
+    tags: record.fields.tags,
+    status: record.fields.status,
+    password: record.fields.password,
+    is_pinned: record.fields.is_pinned,
+    is_hidden: record.fields.is_hidden,
+    cover_image: record.fields.cover_image,
+    deleted_at: record.fields.deleted_at,
+    published_at: record.fields.published_at,
+    updated_at: record.fields.updated_at,
+    content_envelope: record.envelope ? JSON.stringify(record.envelope) : null,
+    content_snapshot_sha256: record.content_snapshot_sha256,
+  }
+}
+
+/** Current observable slug of an article — from its latest frozen snapshot. */
+async function currentSlug(postRef: number): Promise<string> {
+  const rows = await query<Record<string, unknown>>(
+    `SELECT v.snapshot_json FROM articles a
+     JOIN article_versions v ON v.article_id = a.id
+     WHERE a.post_ref = ${postRef} ORDER BY v.version DESC LIMIT 1`,
+  )
+  const record = JSON.parse(rows[0].snapshot_json as string) as { fields: { slug: string } }
+  return record.fields.slug
+}
+
+/** Seed a slug owned by a foreign article id in the address registry. */
+const FOREIGN_ARTICLE_ID = 987654
+async function seedTakenSlug(slug: string): Promise<void> {
+  await query(
+    `INSERT INTO article_slug_addresses (slug, article_id, kind, created_at, updated_at)
+     VALUES ('${slug}', ${FOREIGN_ARTICLE_ID}, 'candidate', strftime('%s','now'), strftime('%s','now'))`,
+  )
 }
 
 async function articleVersions(articleId: number): Promise<Array<Record<string, unknown>>> {
@@ -80,7 +130,7 @@ describe('lib/article-commands — create', { timeout: 600_000 }, () => {
   it('skips a blank session (no title and no body) with zero writes', async () => {
     const creationId = fresh('blank')
     const db = createDatabase()
-    const before = (await query<{ n: number }>('SELECT COUNT(*) AS n FROM posts')).at(-1)?.n as number
+    const before = (await query<{ n: number }>('SELECT COUNT(*) AS n FROM article_slug_addresses')).at(-1)?.n as number
     const result = await create(db, {
       creationId,
       snapshot: snapshot({ title: '  ', content: '' }),
@@ -90,10 +140,10 @@ describe('lib/article-commands — create', { timeout: 600_000 }, () => {
     expect(
       await query(`SELECT id FROM article_versions WHERE operation_id = 'create:${creationId}'`),
     ).toEqual([])
-    expect((await query<{ n: number }>('SELECT COUNT(*) AS n FROM posts')).at(-1)?.n).toBe(before)
+    expect((await query<{ n: number }>('SELECT COUNT(*) AS n FROM article_slug_addresses')).at(-1)?.n).toBe(before)
   })
 
-  it('creates the article identity + version 1 + posts compat projection atomically', async () => {
+  it('creates the article identity + version 1 atomically (no projection)', async () => {
     const creationId = fresh('mk')
     const snap = snapshot({ title: '建稿标题', status: 'published' })
     const db = createDatabase()
@@ -130,7 +180,7 @@ describe('lib/article-commands — create', { timeout: 600_000 }, () => {
     expect(record.content_snapshot_sha256).toMatch(/^[0-9a-f]{64}$/)
     expect(record.source_sync_sha256).toMatch(/^[0-9a-f]{64}$/)
 
-    // posts compat projection matches the version facts.
+    // Canonical state matches the version facts.
     const post = await postRow(result.postRef)
     expect(post).not.toBeNull()
     expect(post!.slug).toBe(snap.slug)
@@ -170,10 +220,8 @@ describe('lib/article-commands — create', { timeout: 600_000 }, () => {
 
   it('returns slug-conflict with zero writes when the slug is already taken', async () => {
     const takenSlug = fresh('taken')
-    // Pre-seed a post with that slug (outside the command layer).
-    await query(
-      `INSERT INTO posts (slug, title, content, html) VALUES ('${takenSlug}', '先占', '先占正文', '<p>先占正文</p>')`,
-    )
+    // Pre-seed the address registry with a foreign owner (outside the command layer).
+    await seedTakenSlug(takenSlug)
     const creationId = fresh('slugconf')
     const db = createDatabase()
     const result = await create(db, { creationId, snapshot: snapshot({ slug: takenSlug }) })
@@ -182,29 +230,27 @@ describe('lib/article-commands — create', { timeout: 600_000 }, () => {
     expect(
       await query(`SELECT id FROM article_versions WHERE operation_id = 'create:${creationId}'`),
     ).toEqual([])
-    expect((await query<{ n: number }>(`SELECT COUNT(*) AS n FROM posts WHERE slug = '${takenSlug}'`)).at(-1)?.n).toBe(1)
+    expect((await query<{ n: number }>(`SELECT COUNT(*) AS n FROM article_slug_addresses WHERE slug = '${takenSlug}'`)).at(-1)?.n).toBe(1)
   })
 
-  it('rolls back the whole create batch when the slug UNIQUE fires mid-batch (transaction interruption)', async () => {
+  it('rolls back the whole create batch when the registry UNIQUE fires mid-batch (transaction interruption)', async () => {
     const takenSlug = fresh('interrupt')
-    await query(
-      `INSERT INTO posts (slug, title, content, html) VALUES ('${takenSlug}', '先占', '先占正文', '<p>先占正文</p>')`,
-    )
+    await seedTakenSlug(takenSlug)
     const creationId = fresh('interrupt-mk')
-    // The slug pre-read is stale (returns "free"); the batch then hits the real
-    // UNIQUE(slug) and must roll back everything.
+    // The registry pre-read is stale (returns "free"); the batch then hits the
+    // real registry UNIQUE(slug) and must roll back everything.
     const db = createDatabase({
-      stale: [{ sqlIncludes: 'FROM posts WHERE slug =', rows: [] }],
+      stale: [{ sqlIncludes: 'FROM article_slug_addresses WHERE slug =', rows: [] }],
     })
     const result = await create(db, { creationId, snapshot: snapshot({ slug: takenSlug }) })
     expect(result).toEqual({ outcome: 'slug-conflict', slug: takenSlug })
 
-    // Zero partial writes: no article, no version, no second posts row.
+    // Zero partial writes: no article, no version, no second registry row.
     expect(await query(`SELECT id FROM articles WHERE draft_ref = '${creationId}'`)).toEqual([])
     expect(
       await query(`SELECT id FROM article_versions WHERE operation_id = 'create:${creationId}'`),
     ).toEqual([])
-    expect((await query<{ n: number }>(`SELECT COUNT(*) AS n FROM posts WHERE slug = '${takenSlug}'`)).at(-1)?.n).toBe(1)
+    expect((await query<{ n: number }>(`SELECT COUNT(*) AS n FROM article_slug_addresses WHERE slug = '${takenSlug}'`)).at(-1)?.n).toBe(1)
   })
 })
 
@@ -226,7 +272,7 @@ describe('lib/article-commands — save', { timeout: 600_000 }, () => {
       articleId,
       expectedVersion: 1,
       operationId: fresh('op'),
-      snapshot: snapshot({ title: '第二版', slug: (await query<Record<string, unknown>>(`SELECT slug FROM posts WHERE id = ${postRef}`))[0].slug as string }),
+      snapshot: snapshot({ title: '第二版', slug: await currentSlug(postRef) }),
     })
     expect(v2.outcome).toBe('applied')
     if (v2.outcome !== 'applied') return
@@ -237,7 +283,7 @@ describe('lib/article-commands — save', { timeout: 600_000 }, () => {
       articleId,
       expectedVersion: 2,
       operationId: fresh('op'),
-      snapshot: snapshot({ title: '第三版', slug: (await query<Record<string, unknown>>(`SELECT slug FROM posts WHERE id = ${postRef}`))[0].slug as string }),
+      snapshot: snapshot({ title: '第三版', slug: await currentSlug(postRef) }),
     })
     expect(v3.outcome).toBe('applied')
     if (v3.outcome !== 'applied') return
@@ -353,9 +399,7 @@ describe('lib/article-commands — save', { timeout: 600_000 }, () => {
   it('returns slug-conflict with zero writes when renaming to a taken slug', async () => {
     const { articleId, postRef } = await createdArticle('改slug冲突')
     const takenSlug = fresh('taken-save')
-    await query(
-      `INSERT INTO posts (slug, title, content, html) VALUES ('${takenSlug}', '占位', '占位正文', '<p>占位正文</p>')`,
-    )
+    await seedTakenSlug(takenSlug)
     const db = createDatabase()
     const result = await save(db, {
       articleId,
@@ -689,7 +733,7 @@ describe('lib/article-commands — #234-02 versioned article-level commands', { 
     })
 
     expect(result.items).toHaveLength(3)
-    expect(result.items[0].outcome).toBe('applied')
+    expect(result.items[0]).toMatchObject({ outcome: 'applied', version: 2 })
     expect(result.items[1].outcome).toBe('conflict')
     if (result.items[1].outcome === 'conflict') expect(result.items[1].serverVersion).toBe(2)
     expect(result.items[2].outcome).toBe('not-found')
@@ -713,8 +757,9 @@ describe('lib/article-commands — #234-02 versioned article-level commands', { 
       operationId: fresh('op'),
       snapshot: snapshot({ title: '第三版' }),
     })
-    expect(staleSave.outcome).toBe('conflict')
+    expect(staleSave).toMatchObject({ outcome: 'conflict', serverVersion: 2 })
 
+    // Re-anchored on v2 the save lands as v3.
     const v3 = await save(db, {
       articleId,
       expectedVersion: 2,

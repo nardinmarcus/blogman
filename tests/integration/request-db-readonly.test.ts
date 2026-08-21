@@ -161,6 +161,102 @@ afterEach(() => {
   }
 })
 
+/**
+ * #234 Phase A — seed one published article through CANONICAL facts
+ * (identity + frozen version + registry). The posts projection is retired.
+ */
+const CANONICAL_SEED_ARTICLES = `
+CREATE TABLE IF NOT EXISTS articles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  post_ref INTEGER UNIQUE NOT NULL,
+  slug TEXT,
+  draft_ref TEXT,
+  source_page_identity TEXT,
+  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+);
+CREATE TABLE IF NOT EXISTS article_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  article_id INTEGER NOT NULL,
+  version INTEGER NOT NULL,
+  operation_id TEXT NOT NULL UNIQUE,
+  snapshot_json TEXT NOT NULL,
+  content_snapshot_sha256 TEXT NOT NULL,
+  published_at INTEGER,
+  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+  UNIQUE (article_id, version)
+);
+CREATE TABLE IF NOT EXISTS article_slug_addresses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  slug TEXT NOT NULL UNIQUE CHECK(length(slug) > 0),
+  article_id INTEGER NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('current', 'candidate', 'historical')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS formal_publications (
+  article_id INTEGER PRIMARY KEY,
+  version INTEGER NOT NULL,
+  slug TEXT NOT NULL UNIQUE,
+  lifecycle TEXT NOT NULL,
+  first_published_at INTEGER NOT NULL,
+  published_at INTEGER NOT NULL,
+  public_url TEXT NOT NULL,
+  event_id TEXT NOT NULL
+);
+`
+function seedCanonicalArticle(stateDirectory: string, opts: {
+  postRef?: number
+  slug: string
+  title: string
+  content?: string
+  status?: string
+  password?: string | null
+  isHidden?: number
+}): void {
+  const postRef = opts.postRef ?? 1
+  const fields: Record<string, unknown> = {
+    slug: opts.slug,
+    title: opts.title,
+    status: opts.status ?? 'draft',
+    description: null,
+    category: null,
+    tags: null,
+    password: opts.password ?? null,
+    is_pinned: 0,
+    is_hidden: opts.isHidden ?? 0,
+    cover_image: null,
+    deleted_at: null,
+    published_at: (opts.status ?? 'draft') === 'published' ? 1700000000 : null,
+    updated_at: 1700000000,
+  }
+  const snapshot = JSON.stringify({
+    format: 'blogman-article-identity/v1',
+    post_ref: postRef,
+    version: 1,
+    fields,
+    original_content: opts.content ?? '',
+    original_html: `<p>${opts.content ?? ''}</p>`,
+    post_field_sha256: '0'.repeat(64),
+    envelope: null,
+    content_snapshot_sha256: 'a'.repeat(64),
+    source_sync_sha256: 'b'.repeat(64),
+    fidelity: 'error',
+    fidelity_detail: null,
+    published_at: (opts.status ?? 'draft') === 'published' ? 1700000000 : null,
+  }).replaceAll("'", "''")
+  queryD1(stateDirectory, `${CANONICAL_SEED_ARTICLES}
+INSERT INTO articles (post_ref, slug, draft_ref) VALUES (${postRef}, '${opts.slug}', 'seed-${postRef}');
+INSERT INTO article_versions (article_id, version, operation_id, snapshot_json, content_snapshot_sha256)
+VALUES (${postRef}, 1, 'seed-op-${postRef}', '${snapshot}', '${'c'.repeat(64)}');
+INSERT INTO article_slug_addresses (slug, article_id, kind, created_at, updated_at)
+VALUES ('${opts.slug}', ${postRef}, 'candidate', 1700000000, 1700000000);
+${(opts.status ?? 'draft') === 'published'
+  ? `UPDATE article_slug_addresses SET kind = 'current' WHERE slug = '${opts.slug}' AND article_id = ${postRef};
+INSERT INTO formal_publications (article_id, version, slug, lifecycle, first_published_at, published_at, public_url, event_id)
+VALUES (${postRef}, 1, '${opts.slug}', 'published', 1700000000, 1700000000, 'https://blog.example.test/${opts.slug}', 'seed-event-${postRef}');`
+  : ''}`)
+}
+
 describe('request-time D1 behavior', () => {
   it('keeps schema and mutable rows byte-for-byte stable across representative reads', { timeout: 120_000 }, async () => {
     const stateDirectory = createD1State()
@@ -169,8 +265,6 @@ describe('request-time D1 behavior', () => {
     const encryptedKey = await encryptApiKey('sk-author-runtime', secret)
     queryD1(stateDirectory, `
 UPDATE site_settings SET value = 'noto-serif-sc' WHERE key = 'body_font';
-INSERT INTO posts (slug, title, content, html, description, category, tags, status, published_at)
-VALUES ('ledger-ready', 'Ledger Ready', 'body', '<p>body</p>', 'description', 'AI', '["D1"]', 'published', 1700000000);
 INSERT INTO ai_provider_profiles (
   name, base_url, model, api_key_encrypted, api_key_masked, is_default
 ) VALUES ('作者文本配置', 'https://ai.example.com/v1', 'author-text', ${sqlLiteral(encryptedKey)}, 'sk-aut...time', 1);
@@ -182,6 +276,7 @@ UPDATE ai_image_actions SET profile_id = 1 WHERE action_key = 'mondo_landscape';
 UPDATE ai_post_generators SET text_profile_id = 1 WHERE target_key = 'summary';
 UPDATE ai_post_generators SET image_profile_id = 1 WHERE target_key = 'cover';
 `)
+    seedCanonicalArticle(stateDirectory, { slug: 'ledger-ready', title: 'Ledger Ready', content: 'body', status: 'published' })
     const db = createWranglerD1Database(stateDirectory)
     const schemaBefore = queryD1(stateDirectory, `
 SELECT type, name, sql FROM sqlite_schema
@@ -299,13 +394,10 @@ ORDER BY kind, row_key
     })
   })
 
-  it('accepts a KV hit on the canonical ledger posts schema', { timeout: 120_000 }, async () => {
+  it('resolves a seeded canonical article regardless of a stale KV cache', { timeout: 120_000 }, async () => {
     const stateDirectory = createD1State()
     applyLedger(stateDirectory)
-    queryD1(stateDirectory, `
-INSERT INTO posts (slug, title, content, html, status)
-VALUES ('canonical-kv', 'Canonical title', 'canonical body', '<p>canonical body</p>', 'published');
-`)
+    seedCanonicalArticle(stateDirectory, { slug: 'canonical-kv', title: 'Canonical title', content: 'canonical body', status: 'published' })
     const db = createWranglerD1Database(stateDirectory)
     const kv = {
       async get(key: string) {
@@ -328,13 +420,13 @@ VALUES ('canonical-kv', 'Canonical title', 'canonical body', '<p>canonical body<
     )
   })
 
-  it('keeps the current D1 post row authoritative over stale KV existence and visibility state', { timeout: 120_000 }, async () => {
+  it('keeps the current canonical facts authoritative over stale KV existence and visibility state', { timeout: 120_000 }, async () => {
     const stateDirectory = createD1State()
     applyLedger(stateDirectory)
-    queryD1(stateDirectory, `
-INSERT INTO posts (slug, title, content, html, status, password, is_hidden)
-VALUES ('stale-kv', 'Current draft', 'current body', '<p>current body</p>', 'draft', 'new-password', 1);
-`)
+    seedCanonicalArticle(stateDirectory, {
+      slug: 'stale-kv', title: 'Current draft', content: 'current body',
+      status: 'draft', password: 'new-password', isHidden: 1,
+    })
     const db = createWranglerD1Database(stateDirectory)
     const kv = {
       async get(key: string) {
@@ -365,7 +457,7 @@ VALUES ('stale-kv', 'Current draft', 'current body', '<p>current body</p>', 'dra
       }),
     )
 
-    queryD1(stateDirectory, "DELETE FROM posts WHERE slug = 'stale-kv'")
+    queryD1(stateDirectory, "DELETE FROM articles WHERE post_ref = 1")
     await expect(getPostBySlug(db, 'stale-kv', kv)).resolves.toBeNull()
   })
 
@@ -378,9 +470,9 @@ UPDATE site_settings SET value = 'author-font' WHERE key = 'body_font';
 UPDATE ai_actions SET prompt = '作者 action prompt', updated_at = 111 WHERE action_key = 'improve';
 UPDATE ai_post_generators SET prompt = '作者 summary prompt', temperature = 0, max_tokens = 1, updated_at = 222 WHERE target_key = 'summary';
 DELETE FROM ai_post_generators WHERE target_key = 'cover';
-INSERT INTO posts (slug, title, content, html, status) VALUES ('current-fixture', 'Current fixture', 'body', '<p>body</p>', 'published');
 `)
     applyLedger(stateDirectory)
+    seedCanonicalArticle(stateDirectory, { postRef: 1, slug: 'current-fixture', title: 'Current fixture', content: 'body', status: 'published' })
     const db = createWranglerD1Database(stateDirectory)
     const schemaBefore = queryD1(stateDirectory, `
 SELECT type, name, sql FROM sqlite_schema

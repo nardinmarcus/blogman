@@ -51,11 +51,10 @@ interface ArticleRow {
   post_ref: number
 }
 
-interface PostRow {
-  id: number
+/** Live authoring state resolved from the latest frozen version snapshot. */
+interface LiveState {
   status: string | null
   deleted_at: number | null
-  published_at: number | null
 }
 
 interface FormalRow {
@@ -94,11 +93,22 @@ async function latestVersion(db: Database, articleId: number): Promise<number> {
   return row?.version ?? 0
 }
 
-async function findPostById(db: Database, postRef: number): Promise<PostRow | null> {
-  return db
-    .prepare('SELECT id, status, deleted_at, published_at FROM posts WHERE id = ?')
-    .bind(postRef)
-    .first<PostRow>()
+/** Resolve the live authoring state from the latest frozen snapshot (canonical). */
+async function findLiveState(db: Database, articleId: number): Promise<LiveState | null> {
+  const row = await db
+    .prepare(
+      `SELECT snapshot_json FROM article_versions
+       WHERE article_id = ? ORDER BY version DESC LIMIT 1`,
+    )
+    .bind(articleId)
+    .first<{ snapshot_json: string }>()
+  if (!row) return null
+  try {
+    const fields = (JSON.parse(row.snapshot_json) as { fields?: { status?: string; deleted_at?: number | null } }).fields ?? {}
+    return { status: fields.status ?? null, deleted_at: fields.deleted_at ?? null }
+  } catch {
+    return null
+  }
 }
 
 async function findFormalByArticle(db: Database, articleId: number): Promise<FormalRow | null> {
@@ -178,23 +188,23 @@ export async function unpublish(db: Database, input: UnpublishInput): Promise<Un
   }
 
   const formal = await findFormalByArticle(db, articleId)
-  const post = await findPostById(db, postRef)
+  const live = await findLiveState(db, articleId)
   if (!formal) {
     return { outcome: 'blocked', articleId, reason: 'article has no formal publication; use first-publish to go live', failures: ['formal-missing'] }
   }
-  if (!post) return { outcome: 'not-found', articleId, reason: 'post missing' }
-  if (post.deleted_at !== null) {
+  if (!live) return { outcome: 'not-found', articleId, reason: 'article has no version facts' }
+  if (live.deleted_at !== null) {
     return { outcome: 'blocked', articleId, reason: 'soft-deleted article must be restored before lifecycle change', failures: ['deleted'] }
   }
   // Status precondition: must currently be live.
-  if (post.status !== 'published' || formal.lifecycle !== 'published') {
+  if (live.status !== 'published' || formal.lifecycle !== 'published') {
     return {
       outcome: 'status-conflict',
       articleId,
       postRef,
       expectedVersion,
       serverVersion,
-      currentStatus: post.status,
+      currentStatus: live.status,
       lifecycle: formal.lifecycle,
     }
   }
@@ -216,20 +226,12 @@ export async function unpublish(db: Database, input: UnpublishInput): Promise<Un
   const batch = [
     db
       .prepare(
-        `UPDATE posts SET status = 'draft', updated_at = ?
-         WHERE id = ? AND status = 'published' AND deleted_at IS NULL
+        `UPDATE formal_publications SET lifecycle = 'unpublished'
+         WHERE article_id = ? AND lifecycle = 'published'
            AND EXISTS (SELECT 1 FROM article_versions WHERE article_id = ? AND version = ?)
            AND NOT EXISTS (SELECT 1 FROM article_lifecycles WHERE operation_id = ?)`,
       )
-      .bind(now, postRef, articleId, expectedVersion, operationId),
-    db
-      .prepare(
-        `UPDATE formal_publications SET lifecycle = 'unpublished'
-         WHERE article_id = ? AND lifecycle = 'published'
-           AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND status = 'draft')
-           AND NOT EXISTS (SELECT 1 FROM article_lifecycles WHERE operation_id = ?)`,
-      )
-      .bind(articleId, postRef, operationId),
+      .bind(articleId, articleId, expectedVersion, operationId),
     db
       .prepare(
         `INSERT INTO article_lifecycles
@@ -238,7 +240,6 @@ export async function unpublish(db: Database, input: UnpublishInput): Promise<Un
             evidence_sha256, payload, actor, created_at)
          SELECT ?, ?, ?, ?, 'unpublish', 'published', 'unpublished', ?, ?, ?, ?, ?, ?
          WHERE NOT EXISTS (SELECT 1 FROM article_lifecycles WHERE operation_id = ?)
-           AND (SELECT status FROM posts WHERE id = ?) = 'draft'
            AND (SELECT lifecycle FROM formal_publications WHERE article_id = ?) = 'unpublished'`,
       )
       .bind(
@@ -253,7 +254,6 @@ export async function unpublish(db: Database, input: UnpublishInput): Promise<Un
         actor,
         now,
         operationId,
-        postRef,
         articleId,
       ),
   ]
@@ -261,9 +261,9 @@ export async function unpublish(db: Database, input: UnpublishInput): Promise<Un
   await db.batch(batch)
 
   const row = await findLifecycleByOperation(db, operationId)
-  const postAfter = (await findPostById(db, postRef)) ?? post
+  const liveAfter = (await findLiveState(db, articleId)) ?? live
   const formalAfter = (await findFormalByArticle(db, articleId)) ?? formal
-  if (!row || postAfter.status !== 'draft' || formalAfter.lifecycle !== 'unpublished') {
+  if (!row || formalAfter.lifecycle !== 'unpublished') {
     // A guard no-op'd — report the real live state (fail-closed).
     return {
       outcome: 'status-conflict',
@@ -271,7 +271,7 @@ export async function unpublish(db: Database, input: UnpublishInput): Promise<Un
       postRef,
       expectedVersion,
       serverVersion: (await latestVersion(db, articleId)) ?? serverVersion,
-      currentStatus: postAfter.status,
+      currentStatus: liveAfter.status,
       lifecycle: formalAfter.lifecycle,
     }
   }
@@ -330,23 +330,23 @@ export async function relive(db: Database, input: ReliveInput): Promise<ReliveRe
   }
 
   const formal = await findFormalByArticle(db, articleId)
-  const post = await findPostById(db, postRef)
+  const live = await findLiveState(db, articleId)
   if (!formal) {
     return { outcome: 'blocked', articleId, reason: 'article has no formal publication; use first-publish to go live', failures: ['formal-missing'] }
   }
-  if (!post) return { outcome: 'not-found', articleId, reason: 'post missing' }
-  if (post.deleted_at !== null) {
+  if (!live) return { outcome: 'not-found', articleId, reason: 'article has no version facts' }
+  if (live.deleted_at !== null) {
     return { outcome: 'blocked', articleId, reason: 'soft-deleted article must be restored first', failures: ['deleted'] }
   }
   // Status precondition: must currently be offline (unpublished).
-  if (post.status === 'published' && formal.lifecycle === 'published') {
+  if (live.status === 'published' && formal.lifecycle === 'published') {
     return {
       outcome: 'status-conflict',
       articleId,
       postRef,
       expectedVersion,
       serverVersion,
-      currentStatus: post.status,
+      currentStatus: live.status,
       lifecycle: formal.lifecycle,
     }
   }
@@ -436,7 +436,7 @@ export async function relive(db: Database, input: ReliveInput): Promise<ReliveRe
         postRef,
         expectedVersion,
         serverVersion: (await latestVersion(db, articleId)) ?? serverVersion,
-        currentStatus: (await findPostById(db, postRef))?.status ?? null,
+        currentStatus: (await findLiveState(db, articleId))?.status ?? null,
         lifecycle: formalAfter.lifecycle,
       }
     }
@@ -469,20 +469,12 @@ export async function relive(db: Database, input: ReliveInput): Promise<ReliveRe
   const batch = [
     db
       .prepare(
-        `UPDATE posts SET status = 'published', published_at = COALESCE(published_at, ?), updated_at = ?
-         WHERE id = ? AND status = 'draft' AND deleted_at IS NULL
+        `UPDATE formal_publications SET lifecycle = 'published'
+         WHERE article_id = ? AND lifecycle = 'unpublished'
            AND EXISTS (SELECT 1 FROM article_versions WHERE article_id = ? AND version = ?)
            AND NOT EXISTS (SELECT 1 FROM article_lifecycles WHERE operation_id = ?)`,
       )
-      .bind(now, now, postRef, articleId, expectedVersion, operationId),
-    db
-      .prepare(
-        `UPDATE formal_publications SET lifecycle = 'published'
-         WHERE article_id = ? AND lifecycle = 'unpublished'
-           AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND status = 'published')
-           AND NOT EXISTS (SELECT 1 FROM article_lifecycles WHERE operation_id = ?)`,
-      )
-      .bind(articleId, postRef, operationId),
+      .bind(articleId, articleId, expectedVersion, operationId),
     db
       .prepare(
         `INSERT INTO article_lifecycles
@@ -491,7 +483,6 @@ export async function relive(db: Database, input: ReliveInput): Promise<ReliveRe
             evidence_sha256, payload, actor, created_at)
          SELECT ?, ?, ?, ?, 'relive-formal', 'unpublished', 'published', ?, ?, ?, ?, ?, ?
          WHERE NOT EXISTS (SELECT 1 FROM article_lifecycles WHERE operation_id = ?)
-           AND (SELECT status FROM posts WHERE id = ?) = 'published'
            AND (SELECT lifecycle FROM formal_publications WHERE article_id = ?) = 'published'`,
       )
       .bind(
@@ -506,7 +497,6 @@ export async function relive(db: Database, input: ReliveInput): Promise<ReliveRe
         actor,
         now,
         operationId,
-        postRef,
         articleId,
       ),
   ]
@@ -514,16 +504,16 @@ export async function relive(db: Database, input: ReliveInput): Promise<ReliveRe
   await db.batch(batch)
 
   const row = await findLifecycleByOperation(db, operationId)
-  const postAfter = (await findPostById(db, postRef)) ?? post
+  const liveAfter = (await findLiveState(db, articleId)) ?? live
   const formalAfter = (await findFormalByArticle(db, articleId)) ?? formal
-  if (!row || postAfter.status !== 'published' || formalAfter.lifecycle !== 'published') {
+  if (!row || formalAfter.lifecycle !== 'published') {
     return {
       outcome: 'status-conflict',
       articleId,
       postRef,
       expectedVersion,
       serverVersion: (await latestVersion(db, articleId)) ?? serverVersion,
-      currentStatus: postAfter.status,
+      currentStatus: liveAfter.status,
       lifecycle: formalAfter.lifecycle,
     }
   }

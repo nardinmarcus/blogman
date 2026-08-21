@@ -31,6 +31,7 @@
  */
 
 import type { Database } from '@/lib/repositories/schema'
+import { findLiveStateByPostRef, type CanonicalLiveState } from '@/lib/canonical-live'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands'
 import { save } from '@/lib/article-commands'
 import type { ArticleIdentitySnapshot } from '@/lib/article-identity'
@@ -226,20 +227,7 @@ interface RevisionRow {
   html: string
 }
 
-interface PostMetaRow {
-  slug: string
-  title: string
-  category: string | null
-  tags: string | null
-  description: string | null
-  password: string | null
-  is_pinned: number
-  is_hidden: number
-  cover_image: string | null
-  status: string
-  published_at: number | null
-  deleted_at: number | null
-}
+type PostMetaRow = CanonicalLiveState
 
 interface ResolutionRow {
   operation_id: string
@@ -324,14 +312,7 @@ async function findActiveRevision(db: Database, articleId: number): Promise<Revi
 }
 
 async function findPostMeta(db: Database, postRef: number): Promise<PostMetaRow | null> {
-  return db
-    .prepare(
-      `SELECT slug, title, category, tags, description, password, is_pinned, is_hidden,
-              cover_image, status, published_at, deleted_at
-       FROM posts WHERE id = ?`,
-    )
-    .bind(postRef)
-    .first<PostMetaRow>()
+  return findLiveStateByPostRef(db, postRef)
 }
 
 function mapResolution(row: ResolutionRow): ConflictResolution {

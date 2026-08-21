@@ -74,11 +74,29 @@ function snapshot(overrides: Partial<ArticleCommandSnapshot> = {}): ArticleComma
   }
 }
 
+/** Live formal status — derived from lifecycle + latest frozen snapshot (canonical). */
 async function postState(postRef: number) {
-  const [row] = await query<{ status: string | null; deleted_at: number | null; published_at: number | null }>(
-    `SELECT status, deleted_at, published_at FROM posts WHERE id = ${postRef}`,
+  const [row] = await query<{ snapshot_json: string; lifecycle: string }>(
+    `SELECT v.snapshot_json, f.lifecycle FROM articles a
+     JOIN formal_publications f ON f.article_id = a.id
+     JOIN article_versions v ON v.article_id = a.id
+      AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
+     WHERE a.post_ref = ${postRef} LIMIT 1`,
   )
-  return row
+  if (!row) return null
+  const fields = (JSON.parse(row.snapshot_json) as { fields?: Record<string, unknown> }).fields ?? {}
+  const deletedAt = (fields.deleted_at as number | null) ?? null
+  const status =
+    deletedAt != null
+      ? 'deleted'
+      : row.lifecycle === 'published' && fields.status !== 'draft'
+        ? 'published'
+        : 'draft'
+  return {
+    status,
+    deleted_at: deletedAt,
+    published_at: (fields.published_at as number | null) ?? null,
+  }
 }
 
 /** #234-02 — article-level state now lives in the latest immutable snapshot. */
@@ -176,14 +194,16 @@ describe('unpublish — 取消发布', () => {
   })
 
   it('blocks a soft-deleted article', async () => {
-    const { articleId } = await createFormalArticle('off-deleted', '已删文章', '内容')
+    const { articleId, postRef } = await createFormalArticle('off-deleted', '已删文章', '内容')
     // #234-02: softDelete appends its own version snapshot (v2).
     const del = await softDelete(createDatabase(), { articleId, expectedVersion: 1, operationId: freshOp('softDelete') })
     expect(del).toMatchObject({ outcome: 'applied', version: 2 })
     expect((await latestSnapshotState(articleId))?.deleted_at).not.toBeNull()
-    // NOTE: the posts-backed blocked guard in the lifecycle kernel is remapped
-    // to the canonical latest snapshot by the 外围内核 posts-less ticket; the
-    // outcome assertion moves there. Here we pin the canonical deletion fact.
+    // The lifecycle kernel's blocked guard reads the canonical deletion fact:
+    // unpublish on a soft-deleted article is refused (blocked), never applied.
+    const result = await unpublish(createDatabase(), { articleId, expectedVersion: 2, operationId: freshOp('unpublish') })
+    expect(result.outcome).toBe('blocked')
+    expect((await postState(postRef))?.deleted_at).not.toBeNull()
   })
 })
 
@@ -241,7 +261,12 @@ describe('relive — 重新上线', () => {
     expect(result.version).toBe(2)
 
     expect((await postState(postRef))?.status).toBe('published')
-    const [content] = await query<{ title: string }>(`SELECT title FROM posts WHERE id = ${postRef}`)
+    const [content] = await query<{ title: string }>(
+      `SELECT json_extract(v.snapshot_json, '$.fields.title') AS title
+       FROM formal_publications f
+       JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+       WHERE f.article_id = ${articleId}`,
+    )
     expect(content?.title).toBe('修订版标题')
     expect((await formalState(articleId))?.lifecycle).toBe('published')
     const [promotion] = await query<{ promoted_version: number }>(

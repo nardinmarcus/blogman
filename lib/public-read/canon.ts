@@ -28,6 +28,8 @@ export interface CanonicalPublicRow {
   first_published_at: number
   published_at: number
   snapshot_json: string
+  /** The LATEST version snapshot — management fields read from it (ADR 0007). */
+  latest_snapshot_json?: string | null
 }
 
 /**
@@ -87,7 +89,10 @@ function toTags(value: unknown): string[] {
  * `formal_publications` + the frozen `article_versions` snapshot.
  */
 export function postFromCanonicalRow(row: CanonicalPublicRow): PostWithTags {
-  const { record, fields } = parseCanonicalSnapshot(row.snapshot_json)
+  const { record } = parseCanonicalSnapshot(row.snapshot_json)
+  // Management / access-control fields come from the LATEST version
+  // (immediate article-level commands, ADR 0007); content stays formal.
+  const { fields } = parseCanonicalSnapshot(row.latest_snapshot_json ?? row.snapshot_json)
   const deletedAt = toStatus(fields.deleted_at)
   const status: PostWithTags['status'] =
     deletedAt !== 0 ? 'deleted' : row.lifecycle === 'published' ? 'published' : 'draft'
@@ -116,10 +121,16 @@ export function postFromCanonicalRow(row: CanonicalPublicRow): PostWithTags {
  * The shared canonical fact projection SELECT (columns) used everywhere a
  * public read wants one full article per formal row without touching `posts`.
  * JOINs `articles` → `formal_publications` (one row per article) →
- * `article_versions` (exactly the formal version).
+ * `article_versions` (exactly the formal version), plus the LATEST version
+ * for management fields (ADR 0007). Pair with CANONICAL_LATEST_JOIN.
  */
 export const CANONICAL_ROW_COLUMNS = `
   a.post_ref,
   f.article_id, f.slug, f.lifecycle, f.first_published_at, f.published_at,
-  v.snapshot_json
-`
+  v.snapshot_json,
+  lv.snapshot_json AS latest_snapshot_json`
+
+/** The LATEST version join — management fields read from it (ADR 0007). */
+export const CANONICAL_LATEST_JOIN = `
+  LEFT JOIN article_versions lv ON lv.article_id = f.article_id
+   AND lv.version = (SELECT MAX(version) FROM article_versions WHERE article_id = f.article_id)`
