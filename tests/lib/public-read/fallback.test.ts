@@ -16,7 +16,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { bootstrapState, teardownState, createDatabase, query } from '@/tests/lib/article-commands/helpers'
-import { getPublicCategories } from '@/lib/db'
+import { getPublicCategories, searchPosts } from '@/lib/db'
 import { listPublicArticles, resolvePublicArticle, searchPublicArticles, countPublicArticles } from '@/lib/public-read'
 
 let state = ''
@@ -61,5 +61,11 @@ describe('lib/public-read — soft-switch fallback on a ledger-only DB', { timeo
     // public categories soft-switch (the request-db-readonly regression)
     const cats = await getPublicCategories(createDatabase())
     expect(cats.some((c) => c.name === 'AI' && c.post_count === 1)).toBe(true)
+  })
+
+  it('searchPosts soft-switch: falls back to the legacy posts FTS on a ledger-only DB', async () => {
+    const hits = await searchPosts(createDatabase(), 'legacy', 20)
+    expect(hits.map((p) => p.slug)).toContain('legacy_ro')
+    expect(hits.every((p) => p.is_hidden === 0 && p.password == null)).toBe(true)
   })
 })
