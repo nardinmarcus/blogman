@@ -155,7 +155,7 @@ function d1ReadAll(args) {
     [
       'd1', 'execute', args.database,
       ...(args.local ? ['--local'] : ['--remote']),
-      '--persist-to', args.persistTo,
+      ...(args.local ? ['--persist-to', args.persistTo] : []),
       '--config', args.config,
       '--command', READ_STATEMENTS.join(';\n'),
       '--json',

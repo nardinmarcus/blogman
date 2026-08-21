@@ -84,7 +84,7 @@ function d1Execute(args, command) {
   const stdout = run('wrangler d1 execute', [
     join(repoRoot, 'node_modules', '.bin', 'wrangler'),
     'd1', 'execute', args.database, ...(args.local ? ['--local'] : ['--remote']),
-    '--persist-to', args.persistTo,
+    ...(args.local ? ['--persist-to', args.persistTo] : []),
     '--config', args.config, '--command', command, '--json',
   ])
   return JSON.parse(stdout)[0]?.results ?? []
