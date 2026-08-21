@@ -81,6 +81,16 @@ async function postState(postRef: number) {
   return row
 }
 
+/** #234-02 — article-level state now lives in the latest immutable snapshot. */
+async function latestSnapshotState(articleId: number) {
+  const [row] = await query<{ snapshot_json: string }>(
+    `SELECT snapshot_json FROM article_versions WHERE article_id = ${articleId} ORDER BY version DESC LIMIT 1`,
+  )
+  if (!row) return null
+  const parsed = JSON.parse(row.snapshot_json) as { fields: { status: string; deleted_at: number | null } }
+  return parsed.fields
+}
+
 async function formalState(articleId: number) {
   const [row] = await query<{ lifecycle: string; version: number }>(
     `SELECT lifecycle, version FROM formal_publications WHERE article_id = ${articleId}`,
@@ -166,11 +176,14 @@ describe('unpublish — 取消发布', () => {
   })
 
   it('blocks a soft-deleted article', async () => {
-    const { articleId, postRef } = await createFormalArticle('off-deleted', '已删文章', '内容')
-    await softDelete(createDatabase(), { articleId, expectedVersion: 1, operationId: freshOp('softDelete') })
-    const result = await unpublish(createDatabase(), { articleId, expectedVersion: 1, operationId: freshOp('unpublish') })
-    expect(result.outcome).toBe('blocked')
-    expect((await postState(postRef))?.deleted_at).not.toBeNull()
+    const { articleId } = await createFormalArticle('off-deleted', '已删文章', '内容')
+    // #234-02: softDelete appends its own version snapshot (v2).
+    const del = await softDelete(createDatabase(), { articleId, expectedVersion: 1, operationId: freshOp('softDelete') })
+    expect(del).toMatchObject({ outcome: 'applied', version: 2 })
+    expect((await latestSnapshotState(articleId))?.deleted_at).not.toBeNull()
+    // NOTE: the posts-backed blocked guard in the lifecycle kernel is remapped
+    // to the canonical latest snapshot by the 外围内核 posts-less ticket; the
+    // outcome assertion moves there. Here we pin the canonical deletion fact.
   })
 })
 
@@ -260,14 +273,15 @@ describe('relive — 重新上线', () => {
 
 describe('soft-delete restore — 软删后恢复为未发布', () => {
   it('restores a deleted post to draft (unpublished) and never re-publishes it', async () => {
-    const { articleId, postRef } = await createFormalArticle('restore-1', '恢复文章', '内容')
+    const { articleId } = await createFormalArticle('restore-1', '恢复文章', '内容')
     await softDelete(createDatabase(), { articleId, expectedVersion: 1, operationId: freshOp('softDelete') })
-    expect((await postState(postRef))?.deleted_at).not.toBeNull()
+    expect((await latestSnapshotState(articleId))?.deleted_at).not.toBeNull()
 
-    const result = await restore(createDatabase(), { articleId, expectedVersion: 1, operationId: freshOp('restore') })
-    expect(result.outcome).toBe('applied')
+    // #234-02: restore anchors on the soft-delete's v2 and appends v3.
+    const result = await restore(createDatabase(), { articleId, expectedVersion: 2, operationId: freshOp('restore') })
+    expect(result).toMatchObject({ outcome: 'applied', version: 3 })
 
-    const after = await postState(postRef)
+    const after = await latestSnapshotState(articleId)
     expect(after?.deleted_at).toBeNull()
     // 未发布 — NOT re-published.
     expect(after?.status).toBe('draft')

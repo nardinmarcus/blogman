@@ -30,8 +30,10 @@
 import type { Database } from '@/lib/repositories/schema'
 import {
   buildInitialSnapshot,
+  postFieldDigest,
   snapshotJson,
   type ArticleIdentitySnapshot,
+  type ArticleSnapshotFields,
   type PostAuthorityRow,
 } from '@/lib/article-identity'
 import type {
@@ -854,32 +856,68 @@ export async function publishTemp(
 }
 
 /* ------------------------------------------------------------------ */
-/* article-level (non-body) commands — B2-06 (issue #29)               */
+/* article-level (non-body) commands — #234 Phase A                    */
 /*                                                                    */
-/* These commands are the admin list's explicit write protocol. They   */
-/* share one driver: resolve the article, anchor on the current body   */
-/* version (expected version precondition), then apply a SINGLE        */
-/* guarded `posts` update — the guard re-checks the version inside the */
-/* UPDATE so a racing save/publish between pre-read and write still    */
-/* aborts atomically. No `article_versions` row is ever inserted, so   */
-/* the body version never advances on a non-revision action.           */
+/* These commands are the admin list's explicit write protocol. Each   */
+/* command appends ONE immutable version snapshot (ADR 0007): the new  */
+/* snapshot carries the latest state with only the target field moved, */
+/* so the canonical public read (latest version) reflects pin / hide / */
+/* password / category / soft-delete / restore immediately — no admin  */
+/* vs public divergence. The body version therefore ADVANCES on every  */
+/* applied article-level action; a long-open editor's next save gets   */
+/* an expectedVersion conflict and replays after refresh (expected).   */
 /*                                                                    */
-/* Idempotency: an operation whose target value is already the live    */
-/* value returns `replayed` (existing: true) without writing; repeated */
-/* operation ids for the same target are therefore safe and no-op.     */
+/* Idempotency:                                                        */
+/*   - a repeated operation_id finds its version fact and replays it   */
+/*     (existing: true) without writing;                               */
+/*   - a different operation whose target value is already live in the */
+/*     latest snapshot also returns `replayed` without writing.        */
+/* The insert is guarded inside the batch (HAVING MAX(version) =       */
+/* expected AND NOT EXISTS operation_id), so a racing save/publish     */
+/* between pre-read and write aborts atomically with zero partial      */
+/* writes. categories.post_count bookkeeping statements carry the      */
+/* same EXISTS(operation_id) guard so they can never fire without the  */
+/* version fact landing in the same transaction.                       */
 /* ------------------------------------------------------------------ */
 
 interface ArticleLevelSpec {
   input: ArticleLevelInput
   label: string
-  /** `SELECT <expr> AS current FROM posts WHERE id = ?` — the idempotency signal. */
-  readSql: string
+  /** Current value of the target field, read from the latest snapshot's fields. */
+  readCurrent: (fields: ArticleSnapshotFields) => unknown
+  /** True when the target value is already live (idempotent replay, no write). */
   isUnchanged: (current: unknown) => boolean
-  /** SET fragment; binds with `value` first, then updated_at is appended. */
-  setSql: string
-  value: unknown
-  /** Category count bookkeeping runs only after a confirmed applied write. */
-  afterUpdate?: (db: Database, postRef: number, prev: unknown) => Promise<void>
+  /** Mutates the cloned fields into the target state; reports a category move for count bookkeeping. */
+  applyFields: (
+    fields: ArticleSnapshotFields,
+    now: number,
+  ) => { from: string | null; to: string | null } | null
+}
+
+/** Rebuild the authoritative row surface from a stored snapshot for digest recomputation. */
+function authorityRowFromSnapshot(
+  parsed: ArticleIdentitySnapshot,
+  postRef: number,
+  fields: ArticleSnapshotFields,
+): PostAuthorityRow {
+  return {
+    id: postRef,
+    slug: fields.slug,
+    title: fields.title,
+    content: parsed.original_content ?? '',
+    html: parsed.original_html ?? '',
+    description: fields.description,
+    category: fields.category,
+    tags: fields.tags,
+    status: fields.status,
+    password: fields.password,
+    is_pinned: fields.is_pinned,
+    is_hidden: fields.is_hidden,
+    cover_image: fields.cover_image,
+    deleted_at: fields.deleted_at,
+    published_at: fields.published_at,
+    updated_at: fields.updated_at,
+  }
 }
 
 async function runArticleLevelCommand(
@@ -895,6 +933,20 @@ async function runArticleLevelCommand(
   if (!article) throw new Error(`${label}: article ${input.articleId} not found`)
   const postRef = article.post_ref
 
+  // Idempotent replay: this exact operation already committed a version fact.
+  const byOperation = await findVersionByOperationId(db, input.operationId)
+  if (byOperation && byOperation.article_id === input.articleId) {
+    return {
+      outcome: 'replayed',
+      articleId: input.articleId,
+      postRef,
+      version: byOperation.version,
+      operationId: input.operationId,
+      existing: true,
+      projectionFailures: [],
+    }
+  }
+
   const latest = await findLatestVersion(db, input.articleId)
   const serverVersion = latest?.version ?? 0
   if (serverVersion !== input.expectedVersion) {
@@ -908,14 +960,28 @@ async function runArticleLevelCommand(
     }
   }
 
-  const row = await db
-    .prepare(spec.readSql)
-    .bind(postRef)
-    .first<{ current: unknown }>()
-  const current = row?.current ?? null
-  if (spec.isUnchanged(current)) {
+  let parsed: ArticleIdentitySnapshot | null = null
+  try {
+    parsed = latest ? (JSON.parse(latest.snapshot_json) as ArticleIdentitySnapshot) : null
+  } catch {
+    parsed = null
+  }
+  if (!parsed) {
+    // No canonical snapshot to anchor on — refuse without writing.
     return {
-      outcome: 'replayed' as const,
+      outcome: 'conflict',
+      articleId: input.articleId,
+      postRef,
+      expectedVersion: input.expectedVersion,
+      serverVersion,
+      facts: comparisonFacts(latest),
+    }
+  }
+
+  // Target value already live → replay signal, zero writes.
+  if (spec.isUnchanged(spec.readCurrent(parsed.fields))) {
+    return {
+      outcome: 'replayed',
       articleId: input.articleId,
       postRef,
       version: serverVersion,
@@ -925,155 +991,205 @@ async function runArticleLevelCommand(
     }
   }
 
-  const guard = `
-    UPDATE posts SET ${spec.setSql}, updated_at = strftime('%s', 'now')
-    WHERE id = ?
-      AND EXISTS (SELECT 1 FROM article_versions WHERE article_id = ? AND version = ?)`
+  const now = unixNow()
+  const nextFields: ArticleSnapshotFields = { ...parsed.fields }
+  const categoryMove = spec.applyFields(nextFields, now)
+  nextFields.updated_at = now
+
+  // Immutable next snapshot: only the target field moved; content hashes are
+  // inherited (the body did not change) and the field digest is recomputed.
+  // The identity snapshot types version as the literal INITIAL_VERSION; command
+  // writes stamp the actual monotonic version on top (same as buildVersionRecord).
+  const next = {
+    ...parsed,
+    version: serverVersion + 1,
+    post_ref: postRef,
+    fields: nextFields,
+    post_field_sha256: postFieldDigest(authorityRowFromSnapshot(parsed, postRef, nextFields)),
+    published_at:
+      nextFields.status === 'published' ? (nextFields.published_at ?? null) : null,
+  } as ArticleIdentitySnapshot
+  const recordJson = snapshotJson(next)
+
+  const batch = [
+    db
+      .prepare(
+        `INSERT INTO article_versions
+           (article_id, version, operation_id, snapshot_json, content_snapshot_sha256, published_at)
+         SELECT ?, COALESCE(MAX(version), 0) + 1, ?, ?, ?, ?
+         FROM article_versions
+         WHERE article_id = ?
+         GROUP BY article_id
+         HAVING COALESCE(MAX(version), 0) = ?
+           AND NOT EXISTS (SELECT 1 FROM article_versions WHERE operation_id = ?)`,
+      )
+      .bind(
+        input.articleId,
+        input.operationId,
+        recordJson,
+        next.content_snapshot_sha256,
+        next.published_at,
+        input.articleId,
+        input.expectedVersion,
+        input.operationId,
+      ),
+  ]
+  if (categoryMove && categoryMove.from !== categoryMove.to) {
+    // Count bookkeeping is guarded by the version fact so a no-op'd insert
+    // (lost race) can never move a counter inside the aborted transaction.
+    if (categoryMove.from) {
+      batch.push(
+        db
+          .prepare(
+            'UPDATE categories SET post_count = post_count - 1 WHERE name = ? AND EXISTS (SELECT 1 FROM article_versions WHERE operation_id = ?)',
+          )
+          .bind(categoryMove.from, input.operationId),
+      )
+    }
+    if (categoryMove.to) {
+      batch.push(
+        db
+          .prepare(
+            'UPDATE categories SET post_count = post_count + 1 WHERE name = ? AND EXISTS (SELECT 1 FROM article_versions WHERE operation_id = ?)',
+          )
+          .bind(categoryMove.to, input.operationId),
+      )
+    }
+  }
+
   try {
-    // Only include the value binding when the SET fragment actually uses a placeholder.
-    const binds = spec.setSql.includes('?') ? [spec.value] : []
-    await db
-      .prepare(guard)
-      .bind(...binds, postRef, input.articleId, input.expectedVersion)
-      .run()
+    await db.batch(batch)
   } catch (error) {
-    // Guard refused the write (version raced forward) or a constraint fired.
-    const fresh = await findLatestVersion(db, input.articleId)
-    if ((fresh?.version ?? 0) !== serverVersion) {
+    const raced = await findVersionByOperationId(db, input.operationId)
+    if (raced && raced.article_id === input.articleId) {
       return {
-        outcome: 'conflict',
+        outcome: 'replayed',
         articleId: input.articleId,
         postRef,
-        expectedVersion: input.expectedVersion,
-        serverVersion: fresh?.version ?? 0,
-        facts: comparisonFacts(fresh),
+        version: raced.version,
+        operationId: input.operationId,
+        existing: true,
+        projectionFailures: [],
       }
     }
     throw new Error(
-      `${label}: unexpected write failure for article ${input.articleId} operation '${input.operationId}': ${error instanceof Error ? error.message : String(error)}`,
+      `${label}: unexpected batch failure for article ${input.articleId} operation '${input.operationId}': ${error instanceof Error ? error.message : String(error)}`,
     )
   }
 
-  // Verify the guarded update actually landed; a lost race is a conflict, never a silent overwrite.
-  const after = await db
-    .prepare(spec.readSql)
-    .bind(postRef)
-    .first<{ current: unknown }>()
-  if (spec.isUnchanged(after?.current ?? null)) {
-    await spec.afterUpdate?.(db, postRef, current)
+  const version = await findVersionByOperationId(db, input.operationId)
+  if (!version || version.article_id !== input.articleId) {
+    // Guards no-op'd: the expected version lost a race between pre-read and
+    // batch. Nothing was written — report the real server state.
+    const fresh = await findLatestVersion(db, input.articleId)
     return {
-      outcome: 'applied' as const,
+      outcome: 'conflict',
       articleId: input.articleId,
       postRef,
-      version: serverVersion,
-      operationId: input.operationId,
-      existing: false,
-      projectionFailures: [],
+      expectedVersion: input.expectedVersion,
+      serverVersion: fresh?.version ?? 0,
+      facts: comparisonFacts(fresh),
     }
   }
 
-  const fresh = await findLatestVersion(db, input.articleId)
   return {
-    outcome: 'conflict',
+    outcome: 'applied',
     articleId: input.articleId,
     postRef,
-    expectedVersion: input.expectedVersion,
-    serverVersion: fresh?.version ?? 0,
-    facts: comparisonFacts(fresh),
+    version: version.version,
+    operationId: input.operationId,
+    existing: false,
+    projectionFailures: [],
   }
 }
 
-/** Pin / unpin — independent, never advances the body version. */
+/** Pin / unpin — appends one immutable version snapshot. */
 export async function setPinned(db: Database, input: SetPinnedInput): Promise<ArticleLevelResult> {
   const is_pinned = input.is_pinned === 1 ? 1 : 0
   return runArticleLevelCommand(db, {
     input,
     label: 'setPinned',
-    readSql: 'SELECT is_pinned AS current FROM posts WHERE id = ?',
+    readCurrent: (fields) => fields.is_pinned,
     isUnchanged: (current) => current === is_pinned,
-    setSql: 'is_pinned = ?',
-    value: is_pinned,
+    applyFields: (fields) => {
+      fields.is_pinned = is_pinned
+      return null
+    },
   })
 }
 
-/** Visibility (unlisted/link-only) — independent, never advances the body version. */
+/** Visibility (unlisted/link-only) — appends one immutable version snapshot. */
 export async function setHidden(db: Database, input: SetHiddenInput): Promise<ArticleLevelResult> {
   const is_hidden = input.is_hidden === 1 ? 1 : 0
   return runArticleLevelCommand(db, {
     input,
     label: 'setHidden',
-    readSql: 'SELECT is_hidden AS current FROM posts WHERE id = ?',
+    readCurrent: (fields) => fields.is_hidden,
     isUnchanged: (current) => current === is_hidden,
-    setSql: 'is_hidden = ?',
-    value: is_hidden,
+    applyFields: (fields) => {
+      fields.is_hidden = is_hidden
+      return null
+    },
   })
 }
 
-/** Access password — independent, never advances the body version. */
+/** Access password — appends one immutable version snapshot; NULL and '' are the same "no password" state. */
 export async function setPassword(db: Database, input: SetPasswordInput): Promise<ArticleLevelResult> {
   const password = typeof input.password === 'string' && input.password.trim() ? input.password.trim() : null
   return runArticleLevelCommand(db, {
     input,
     label: 'setPassword',
-    readSql: 'SELECT password AS current FROM posts WHERE id = ?',
-    // NULL and '' are the same "no password" state.
+    readCurrent: (fields) => fields.password,
     isUnchanged: (current) => (current ?? null) === password,
-    setSql: 'password = ?',
-    value: password,
+    applyFields: (fields) => {
+      fields.password = password
+      return null
+    },
   })
 }
 
-/** Category rename/move — independent, never advances the body version; keeps `categories.post_count`. */
+/** Category rename/move — appends one immutable version snapshot; keeps `categories.post_count` deltas. */
 export async function setCategory(db: Database, input: SetCategoryInput): Promise<ArticleLevelResult> {
   const category = typeof input.category === 'string' && input.category.trim() ? input.category.trim() : null
   return runArticleLevelCommand(db, {
     input,
     label: 'setCategory',
-    readSql: 'SELECT category AS current FROM posts WHERE id = ?',
+    readCurrent: (fields) => fields.category,
     isUnchanged: (current) => (current ?? null) === category,
-    setSql: 'category = ?',
-    value: category,
-    afterUpdate: async (dbi, postRef, prev) => {
-      const oldCategory = (prev as string | null) ?? null
-      if (oldCategory !== category) {
-        if (oldCategory) {
-          await dbi
-            .prepare('UPDATE categories SET post_count = post_count - 1 WHERE name = ?')
-            .bind(oldCategory)
-            .run()
-        }
-        if (category) {
-          await dbi
-            .prepare('UPDATE categories SET post_count = post_count + 1 WHERE name = ?')
-            .bind(category)
-            .run()
-        }
-      }
+    applyFields: (fields) => {
+      const from = fields.category ?? null
+      fields.category = category
+      return { from, to: category }
     },
   })
 }
 
-/** Soft delete — keeps the first deletion timestamp and the post status; independent, never advances the body version. */
+/** Soft delete — appends one immutable version snapshot; keeps the first deletion timestamp and the status. */
 export async function softDelete(db: Database, input: SoftDeleteInput): Promise<ArticleLevelResult> {
   return runArticleLevelCommand(db, {
     input,
     label: 'softDelete',
-    readSql: 'SELECT deleted_at AS current FROM posts WHERE id = ?',
-    isUnchanged: (current) => current !== null,
-    setSql: "deleted_at = COALESCE(deleted_at, strftime('%s', 'now'))",
-    value: null,
+    readCurrent: (fields) => fields.deleted_at,
+    isUnchanged: (current) => current !== null && current !== undefined,
+    applyFields: (fields, now) => {
+      fields.deleted_at = fields.deleted_at ?? now
+      return null
+    },
   })
 }
 
-/** Restore — returns a soft-deleted post to draft with NO deletion timestamp; independent, never advances the body version. */
+/** Restore — appends one immutable version snapshot; returns a soft-deleted article to draft with NO deletion timestamp. */
 export async function restore(db: Database, input: RestoreInput): Promise<ArticleLevelResult> {
   return runArticleLevelCommand(db, {
     input,
     label: 'restore',
-    readSql: "SELECT (deleted_at IS NULL AND status = 'draft') AS current FROM posts WHERE id = ?",
-    isUnchanged: (current) => current === 1,
-    setSql: "status = 'draft', deleted_at = NULL",
-    value: null,
+    readCurrent: (fields) => fields.deleted_at === null && fields.status === 'draft',
+    isUnchanged: (current) => current === true,
+    applyFields: (fields) => {
+      fields.status = 'draft'
+      fields.deleted_at = null
+      return null
+    },
   })
 }
 
