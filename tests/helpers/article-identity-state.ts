@@ -17,6 +17,7 @@ export const runnerPath = join(repoRoot, 'scripts', 'migrations.mjs')
 export const ddlPath = join(repoRoot, 'scripts', 'apply-article-identity-ddl.mjs')
 export const backfillPath = join(repoRoot, 'scripts', 'backfill-article-identity.mjs')
 export const reconcilePath = join(repoRoot, 'scripts', 'reconcile-article-shadow.mjs')
+export const retirePath = join(repoRoot, 'scripts', 'retire-posts-projection.mjs')
 export const configPath = join(repoRoot, 'wrangler.toml')
 
 const stateDirectories: string[] = []
