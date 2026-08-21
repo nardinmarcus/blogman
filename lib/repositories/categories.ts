@@ -1,5 +1,6 @@
 import type { Database } from '@/lib/repositories/schema'
 import type { CategoryRow } from '@/lib/repositories/types'
+import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 
 // 获取所有分类
 export async function getCategories(db: Database): Promise<CategoryRow[]> {
@@ -11,30 +12,19 @@ export async function getCategories(db: Database): Promise<CategoryRow[]> {
 }
 
 export async function getPublicCategories(db: Database): Promise<CategoryRow[]> {
-  // Soft-switch: before the canonical DDL is applied, fall back to the legacy
-  // posts projection so the site header / sitemap never 500 on a pre-migration DB.
+  // Degraded: posts is retired from the public runtime. When the canonical
+  // fact tables are absent the header / sitemap get an empty category list
+  // rather than a legacy `posts` read.
   try {
     const has = await db
       .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='formal_publications'`)
       .first<{ name: string }>()
-    if (!has) {
-      const { results } = await db
-        .prepare(
-          `SELECT categories.name, categories.slug, COUNT(posts.id) AS post_count
-           FROM categories
-           JOIN posts ON posts.category = categories.name
-           WHERE posts.status = 'published'
-             AND posts.password IS NULL
-             AND posts.is_hidden = 0
-             AND posts.deleted_at IS NULL
-           GROUP BY categories.name, categories.slug
-           ORDER BY categories.name`,
-        )
-        .all<CategoryRow>()
-      return results ?? []
-    }
-  } catch {
-    // fall through to the canonical query only if it exists
+    if (!has) return []
+  } catch (error) {
+    // A migration-required DB must still surface DATABASE_MIGRATION_REQUIRED
+    // (the site header / request-db-readonly path relies on it).
+    rethrowIfDatabaseMigrationRequired(error)
+    return []
   }
 
   // L2: the public category reader list derives from the CANONICAL formal
