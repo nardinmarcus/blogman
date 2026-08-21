@@ -90,19 +90,24 @@ export async function getMobilePublishConfirmation(
   db: Database,
   articleId: number,
 ): Promise<MobilePublishConfirmation | null> {
+  // Identity + live state from canonical facts (the posts projection is retired).
   const article = await db
     .prepare(
       `SELECT a.id, a.post_ref,
-              COALESCE(p.title,'') AS title, COALESCE(p.slug,'') AS slug,
-              COALESCE(p.status,'') AS status, p.deleted_at
-       FROM articles a LEFT JOIN posts p ON p.id = a.post_ref
+              json_extract(v.snapshot_json, '$.fields.title') AS title,
+              json_extract(v.snapshot_json, '$.fields.slug') AS slug,
+              json_extract(v.snapshot_json, '$.fields.status') AS status,
+              json_extract(v.snapshot_json, '$.fields.deleted_at') AS deleted_at
+       FROM articles a
+       JOIN article_versions v ON v.article_id = a.id
+        AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
        WHERE a.id = ?`,
     )
     .bind(articleId)
     .first<ArticleRow>()
   if (!article) return null
 
-  const deleted = Boolean(article.deleted_at) || article.status === 'deleted'
+  const deleted = article.deleted_at != null || article.status === 'deleted'
 
   const formal = await db
     .prepare(

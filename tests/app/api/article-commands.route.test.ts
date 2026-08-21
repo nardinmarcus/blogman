@@ -80,11 +80,26 @@ vi.mock('nanoid', () => ({
 
 import { POST } from '@/app/api/article-commands/route'
 
-function fakeDb() {
+function fakeDb(
+  registry: Record<string, number> = { s: 5 },
+  versions: Record<number, number> = { 5: 2 },
+) {
   return {
-    prepare: () => ({
-      bind: () => ({
-        first: async () => ({ slug: 'persisted-slug', published_at: 1700000000 }),
+    prepare: (sql: string) => ({
+      bind: (...binds: unknown[]) => ({
+        first: async () => {
+          if (sql.includes("json_extract(v.snapshot_json, '$.fields.slug')")) {
+            return { slug: 'persisted-slug', published_at: 1700000000 }
+          }
+          if (sql.includes('FROM article_slug_addresses')) {
+            const slug = String(binds[0] ?? '')
+            return slug in registry ? { article_id: registry[slug] } : null
+          }
+          if (sql.includes('MAX(version)')) {
+            return { version: versions[Number(binds[0])] ?? 0 }
+          }
+          return { slug: 'persisted-slug', published_at: 1700000000 }
+        },
       }),
     }),
   }
@@ -280,8 +295,13 @@ describe('/api/article-commands — dispatch', () => {
   })
 
   it('rejects an articleId/slug mismatch with 409 before touching the kernel', async () => {
-    mockAuthority(99, 3) // server identity belongs to article 99
-    mocks.getPostBySlug.mockResolvedValue({ id: 1, slug: 's', title: 't', description: null, category: null, tags: null, status: 'draft', password: null, is_pinned: 0, is_hidden: 0, deleted_at: null, published_at: 1, updated_at: 1, view_count: 0 })
+    // The registry binds slug 's' to article 99; the request claims article 5.
+    mocks.getRouteContextWithDb.mockResolvedValue({
+      ok: true,
+      env: {},
+      db: fakeDb({ s: 99 }, { 99: 3 }),
+      ctx: { waitUntil: vi.fn() },
+    })
     mocks.parseJsonBody.mockResolvedValue({
       action: 'setHidden',
       slug: 's',
@@ -295,11 +315,14 @@ describe('/api/article-commands — dispatch', () => {
     expect(mocks.setHidden).not.toHaveBeenCalled()
   })
 
-  it('falls back to the legacy direct write on a ledger-only DB (missing identity tables, no 503)', async () => {
-    // Identity infra absent -> authority detection swallows the error -> legacy path.
-    mocks.getByPostRef.mockRejectedValue(new Error('no such table: articles'))
-    mocks.listVersions.mockRejectedValue(new Error('no such table: article_versions'))
-    mocks.getPostBySlug.mockResolvedValue({ id: 7, slug: 's', title: 't', description: null, category: null, tags: [], status: 'draft', password: null, is_pinned: 0, is_hidden: 0, deleted_at: null, published_at: 1, updated_at: 1, view_count: 0 })
+  it('refuses a versionless article (no version facts) with 409 — no legacy fallback', async () => {
+    // Registry resolves the slug but the article carries zero version facts.
+    mocks.getRouteContextWithDb.mockResolvedValue({
+      ok: true,
+      env: {},
+      db: fakeDb({ s: 5 }, { 5: 0 }),
+      ctx: { waitUntil: vi.fn() },
+    })
     mocks.parseJsonBody.mockResolvedValue({
       action: 'setPinned',
       slug: 's',
@@ -308,25 +331,20 @@ describe('/api/article-commands — dispatch', () => {
       operationId: 'op-legacy-pin',
       is_pinned: 1,
     })
-    mocks.updatePost.mockResolvedValue(undefined)
 
     const res = await POST({} as never)
-    expect(res.status).toBe(200)
-    const body = await res.json()
-    expect(body.outcome).toBe('legacy-applied')
-    const legacyCall = mocks.updatePost.mock.calls[0] as [unknown, number, unknown]
-    expect(legacyCall[1]).toBe(7)
-    expect(legacyCall[2]).toEqual({ is_pinned: 1 })
+    expect(res.status).toBe(409)
+    expect(mocks.updatePost).not.toHaveBeenCalled()
     expect(mocks.setPinned).not.toHaveBeenCalled()
   })
 
   it('batchSetCategory returns per-article applied + conflict, never blocking each other', async () => {
-    mocks.getPostBySlug.mockResolvedValueOnce({ id: 1, slug: 'a', title: 't', description: null, category: null, tags: null, status: 'draft', password: null, is_pinned: 0, is_hidden: 0, deleted_at: null, published_at: 1, updated_at: 1, view_count: 0 })
-    mocks.getPostBySlug.mockResolvedValueOnce({ id: 2, slug: 'b', title: 't', description: null, category: null, tags: null, status: 'draft', password: null, is_pinned: 0, is_hidden: 0, deleted_at: null, published_at: 1, updated_at: 1, view_count: 0 })
-    mocks.getByPostRef.mockResolvedValueOnce({ id: 5, post_ref: 1, slug: 'a', draft_ref: null, source_page_identity: null, created_at: 1 })
-    mocks.getByPostRef.mockResolvedValueOnce({ id: 6, post_ref: 2, slug: 'b', draft_ref: null, source_page_identity: null, created_at: 1 })
-    mocks.listVersions.mockResolvedValueOnce([{ id: 1, article_id: 5, version: 2, operation_id: 'x', snapshot_json: '{}', content_snapshot_sha256: '', published_at: null, created_at: 1 } as never])
-    mocks.listVersions.mockResolvedValueOnce([{ id: 1, article_id: 6, version: 5, operation_id: 'x', snapshot_json: '{}', content_snapshot_sha256: '', published_at: null, created_at: 1 } as never])
+    mocks.getRouteContextWithDb.mockResolvedValue({
+      ok: true,
+      env: {},
+      db: fakeDb({ a: 5, b: 6 }, { 5: 2, 6: 5 }),
+      ctx: { waitUntil: vi.fn() },
+    })
     mocks.setCategory.mockResolvedValueOnce({
       outcome: 'applied', articleId: 5, postRef: 1, version: 2, operationId: 'op-a', existing: false, projectionFailures: [],
     })

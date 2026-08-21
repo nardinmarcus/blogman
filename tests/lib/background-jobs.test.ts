@@ -112,10 +112,15 @@ function snapshot(overrides: Partial<ArticleCommandSnapshot> = {}): ArticleComma
 
 async function postRow(postRef: number): Promise<Record<string, unknown> | null> {
   const rows = await query<Record<string, unknown>>(
-    `SELECT slug, title, content, html, description, category, tags, status
-     FROM posts WHERE id = ${postRef}`,
+    `SELECT v.snapshot_json FROM articles a
+     JOIN article_versions v ON v.article_id = a.id
+      AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
+     WHERE a.post_ref = ${postRef} LIMIT 1`,
   )
-  return rows[0] ?? null
+  const raw = rows[0]
+  if (!raw) return null
+  const record = JSON.parse(raw.snapshot_json as string) as { fields: Record<string, unknown> }
+  return record.fields
 }
 
 async function versionRows(articleId: number): Promise<Array<{ version: number; operation_id: string }>> {
@@ -237,9 +242,11 @@ describe('lib/background-jobs — process-post-ai records suggestions, never wri
 
   it('skips a legacy post with no article identity (never migrates queue objects into facts)', async () => {
     const slug = fresh('legacy-no-id')
+    // Explicit high id: keeps the legacy seed clear of synthesized post_refs
+    // in the mixed fixture DB (production drops posts entirely).
     await query(
-      `INSERT INTO posts (slug, title, content, html, description, category, tags, status)
-       VALUES ('${slug}', '旧稿', '旧正文', '<p>旧正文</p>', NULL, '未分类', NULL, 'draft')`,
+      `INSERT INTO posts (id, slug, title, content, html, description, category, tags, status)
+       VALUES (987001, '${slug}', '旧稿', '旧正文', '<p>旧正文</p>', NULL, '未分类', NULL, 'draft')`,
     )
     const postId = (await query<{ id: number }>(`SELECT id FROM posts WHERE slug = '${slug}'`))[0].id
 

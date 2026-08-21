@@ -234,6 +234,25 @@ async function seedConflict(): Promise<Seeded & { opId: string }> {
 /* 双方偏离检测                                                         */
 /* ------------------------------------------------------------------ */
 
+
+/** Latest frozen snapshot fields for an article (canonical, projection-free). */
+async function canonFields(postRef: number): Promise<Record<string, unknown> | null> {
+  const rows = await query<Record<string, unknown>>(
+    `SELECT v.snapshot_json FROM articles a
+     JOIN article_versions v ON v.article_id = a.id
+      AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
+     WHERE a.post_ref = ${postRef} LIMIT 1`,
+  )
+  const raw = rows[0]
+  if (!raw) return null
+  const record = JSON.parse(raw.snapshot_json as string) as {
+    fields: Record<string, unknown>
+    original_content: string | null
+    original_html: string | null
+  }
+  return { ...record.fields, content: record.original_content ?? '', html: record.original_html ?? '' }
+}
+
 describe('probeConflict — 双方偏离检测 (derive, never store a status label)', { timeout: 120_000 }, () => {
   it('synced: neither side moved past the baseline', async () => {
     const s = await seedBaseline()
@@ -468,7 +487,7 @@ describe('resolveConflictSide — 选源稿 (draft 写新版本)', { timeout: 12
     expect(await versionCount(c.articleId)).toBe(3)
 
     // 版本内核 wrote the chosen source content (refs rewritten to asset URLs).
-    const post = (await query<{ title: string; content: string }>(`SELECT title, content FROM posts WHERE id = ${c.postRef}`))[0]
+    const post = await canonFields(c.postRef)
     expect(post.title).toBe('源稿改标题')
     expect(post.content).toContain('/api/images/source-media/')
     expect(post.content).not.toContain(HERO_REF)
@@ -859,7 +878,7 @@ describe('选源稿 — 正式文章只更新待发布修订 (恢复点 + 线上
     expect(rp).toBe(1)
 
     // Live posts projection untouched (线上版本保持).
-    const live = (await query<{ title: string }>(`SELECT title FROM posts WHERE id = ${postRef}`))[0]
+    const live = await canonFields(postRef)
     expect(live.title).toBe('正式文章标题')
 
     // Baseline advanced → re-derive → synced.

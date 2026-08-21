@@ -141,9 +141,20 @@ async function recordThree(articleId: number, postRef: number, boundVersion: num
 }
 
 async function postRow(postRef: number): Promise<Record<string, unknown>> {
-  return (await query<Record<string, unknown>>(
-    `SELECT slug, title, content, html, description, category, tags, status, published_at FROM posts WHERE id = ${postRef}`,
-  ))[0]
+  const rows = await query<Record<string, unknown>>(
+    `SELECT v.snapshot_json FROM articles a
+     JOIN article_versions v ON v.article_id = a.id
+      AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
+     WHERE a.post_ref = ${postRef} LIMIT 1`,
+  )
+  const raw = rows[0]
+  if (!raw) return undefined as never
+  const record = JSON.parse(raw.snapshot_json as string) as {
+    fields: Record<string, unknown>
+    original_content: string | null
+    original_html: string | null
+  }
+  return { ...record.fields, content: record.original_content, html: record.original_html }
 }
 
 async function revisionNumber(articleId: number): Promise<number | null> {

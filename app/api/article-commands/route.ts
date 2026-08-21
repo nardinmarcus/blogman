@@ -154,22 +154,6 @@ async function resolveArticleIdBySlug(db: D1Database, slug: string): Promise<num
   return byIdentity?.id ?? null
 }
 
-/** B2-06 — the versioned-authority facts for a post. Null when the identity tables are absent (a ledger-only DB that never ran the B2-02 DDL) so existing CRUD never 503s. */
-async function versionedAuthority(
-  db: D1Database,
-  postRef: number,
-): Promise<{ articleId: number; version: number } | null> {
-  try {
-    const identity = await getByPostRef(db, postRef)
-    if (!identity) return null
-    const versions = await listVersions(db, identity.id)
-    if (versions.length === 0) return null
-    return { articleId: identity.id, version: versions[0].version }
-  } catch {
-    return null
-  }
-}
-
 /** Run the best-effort out-of-transaction projections for a content-affecting result. */
 async function runProjectorsFor(
   projections: ArticleCommandProjections,
@@ -185,10 +169,9 @@ async function runProjectorsFor(
 
 /**
  * B2-06 — shared adapter for the independent (non-body) article-level commands.
- * Once a post is under versioned authority the write goes through the kernel's
- * explicit command (expected version + operation id preconditions). On a
- * ledger-only DB (identity tables absent) the same action falls back to the
- * legacy direct `updatePost` write so nothing 503s.
+ * The write goes through the kernel's explicit command (expected version +
+ * operation id preconditions); versionless articles are refused with 409 —
+ * the legacy direct write fallback is retired with the posts projection.
  */
 async function dispatchArticleLevelAction(
   params: {
@@ -316,13 +299,17 @@ async function dispatchBatchSetCategory(
       items.push({ outcome: 'not-found', articleId, expectedVersion, operationId, slug })
       continue
     }
-    const authority = await versionedAuthority(db, resolvedArticleId)
-    if (!authority) {
+    // Version facts straight from canonical identity (same anchor as dispatch).
+    const vRow = await db
+      .prepare('SELECT COALESCE(MAX(version), 0) AS version FROM article_versions WHERE article_id = ?')
+      .bind(resolvedArticleId)
+      .first<{ version: number }>()
+    if (!vRow || vRow.version === 0) {
       items.push({ outcome: 'not-found', articleId, expectedVersion, operationId, slug })
       continue
     }
-    if (authority.articleId !== articleId) {
-      items.push({ outcome: 'conflict', articleId, expectedVersion, serverVersion: authority.version, slug, facts: null })
+    if (resolvedArticleId !== articleId) {
+      items.push({ outcome: 'conflict', articleId, expectedVersion, serverVersion: vRow.version, slug, facts: null })
       continue
     }
     try {

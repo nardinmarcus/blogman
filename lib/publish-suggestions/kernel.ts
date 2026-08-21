@@ -25,6 +25,7 @@
  */
 
 import type { Database } from '@/lib/repositories/schema'
+import { findLiveStateByPostRef, type CanonicalLiveState } from '@/lib/canonical-live'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands/types'
 import { save } from '@/lib/article-commands'
 import { findActiveRevision, snapshotContentHash } from '@/lib/publish-revision'
@@ -69,23 +70,10 @@ interface ArticleRow {
   post_ref: number
 }
 
-interface PostRow {
+interface PostRow extends CanonicalLiveState {
   id: number
-  slug: string
-  title: string
   content: string | null
   html: string | null
-  description: string | null
-  category: string | null
-  tags: string | null
-  status: string
-  password: string | null
-  is_pinned: number | null
-  is_hidden: number | null
-  cover_image: string | null
-  deleted_at: number | null
-  published_at: number | null
-  updated_at: number | null
 }
 
 async function findArticleById(db: Database, articleId: number): Promise<ArticleRow | null> {
@@ -99,10 +87,18 @@ const POST_COLUMNS = `id, slug, title, content, html, description, category, tag
   password, is_pinned, is_hidden, cover_image, deleted_at, published_at, updated_at`
 
 async function findPostById(db: Database, postRef: number): Promise<PostRow | null> {
-  return db
-    .prepare(`SELECT ${POST_COLUMNS} FROM posts WHERE id = ?`)
+  const live = await findLiveStateByPostRef(db, postRef)
+  if (!live) return null
+  const bodies = await db
+    .prepare(
+      `SELECT json_extract(v.snapshot_json, '$.original_content') AS content, json_extract(v.snapshot_json, '$.original_html') AS html FROM articles a
+       JOIN article_versions v ON v.article_id = a.id
+        AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
+       WHERE a.post_ref = ?`,
+    )
     .bind(postRef)
-    .first<PostRow>()
+    .first<{ content: string | null; html: string | null }>()
+  return { id: postRef, ...live, content: bodies?.content ?? '', html: bodies?.html ?? '' }
 }
 
 async function latestVersion(db: Database, articleId: number): Promise<number> {
@@ -482,7 +478,7 @@ async function ensureSuggestionRestorePoint(
       description: live.description,
       category: live.category,
       tags: live.tags,
-      status: live.status,
+      status: live.status ?? 'draft',
       password: live.password,
       is_pinned: live.is_pinned,
       is_hidden: live.is_hidden,
