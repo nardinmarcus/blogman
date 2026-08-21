@@ -1,6 +1,5 @@
 import type { Database } from '@/lib/repositories/schema'
-import type { Post, PostWithTags } from '@/lib/repositories/types'
-import { mapPostWithTags } from '@/lib/repositories/post-mappers'
+import type { PostWithTags } from '@/lib/repositories/types'
 import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 import {
   CANONICAL_ROW_COLUMNS,
@@ -26,8 +25,9 @@ const SNAP = {
  * (frozen access-control + content) so visibility/encryption/hidden semantics
  * are decided from canonical facts, in SQL, preserving FTS `rank` ordering.
  *
- * On a pre-migration / ledger-only DB (canonical tables absent) it SOFT-SWITCHES
- * to the legacy `posts` + `posts_fts` projection so search never 500s.
+ * On a pre-migration / ledger-only DB (canonical tables absent) search is
+ * DEGRADED: no legacy `posts` fallback is run (posts is retired from the public
+ * runtime), so it returns an empty result set rather than reading `posts`.
  */
 export async function searchPosts(
   db: Database,
@@ -40,10 +40,11 @@ export async function searchPosts(
 ): Promise<PostWithTags[]> {
   if (!query.trim()) return []
 
-  if (await canonicalFactsAvailable(db)) {
-    return searchCanonical(db, query, limit, includeDrafts, includeEncrypted, includeHidden, includeDeleted)
+  if (!(await canonicalFactsAvailable(db))) {
+    // posts is retired from the public runtime — degraded empty is the intent.
+    return []
   }
-  return searchLegacy(db, query, limit, includeDrafts, includeEncrypted, includeHidden, includeDeleted)
+  return searchCanonical(db, query, limit, includeDrafts, includeEncrypted, includeHidden, includeDeleted)
 }
 
 /** Canonical FTS: posts_fts → articles → formal_publications → article_versions. */
@@ -87,52 +88,4 @@ async function searchCanonical(
   }
 }
 
-/** Legacy (pre-migration) FTS with LIKE fallback, unchanged semantics. */
-async function searchLegacy(
-  db: Database,
-  query: string,
-  limit: number,
-  includeDrafts: boolean,
-  includeEncrypted: boolean,
-  includeHidden: boolean,
-  includeDeleted: boolean,
-): Promise<PostWithTags[]> {
-  const conditions: string[] = []
-  if (!includeDrafts) conditions.push("posts.status = 'published'")
-  if (!includeEncrypted) conditions.push('posts.password IS NULL')
-  if (!includeHidden) conditions.push('posts.is_hidden = 0')
-  if (!includeDeleted) conditions.push('posts.deleted_at IS NULL')
-  const whereClause = conditions.length > 0 ? `AND ${conditions.join(' AND ')}` : ''
 
-  let results: Post[]
-  try {
-    const ftsResult = await db
-      .prepare(
-        `SELECT posts.* FROM posts_fts
-         JOIN posts ON posts.id = posts_fts.rowid
-         WHERE posts_fts MATCH ?
-         ${whereClause}
-         ORDER BY rank
-         LIMIT ?`,
-      )
-      .bind(query, limit)
-      .all<Post>()
-    results = ftsResult.results
-  } catch (error) {
-    rethrowIfDatabaseMigrationRequired(error)
-    const pattern = `%${query}%`
-    const likeResult = await db
-      .prepare(
-        `SELECT * FROM posts
-         WHERE (title LIKE ? OR content LIKE ?)
-         ${whereClause}
-         ORDER BY published_at DESC
-         LIMIT ?`,
-      )
-      .bind(pattern, pattern, limit)
-      .all<Post>()
-    results = likeResult.results
-  }
-
-  return results.map(mapPostWithTags)
-}

@@ -56,14 +56,6 @@ function parseTags(value: string | string[] | null | undefined): string[] {
   }
 }
 
-function mapPost(post: Post): PostWithTags {
-  return {
-    ...post,
-    status: post.deleted_at ? 'deleted' : (post.status || 'published'),
-    tags: parseTags(post.tags),
-  }
-}
-
 function normalizeText(text: string): string {
   return text
     .toLowerCase()
@@ -159,87 +151,56 @@ async function fetchPostsBySlugs(db: D1Database, slugs: string[]): Promise<PostW
   const placeholders = slugs.map(() => '?').join(', ')
   const order = new Map(slugs.map((slug, index) => [slug, index]))
 
-  // Canonical read: resolve the requested slugs against formal_publications +
-  // the frozen article_versions snapshot (access-control decided canonically).
-  if (await canonicalFactsAvailable(db)) {
-    const { results } = await db
-      .prepare(
-        `SELECT ${CANONICAL_ROW_COLUMNS}
-         FROM articles a
-         JOIN formal_publications f ON f.article_id = a.id
-         JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
-         WHERE f.slug IN (${placeholders})
-           AND f.lifecycle = 'published'
-           AND COALESCE(json_extract(v.snapshot_json, '$.fields.password'), '') = ''
-           AND COALESCE(json_extract(v.snapshot_json, '$.fields.is_hidden'), 0) = 0
-           AND COALESCE(json_extract(v.snapshot_json, '$.fields.deleted_at'), 0) = 0`
-      )
-      .bind(...slugs)
-      .all<CanonicalPublicRow>()
-
-    return (results ?? [])
-      .map(postFromCanonicalRow)
-      .sort((left, right) => (order.get(left.slug) ?? Number.MAX_SAFE_INTEGER) - (order.get(right.slug) ?? Number.MAX_SAFE_INTEGER))
+  if (!(await canonicalFactsAvailable(db))) {
+    // posts is retired from the public runtime — degraded empty.
+    return []
   }
 
-  // Legacy fallback (pre-migration / ledger-only DB).
   const { results } = await db
     .prepare(
-      `SELECT * FROM posts
-       WHERE slug IN (${placeholders})
-         AND status = 'published'
-         AND password IS NULL
-         AND is_hidden = 0
-         AND deleted_at IS NULL`
+      `SELECT ${CANONICAL_ROW_COLUMNS}
+       FROM articles a
+       JOIN formal_publications f ON f.article_id = a.id
+       JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+       WHERE f.slug IN (${placeholders})
+         AND f.lifecycle = 'published'
+         AND COALESCE(json_extract(v.snapshot_json, '$.fields.password'), '') = ''
+         AND COALESCE(json_extract(v.snapshot_json, '$.fields.is_hidden'), 0) = 0
+         AND COALESCE(json_extract(v.snapshot_json, '$.fields.deleted_at'), 0) = 0`
     )
     .bind(...slugs)
-    .all<Post>()
+    .all<CanonicalPublicRow>()
 
-  return results
-    .map(mapPost)
+  return (results ?? [])
+    .map(postFromCanonicalRow)
     .sort((left, right) => (order.get(left.slug) ?? Number.MAX_SAFE_INTEGER) - (order.get(right.slug) ?? Number.MAX_SAFE_INTEGER))
 }
 
 /** Recent public articles (exclude one slug), read from canonical facts. */
 async function fetchRecentPublicPosts(db: D1Database, excludeSlug: string, limit: number): Promise<PostWithTags[]> {
-  // Canonical read: one row per formal article, ordered by first publish desc.
-  if (await canonicalFactsAvailable(db)) {
-    const { results } = await db
-      .prepare(
-        `SELECT ${CANONICAL_ROW_COLUMNS}
-         FROM articles a
-         JOIN formal_publications f ON f.article_id = a.id
-         JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
-         WHERE f.slug != ?
-           AND f.lifecycle = 'published'
-           AND COALESCE(json_extract(v.snapshot_json, '$.fields.password'), '') = ''
-           AND COALESCE(json_extract(v.snapshot_json, '$.fields.is_hidden'), 0) = 0
-           AND COALESCE(json_extract(v.snapshot_json, '$.fields.deleted_at'), 0) = 0
-         ORDER BY f.first_published_at DESC
-         LIMIT ?`
-      )
-      .bind(excludeSlug, limit)
-      .all<CanonicalPublicRow>()
-
-    return (results ?? []).map(postFromCanonicalRow)
+  if (!(await canonicalFactsAvailable(db))) {
+    // posts is retired from the public runtime — degraded empty.
+    return []
   }
 
-  // Legacy fallback (pre-migration / ledger-only DB).
   const { results } = await db
     .prepare(
-      `SELECT * FROM posts
-       WHERE slug != ?
-         AND status = 'published'
-         AND password IS NULL
-         AND is_hidden = 0
-         AND deleted_at IS NULL
-       ORDER BY published_at DESC
+      `SELECT ${CANONICAL_ROW_COLUMNS}
+       FROM articles a
+       JOIN formal_publications f ON f.article_id = a.id
+       JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+       WHERE f.slug != ?
+         AND f.lifecycle = 'published'
+         AND COALESCE(json_extract(v.snapshot_json, '$.fields.password'), '') = ''
+         AND COALESCE(json_extract(v.snapshot_json, '$.fields.is_hidden'), 0) = 0
+         AND COALESCE(json_extract(v.snapshot_json, '$.fields.deleted_at'), 0) = 0
+       ORDER BY f.first_published_at DESC
        LIMIT ?`
     )
     .bind(excludeSlug, limit)
-    .all<Post>()
+    .all<CanonicalPublicRow>()
 
-  return results.map(mapPost)
+  return (results ?? []).map(postFromCanonicalRow)
 }
 
 async function tryVectorLookup(
@@ -418,46 +379,37 @@ export async function getRelatedPosts(
 }
 
 async function getPostForIndexing(db: D1Database, postId: number): Promise<PublicPostRow | null> {
-  // Canonical read: index only what is observable on the public surface,
-  // derived from formal_publications + the frozen article_versions snapshot.
-  if (await canonicalFactsAvailable(db)) {
-    const row = await db
-      .prepare(
-        `SELECT ${CANONICAL_ROW_COLUMNS}
-         FROM articles a
-         JOIN formal_publications f ON f.article_id = a.id
-         JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
-         WHERE a.post_ref = ?`
-      )
-      .bind(postId)
-      .first<CanonicalPublicRow>()
-    if (!row) return null
-    const post = postFromCanonicalRow(row)
-    return {
-      id: post.id,
-      slug: post.slug,
-      title: post.title,
-      content: post.content,
-      description: post.description,
-      category: post.category,
-      tags: JSON.stringify(post.tags),
-      status: post.status,
-      password: post.password,
-      is_hidden: post.is_hidden,
-      deleted_at: post.deleted_at,
-      published_at: post.published_at,
-    }
+  if (!(await canonicalFactsAvailable(db))) {
+    // posts is retired from the public runtime — nothing to index.
+    return null
   }
 
-  // Legacy fallback (pre-migration / ledger-only DB).
-  return db
+  const row = await db
     .prepare(
-      `SELECT id, slug, title, content, description, category, tags, status, password, is_hidden, deleted_at, published_at
-       FROM posts
-       WHERE id = ?`
+      `SELECT ${CANONICAL_ROW_COLUMNS}
+       FROM articles a
+       JOIN formal_publications f ON f.article_id = a.id
+       JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+       WHERE a.post_ref = ?`
     )
     .bind(postId)
-    .first<PublicPostRow>()
+    .first<CanonicalPublicRow>()
+  if (!row) return null
+  const post = postFromCanonicalRow(row)
+  return {
+    id: post.id,
+    slug: post.slug,
+    title: post.title,
+    content: post.content,
+    description: post.description,
+    category: post.category,
+    tags: JSON.stringify(post.tags),
+    status: post.status,
+    password: post.password,
+    is_hidden: post.is_hidden,
+    deleted_at: post.deleted_at,
+    published_at: post.published_at,
+  }
 }
 
 function isIndexablePost(post: PublicPostRow | null): post is PublicPostRow {
