@@ -1,4 +1,10 @@
 import { searchPosts, type Post, type PostWithTags } from '@/lib/db'
+import {
+  CANONICAL_ROW_COLUMNS,
+  canonicalFactsAvailable,
+  type CanonicalPublicRow,
+  postFromCanonicalRow,
+} from '@/lib/public-read/canon'
 
 const VECTOR_NAMESPACE = 'posts'
 const DEFAULT_VECTOR_DIMENSIONS = 128
@@ -151,6 +157,32 @@ async function fetchPostsBySlugs(db: D1Database, slugs: string[]): Promise<PostW
   if (slugs.length === 0) return []
 
   const placeholders = slugs.map(() => '?').join(', ')
+  const order = new Map(slugs.map((slug, index) => [slug, index]))
+
+  // Canonical read: resolve the requested slugs against formal_publications +
+  // the frozen article_versions snapshot (access-control decided canonically).
+  if (await canonicalFactsAvailable(db)) {
+    const { results } = await db
+      .prepare(
+        `SELECT ${CANONICAL_ROW_COLUMNS}
+         FROM articles a
+         JOIN formal_publications f ON f.article_id = a.id
+         JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+         WHERE f.slug IN (${placeholders})
+           AND f.lifecycle = 'published'
+           AND COALESCE(json_extract(v.snapshot_json, '$.fields.password'), '') = ''
+           AND COALESCE(json_extract(v.snapshot_json, '$.fields.is_hidden'), 0) = 0
+           AND COALESCE(json_extract(v.snapshot_json, '$.fields.deleted_at'), 0) = 0`
+      )
+      .bind(...slugs)
+      .all<CanonicalPublicRow>()
+
+    return (results ?? [])
+      .map(postFromCanonicalRow)
+      .sort((left, right) => (order.get(left.slug) ?? Number.MAX_SAFE_INTEGER) - (order.get(right.slug) ?? Number.MAX_SAFE_INTEGER))
+  }
+
+  // Legacy fallback (pre-migration / ledger-only DB).
   const { results } = await db
     .prepare(
       `SELECT * FROM posts
@@ -163,10 +195,51 @@ async function fetchPostsBySlugs(db: D1Database, slugs: string[]): Promise<PostW
     .bind(...slugs)
     .all<Post>()
 
-  const order = new Map(slugs.map((slug, index) => [slug, index]))
   return results
     .map(mapPost)
     .sort((left, right) => (order.get(left.slug) ?? Number.MAX_SAFE_INTEGER) - (order.get(right.slug) ?? Number.MAX_SAFE_INTEGER))
+}
+
+/** Recent public articles (exclude one slug), read from canonical facts. */
+async function fetchRecentPublicPosts(db: D1Database, excludeSlug: string, limit: number): Promise<PostWithTags[]> {
+  // Canonical read: one row per formal article, ordered by first publish desc.
+  if (await canonicalFactsAvailable(db)) {
+    const { results } = await db
+      .prepare(
+        `SELECT ${CANONICAL_ROW_COLUMNS}
+         FROM articles a
+         JOIN formal_publications f ON f.article_id = a.id
+         JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+         WHERE f.slug != ?
+           AND f.lifecycle = 'published'
+           AND COALESCE(json_extract(v.snapshot_json, '$.fields.password'), '') = ''
+           AND COALESCE(json_extract(v.snapshot_json, '$.fields.is_hidden'), 0) = 0
+           AND COALESCE(json_extract(v.snapshot_json, '$.fields.deleted_at'), 0) = 0
+         ORDER BY f.first_published_at DESC
+         LIMIT ?`
+      )
+      .bind(excludeSlug, limit)
+      .all<CanonicalPublicRow>()
+
+    return (results ?? []).map(postFromCanonicalRow)
+  }
+
+  // Legacy fallback (pre-migration / ledger-only DB).
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM posts
+       WHERE slug != ?
+         AND status = 'published'
+         AND password IS NULL
+         AND is_hidden = 0
+         AND deleted_at IS NULL
+       ORDER BY published_at DESC
+       LIMIT ?`
+    )
+    .bind(excludeSlug, limit)
+    .all<Post>()
+
+  return results.map(mapPost)
 }
 
 async function tryVectorLookup(
@@ -257,22 +330,10 @@ function scoreCandidate(candidate: PostWithTags, current: PostWithTags, currentT
 async function getRuleBasedRelatedPosts(db: D1Database, current: PostWithTags, limit: number): Promise<PostWithTags[]> {
   const query = buildRelatedQuery(current)
   const fromSearch = query ? await searchPosts(db, query, Math.max(limit * 4, 12)) : []
-  const recentResult = await db
-    .prepare(
-      `SELECT * FROM posts
-       WHERE slug != ?
-         AND status = 'published'
-         AND password IS NULL
-         AND is_hidden = 0
-         AND deleted_at IS NULL
-       ORDER BY published_at DESC
-       LIMIT ?`
-    )
-    .bind(current.slug, Math.max(limit * 12, 48))
-    .all<Post>()
+  const recentPosts = await fetchRecentPublicPosts(db, current.slug, Math.max(limit * 12, 48))
 
   const merged = new Map<string, PostWithTags>()
-  for (const post of [...fromSearch, ...recentResult.results.map(mapPost)]) {
+  for (const post of [...fromSearch, ...recentPosts]) {
     if (post.slug === current.slug) continue
     merged.set(post.slug, post)
   }
@@ -357,6 +418,38 @@ export async function getRelatedPosts(
 }
 
 async function getPostForIndexing(db: D1Database, postId: number): Promise<PublicPostRow | null> {
+  // Canonical read: index only what is observable on the public surface,
+  // derived from formal_publications + the frozen article_versions snapshot.
+  if (await canonicalFactsAvailable(db)) {
+    const row = await db
+      .prepare(
+        `SELECT ${CANONICAL_ROW_COLUMNS}
+         FROM articles a
+         JOIN formal_publications f ON f.article_id = a.id
+         JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+         WHERE a.post_ref = ?`
+      )
+      .bind(postId)
+      .first<CanonicalPublicRow>()
+    if (!row) return null
+    const post = postFromCanonicalRow(row)
+    return {
+      id: post.id,
+      slug: post.slug,
+      title: post.title,
+      content: post.content,
+      description: post.description,
+      category: post.category,
+      tags: JSON.stringify(post.tags),
+      status: post.status,
+      password: post.password,
+      is_hidden: post.is_hidden,
+      deleted_at: post.deleted_at,
+      published_at: post.published_at,
+    }
+  }
+
+  // Legacy fallback (pre-migration / ledger-only DB).
   return db
     .prepare(
       `SELECT id, slug, title, content, description, category, tags, status, password, is_hidden, deleted_at, published_at
