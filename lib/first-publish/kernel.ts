@@ -29,6 +29,7 @@
 
 import { createHash } from 'node:crypto'
 import type { Database } from '@/lib/repositories/schema'
+import type { ArticleIdentitySnapshot } from '@/lib/article-identity'
 import type {
   ConfirmInput,
   ConfirmResult,
@@ -82,16 +83,6 @@ interface ArticleRow {
   post_ref: number
 }
 
-interface PostsRow {
-  id: number
-  slug: string
-  title: string
-  content: string
-  status: string
-  deleted_at: number | null
-  password: string | null
-}
-
 async function findArticleById(db: Database, articleId: number): Promise<ArticleRow | null> {
   return db
     .prepare('SELECT id, post_ref FROM articles WHERE id = ?')
@@ -99,11 +90,21 @@ async function findArticleById(db: Database, articleId: number): Promise<Article
     .first<ArticleRow>()
 }
 
-async function findPostById(db: Database, postRef: number): Promise<PostsRow | null> {
-  return db
-    .prepare('SELECT id, slug, title, content, status, deleted_at, password FROM posts WHERE id = ?')
-    .bind(postRef)
-    .first<PostsRow>()
+/** The latest frozen version snapshot — the canonical lifecycle/content fact. */
+async function findLatestSnapshot(db: Database, articleId: number): Promise<ArticleIdentitySnapshot | null> {
+  const row = await db
+    .prepare(
+      `SELECT snapshot_json FROM article_versions
+       WHERE article_id = ? ORDER BY version DESC LIMIT 1`,
+    )
+    .bind(articleId)
+    .first<{ snapshot_json: string }>()
+  if (!row) return null
+  try {
+    return JSON.parse(row.snapshot_json) as ArticleIdentitySnapshot
+  } catch {
+    return null
+  }
 }
 
 async function latestVersion(db: Database, articleId: number): Promise<number> {
@@ -207,21 +208,23 @@ async function findEventById(db: Database, eventId: string): Promise<EventRow | 
 /* ------------------------------------------------------------------ */
 
 /**
- * Evaluate the four blockers against the LIVE state.
+ * Evaluate the four blockers against the LIVE canonical state.
  *
  * B1 saved:      the latest version fact equals the confirmed version AND its
  *                content hash exists (the exact server-saved snapshot).
- * B2 lifecycle:  no formal publication exists yet and the post is not deleted.
- * B3 slug:       the slug is not used by another formal publication and not used
- *                by another published post (public-address uniqueness).
- * B4 content:    title + body are non-blank and the post is not password
+ * B2 lifecycle:  no formal publication exists yet and the latest frozen
+ *                snapshot is neither deleted nor soft-deleted.
+ * B3 slug:       the slug is not used by another formal publication and not
+ *                registered to another article in the address registry
+ *                (ADR 0009 — the registry is the only slug authority).
+ * B4 content:    title + body are non-blank and the article is not password
  *                protected. AI-derived fields NEVER block.
  */
 export async function evaluateBlockers(
   db: Database,
   input: { articleId: number; postRef: number; confirmedVersion: number; slug: string; contentSha256?: string },
 ): Promise<PublishBlockers> {
-  const { articleId, postRef, confirmedVersion, slug, contentSha256: claimedHash = '' } = input
+  const { articleId, confirmedVersion, slug, contentSha256: claimedHash = '' } = input
 
   const current = await latestVersion(db, articleId)
   const contentSha256 = await latestContentSha256(db, articleId)
@@ -232,24 +235,29 @@ export async function evaluateBlockers(
     (claimedHash === '' || claimedHash === contentSha256)
 
   const formal = await findFormalByArticle(db, articleId)
-  const post = await findPostById(db, postRef)
-  const lifecycle = !formal && post !== null && post.status !== 'deleted' && post.deleted_at === null
+  const snapshot = await findLatestSnapshot(db, articleId)
+  const fields = snapshot?.fields
+  const lifecycle =
+    !formal &&
+    !!fields &&
+    fields.status !== 'deleted' &&
+    (fields.deleted_at ?? null) === null
 
   const rivalFormal = await db
     .prepare('SELECT article_id FROM formal_publications WHERE slug = ? AND article_id != ?')
     .bind(slug, articleId)
     .first<{ article_id: number }>()
-  const rivalPublished = await db
-    .prepare("SELECT id FROM posts WHERE slug = ? AND id != ? AND status = 'published'")
-    .bind(slug, postRef)
-    .first<{ id: number }>()
-  const slugOk = rivalFormal === null && rivalPublished === null
+  const rivalAddress = await db
+    .prepare('SELECT article_id FROM article_slug_addresses WHERE slug = ?')
+    .bind(slug)
+    .first<{ article_id: number }>()
+  const slugOk = rivalFormal === null && (rivalAddress === null || rivalAddress.article_id === articleId)
 
   const content =
-    post !== null &&
-    post.title.trim().length > 0 &&
-    post.content.trim().length > 0 &&
-    (post.password === null || post.password === '')
+    !!snapshot &&
+    (fields?.title ?? '').trim().length > 0 &&
+    (snapshot.original_content ?? '').trim().length > 0 &&
+    (fields?.password ?? '') === ''
 
   return { saved, lifecycle, slug: slugOk, content }
 }
@@ -391,7 +399,6 @@ export async function confirmPublish(db: Database, input: ConfirmInput): Promise
 
   const article = await findArticleById(db, articleId)
   if (!article) return { outcome: 'invalid', reason: `article ${articleId} not found` }
-  const postRef = article.post_ref
 
   // Idempotent replay: the same intent already produced its event. Checked
   // BEFORE the prepare-status gate so a committed prepare replays cleanly.
@@ -468,7 +475,8 @@ export async function confirmPublish(db: Database, input: ConfirmInput): Promise
   })
 
   const batch: D1PreparedStatement[] = [
-    // (1) Current formal version + public address — every guard re-checked here.
+    // (1) Current formal version + public address — every guard re-checked here
+    // against CANONICAL facts only (latest frozen snapshot + registry).
     db
       .prepare(
         `INSERT INTO formal_publications
@@ -478,12 +486,18 @@ export async function confirmPublish(db: Database, input: ConfirmInput): Promise
            AND NOT EXISTS (SELECT 1 FROM publish_intents WHERE intent_id = ?)
            AND (SELECT COALESCE(MAX(version), 0) FROM article_versions WHERE article_id = ?) = ?
            AND (SELECT content_snapshot_sha256 FROM article_versions WHERE article_id = ? AND version = ?) = ?
-           AND (SELECT status FROM posts WHERE id = ?) != 'deleted'
-           AND (SELECT deleted_at FROM posts WHERE id = ?) IS NULL
+           AND COALESCE(json_extract((SELECT snapshot_json FROM article_versions
+                 WHERE article_id = ? ORDER BY version DESC LIMIT 1), '$.fields.status'), 'deleted') != 'deleted'
+           AND json_extract((SELECT snapshot_json FROM article_versions
+                 WHERE article_id = ? ORDER BY version DESC LIMIT 1), '$.fields.deleted_at') IS NULL
            AND NOT EXISTS (SELECT 1 FROM formal_publications WHERE slug = ? AND article_id != ?)
-           AND NOT EXISTS (SELECT 1 FROM posts WHERE slug = ? AND id != ? AND status = 'published')
-           AND EXISTS (SELECT 1 FROM posts WHERE id = ? AND length(trim(title)) > 0 AND length(trim(content)) > 0
-                        AND (password IS NULL OR password = ''))`,
+           AND NOT EXISTS (SELECT 1 FROM article_slug_addresses WHERE slug = ? AND article_id != ?)
+           AND length(COALESCE(json_extract((SELECT snapshot_json FROM article_versions
+                 WHERE article_id = ? ORDER BY version DESC LIMIT 1), '$.fields.title'), '')) > 0
+           AND length(COALESCE(json_extract((SELECT snapshot_json FROM article_versions
+                 WHERE article_id = ? ORDER BY version DESC LIMIT 1), '$.original_content'), '')) > 0
+           AND COALESCE(json_extract((SELECT snapshot_json FROM article_versions
+                 WHERE article_id = ? ORDER BY version DESC LIMIT 1), '$.fields.password'), '') = ''`,
       )
       .bind(
         articleId,
@@ -500,13 +514,15 @@ export async function confirmPublish(db: Database, input: ConfirmInput): Promise
         articleId,
         expectedVersion,
         contentSha256,
-        postRef,
-        postRef,
+        articleId,
+        articleId,
         slug,
         articleId,
         slug,
-        postRef,
-        postRef,
+        articleId,
+        articleId,
+        articleId,
+        articleId,
       ),
     // (2) The intent — one per client intent id.
     db
@@ -540,7 +556,7 @@ export async function confirmPublish(db: Database, input: ConfirmInput): Promise
       )
       .bind(outboxId, eventId, articleId, expectedVersion, outboxPayload, now, eventId, eventId),
     // (5) The prepare commits ONLY if the formal publication for this event
-    // actually landed; the posts projection follows the formal fact.
+    // actually landed.
     db
       .prepare(
         `UPDATE publish_prepares SET status = 'committed', updated_at = ?
@@ -548,12 +564,25 @@ export async function confirmPublish(db: Database, input: ConfirmInput): Promise
            AND EXISTS (SELECT 1 FROM formal_publications WHERE article_id = ? AND event_id = ?)`,
       )
       .bind(now, prepareId, articleId, eventId),
+    // (6) Address registration (ADR 0009): the formal slug becomes the
+    // article's `current` registry address in the SAME transaction — a
+    // reserved candidate is promoted, an unreserved slug is registered
+    // directly. Both statements only apply when the formal fact landed.
     db
       .prepare(
-        `UPDATE posts SET status = 'published', published_at = ?, updated_at = ?
-         WHERE id = ? AND EXISTS (SELECT 1 FROM formal_publications WHERE article_id = ? AND event_id = ?)`,
+        `UPDATE article_slug_addresses SET kind = 'current', updated_at = ?
+         WHERE slug = ? AND article_id = ? AND kind = 'candidate'
+           AND EXISTS (SELECT 1 FROM formal_publications WHERE article_id = ? AND event_id = ?)`,
       )
-      .bind(now, now, postRef, articleId, eventId),
+      .bind(now, slug, articleId, articleId, eventId),
+    db
+      .prepare(
+        `INSERT INTO article_slug_addresses (slug, article_id, kind, created_at, updated_at)
+         SELECT ?, ?, 'current', ?, ?
+         WHERE EXISTS (SELECT 1 FROM formal_publications WHERE article_id = ? AND event_id = ?)
+           AND NOT EXISTS (SELECT 1 FROM article_slug_addresses WHERE slug = ?)`,
+      )
+      .bind(slug, articleId, now, now, articleId, eventId, slug),
   ]
 
   try {
@@ -602,26 +631,31 @@ export async function confirmPublish(db: Database, input: ConfirmInput): Promise
       .prepare('SELECT article_id FROM formal_publications WHERE slug = ? AND article_id != ?')
       .bind(slug, articleId)
       .first<{ article_id: number }>()
-    const rivalPublished = await db
-      .prepare("SELECT id FROM posts WHERE slug = ? AND id != ? AND status = 'published'")
-      .bind(slug, postRef)
-      .first<{ id: number }>()
-    if (rivalFormal || rivalPublished) {
+    const rivalAddress = await db
+      .prepare('SELECT article_id FROM article_slug_addresses WHERE slug = ?')
+      .bind(slug)
+      .first<{ article_id: number }>()
+    if (rivalFormal || (rivalAddress && rivalAddress.article_id !== articleId)) {
       await db
         .prepare(`UPDATE publish_prepares SET status = 'aborted', updated_at = ? WHERE prepare_id = ? AND status = 'prepared'`)
         .bind(now, prepareId)
         .run()
       return { outcome: 'slug-conflict', articleId, slug }
     }
-    const post = await findPostById(db, postRef)
-    if (!post || post.status === 'deleted' || post.deleted_at !== null) {
+    const snapshot = await findLatestSnapshot(db, articleId)
+    const fields = snapshot?.fields
+    if (!snapshot || fields?.status === 'deleted' || (fields?.deleted_at ?? null) !== null) {
       await db
         .prepare(`UPDATE publish_prepares SET status = 'aborted', updated_at = ? WHERE prepare_id = ? AND status = 'prepared'`)
         .bind(now, prepareId)
         .run()
       return { outcome: 'blocked', articleId, expectedVersion, blockers: { saved: true, lifecycle: false, slug: true, content: true }, failures: ['lifecycle'] }
     }
-    if (post.title.trim().length === 0 || post.content.trim().length === 0 || (post.password !== null && post.password !== '')) {
+    if (
+      (fields?.title ?? '').trim().length === 0 ||
+      (snapshot.original_content ?? '').trim().length === 0 ||
+      (fields?.password ?? '') !== ''
+    ) {
       await db
         .prepare(`UPDATE publish_prepares SET status = 'aborted', updated_at = ? WHERE prepare_id = ? AND status = 'prepared'`)
         .bind(now, prepareId)

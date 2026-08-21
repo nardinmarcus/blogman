@@ -1,6 +1,7 @@
 import { searchPosts, type Post, type PostWithTags } from '@/lib/db'
 import {
   CANONICAL_ROW_COLUMNS,
+  CANONICAL_LATEST_JOIN,
   canonicalFactsAvailable,
   type CanonicalPublicRow,
   postFromCanonicalRow,
@@ -162,6 +163,7 @@ async function fetchPostsBySlugs(db: D1Database, slugs: string[]): Promise<PostW
        FROM articles a
        JOIN formal_publications f ON f.article_id = a.id
        JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+       ${CANONICAL_LATEST_JOIN}
        WHERE f.slug IN (${placeholders})
          AND f.lifecycle = 'published'
          AND COALESCE(json_extract(v.snapshot_json, '$.fields.password'), '') = ''
@@ -189,6 +191,7 @@ async function fetchRecentPublicPosts(db: D1Database, excludeSlug: string, limit
        FROM articles a
        JOIN formal_publications f ON f.article_id = a.id
        JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+       ${CANONICAL_LATEST_JOIN}
        WHERE f.slug != ?
          AND f.lifecycle = 'published'
          AND COALESCE(json_extract(v.snapshot_json, '$.fields.password'), '') = ''
@@ -390,6 +393,7 @@ async function getPostForIndexing(db: D1Database, postId: number): Promise<Publi
        FROM articles a
        JOIN formal_publications f ON f.article_id = a.id
        JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+       ${CANONICAL_LATEST_JOIN}
        WHERE a.post_ref = ?`
     )
     .bind(postId)

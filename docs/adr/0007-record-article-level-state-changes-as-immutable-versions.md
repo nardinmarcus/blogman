@@ -1,0 +1,3 @@
+# Record article-level state changes as immutable versions
+
+Article-level commands (pin, hide, password, category, soft delete, restore) historically wrote only the legacy `posts` projection without producing a version fact, which left canonical reads stale and gave these facts no home once `posts` retires. We decided that every article-level command appends a new immutable `article_versions` snapshot (idempotent by operation id) instead of mutating the latest snapshot in place or introducing a new side table. This preserves version immutability and content-hash integrity at the cost of advancing the body version counter, so an editor holding an older expectedVersion will conflict and must refresh after an admin toggles article-level state.

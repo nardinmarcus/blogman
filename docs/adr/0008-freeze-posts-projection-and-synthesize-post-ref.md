@@ -1,0 +1,3 @@
+# Freeze the posts compat projection and synthesize post_ref
+
+With public reads fully canonical (PR #232/#233) and authority=1/producer=0, the write kernel remained the last reader/writer of `posts`, blocking its physical retirement. We decided the write kernel stops reading and writing `posts` entirely (the projection is frozen, never dual-written during the transition), and new articles allocate `post_ref` as `MAX(post_ref)+1` over existing identities rather than deriving it from a `posts` row. `post_ref` therefore degrades to a legacy numeric identifier whose only job is uniqueness; the reconciliation gate must treat the frozen projection as an archived mirror rather than demand live parity with evolving canonical facts.

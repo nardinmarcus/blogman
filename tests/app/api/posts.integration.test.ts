@@ -95,6 +95,20 @@ async function articleVersions(articleId: number): Promise<Array<{ version: numb
   )
 }
 
+/** Canonical article state by slug — materialized from the latest frozen snapshot. */
+async function canonBySlug(slug: string): Promise<Record<string, unknown> | null> {
+  const rows = await query<Record<string, unknown>>(
+    `SELECT v.snapshot_json FROM article_slug_addresses s
+     JOIN articles a ON a.id = s.article_id
+     JOIN article_versions v ON v.article_id = a.id
+     WHERE s.slug = '${slug}' ORDER BY v.version DESC LIMIT 1`,
+  )
+  const raw = rows[0]
+  if (!raw) return null
+  const record = JSON.parse(raw.snapshot_json as string) as { fields: Record<string, unknown> }
+  return record.fields
+}
+
 describe('app/api/posts — external write integration', { timeout: 600_000 }, () => {
   it('upgraded client create is idempotent: retries never duplicate the article', async () => {
     const slug = fresh('vslug')
@@ -108,8 +122,7 @@ describe('app/api/posts — external write integration', { timeout: 600_000 }, (
     expect(first.outcome).toBe('created')
     expect(first.version).toBe(1)
     // B2-08: creation always lands as a draft even when the snapshot asked published.
-    const createdPost = (await query<Record<string, unknown>>(`SELECT status FROM posts WHERE slug = '${slug}'`))[0]
-    expect(createdPost.status).toBe('draft')
+    expect((await canonBySlug(slug))?.status).toBe('draft')
 
     // Response-lost retry: same creationId, even a different payload → existing, no duplicate.
     const retry = await (await POST(await postReq('POST', body({
@@ -120,11 +133,9 @@ describe('app/api/posts — external write integration', { timeout: 600_000 }, (
     expect(retry.outcome).toBe('existing')
     expect(retry.articleId).toBe(first.articleId)
 
-    const articles = await query<{ id: number }>(`SELECT id FROM articles WHERE draft_ref = '${creationId}'`)
-    expect(articles).toHaveLength(1)
+    expect(await query<{ id: number }>(`SELECT id FROM articles WHERE draft_ref = '${creationId}'`)).toHaveLength(1)
     expect(await articleVersions(first.articleId)).toHaveLength(1)
-    const post = (await query<Record<string, unknown>>(`SELECT title FROM posts WHERE slug = '${slug}'`))[0]
-    expect(post.title).toBe('第一稿')
+    expect((await canonBySlug(slug))?.title).toBe('第一稿')
   })
 
   it('upgraded client save is versioned: replay does not inflate versions, stale version conflicts', async () => {
@@ -176,9 +187,9 @@ describe('app/api/posts — external write integration', { timeout: 600_000 }, (
     expect(published.outcome).toBe('applied')
     expect(published.version).toBe(2)
 
-    const post = (await query<Record<string, unknown>>(`SELECT status, published_at FROM posts WHERE slug = '${slug}'`))[0]
-    expect(post.status).toBe('published')
-    expect(post.published_at).not.toBeNull()
+    const post = await canonBySlug(slug)
+    expect(post?.status).toBe('published')
+    expect(post?.published_at).not.toBeNull()
   })
 
   it('legacy create is rejected after writer removal (upgrade signal, no write)', async () => {
@@ -197,7 +208,10 @@ describe('app/api/posts — external write integration', { timeout: 600_000 }, (
     expect(result.upgrade.required).toBe(true)
 
     // No row lands and no legacy telemetry is recorded.
-    const posts = await query<Record<string, unknown>>(`SELECT status FROM posts WHERE title = '${title}'`)
+    const posts = await query<Record<string, unknown>>(
+      `SELECT a.id FROM articles a JOIN article_versions v ON v.article_id = a.id
+       WHERE json_extract(v.snapshot_json, '$.fields.title') = '${title}'`,
+    )
     expect(posts).toHaveLength(0)
     const telemetry = (await query<Record<string, unknown>>(`SELECT value FROM site_settings WHERE key = '${LEGACY_TELEMETRY_KEY}'`))[0]?.value as string | undefined
     expect(telemetry ?? '').not.toContain('"create"')
@@ -250,9 +264,9 @@ describe('app/api/posts — external write integration', { timeout: 600_000 }, (
     expect(result.upgrade?.required).toBe(true)
 
     // The article was not mutated by the legacy update and no version advanced.
-    const post = (await query<Record<string, unknown>>(`SELECT title, status FROM posts WHERE slug = '${slug}'`))[0]
-    expect(post.title).toBe('草稿基底')
-    expect(post.status).toBe('draft')
+    const post = await canonBySlug(slug)
+    expect(post?.title).toBe('草稿基底')
+    expect(post?.status).toBe('draft')
     expect((await articleVersions(created.articleId)).map((r) => r.version)).toEqual([1])
   })
 })

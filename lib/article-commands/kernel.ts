@@ -32,6 +32,7 @@ import {
   buildInitialSnapshot,
   snapshotJson,
   type ArticleIdentitySnapshot,
+  type ArticleSnapshotFields,
   type PostAuthorityRow,
 } from '@/lib/article-identity'
 import type {
@@ -174,19 +175,24 @@ function findLatestVersion(db: Database, articleId: number): Promise<VersionRow 
     .first<VersionRow>()
 }
 
-function slugTakenByOther(db: Database, slug: string, excludePostRef: number): Promise<boolean> {
+/**
+ * Slug exclusivity through the permanent address registry (ADR 0009): the slug
+ * is taken when ANY kind row exists for a DIFFERENT article. Own historical /
+ * candidate rows never block (revert / re-reserve).
+ */
+function slugOwnedByOther(db: Database, slug: string, articleId: number): Promise<boolean> {
   return db
-    .prepare('SELECT id FROM posts WHERE slug = ? AND id != ?')
-    .bind(slug, excludePostRef)
-    .first<{ id: number }>()
-    .then((row) => row !== null)
+    .prepare('SELECT article_id FROM article_slug_addresses WHERE slug = ?')
+    .bind(slug)
+    .first<{ article_id: number }>()
+    .then((row) => row !== null && row.article_id !== articleId)
 }
 
 function slugTaken(db: Database, slug: string): Promise<boolean> {
   return db
-    .prepare('SELECT id FROM posts WHERE slug = ?')
+    .prepare('SELECT article_id FROM article_slug_addresses WHERE slug = ?')
     .bind(slug)
-    .first<{ id: number }>()
+    .first<{ article_id: number }>()
     .then((row) => row !== null)
 }
 
@@ -368,47 +374,19 @@ export async function create(
   const record = buildVersionRecord(row, 1)
   // post_ref is patched into the stored JSON inside the transaction (json_set).
   const recordJson = snapshotJson({ ...record, post_ref: 0 })
-  const { content_envelope, content_snapshot_sha256, source_sync_sha256 } =
-    envelopeColumns(record)
+  const { content_snapshot_sha256 } = envelopeColumns(record)
 
   const batch = [
-    db
-      .prepare(
-        `INSERT INTO posts
-           (slug, title, content, html, description, category, tags, status, password,
-            is_pinned, is_hidden, cover_image, deleted_at, published_at, updated_at,
-            content_envelope, content_snapshot_sha256, source_sync_sha256)
-         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-         WHERE NOT EXISTS (SELECT 1 FROM articles WHERE draft_ref = ?)`,
-      )
-      .bind(
-        row.slug,
-        row.title,
-        row.content,
-        row.html,
-        row.description,
-        row.category,
-        row.tags,
-        row.status,
-        row.password,
-        row.is_pinned,
-        row.is_hidden,
-        row.cover_image,
-        row.deleted_at,
-        row.published_at,
-        row.updated_at,
-        content_envelope,
-        content_snapshot_sha256,
-        source_sync_sha256,
-        creationId,
-      ),
+    // (1) The article identity — post_ref is synthesized as MAX(post_ref)+1
+    // (ADR 0008): a legacy numeric identifier whose only job is uniqueness;
+    // it is no longer derived from (or mirrored into) the posts projection.
     db
       .prepare(
         `INSERT INTO articles (post_ref, slug, draft_ref)
-         SELECT id, ?, ? FROM posts WHERE slug = ?
-           AND NOT EXISTS (SELECT 1 FROM articles WHERE draft_ref = ?)`,
+         SELECT COALESCE((SELECT MAX(post_ref) FROM articles), 0) + 1, ?, ?
+         WHERE NOT EXISTS (SELECT 1 FROM articles WHERE draft_ref = ?)`,
       )
-      .bind(row.slug, creationId, row.slug, creationId),
+      .bind(row.slug, creationId, creationId),
     db
       .prepare(
         `INSERT INTO article_versions
@@ -425,6 +403,19 @@ export async function create(
         creationId,
         operationId,
       ),
+    // (3) Reserve the draft slug in the address registry (ADR 0009). No
+    // guard against a RIVAL's row: the registry's slug UNIQUE is the hard
+    // enforcement — a concurrent registration aborts the whole batch.
+    db
+      .prepare(
+        `INSERT INTO article_slug_addresses (slug, article_id, kind, created_at, updated_at)
+         SELECT ?, a.id, 'candidate', ?, ?
+         FROM articles a WHERE a.draft_ref = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM article_slug_addresses s WHERE s.slug = ? AND s.article_id = a.id
+           )`,
+      )
+      .bind(row.slug, now, now, creationId, row.slug),
   ]
 
   try {
@@ -556,8 +547,9 @@ export async function save(db: Database, input: SaveArticleInput): Promise<SaveR
     }
   }
 
-  // Slug precondition (belt; the batch UNIQUE constraint is the suspenders).
-  if (await slugTakenByOther(db, snapshot.slug, postRef)) {
+  // Slug precondition through the address registry (ADR 0009); the batch's
+  // registry UNIQUE constraint is the suspenders.
+  if (await slugOwnedByOther(db, snapshot.slug, articleId)) {
     return { outcome: 'slug-conflict', slug: snapshot.slug }
   }
 
@@ -567,8 +559,7 @@ export async function save(db: Database, input: SaveArticleInput): Promise<SaveR
   const row = snapshotRow({ ...snapshot, published_at: publishedAt }, postRef, now)
   const record = buildVersionRecord(row, expectedVersion + 1)
   const recordJson = snapshotJson(record)
-  const { content_envelope, content_snapshot_sha256, source_sync_sha256 } =
-    envelopeColumns(record)
+  const { content_snapshot_sha256 } = envelopeColumns(record)
 
   const batch = [
     db
@@ -592,44 +583,24 @@ export async function save(db: Database, input: SaveArticleInput): Promise<SaveR
         expectedVersion,
         operationId,
       ),
+    // Reserve the saved slug as this article's candidate. Own rows (from
+    // create or a prior save) skip via the NOT EXISTS; a RIVAL's row trips
+    // the registry slug UNIQUE and aborts the whole batch.
     db
       .prepare(
-        `UPDATE posts SET
-           slug = ?, title = ?, content = ?, html = ?, description = ?, category = ?,
-           tags = ?, status = ?, password = ?, is_pinned = ?, is_hidden = ?,
-           cover_image = ?, deleted_at = ?, published_at = ?, updated_at = ?,
-           content_envelope = ?, content_snapshot_sha256 = ?, source_sync_sha256 = ?
-         WHERE id = ?
-           AND EXISTS (SELECT 1 FROM article_versions WHERE operation_id = ?)`,
+        `INSERT INTO article_slug_addresses (slug, article_id, kind, created_at, updated_at)
+         SELECT ?, ?, 'candidate', ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM article_slug_addresses WHERE slug = ? AND article_id = ?
+         )`,
       )
-      .bind(
-        row.slug,
-        row.title,
-        row.content,
-        row.html,
-        row.description,
-        row.category,
-        row.tags,
-        row.status,
-        row.password,
-        row.is_pinned,
-        row.is_hidden,
-        row.cover_image,
-        row.deleted_at,
-        row.published_at,
-        row.updated_at,
-        content_envelope,
-        content_snapshot_sha256,
-        source_sync_sha256,
-        postRef,
-        operationId,
-      ),
+      .bind(row.slug, articleId, now, now, row.slug, articleId),
   ]
 
   try {
     await db.batch(batch)
   } catch (error) {
-    // Atomic abort — most likely a slug UNIQUE race on the posts projection.
+    // Atomic abort — most likely a registry slug UNIQUE race.
     const byOperation = await findVersionByOperationId(db, operationId)
     if (byOperation) {
       return {
@@ -642,7 +613,7 @@ export async function save(db: Database, input: SaveArticleInput): Promise<SaveR
         projectionFailures: [],
       }
     }
-    if (await slugTakenByOther(db, snapshot.slug, postRef)) {
+    if (await slugOwnedByOther(db, snapshot.slug, articleId)) {
       return { outcome: 'slug-conflict', slug: snapshot.slug }
     }
     throw new Error(
@@ -730,28 +701,25 @@ export async function publishTemp(
     }
   }
 
-  // Status precondition against the live posts projection (legacy PATCH can
-  // change posts.status outside the command layer).
-  const post = await db
-    .prepare('SELECT status, published_at FROM posts WHERE id = ?')
-    .bind(postRef)
-    .first<{ status: string | null; published_at: number | null }>()
-  if (!post || post.status !== currentStatus) {
+  // Status precondition anchored on the latest version snapshot — the
+  // canonical lifecycle fact (the legacy posts projection is retired).
+  const current = JSON.parse(latest!.snapshot_json) as ArticleIdentitySnapshot
+  const liveStatus = current.fields.status ?? null
+  if (liveStatus !== currentStatus) {
     return {
       outcome: 'status-conflict',
       articleId,
       postRef,
       expectedVersion,
       serverVersion,
-      currentStatus: post?.status ?? null,
+      currentStatus: liveStatus,
     }
   }
 
   // Legacy-compatible published_at: keep on unpublish, first-now on publish.
   const now = unixNow()
   const nextPublishedAt =
-    status === 'published' ? (post.published_at ?? now) : post.published_at
-  const current = JSON.parse(latest!.snapshot_json) as ArticleIdentitySnapshot
+    status === 'published' ? (latest!.published_at ?? now) : latest!.published_at
   const nextRow: PostAuthorityRow = {
     id: postRef,
     slug: current.fields.slug,
@@ -784,7 +752,8 @@ export async function publishTemp(
          GROUP BY article_id
          HAVING COALESCE(MAX(version), 0) = ?
            AND NOT EXISTS (SELECT 1 FROM article_versions WHERE operation_id = ?)
-           AND (SELECT status FROM posts WHERE id = ?) = ?`,
+           AND COALESCE(json_extract((SELECT snapshot_json FROM article_versions
+                 WHERE article_id = ? ORDER BY version DESC LIMIT 1), '$.fields.status'), '') = ?`,
       )
       .bind(
         articleId,
@@ -795,16 +764,9 @@ export async function publishTemp(
         articleId,
         expectedVersion,
         operationId,
-        postRef,
+        articleId,
         currentStatus,
       ),
-    db
-      .prepare(
-        `UPDATE posts SET status = ?, published_at = ?, updated_at = strftime('%s', 'now')
-         WHERE id = ?
-           AND EXISTS (SELECT 1 FROM article_versions WHERE operation_id = ?)`,
-      )
-      .bind(status, nextPublishedAt, postRef, operationId),
   ]
 
   try {
@@ -854,15 +816,16 @@ export async function publishTemp(
 }
 
 /* ------------------------------------------------------------------ */
-/* article-level (non-body) commands — B2-06 (issue #29)               */
+/* article-level (non-body) commands — B2-06 (issue #29), #234 T2      */
 /*                                                                    */
 /* These commands are the admin list's explicit write protocol. They   */
 /* share one driver: resolve the article, anchor on the current body   */
-/* version (expected version precondition), then apply a SINGLE        */
-/* guarded `posts` update — the guard re-checks the version inside the */
-/* UPDATE so a racing save/publish between pre-read and write still    */
-/* aborts atomically. No `article_versions` row is ever inserted, so   */
-/* the body version never advances on a non-revision action.           */
+/* version (expected version precondition), then append ONE guarded    */
+/* immutable version whose snapshot carries the patched article-level  */
+/* state (ADR 0007). The guard re-checks the version inside the INSERT,*/
+/* so a racing save/publish between pre-read and write still aborts    */
+/* atomically. The body content itself is untouched; the version       */
+/* counter advances because article-level facts are canonical now.     */
 /*                                                                    */
 /* Idempotency: an operation whose target value is already the live    */
 /* value returns `replayed` (existing: true) without writing; repeated */
@@ -872,14 +835,41 @@ export async function publishTemp(
 interface ArticleLevelSpec {
   input: ArticleLevelInput
   label: string
-  /** `SELECT <expr> AS current FROM posts WHERE id = ?` — the idempotency signal. */
-  readSql: string
+  /** Extract the live value from the latest snapshot's fields — the idempotency signal. */
+  readField: (fields: ArticleSnapshotFields) => unknown
   isUnchanged: (current: unknown) => boolean
-  /** SET fragment; binds with `value` first, then updated_at is appended. */
-  setSql: string
-  value: unknown
+  /** Patch applied to the snapshot fields for the next immutable version. */
+  patchFields: (fields: ArticleSnapshotFields, now: number) => Partial<ArticleSnapshotFields>
   /** Category count bookkeeping runs only after a confirmed applied write. */
   afterUpdate?: (db: Database, postRef: number, prev: unknown) => Promise<void>
+}
+
+/** Rebuild a full authority row from the latest frozen snapshot + a field patch. */
+function nextAuthorityRow(
+  postRef: number,
+  current: ArticleIdentitySnapshot,
+  patch: Partial<ArticleSnapshotFields>,
+  now: number,
+): PostAuthorityRow {
+  const fields = { ...current.fields, ...patch }
+  return {
+    id: postRef,
+    slug: fields.slug,
+    title: fields.title,
+    content: current.original_content ?? '',
+    html: current.original_html ?? '',
+    description: fields.description,
+    category: fields.category,
+    tags: fields.tags,
+    status: fields.status,
+    password: fields.password,
+    is_pinned: fields.is_pinned ?? 0,
+    is_hidden: fields.is_hidden ?? 0,
+    cover_image: fields.cover_image,
+    deleted_at: fields.deleted_at,
+    published_at: fields.published_at,
+    updated_at: now,
+  }
 }
 
 async function runArticleLevelCommand(
@@ -895,6 +885,25 @@ async function runArticleLevelCommand(
   if (!article) throw new Error(`${label}: article ${input.articleId} not found`)
   const postRef = article.post_ref
 
+  // Idempotent replay: the same operation id returns the original result.
+  const replayed = await findVersionByOperationId(db, input.operationId)
+  if (replayed) {
+    if (replayed.article_id !== input.articleId) {
+      throw new Error(
+        `${label}: operation '${input.operationId}' already used by article ${replayed.article_id}`,
+      )
+    }
+    return {
+      outcome: 'replayed',
+      articleId: input.articleId,
+      postRef,
+      version: replayed.version,
+      operationId: input.operationId,
+      existing: true,
+      projectionFailures: [],
+    }
+  }
+
   const latest = await findLatestVersion(db, input.articleId)
   const serverVersion = latest?.version ?? 0
   if (serverVersion !== input.expectedVersion) {
@@ -908,11 +917,8 @@ async function runArticleLevelCommand(
     }
   }
 
-  const row = await db
-    .prepare(spec.readSql)
-    .bind(postRef)
-    .first<{ current: unknown }>()
-  const current = row?.current ?? null
+  const currentSnapshot = JSON.parse(latest!.snapshot_json) as ArticleIdentitySnapshot
+  const current = spec.readField(currentSnapshot.fields)
   if (spec.isUnchanged(current)) {
     return {
       outcome: 'replayed' as const,
@@ -925,16 +931,35 @@ async function runArticleLevelCommand(
     }
   }
 
-  const guard = `
-    UPDATE posts SET ${spec.setSql}, updated_at = strftime('%s', 'now')
-    WHERE id = ?
-      AND EXISTS (SELECT 1 FROM article_versions WHERE article_id = ? AND version = ?)`
+  const now = unixNow()
+  const record = buildVersionRecord(
+    nextAuthorityRow(postRef, currentSnapshot, spec.patchFields(currentSnapshot.fields, now), now),
+    serverVersion + 1,
+  )
+  const recordJson = snapshotJson(record)
+
   try {
-    // Only include the value binding when the SET fragment actually uses a placeholder.
-    const binds = spec.setSql.includes('?') ? [spec.value] : []
     await db
-      .prepare(guard)
-      .bind(...binds, postRef, input.articleId, input.expectedVersion)
+      .prepare(
+        `INSERT INTO article_versions
+           (article_id, version, operation_id, snapshot_json, content_snapshot_sha256, published_at)
+         SELECT ?, COALESCE(MAX(version), 0) + 1, ?, ?, ?, ?
+         FROM article_versions
+         WHERE article_id = ?
+         GROUP BY article_id
+         HAVING COALESCE(MAX(version), 0) = ?
+           AND NOT EXISTS (SELECT 1 FROM article_versions WHERE operation_id = ?)`,
+      )
+      .bind(
+        input.articleId,
+        input.operationId,
+        recordJson,
+        record.content_snapshot_sha256 ?? '',
+        latest!.published_at,
+        input.articleId,
+        input.expectedVersion,
+        input.operationId,
+      )
       .run()
   } catch (error) {
     // Guard refused the write (version raced forward) or a constraint fired.
@@ -954,86 +979,80 @@ async function runArticleLevelCommand(
     )
   }
 
-  // Verify the guarded update actually landed; a lost race is a conflict, never a silent overwrite.
-  const after = await db
-    .prepare(spec.readSql)
-    .bind(postRef)
-    .first<{ current: unknown }>()
-  if (spec.isUnchanged(after?.current ?? null)) {
+  // Verify the new immutable version actually landed and carries the patch;
+  // a lost race is a conflict, never a silent overwrite.
+  const after = await findLatestVersion(db, input.articleId)
+  const afterSnapshot = after ? (JSON.parse(after.snapshot_json) as ArticleIdentitySnapshot) : null
+  if (after && spec.isUnchanged(spec.readField(afterSnapshot!.fields))) {
     await spec.afterUpdate?.(db, postRef, current)
     return {
       outcome: 'applied' as const,
       articleId: input.articleId,
       postRef,
-      version: serverVersion,
+      version: after.version,
       operationId: input.operationId,
       existing: false,
       projectionFailures: [],
     }
   }
 
-  const fresh = await findLatestVersion(db, input.articleId)
   return {
     outcome: 'conflict',
     articleId: input.articleId,
     postRef,
     expectedVersion: input.expectedVersion,
-    serverVersion: fresh?.version ?? 0,
-    facts: comparisonFacts(fresh),
+    serverVersion: after?.version ?? 0,
+    facts: comparisonFacts(after),
   }
 }
 
-/** Pin / unpin — independent, never advances the body version. */
+/** Pin / unpin — records its own immutable version (ADR 0007). */
 export async function setPinned(db: Database, input: SetPinnedInput): Promise<ArticleLevelResult> {
   const is_pinned = input.is_pinned === 1 ? 1 : 0
   return runArticleLevelCommand(db, {
     input,
     label: 'setPinned',
-    readSql: 'SELECT is_pinned AS current FROM posts WHERE id = ?',
+    readField: (fields) => fields.is_pinned ?? 0,
     isUnchanged: (current) => current === is_pinned,
-    setSql: 'is_pinned = ?',
-    value: is_pinned,
+    patchFields: () => ({ is_pinned }),
   })
 }
 
-/** Visibility (unlisted/link-only) — independent, never advances the body version. */
+/** Visibility (unlisted/link-only) — records its own immutable version. */
 export async function setHidden(db: Database, input: SetHiddenInput): Promise<ArticleLevelResult> {
   const is_hidden = input.is_hidden === 1 ? 1 : 0
   return runArticleLevelCommand(db, {
     input,
     label: 'setHidden',
-    readSql: 'SELECT is_hidden AS current FROM posts WHERE id = ?',
+    readField: (fields) => fields.is_hidden ?? 0,
     isUnchanged: (current) => current === is_hidden,
-    setSql: 'is_hidden = ?',
-    value: is_hidden,
+    patchFields: () => ({ is_hidden }),
   })
 }
 
-/** Access password — independent, never advances the body version. */
+/** Access password — records its own immutable version; empty == none. */
 export async function setPassword(db: Database, input: SetPasswordInput): Promise<ArticleLevelResult> {
   const password = typeof input.password === 'string' && input.password.trim() ? input.password.trim() : null
   return runArticleLevelCommand(db, {
     input,
     label: 'setPassword',
-    readSql: 'SELECT password AS current FROM posts WHERE id = ?',
+    readField: (fields) => fields.password ?? null,
     // NULL and '' are the same "no password" state.
     isUnchanged: (current) => (current ?? null) === password,
-    setSql: 'password = ?',
-    value: password,
+    patchFields: () => ({ password }),
   })
 }
 
-/** Category rename/move — independent, never advances the body version; keeps `categories.post_count`. */
+/** Category rename/move — records its own immutable version; keeps `categories.post_count`. */
 export async function setCategory(db: Database, input: SetCategoryInput): Promise<ArticleLevelResult> {
   const category = typeof input.category === 'string' && input.category.trim() ? input.category.trim() : null
   return runArticleLevelCommand(db, {
     input,
     label: 'setCategory',
-    readSql: 'SELECT category AS current FROM posts WHERE id = ?',
+    readField: (fields) => fields.category ?? null,
     isUnchanged: (current) => (current ?? null) === category,
-    setSql: 'category = ?',
-    value: category,
-    afterUpdate: async (dbi, postRef, prev) => {
+    patchFields: () => ({ category }),
+    afterUpdate: async (dbi, _postRef, prev) => {
       const oldCategory = (prev as string | null) ?? null
       if (oldCategory !== category) {
         if (oldCategory) {
@@ -1053,27 +1072,25 @@ export async function setCategory(db: Database, input: SetCategoryInput): Promis
   })
 }
 
-/** Soft delete — keeps the first deletion timestamp and the post status; independent, never advances the body version. */
+/** Soft delete — keeps the first deletion timestamp; records its own immutable version. */
 export async function softDelete(db: Database, input: SoftDeleteInput): Promise<ArticleLevelResult> {
   return runArticleLevelCommand(db, {
     input,
     label: 'softDelete',
-    readSql: 'SELECT deleted_at AS current FROM posts WHERE id = ?',
+    readField: (fields) => fields.deleted_at ?? null,
     isUnchanged: (current) => current !== null,
-    setSql: "deleted_at = COALESCE(deleted_at, strftime('%s', 'now'))",
-    value: null,
+    patchFields: (fields, now) => ({ deleted_at: fields.deleted_at ?? now }),
   })
 }
 
-/** Restore — returns a soft-deleted post to draft with NO deletion timestamp; independent, never advances the body version. */
+/** Restore — returns a soft-deleted article to draft with NO deletion timestamp. */
 export async function restore(db: Database, input: RestoreInput): Promise<ArticleLevelResult> {
   return runArticleLevelCommand(db, {
     input,
     label: 'restore',
-    readSql: "SELECT (deleted_at IS NULL AND status = 'draft') AS current FROM posts WHERE id = ?",
+    readField: (fields) => (fields.deleted_at === null && fields.status === 'draft' ? 1 : 0),
     isUnchanged: (current) => current === 1,
-    setSql: "status = 'draft', deleted_at = NULL",
-    value: null,
+    patchFields: () => ({ status: 'draft', deleted_at: null }),
   })
 }
 

@@ -115,17 +115,18 @@ describe('lib/first-publish — first formal publish', { timeout: 600_000 }, () 
     expect(b1.failures).toContain('saved')
     expect(b1.blockers.saved).toBe(false)
 
-    // B4 content — blank title (body exists) blocks.
-    await query(`UPDATE posts SET title = '' WHERE id = ${a.postRef}`)
+    // B4 content — blank title (body exists) blocks. Mutate the frozen
+    // snapshot (canonical), not the retired projection.
+    await query(`UPDATE article_versions SET snapshot_json = json_set(snapshot_json, '$.fields.title', '') WHERE article_id = ${a.articleId} AND version = 1`)
     const b4 = await prepareFor(a, { title: '' })
     expect(b4.outcome).toBe('aborted')
     if (b4.outcome !== 'aborted') return
     expect(b4.failures).toContain('content')
 
-    // Restore content; B3 slug — a rival published post owns the slug.
-    await query(`UPDATE posts SET title = '待发布标题' WHERE id = ${a.postRef}`)
+    // Restore content; B3 slug — a rival article owns the address in the registry.
+    await query(`UPDATE article_versions SET snapshot_json = json_set(snapshot_json, '$.fields.title', '待发布标题') WHERE article_id = ${a.articleId} AND version = 1`)
     const rivalSlug = fresh('rival')
-    await query(`INSERT INTO posts (slug, title, content, html, status, published_at) VALUES ('${rivalSlug}', '占位', '占位正文', '<p>占位正文</p>', 'published', strftime('%s','now'))`)
+    await query(`INSERT INTO article_slug_addresses (slug, article_id, kind, created_at, updated_at) VALUES ('${rivalSlug}', 987654, 'candidate', strftime('%s','now'), strftime('%s','now'))`)
     const b3 = await prepareFor(a, { slug: rivalSlug })
     expect(b3.outcome).toBe('aborted')
     if (b3.outcome !== 'aborted') return
@@ -277,13 +278,9 @@ describe('lib/first-publish — first formal publish', { timeout: 600_000 }, () 
     expect(prep.outcome).toBe('prepared')
     if (prep.outcome !== 'prepared') return
 
-    // The article's own post no longer owns the prepared slug, and a rival
-    // published post takes it between prepare and confirm.
-    await query(`UPDATE posts SET slug = '${fresh('renamed')}' WHERE id = ${article.postRef}`)
-    await query(
-      `INSERT INTO posts (slug, title, content, html, status, published_at)
-       VALUES ('${article.slug}', '抢占者', '抢占正文', '<p>抢占正文</p>', 'published', strftime('%s','now'))`,
-    )
+    // The article's own registry address is handed to a rival article between
+    // prepare and confirm (simulating a concurrent claim).
+    await query(`UPDATE article_slug_addresses SET article_id = 987654, kind = 'candidate' WHERE slug = '${article.slug}'`)
 
     const confirm = await confirmFor(article, { intentId: fresh('intent'), prepareId: prep.prepareId, version: 1 })
     expect(confirm.outcome).toBe('slug-conflict')

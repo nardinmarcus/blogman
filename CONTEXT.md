@@ -43,3 +43,25 @@ _Avoid_: Test fixture, synthetic rehearsal, screen state
 **Upload Child Evidence**:
 Bounded (64 KiB cap) stdout/stderr captured from the single upload child of the authorized Worker deploy, persisted hash-named (sha256.stdout / sha256.stderr) under the durable sink's `upload-evidence/` directory on success and failure. The acceptance and Worker stage receipt keep only the hash references — never the raw bytes.
 _Avoid_: Transport temp tree storage, raw output in canonical records, unbounded captures
+
+### Article Write Model
+
+**Canonical Facts**:
+The only authoritative records of article identity, content versions, formal publication, and lifecycle transitions. Every read and write resolves against them; nothing else may be treated as authoritative.
+_Avoid_: Shadow layer, source-of-truth copy, dual write target
+
+**Compat Projection**:
+The frozen, rebuildable mirror of canonical facts kept only for legacy compatibility. It is never authoritative and receives no new writes.
+_Avoid_: Legacy table, authority, second source of truth
+
+**Post Ref**:
+The legacy numeric identifier carried on an article identity for compatibility with the Compat Projection era. It carries no meaning beyond uniqueness and is no longer derived from the projection.
+_Avoid_: Post id, row number
+
+**Slug Address Registry**:
+The single record of every public address ever bound to an article, classified as current, candidate, or historical. Slug exclusivity and resolution resolve only against it.
+_Avoid_: Slug lookup table, title slug
+
+**Article-Level Command**:
+A state change that does not revise body content (pin, hide, password, category, soft delete, restore), recorded as its own immutable version snapshot.
+_Avoid_: Field patch, in-place update, side-table write

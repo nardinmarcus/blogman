@@ -19,19 +19,26 @@ import type {
   PublicListOptions,
 } from './types'
 
-/** Snapshot JSON field paths surfaced by the frozen article version. */
+/** Snapshot JSON field paths surfaced by the LATEST frozen article version.
+ *
+ * Management / access-control state (password, pin, hide, soft-delete,
+ * category) takes effect IMMEDIATELY when an article-level command appends a
+ * new immutable version — so these paths always read the latest snapshot,
+ * never the formal one (ADR 0007). Content-bearing fields stay anchored to
+ * the formal version: only a promoted revision changes the public body.
+ */
 const F = {
-  password: "json_extract(snapshot_json, '$.fields.password')",
-  is_hidden: "json_extract(snapshot_json, '$.fields.is_hidden')",
-  is_pinned: "json_extract(snapshot_json, '$.fields.is_pinned')",
-  deleted_at: "json_extract(snapshot_json, '$.fields.deleted_at')",
-  title: "json_extract(snapshot_json, '$.fields.title')",
-  description: "json_extract(snapshot_json, '$.fields.description')",
-  category: "json_extract(snapshot_json, '$.fields.category')",
-  cover_image: "json_extract(snapshot_json, '$.fields.cover_image')",
-  updated_at: "json_extract(snapshot_json, '$.fields.updated_at')",
-  original_content: "json_extract(snapshot_json, '$.original_content')",
-  original_html: "json_extract(snapshot_json, '$.original_html')",
+  password: "json_extract(lv.snapshot_json, '$.fields.password')",
+  is_hidden: "json_extract(lv.snapshot_json, '$.fields.is_hidden')",
+  is_pinned: "json_extract(lv.snapshot_json, '$.fields.is_pinned')",
+  deleted_at: "json_extract(lv.snapshot_json, '$.fields.deleted_at')",
+  title: "json_extract(v.snapshot_json, '$.fields.title')",
+  description: "json_extract(v.snapshot_json, '$.fields.description')",
+  category: "json_extract(lv.snapshot_json, '$.fields.category')",
+  cover_image: "json_extract(v.snapshot_json, '$.fields.cover_image')",
+  updated_at: "json_extract(lv.snapshot_json, '$.fields.updated_at')",
+  original_content: "json_extract(v.snapshot_json, '$.original_content')",
+  original_html: "json_extract(v.snapshot_json, '$.original_html')",
 } as const
 
 interface FormalRow {
@@ -116,16 +123,21 @@ async function canonicalAvailable(db: Database): Promise<boolean> {
 }
 
 /**
- * Materialize a `PublicArticle` from a canonical formal row + version snapshot
- * (with optional pre-fetched postRef / viewCount to avoid N+1 in lists).
+ * Materialize a `PublicArticle` from canonical formal row + version snapshots.
+ *
+ * Content comes from the FORMAL version; management / access-control fields
+ * come from the LATEST version (immediate effect of article-level commands,
+ * ADR 0007). `latestJson` falls back to the formal snapshot when absent.
  */
 function buildPublicArticle(
   formal: FormalRow,
   snapshotJson: string,
   postRef: number,
   viewCount = 0,
+  latestJson?: string | null,
 ): PublicArticle {
-  const { record, fields } = parseSnapshot(snapshotJson)
+  const { record } = parseSnapshot(snapshotJson)
+  const fields = parseSnapshot(latestJson ?? snapshotJson).fields
   const deletedAt = toStatus(fields.deleted_at)
   const updatedAt = toStatus(fields.updated_at) || formal.published_at
 
@@ -197,6 +209,17 @@ async function findVersion(db: Database, articleId: number, version: number): Pr
     .catch(() => null)
 }
 
+async function findLatestVersionRow(db: Database, articleId: number): Promise<VersionRow | null> {
+  return db
+    .prepare(
+      `SELECT snapshot_json, content_snapshot_sha256 FROM article_versions
+       WHERE article_id = ? ORDER BY version DESC LIMIT 1`,
+    )
+    .bind(articleId)
+    .first<VersionRow>()
+    .catch(() => null)
+}
+
 /* ------------------------------------------------------------------ */
 /* single-hop detail resolution                                        */
 /* ------------------------------------------------------------------ */
@@ -253,9 +276,12 @@ export async function resolvePublicArticle(
   }
 
   const postRef = await findPostRef(db, formal.article_id)
+  // Management fields come from the LATEST version (immediate article-level
+  // commands); content stays anchored to the formal version.
+  const latest = await findLatestVersionRow(db, formal.article_id)
   // view_count is not carried by canonical facts (only unstably mirrored to
   // `posts`); drop the legacy read so the detail path has no `FROM posts`.
-  const article = buildPublicArticle(formal, version.snapshot_json, postRef)
+  const article = buildPublicArticle(formal, version.snapshot_json, postRef, 0, latest?.snapshot_json ?? null)
 
   // A historical single-hop must carry the CURRENT slug, never the old one.
   if (redirectSlug) {
@@ -272,8 +298,14 @@ const LIST_COLUMNS = `
   f.article_id, f.version, f.slug, f.lifecycle,
   f.first_published_at, f.published_at,
   v.snapshot_json,
+  lv.snapshot_json AS latest_snapshot_json,
   COALESCE(a.post_ref, 0) AS post_ref
 `
+
+/** The LATEST version join — management fields read from it (ADR 0007). */
+const LATEST_JOIN = `
+  LEFT JOIN article_versions lv ON lv.article_id = f.article_id
+   AND lv.version = (SELECT MAX(version) FROM article_versions WHERE article_id = f.article_id)`
 
 /**
  * List the CANONICAL public articles: lifecycle published (from
@@ -318,6 +350,7 @@ export async function listPublicArticles(
   const where = conditions.join(' AND ')
   interface ListRow extends FormalRow, VersionRow {
     post_ref: number
+    latest_snapshot_json: string | null
   }
 
   const { results } = await db
@@ -325,6 +358,7 @@ export async function listPublicArticles(
       `SELECT ${LIST_COLUMNS}
        FROM formal_publications f
        JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+       ${LATEST_JOIN}
        JOIN articles a ON a.id = f.article_id
        WHERE ${where}
        ORDER BY COALESCE(${F.is_pinned}, 0) DESC, f.first_published_at DESC
@@ -334,7 +368,7 @@ export async function listPublicArticles(
     .all<ListRow>()
 
   return (results ?? []).map((row) =>
-    buildPublicArticle(row, row.snapshot_json, row.post_ref),
+    buildPublicArticle(row, row.snapshot_json, row.post_ref, 0, row.latest_snapshot_json),
   )
 }
 
@@ -365,6 +399,7 @@ export async function countPublicArticles(
       `SELECT COUNT(*) AS n
        FROM formal_publications f
        JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+       ${LATEST_JOIN}
        WHERE ${conditions.join(' AND ')}`,
     )
     .bind(...params)
@@ -395,9 +430,9 @@ export async function searchPublicArticles(
   try {
     const { results } = await db
       .prepare(
-        `SELECT posts.id AS post_ref FROM posts_fts
-         JOIN posts ON posts.id = posts_fts.rowid
-         WHERE posts_fts MATCH ?
+        `SELECT a.post_ref AS post_ref FROM article_fts
+         JOIN articles a ON a.id = article_fts.rowid
+         WHERE article_fts MATCH ?
          LIMIT ?`,
       )
       .bind(query, limit * 4)

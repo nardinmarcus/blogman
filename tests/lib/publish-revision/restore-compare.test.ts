@@ -49,6 +49,21 @@ afterAll(async () => {
 })
 
 let seq = 0
+/** The live formal state — derived from formal lifecycle + frozen snapshot (canonical). */
+async function liveFormalRow(articleId: number): Promise<Record<string, unknown> | null> {
+  const rows = await query<Record<string, unknown>>(
+    `SELECT v.snapshot_json, f.lifecycle FROM formal_publications f
+     JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+     WHERE f.article_id = ${articleId} LIMIT 1`,
+  )
+  const raw = rows[0]
+  if (!raw) return null
+  const record = JSON.parse(raw.snapshot_json as string) as { fields: Record<string, unknown> }
+  const deletedAt = record.fields.deleted_at
+  const status = deletedAt ? 'deleted' : raw.lifecycle === 'published' ? 'published' : 'draft'
+  return { ...record.fields, status }
+}
+
 function fresh(prefix: string): string {
   seq += 1
   return `${prefix}-${Date.now()}-${seq}`
@@ -151,10 +166,8 @@ describe('lib/publish-revision compare/restore — issue #35', { timeout: 600_00
     expect(restored.target).toBe('revision')
     expect(restored.revisionId).toBeTruthy()
 
-    // Live formal is untouched — the public projection still reads v2.
-    const live = (await query<Record<string, unknown>>(
-      `SELECT title, slug FROM posts WHERE id = ${article.postRef}`,
-    ))[0]
+    // Live formal is untouched — the frozen formal version still reads v2.
+    const live = await liveFormalRow(article.articleId)
     expect(live?.title).toBe('第二版标题')
     const active = await readRevisionState(createDatabase(), article.articleId)
     expect(active.active).toBeTruthy()
@@ -168,7 +181,7 @@ describe('lib/publish-revision compare/restore — issue #35', { timeout: 600_00
     expect(undone.outcome).toBe('undone')
     const afterUndo = await readRevisionState(createDatabase(), article.articleId)
     expect(afterUndo.active).toBeNull()
-    expect((await query<Record<string, unknown>>(`SELECT title FROM posts WHERE id = ${article.postRef}`))[0]?.title).toBe('第二版标题')
+    expect((await liveFormalRow(article.articleId))?.title).toBe('第二版标题')
   })
 
   it('恢复为草稿创建独立草稿副本，绝不取消发布/不改线上 slug', async () => {
@@ -195,16 +208,15 @@ describe('lib/publish-revision compare/restore — issue #35', { timeout: 600_00
     expect(restored.draftArticleId).toBeTruthy()
 
     // Original live article is fully untouched (still published, same slug).
-    const live = (await query<Record<string, unknown>>(
-      `SELECT title, status, slug FROM posts WHERE id = ${article.postRef}`,
-    ))[0]
+    const live = await liveFormalRow(article.articleId)
     expect(live?.status).toBe('published')
     expect(live?.slug).toBe(article.slug)
 
-    // The draft copy exists as a separate routed draft.
+    // The draft copy exists as a separate routed draft (canonical facts only).
     const draftPost = await query<Record<string, unknown>>(
-      `SELECT p.title, p.status FROM posts p
-       JOIN articles a ON a.post_ref = p.id WHERE a.id = ${restored.draftArticleId}`,
+      `SELECT json_extract(v.snapshot_json, '$.fields.status') AS status
+       FROM articles a JOIN article_versions v ON v.article_id = a.id
+       WHERE a.id = ${restored.draftArticleId} ORDER BY v.version DESC LIMIT 1`,
     )
     expect(draftPost).toHaveLength(1)
     expect(draftPost[0]?.status).toBe('draft')
@@ -218,7 +230,7 @@ describe('lib/publish-revision compare/restore — issue #35', { timeout: 600_00
     expect(
       await query<Record<string, unknown>>(`SELECT id FROM articles WHERE id = ${restored.draftArticleId}`),
     ).toHaveLength(0)
-    expect((await query<Record<string, unknown>>(`SELECT status FROM posts WHERE id = ${article.postRef}`))[0]?.status).toBe('published')
+    expect((await liveFormalRow(article.articleId))?.status).toBe('published')
   })
 
   it('恢复点保留最近 10 条（retention），超出即修剪', async () => {

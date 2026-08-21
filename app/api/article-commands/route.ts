@@ -29,11 +29,9 @@ import {
 } from '@/lib/server/route-helpers'
 import { migrationRequiredResponse } from '@/lib/database-errors'
 import { invalidatePublicContentCache } from '@/lib/cache'
-import { versionedWriteGuard } from '@/lib/rollout-controls'
 import { enqueueBackgroundJob, aiProcessPostOperationId } from '@/lib/background-jobs'
 import { normalizePostSlug } from '@/lib/post-utils'
 import { nanoid } from 'nanoid'
-import { getPostBySlug, updatePost } from '@/lib/db'
 import { getByPostRef, listVersions } from '@/lib/repositories/articles'
 import { getSiteUrl } from '@/lib/site-config'
 import type { ArticleIdentitySnapshot } from '@/lib/article-identity'
@@ -115,8 +113,19 @@ async function attachFacts<T>(db: D1Database, result: T): Promise<T & { slug?: s
     r.postRef !== undefined &&
     (outcome === 'applied' || outcome === 'created' || outcome === 'replayed' || outcome === 'existing')
   ) {
+    // Canonical facts only: current registry address (fallback: snapshot slug)
+    // + the latest frozen snapshot's observable published time.
     const post = await db
-      .prepare('SELECT slug, published_at FROM posts WHERE id = ?')
+      .prepare(
+        `SELECT COALESCE(
+            (SELECT slug FROM article_slug_addresses WHERE article_id = a.id AND kind = 'current'),
+            json_extract(v.snapshot_json, '$.fields.slug')) AS slug,
+          json_extract(v.snapshot_json, '$.fields.published_at') AS published_at
+         FROM articles a
+         JOIN article_versions v ON v.article_id = a.id
+           AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
+         WHERE a.post_ref = ?`,
+      )
       .bind(r.postRef)
       .first<{ slug: string; published_at: number | null }>()
     if (post) {
@@ -125,6 +134,24 @@ async function attachFacts<T>(db: D1Database, result: T): Promise<T & { slug?: s
     }
   }
   return r
+}
+
+/** Resolve an article id by slug through the address registry (ADR 0009). */
+async function resolveArticleIdBySlug(db: D1Database, slug: string): Promise<number | null> {
+  const normalized = normalizePostSlug(slug)
+  if (!normalized) return null
+  const byRegistry = await db
+    .prepare('SELECT article_id FROM article_slug_addresses WHERE slug = ?')
+    .bind(normalized)
+    .first<{ article_id: number }>()
+    .catch(() => null)
+  if (byRegistry) return byRegistry.article_id
+  const byIdentity = await db
+    .prepare('SELECT id FROM articles WHERE slug = ?')
+    .bind(normalized)
+    .first<{ id: number }>()
+    .catch(() => null)
+  return byIdentity?.id ?? null
 }
 
 /** B2-06 — the versioned-authority facts for a post. Null when the identity tables are absent (a ledger-only DB that never ran the B2-02 DDL) so existing CRUD never 503s. */
@@ -181,33 +208,25 @@ async function dispatchArticleLevelAction(
     return jsonError(`${action}: slug / articleId / expectedVersion / operationId 无效`, 400)
   }
 
-  const post = await getPostBySlug(db, slug)
-  if (!post) return jsonError(`${action}: 文章不存在 (${slug})`, 404)
+  // Slug resolution through the address registry (ADR 0009); the legacy
+  // direct-write fallback is removed (posts is retired from the write path).
+  const resolvedArticleId = await resolveArticleIdBySlug(db, slug)
+  if (!resolvedArticleId) return jsonError(`${action}: 文章不存在 (${slug})`, 404)
 
   const projections = afterCommit(env, ctx)
-  const failures: string[] = []
-  const legacyWrite = async (data: Record<string, unknown>) => {
-    await updatePost(db, post.id, data as Parameters<typeof updatePost>[2])
-  }
 
-  const authority = await versionedAuthority(db, post.id)
+  // Versioned-authority facts straight from canonical identity + versions.
+  const authority = await (async () => {
+    const v = await db
+      .prepare('SELECT COALESCE(MAX(version), 0) AS version FROM article_versions WHERE article_id = ?')
+      .bind(resolvedArticleId)
+      .first<{ version: number }>()
+    if (!v || v.version === 0) return null
+    return { articleId: resolvedArticleId, version: v.version }
+  })()
+
   if (!authority) {
-    // Ledger-only DB — legacy compatible direct write, no version conditions exist.
-    // B2-G: once the rollout closes the legacy producer or enables authority,
-    // the versionless management write is refused outright.
-    const guard = await versionedWriteGuard(db, { requireProducer: true })
-    if (guard.refused) return jsonError(guard.message!, 409)
-    if (action === 'setPinned') await legacyWrite({ is_pinned: payload.is_pinned === 1 ? 1 : 0 })
-    else if (action === 'setHidden') await legacyWrite({ is_hidden: payload.is_hidden === 1 ? 1 : 0 })
-    else if (action === 'setPassword') await legacyWrite({ password: typeof payload.password === 'string' && payload.password.trim() ? payload.password.trim() : null })
-    else if (action === 'setCategory') await legacyWrite({ category: typeof payload.category === 'string' && payload.category.trim() ? payload.category.trim() : null })
-    else if (action === 'softDelete') await legacyWrite({ status: 'deleted' })
-    else if (action === 'restore') await legacyWrite({ status: 'draft' })
-    else if (action === 'unpublish') await legacyWrite({ status: 'draft' })
-    else if (action === 'relive') await legacyWrite({ status: 'published' })
-    else return jsonError(`${action}: 未知动作`, 400)
-    await runProjectorsFor(projections, { postRef: post.id, operationId, existing: false }, failures)
-    return jsonOk({ outcome: 'legacy-applied', articleId, postRef: post.id, version: null, operationId, existing: false, projectionFailures: failures })
+    return jsonError(`${action}: 文章尚未启用版本化写入`, 409)
   }
 
   if (authority.articleId !== articleId) {
@@ -292,19 +311,18 @@ async function dispatchBatchSetCategory(
       continue
     }
 
-    const post = await getPostBySlug(db, slug)
-    if (!post) {
+    const resolvedArticleId = await resolveArticleIdBySlug(db, slug)
+    if (!resolvedArticleId) {
       items.push({ outcome: 'not-found', articleId, expectedVersion, operationId, slug })
       continue
     }
-    const authority = await versionedAuthority(db, post.id)
+    const authority = await versionedAuthority(db, resolvedArticleId)
     if (!authority) {
-      await updatePost(db, post.id, { category } as Parameters<typeof updatePost>[2])
-      items.push({ outcome: 'legacy-applied', articleId, postRef: post.id, version: null, operationId, existing: false, slug, projectionFailures: [] })
+      items.push({ outcome: 'not-found', articleId, expectedVersion, operationId, slug })
       continue
     }
     if (authority.articleId !== articleId) {
-      items.push({ outcome: 'conflict', articleId, postRef: post.id, expectedVersion, serverVersion: authority.version, slug, facts: null })
+      items.push({ outcome: 'conflict', articleId, expectedVersion, serverVersion: authority.version, slug, facts: null })
       continue
     }
     try {
@@ -423,14 +441,12 @@ export async function GET(req: NextRequest) {
         .bind(rawArticleId)
         .first<{ id: number; post_ref: number }>()
     } else if (slug) {
-      const post = await db
-        .prepare('SELECT id FROM posts WHERE slug = ?')
-        .bind(normalizePostSlug(slug))
-        .first<{ id: number }>()
-      if (post) {
+      // Slug resolution through the address registry (ADR 0009).
+      const resolvedId = await resolveArticleIdBySlug(db, normalizePostSlug(slug))
+      if (resolvedId) {
         article = await db
-          .prepare('SELECT id, post_ref FROM articles WHERE post_ref = ?')
-          .bind(post.id)
+          .prepare('SELECT id, post_ref FROM articles WHERE id = ?')
+          .bind(resolvedId)
           .first<{ id: number; post_ref: number }>()
       }
     }

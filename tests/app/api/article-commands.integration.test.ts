@@ -256,11 +256,14 @@ describe('app/api/article-commands — real kernel + D1', { timeout: 600_000 }, 
     })
     const outcome = (await (await POST({} as never)).json()) as { outcome: string; version: number }
     expect(outcome.outcome).toBe('applied')
-    expect(outcome.version).toBe(1) // pinned, but still version 1
+    expect(outcome.version).toBe(2) // ADR 0007: the pin appends its own version
 
-    // D1: the pin never advanced the version counter.
-    expect((await versions(articleId)).map((r) => r.version)).toEqual([1])
-    const row = (await query(`SELECT is_pinned FROM posts WHERE slug = '${slug}'`))[0] as { is_pinned: number }
+    // D1: the pin advanced the version counter and the latest snapshot carries it.
+    expect((await versions(articleId)).map((r) => r.version)).toEqual([1, 2])
+    const row = (await query<{ is_pinned: number }>(
+      `SELECT json_extract(snapshot_json, '$.fields.is_pinned') AS is_pinned
+       FROM article_versions WHERE article_id = ${articleId} ORDER BY version DESC LIMIT 1`,
+    ))[0]
     expect(row.is_pinned).toBe(1)
 
     // A stale article-level request (旧请求) is rejected as a conflict.
@@ -274,8 +277,11 @@ describe('app/api/article-commands — real kernel + D1', { timeout: 600_000 }, 
     })
     const conflict = (await (await POST({} as never)).json()) as { outcome: string; serverVersion: number }
     expect(conflict.outcome).toBe('conflict')
-    expect(conflict.serverVersion).toBe(1)
-    const hiddenRow = (await query(`SELECT is_hidden FROM posts WHERE slug = '${slug}'`))[0] as { is_hidden: number }
+    expect(conflict.serverVersion).toBe(2) // the pin advanced the version
+    const hiddenRow = (await query<{ is_hidden: number }>(
+      `SELECT json_extract(snapshot_json, '$.fields.is_hidden') AS is_hidden
+       FROM article_versions WHERE article_id = ${articleId} ORDER BY version DESC LIMIT 1`,
+    ))[0]
     expect(hiddenRow.is_hidden).toBe(0)
   })
 })

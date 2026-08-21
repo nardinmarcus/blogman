@@ -239,10 +239,11 @@ describe('lib/slug-address — permanent address registry', { timeout: 600_000 }
     await query(
       `DELETE FROM article_slug_addresses WHERE slug = '${taken}'`,
     )
-    // B registers the address as its own current.
+    // B owns the address (as candidate — any kind owned by another article
+    // blocks the promote gate; simulating a concurrent claim after the save).
     await query(
       `INSERT INTO article_slug_addresses (slug, article_id, kind, created_at, updated_at)
-       VALUES ('${taken}', ${b.articleId}, 'current', ${now}, ${now})`,
+       VALUES ('${taken}', ${b.articleId}, 'candidate', ${now}, ${now})`,
     )
 
     const promoted = await promoteRevision(createDatabase(), {
