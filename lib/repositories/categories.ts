@@ -67,16 +67,24 @@ export async function updateCategory(db: Database, oldSlug: string, name: string
     // latest frozen snapshot carries the old category name gets its own
     // immutable version via the explicit command (ADR 0007 — no in-place
     // snapshot mutation), so canonical reads reflect the rename immediately.
-    const members = await db
-      .prepare(
-        `SELECT a.id AS article_id, COALESCE(MAX(v.version), 0) AS version
-         FROM articles a
-         JOIN article_versions v ON v.article_id = a.id
-         WHERE json_extract(v.snapshot_json, '$.fields.category') = ?
-         GROUP BY a.id`,
-      )
-      .bind(cat.name)
-      .all<{ article_id: number; version: number }>().then((r) => r.results)
+    // On a ledger-only DB (canonical surfaces absent) there is nothing to
+    // re-point: only the taxonomy row renames below.
+    let members: Array<{ article_id: number; version: number }> = []
+    try {
+      members = await db
+        .prepare(
+          `SELECT a.id AS article_id, COALESCE(MAX(v.version), 0) AS version
+           FROM articles a
+           JOIN article_versions v ON v.article_id = a.id
+           WHERE json_extract(v.snapshot_json, '$.fields.category') = ?
+           GROUP BY a.id`,
+        )
+        .bind(cat.name)
+        .all<{ article_id: number; version: number }>().then((r) => r.results)
+    } catch {
+      // Ledger-only DB: canonical surfaces absent — skip per-article versioning.
+      members = []
+    }
     for (const member of members) {
       if (member.version < 1) continue
       await setCategory(db, {
