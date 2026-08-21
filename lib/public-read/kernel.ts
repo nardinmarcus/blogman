@@ -279,8 +279,7 @@ export async function resolvePublicArticle(
   // Management fields come from the LATEST version (immediate article-level
   // commands); content stays anchored to the formal version.
   const latest = await findLatestVersionRow(db, formal.article_id)
-  // view_count is not carried by canonical facts (only unstably mirrored to
-  // `posts`); drop the legacy read so the detail path has no `FROM posts`.
+  // view_count is not carried by canonical facts (retired with ADR 0010).
   const article = buildPublicArticle(formal, version.snapshot_json, postRef, 0, latest?.snapshot_json ?? null)
 
   // A historical single-hop must carry the CURRENT slug, never the old one.
