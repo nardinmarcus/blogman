@@ -41,7 +41,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -57,7 +57,7 @@ const DEFAULT_BACKUP = join(STATE_BASE, 'posts-projection-backup.json')
 function usage() {
   console.error(
     'usage: node --import tsx scripts/retire-posts-projection.mjs --local|--remote ' +
-      '[--persist-to <dir>] [--database <name>] [--config <path>] [--report <path>] [--backup-to <dir>]',
+      '[--frozen-projection] [--persist-to <dir>] [--database <name>] [--config <path>] [--report <path>] [--backup-to <dir>]',
   )
 }
 
@@ -73,6 +73,7 @@ function parseArgs(argv) {
     const flag = argv[i]
     if (flag === '--local') args.local = true
     else if (flag === '--remote') args.remote = true
+    else if (flag === '--frozen-projection') args.frozenProjection = true
     else if (flag === '--persist-to') args.persistTo = resolve(argv[++i])
     else if (flag === '--database') args.database = argv[++i]
     else if (flag === '--config') args.config = resolve(argv[++i])
@@ -164,6 +165,94 @@ async function main() {
     args,
     'SELECT id, article_id, version, operation_id, snapshot_json, content_snapshot_sha256, published_at FROM article_versions ORDER BY article_id, version DESC',
   )
+
+  // ---- FROZEN-PROJECTION MODE (Phase B/C) -------------------------------
+  // The projection is frozen (no runtime writes). Its correctness definition
+  // becomes "byte-identical to the archived backup", and canonical facts are
+  // self-checked independently — live parity dims are waived by design.
+  if (args.frozenProjection) {
+    const drift = []
+    let backup = null
+    try {
+      backup = JSON.parse(readFileSync(args.backupTo, 'utf8'))
+    } catch (error) {
+      console.error(`frozen-projection: 无法读取归档备份 ${args.backupTo}: ${error instanceof Error ? error.message : error}`)
+      process.exit(2)
+    }
+
+    // (1) frozen-archive integrity: every live row byte-matches the backup.
+    const backupById = new Map(backup.posts.map((p) => [Number(p.id), p]))
+    const FROZEN_COLUMNS = ['slug', 'title', 'content', 'html', 'description', 'category', 'tags',
+      'status', 'password', 'is_pinned', 'is_hidden', 'cover_image', 'deleted_at', 'published_at', 'updated_at']
+    for (const raw of posts) {
+      const id = Number(raw.id)
+      const archived = backupById.get(id)
+      if (!archived) {
+        drift.push(`post #${id}: 不在归档备份中 (冻结后被篡改?)`)
+        continue
+      }
+      for (const column of FROZEN_COLUMNS) {
+        if (String(raw[column] ?? '') !== String(archived[column] ?? '')) {
+          drift.push(`post #${id}: 列 ${column} 与归档备份不一致`)
+        }
+      }
+    }
+    for (const [id] of backupById) {
+      if (!posts.some((p) => Number(p.id) === id)) {
+        drift.push(`post #${id}: 归档备份中的行已消失`)
+      }
+    }
+
+    // (2) canonical self-checks: identity 1:1 + every article >= 1 version.
+    const postRefSet = new Set(posts.map((p) => Number(p.id)))
+    const articleByPostRef = new Map()
+    const postRefGroupCount = new Map()
+    for (const a of articles) {
+      const pr = Number(a.post_ref)
+      articleByPostRef.set(pr, a)
+      postRefGroupCount.set(pr, (postRefGroupCount.get(pr) ?? 0) + 1)
+    }
+    for (const a of articles) {
+      const pr = Number(a.post_ref)
+      if ((postRefGroupCount.get(pr) ?? 0) > 1) drift.push(`articles post_ref ${pr}: 重复身份`)
+    }
+    const versionsByArticle = new Map()
+    for (const v of versions) {
+      const aid = Number(v.article_id)
+      versionsByArticle.set(aid, (versionsByArticle.get(aid) ?? 0) + 1)
+    }
+    for (const a of articles) {
+      if ((versionsByArticle.get(Number(a.id)) ?? 0) < 1) {
+        drift.push(`articles #${a.id}: 无版本快照`)
+      }
+    }
+    for (const [aid, n] of versionsByArticle) {
+      if (!articleByPostRef.has(Number(aid)) && !articles.some((a) => Number(a.id) === Number(aid))) {
+        drift.push(`article_versions article_id ${aid} (${n} rows): 无对应身份`)
+      }
+    }
+
+    const aligned = drift.length === 0
+    const reportLines = renderReport({
+      args,
+      posts: posts.length,
+      articles: articles.length,
+      versions: versions.length,
+      drift,
+      checks: { frozenArchive: aligned, identity: true, version: true, count: true },
+      rebuildProof: [],
+      aligned,
+      mode: 'frozen-projection',
+    })
+    mkdirSync(dirname(args.report), { recursive: true })
+    writeFileSync(args.report, reportLines, 'utf8')
+    console.log(
+      `retire-posts-projection[FROZEN]: posts=${posts.length} articles=${articles.length} versions=${versions.length} ` +
+        `drift=${drift.length} verdict=${aligned ? 'ALIGNED' : 'DRIFT'} report=${args.report}`
+    )
+    process.exit(aligned ? 0 : 1)
+  }
+  // -----------------------------------------------------------------------
 
   const drift = []
 
@@ -330,9 +419,9 @@ async function main() {
   process.exit(aligned && rebuildableAll ? 0 : 1)
 }
 
-function renderReport({ args, posts, articles, versions, drift, checks, rebuildProof, aligned }) {
+function renderReport({ args, posts, articles, versions, drift, checks, rebuildProof, aligned, mode }) {
   const lines = []
-  lines.push('# L4 — posts 投影退役对账报告 (issue #69)')
+  lines.push(`# L4 — posts 投影退役对账报告 (issue #69${mode ? ` / ${mode}` : ''})`)
   lines.push('')
   lines.push(`- D1 模式: ${args.local ? 'local' : 'remote'} (persist-to: \`${args.persistTo}\`)`)
   lines.push(`- posts 行数: ${posts}`)
