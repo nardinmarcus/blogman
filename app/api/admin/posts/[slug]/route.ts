@@ -1,17 +1,17 @@
-import { deletePost, getPostBySlug, updatePost } from '@/lib/db'
+import { getPostBySlug } from '@/lib/db'
 import { isAdminAuthenticated, COOKIE_NAME } from '@/lib/admin-auth'
 import { invalidatePublicContentCache } from '@/lib/cache'
-import { getByPostRef, listVersions } from '@/lib/repositories/articles'
 import {
-  buildAutoDescription,
-  extractMarkdownDescription,
-  normalizePostSlug,
-  stripMarkdownFrontmatter,
-} from '@/lib/post-utils'
-import { enqueueBackgroundJob } from '@/lib/background-jobs'
+  restore,
+  setCategory,
+  setHidden,
+  setPassword,
+  setPinned,
+  softDelete,
+} from '@/lib/article-commands'
 import { getRouteContextWithDb, jsonError, jsonOk, parseJsonBody } from '@/lib/server/route-helpers'
 import { rethrowIfDatabaseMigrationRequired, withDatabaseErrorResponse } from '@/lib/database-errors'
-import { versionedWriteGuard } from '@/lib/rollout-controls'
+import { resolveArticleIdBySlug } from '@/lib/server/resolve-article'
 import type { NextRequest } from 'next/server'
 
 async function checkAuth(req: NextRequest): Promise<boolean> {
@@ -21,7 +21,7 @@ async function checkAuth(req: NextRequest): Promise<boolean> {
 
 type Ctx = { params: Promise<{ slug: string }> }
 
-// 获取单篇文章（编辑用）
+// 获取单篇文章（编辑用）— canonical read model
 async function getPost(req: NextRequest, { params }: Ctx) {
   if (!(await checkAuth(req))) {
     return jsonError('Unauthorized', 401)
@@ -37,7 +37,13 @@ async function getPost(req: NextRequest, { params }: Ctx) {
   return jsonOk(post)
 }
 
-// 更新文章
+/**
+ * 更新文章 — #234 Phase A: the legacy direct posts write is retired (ADR 0008).
+ * Article-level field changes map onto the explicit command kernels
+ * (expected version resolved from canonical facts server-side), so existing
+ * admin UI calls keep working without carrying version tokens. Content edits
+ * are refused: they belong to the versioned save entry.
+ */
 async function updatePostRoute(req: NextRequest, { params }: Ctx) {
   if (!(await checkAuth(req))) {
     return jsonError('Unauthorized', 401)
@@ -48,8 +54,8 @@ async function updatePostRoute(req: NextRequest, { params }: Ctx) {
   if (!route.ok) return route.response
   const { env, db, ctx } = route
 
-  const post = await getPostBySlug(db, slug)
-  if (!post) return jsonError('文章不存在', 404)
+  const articleId = await resolveArticleIdBySlug(db, slug)
+  if (!articleId) return jsonError('文章不存在', 404)
 
   try {
     const body = await parseJsonBody<{
@@ -67,115 +73,72 @@ async function updatePostRoute(req: NextRequest, { params }: Ctx) {
       description?: string
     }>(req)
 
-    // B2-06: once an article is under versioned authority (identity + >=1 version
-    // snapshot), the generic field PATCH may no longer touch lifecycle/status or
-    // article-level state directly — those go through the explicit command route
-    // (/api/article-commands) with expected version + operation id preconditions.
-    // Content writes (title/html/content) were already rejected by B2-05. When the
-    // identity shadow tables are absent (e.g. a ledger-only test DB that never ran
-    // the article-identity DDL), the article has not switched to versioned
-    // authority — keep the legacy compatible path instead of 503'ing.
-    const hasVersionedAuthority = await (async () => {
+    const contentFields = ['slug', 'title', 'content', 'html', 'cover_image', 'tags', 'description'] as const
+    const touchedContent = contentFields.filter((field) => body[field] !== undefined)
+    if (touchedContent.length > 0) {
+      return jsonError('内容字段请通过版本化保存入口修改', 409)
+    }
+
+    // Resolve the current version fact for the command preconditions.
+    const vRow = await db
+      .prepare('SELECT COALESCE(MAX(version), 0) AS version FROM article_versions WHERE article_id = ?')
+      .bind(articleId)
+      .first<{ version: number }>()
+    const expectedVersion = vRow?.version ?? 0
+    if (expectedVersion === 0) {
+      // No canonical version facts — the legacy write surface is retired.
+      return jsonError('文章尚未启用版本化写入', 409)
+    }
+    const operationId = `admin-put:${articleId}:${Date.now()}`
+
+    const runCommand = async (
+      command: (db: unknown, input: never) => Promise<{ outcome: string }>,
+      input: Record<string, unknown>,
+    ) => command(db, { articleId, expectedVersion, operationId, ...input } as never)
+
+    let result: { outcome: string }
+    if (body.is_pinned !== undefined) {
+      result = await runCommand(setPinned as never, { is_pinned: body.is_pinned === 1 ? 1 : 0 })
+    } else if (body.is_hidden !== undefined) {
+      result = await runCommand(setHidden as never, { is_hidden: body.is_hidden === 1 ? 1 : 0 })
+    } else if (body.password !== undefined) {
+      result = await runCommand(setPassword as never, {
+        password: typeof body.password === 'string' && body.password.trim() ? body.password.trim() : null,
+      })
+    } else if (body.category !== undefined) {
+      result = await runCommand(setCategory as never, {
+        category: typeof body.category === 'string' && body.category.trim() ? body.category.trim() : null,
+      })
+    } else if (body.status === 'deleted') {
+      result = await runCommand(softDelete as never, {})
+    } else if (body.status === 'draft') {
+      result = await runCommand(restore as never, {})
+    } else if (body.status === 'published') {
+      // Lifecycle transitions go through the explicit lifecycle surface.
+      return jsonError('发布/下线请通过发布流程或 /api/article-lifecycle', 409)
+    } else {
+      return jsonError('没有可应用的字段', 400)
+    }
+
+    // Best-effort cache invalidation after an applied/replayed command.
+    if (result.outcome === 'applied' || result.outcome === 'replayed') {
       try {
-        const identity = await getByPostRef(db, post.id)
-        if (!identity) return false
-        const versions = await listVersions(db, identity.id)
-        return versions.length > 0
-      } catch {
-        return false
-      }
-    })()
-    if (!hasVersionedAuthority) {
-      // Ledger-only DB — this is a versionless legacy write. B2-G: once the
-      // rollout closes the legacy producer or enables authority, the direct
-      // `posts` write is refused (management writes go through the kernel).
-      const guard = await versionedWriteGuard(db, { requireProducer: true })
-      if (guard.refused) return jsonError(guard.message!, 409)
-    }
-
-    if (hasVersionedAuthority) {
-      const lifecycleFields = ['status', 'is_pinned', 'is_hidden', 'password', 'category'] as const
-      const blocked = lifecycleFields.filter((field) => field in body)
-      if (blocked.length > 0) {
-        return jsonError(
-          `这篇文章已启用版本化写入，请通过 /api/article-commands 的显式命令修改: ${blocked.join(', ')}（携带 expectedVersion + operationId）`,
-          409,
-        )
-      }
-      if ('title' in body || 'html' in body || 'content' in body) {
-        return jsonError('这篇文章已启用版本化写入，请使用版本化保存入口', 409)
+        await invalidatePublicContentCache(env)
+      } catch (cacheErr) {
+        console.warn('Cache invalidation failed:', cacheErr)
       }
     }
-
-    const {
-      slug: nextSlugRaw,
-      title,
-      content,
-      html,
-      category,
-      status,
-      password,
-      is_pinned,
-      is_hidden,
-      cover_image,
-      tags,
-      description,
-    } = body
-
-    const nextSlug = typeof nextSlugRaw === 'string' ? normalizePostSlug(nextSlugRaw) : ''
-    const rawContent = typeof content === 'string' ? content : ''
-    const normalizedContent = typeof content === 'string' ? stripMarkdownFrontmatter(content) : undefined
-    const normalizedDescription = typeof description === 'string' && description.trim()
-      ? description.trim()
-      : typeof content === 'string'
-        ? extractMarkdownDescription(rawContent) || buildAutoDescription(rawContent)
-        : undefined
-
-    await updatePost(db, post.id, {
-      slug: nextSlug || undefined,
-      title,
-      content: normalizedContent,
-      html,
-      category,
-      status,
-      password,
-      is_pinned,
-      is_hidden,
-      cover_image,
-      tags,
-      description: normalizedDescription,
-    })
-
-    // 清除 KV 缓存（失败不影响保存结果）
-    try {
-      await invalidatePublicContentCache(env)
-    } catch (cacheErr) {
-      console.warn('Cache invalidation failed:', cacheErr)
-    }
-
-    await enqueueBackgroundJob(
-      env,
-      {
-        type: 'sync-post-related-index',
-        postId: post.id,
-      },
-      {
-        waitUntil: ctx?.waitUntil?.bind(ctx),
-      },
-    )
-
-    return jsonOk({ success: true, slug: nextSlug || slug })
+    void ctx
+    return jsonOk({ success: true, outcome: result.outcome, slug })
   } catch (err) {
     rethrowIfDatabaseMigrationRequired(err)
-    if (err instanceof Error && /UNIQUE constraint failed: posts\.slug/i.test(err.message)) {
-      return jsonError('slug 已存在，请换一个', 409)
-    }
     console.error('PUT /api/admin/posts/[slug] error:', err)
     return jsonError(err instanceof Error ? err.message : '保存失败', 500)
   }
 }
 
-// 删除文章
+// 删除文章 — soft delete through the explicit command (reversible; the hard
+// delete of canonical rows is out of scope for the admin surface).
 async function deletePostRoute(req: NextRequest, { params }: Ctx) {
   if (!(await checkAuth(req))) {
     return jsonError('Unauthorized', 401)
@@ -187,32 +150,34 @@ async function deletePostRoute(req: NextRequest, { params }: Ctx) {
   const { env, db, ctx } = route
 
   try {
-    const post = await getPostBySlug(db, slug)
-    if (!post) {
-      return jsonError('文章不存在', 404)
+    const articleId = await resolveArticleIdBySlug(db, slug)
+    if (!articleId) {
+      return jsonOk({ success: false, error: '文章不存在' })
     }
 
-    await deletePost(db, slug)
+    const vRow = await db
+      .prepare('SELECT COALESCE(MAX(version), 0) AS version FROM article_versions WHERE article_id = ?')
+      .bind(articleId)
+      .first<{ version: number }>()
+    const expectedVersion = vRow?.version ?? 0
+    if (expectedVersion === 0) {
+      return jsonOk({ success: false, error: '文章尚未启用版本化写入' })
+    }
 
-    // 清除 KV 缓存（失败不影响删除结果）
+    const result = await softDelete(db, {
+      articleId,
+      expectedVersion,
+      operationId: `admin-delete:${articleId}:${Date.now()}`,
+    })
+
     try {
       await invalidatePublicContentCache(env)
     } catch (cacheErr) {
       console.warn('Cache invalidation failed:', cacheErr)
     }
 
-    await enqueueBackgroundJob(
-      env,
-      {
-        type: 'delete-post-related-index',
-        postId: post.id,
-      },
-      {
-        waitUntil: ctx?.waitUntil?.bind(ctx),
-      },
-    )
-
-    return jsonOk({ success: true })
+    void ctx
+    return jsonOk({ success: true, outcome: result.outcome })
   } catch (error) {
     rethrowIfDatabaseMigrationRequired(error)
     console.error('Delete post failed:', error)

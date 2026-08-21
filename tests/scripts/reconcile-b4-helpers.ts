@@ -36,6 +36,8 @@ import {
 } from '@/tests/helpers/article-identity-state'
 import { splitSqlFile } from '@/tests/lib/article-commands/helpers'
 import { ensureFirstPublishTables } from '@/lib/first-publish/ddl'
+import { SLUG_ADDRESS_DDL_STATEMENTS } from '@/lib/slug-address/ddl'
+import { ARTICLE_FTS_DDL_STATEMENTS } from '@/lib/article-fts/ddl'
 import { ensureScheduledPublishTables } from '@/lib/scheduled-publish/ddl'
 import { ensureNotificationTables } from '@/lib/notifications/ddl'
 import { ensureEmailReminderTables } from '@/lib/email-reminders/ddl'
@@ -294,6 +296,9 @@ export async function createKernelContext(dir = createWranglerState()): Promise<
     await db.prepare(statement).run()
   }
   for (const statement of identityDdl) await db.prepare(statement).run()
+  // #234 Phase A — canonical slug registry + article FTS (kernel dependencies).
+  for (const statement of SLUG_ADDRESS_DDL_STATEMENTS) await db.prepare(statement).run()
+  for (const statement of ARTICLE_FTS_DDL_STATEMENTS) await db.prepare(statement).run()
   for (const column of ['content_envelope', 'content_snapshot_sha256', 'source_sync_sha256']) {
     await db.prepare(`ALTER TABLE posts ADD COLUMN ${column} TEXT`).run()
   }

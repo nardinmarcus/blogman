@@ -32,7 +32,7 @@ import {
 } from './helpers'
 import { save, setPinned } from '@/lib/article-commands'
 import { discardRevision, promoteRevision, readRevisionState } from '@/lib/publish-revision'
-import { FormalArticleInPlaceUpdateError, updatePost, updatePostBySlug } from '@/lib/repositories/posts'
+
 import type { ArticleCommandSnapshot } from '@/lib/article-commands/types'
 import type { RevisionRow } from '@/lib/publish-revision/types'
 
@@ -403,18 +403,14 @@ describe('lib/publish-revision — formal-article pending revision loop', { time
     expect((await livePost(article.postRef))?.title).toBe('第一修订')
   })
 
-  it('拒绝旧式原地更新：对正式文章的 legacy 直接 posts 写入抛错', async () => {
+  it('拒绝旧式原地更新：legacy 直接写已随投影退役（结构性移除）', async () => {
     const article = await createFormalArticle(fresh('inplace'))
-    await expect(
-      updatePost(createDatabase(), article.postRef, { title: '试图原地改标题', content: '试图原地改正文' }),
-    ).rejects.toBeInstanceOf(FormalArticleInPlaceUpdateError)
-    // The legacy in-place surface can no longer even REACH the article (its
-    // rows live only in canonical facts now) — a structural refusal, and the
-    // live formal content is untouched.
-    await expect(
-      updatePostBySlug(createDatabase(), article.slug, { title: '原地改' }),
-    ).rejects.toThrow()
-    // The live row is untouched.
+    // The legacy in-place helpers no longer exist — the posts write surface is
+    // retired with the projection (ADR 0008). The live formal content is
+    // untouched and remains reachable only through canonical reads.
+    const repo = (await import('@/lib/repositories/posts')) as Record<string, unknown>
+    expect(repo.updatePost).toBeUndefined()
+    expect(repo.updatePostBySlug).toBeUndefined()
     expect((await livePost(article.postRef))?.title).toBe('正式文章标题')
     // A visibility-only toggle (pin) is NOT a content edit: it goes through
     // the explicit command protocol and appends its own immutable version;

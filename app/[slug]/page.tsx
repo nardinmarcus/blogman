@@ -13,7 +13,6 @@ import { ArticleOutline } from '@/components/ArticleOutline'
 import { getSiteHeaderData } from '@/lib/site'
 import { resolvePublicArticle } from '@/lib/public-read'
 import { getRelatedPosts } from '@/lib/related-content'
-import { incrementViewCount } from '@/lib/repositories/posts'
 import { getSiteUrl } from '@/lib/site-config'
 import { resolvePostCoverImage } from '@/lib/default-cover-images'
 import { buildArticleOutline } from '@/lib/article-outline'
@@ -217,13 +216,6 @@ export default async function PostPage({
         </div>
       )
     }
-  }
-
-  try {
-    await incrementViewCount(db, slug)
-  } catch (error) {
-    rethrowIfDatabaseMigrationRequired(error)
-    console.error(error)
   }
 
   // 阅读时间估算（中文按 400 字/分钟）

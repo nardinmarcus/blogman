@@ -140,17 +140,16 @@ async function attachFacts<T>(db: D1Database, result: T): Promise<T & { slug?: s
 async function resolveArticleIdBySlug(db: D1Database, slug: string): Promise<number | null> {
   const normalized = normalizePostSlug(slug)
   if (!normalized) return null
+  // Errors propagate: a broken schema surfaces as the fixed safe 503.
   const byRegistry = await db
     .prepare('SELECT article_id FROM article_slug_addresses WHERE slug = ?')
     .bind(normalized)
     .first<{ article_id: number }>()
-    .catch(() => null)
   if (byRegistry) return byRegistry.article_id
   const byIdentity = await db
     .prepare('SELECT id FROM articles WHERE slug = ?')
     .bind(normalized)
     .first<{ id: number }>()
-    .catch(() => null)
   return byIdentity?.id ?? null
 }
 
