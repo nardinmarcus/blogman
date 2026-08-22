@@ -14,6 +14,10 @@ export const metadata = { title: '文章管理' }
 export interface AdminListPost extends PostWithTags {
   articleId: number | null
   version: number | null
+  /** Canonical B3 fact — true when a formal_publication exists (any lifecycle). */
+  formalPublished: boolean | null
+  /** Canonical lifecycle ('published' | 'unpublished'), null when never formally published. */
+  lifecycle: 'published' | 'unpublished' | null
 }
 
 export default async function AdminPostsPage({
@@ -43,16 +47,20 @@ export default async function AdminPostsPage({
   // B2-06 — merge the versioned-authority facts (article id + current version) so
   // every list write action can carry expected version + operation id. Falls back
   // to null facts (legacy direct writes) on a ledger-only DB that lacks identity tables.
-  let versionFacts: Map<number, { articleId: number; version: number }> = new Map()
+  let versionFacts: Map<number, import('@/lib/repositories/articles').PostVersionFact> = new Map()
   if (env?.DB) {
     const facts = await listIdentityFacts(env.DB, sourcePosts.map((p) => p.id))
-    versionFacts = new Map(
-      [...facts.entries()].map(([postRef, fact]) => [postRef, { articleId: fact.articleId, version: fact.version }]),
-    )
+    versionFacts = facts
   }
   const posts: AdminListPost[] = sourcePosts.map((p) => {
     const fact = versionFacts.get(p.id)
-    return { ...p, articleId: fact?.articleId ?? null, version: fact?.version ?? null }
+    return {
+      ...p,
+      articleId: fact?.articleId ?? null,
+      version: fact?.version ?? null,
+      formalPublished: fact ? fact.formalPublished : null,
+      lifecycle: fact?.lifecycle ?? null,
+    }
   })
 
   // 从 categories 表获取正式分类列表（用于 PostRow 下拉菜单）
