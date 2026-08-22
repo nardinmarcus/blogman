@@ -44,6 +44,10 @@ export interface PostVersionFact {
   /** Current body version (0 when an identity exists but no version snapshot is present). */
   version: number
   identitySlug: string | null
+  /** Canonical B3 fact — true when a formal_publications row exists (any lifecycle). */
+  formalPublished: boolean
+  /** Canonical lifecycle ('published' | 'unpublished'), null when never formally published. */
+  lifecycle: 'published' | 'unpublished' | null
 }
 
 /**
@@ -80,7 +84,31 @@ export async function listIdentityFacts(
         articleId: row.article_id,
         version: row.version ?? 0,
         identitySlug: row.identity_slug,
+        formalPublished: false,
+        lifecycle: null,
       })
+    }
+    // Canonical B3 formal-publication facts in a SEPARATE fault-tolerant read:
+    // a DB with identity tables but no formal_publications table keeps its
+    // version facts instead of losing them to one combined failing query.
+    try {
+      const { results: fpRows } = await db
+        .prepare(
+          `SELECT article_id, lifecycle FROM formal_publications
+           WHERE article_id IN (SELECT id FROM articles WHERE post_ref IN (${placeholders}))`,
+        )
+        .bind(...ids)
+        .all<{ article_id: number; lifecycle: string }>()
+      const byArticleId = new Map(fpRows.map((r) => [r.article_id, r.lifecycle]))
+      for (const fact of map.values()) {
+        const lc = byArticleId.get(fact.articleId)
+        if (lc === 'published' || lc === 'unpublished') {
+          fact.formalPublished = true
+          fact.lifecycle = lc
+        }
+      }
+    } catch {
+      // formal_publications absent — treat every article as never formally published
     }
   } catch {
     // identity tables absent — no versioned authority exists on this DB

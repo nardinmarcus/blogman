@@ -156,6 +156,17 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
     ...categories.map((cat) => ({ value: cat, label: cat })),
   ]
 
+  // B3 分流文案：从未正式发布 → 首次上线；曾正式发布 → 重新上线；ledger-only → 旧「发布文章」
+  const canFirstPublish = hasAuthority && post.formalPublished !== true
+  const publishLabel =
+    post.status === 'published'
+      ? '转为草稿'
+      : canFirstPublish
+        ? '发布（首次上线）'
+        : hasAuthority
+          ? '重新上线'
+          : '发布文章'
+
   // 查看文章
   const handleView = () => {
     window.open(articleUrl, '_blank')
@@ -199,8 +210,28 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
     return ok
   }
 
-  // 状态切换（发布/取消发布 —— 走临时版本化命令）
+  // 状态切换（发布/取消发布）—— B3 canonical 分流：
+  //   · 从未正式发布（无 formal_publication）→ 打开首次发布确认流（prepare →
+  //     四阻塞项与精确版本 → confirm → publicUrl 回执），绝不走临时命令；
+  //   · 曾正式发布 → relive / unpublish 生命周期命令；
+  //   · ledger-only 库（无身份表）→ 保留旧直写回退。
   const handleStatusToggle = async () => {
+    if (hasAuthority && post.formalPublished !== true) {
+      // 首次上线：交给共享 #33/#34 发布确认页（服务端 prepare/confirm + 回执）。
+      router.push(`/admin/publish/${post.articleId}`)
+      setShowStatusModal(false)
+      return true
+    }
+    if (hasAuthority) {
+      // 曾正式发布：生命周期命令，不使用 publishTemp。
+      const action = post.status === 'published' ? 'unpublish' : 'relive'
+      const ok = await run(action, { content: 'formal' }, action === 'unpublish' ? '已取消发布' : '已重新上线')
+      if (ok) {
+        setShowStatusModal(false)
+        router.refresh()
+      }
+      return ok
+    }
     const newStatus = post.status === 'published' ? 'draft' : 'published'
     const ok = await run(
       'publishTemp',
@@ -477,7 +508,7 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
                       ) : (
                         <Check className="w-4 h-4 text-emerald-600" />
                       )}
-                      <span>{post.status === 'published' ? '转为草稿' : '发布文章'}</span>
+                      <span>{publishLabel}</span>
                     </button>
                     <button
                       type="button"
@@ -695,7 +726,7 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
                       ) : (
                         <Check className="w-4 h-4 text-emerald-600" />
                       )}
-                      <span>{post.status === 'published' ? '转为草稿' : '发布文章'}</span>
+                      <span>{publishLabel}</span>
                     </button>
                     <button
                       type="button"
@@ -756,11 +787,15 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
         isOpen={showStatusModal}
         onClose={() => setShowStatusModal(false)}
         onConfirm={handleStatusToggle}
-        title={post.status === 'published' ? '转为草稿' : '发布文章'}
+        title={post.status === 'published' ? '转为草稿' : publishLabel}
         description={
           post.status === 'published'
             ? '转为草稿后，文章将不再公开显示。'
-            : '发布后，文章将在首页和 RSS 中显示。'
+            : canFirstPublish
+              ? '将进入首次发布确认：展示精确版本与四项阻塞检查，确认后创建正式发布并生成公开地址。'
+              : hasAuthority
+                ? '将基于正式版本重新上线，文章将在首页和 RSS 中显示。'
+                : '发布后，文章将在首页和 RSS 中显示。'
         }
         confirmText="确认"
         type="info"
