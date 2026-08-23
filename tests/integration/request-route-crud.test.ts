@@ -52,8 +52,10 @@ import {
 } from '@/app/api/admin/posts/[slug]/route'
 import {
   DELETE as deleteCategory,
+  GET as listCategories,
   PATCH as updateCategory,
   POST as createCategory,
+  PUT as reorderCategories,
 } from '@/app/api/admin/categories/route'
 import { POST as createPost } from '@/app/api/posts/route'
 
@@ -250,6 +252,20 @@ describe('real route CRUD on a ledger-migrated D1', () => {
       .toEqual([{ prompt: '作者 route summary prompt', temperature: 0, max_tokens: 1 }])
 
     expect((await createCategory(request('/api/admin/categories', 'POST', { name: 'Route Category', slug: 'route-category' }))).status).toBe(200)
+    expect((await createCategory(request('/api/admin/categories', 'POST', { name: 'Route Second', slug: 'route-second' }))).status).toBe(200)
+    expect((await reorderCategories(request('/api/admin/categories', 'PUT', {
+      slugs: ['route-second', 'route-category'],
+    }))).status).toBe(200)
+    expect(query(state, "SELECT value FROM site_settings WHERE key = 'category_order'"))
+      .toEqual([{ value: '["route-second","route-category"]' }])
+    const listResponse = await listCategories(request('/api/admin/categories', 'GET'))
+    expect(listResponse.status).toBe(200)
+    const listed = (await listResponse.json()) as { categories: Array<{ slug: string }> }
+    expect(listed.categories.map((c) => c.slug).filter((s) => s.startsWith('route-')))
+      .toEqual(['route-second', 'route-category'])
+    expect((await deleteCategory(request('/api/admin/categories', 'DELETE', { slug: 'route-second' }))).status).toBe(200)
+    expect(query(state, "SELECT value FROM site_settings WHERE key = 'category_order'"))
+      .toEqual([{ value: '["route-category"]' }])
     expect((await updateCategory(request('/api/admin/categories', 'PATCH', { oldSlug: 'route-category', name: 'Route Renamed', slug: 'route-renamed' }))).status).toBe(200)
     expect(query(state, "SELECT name, slug FROM categories WHERE slug = 'route-renamed'"))
       .toEqual([{ name: 'Route Renamed', slug: 'route-renamed' }])

@@ -7,7 +7,6 @@ import { normalizeTheme, type BodyFont, type Theme } from '@/lib/appearance'
 import { NavLinksEditor } from './NavLinksEditor'
 import { CustomJsEditor } from './CustomJsEditor'
 import { ThemeManager } from './ThemeManager'
-import { CategoryManager } from '../categories/CategoryManager'
 import { AiProviderManager } from './AiProviderManager'
 import { AiActionsManager } from './AiActionsManager'
 import { AiImageProviderManager } from './AiImageProviderManager'
@@ -16,16 +15,9 @@ import { AiPostGeneratorsManager } from './AiPostGeneratorsManager'
 import { RuntimeCapabilitiesPanel } from './RuntimeCapabilitiesPanel'
 import { ThirdPartyPublishingManager } from './ThirdPartyPublishingManager'
 
-interface Category {
-  name: string
-  slug: string
-  post_count: number
-}
-
 interface Props {
   initialNavLinks: string
   initialCustomJs: string
-  initialCategories: Category[]
   initialBodyFont: string
   initialDefaultTheme: string
   initialRuntimeCapabilities: RuntimeCapabilities
@@ -34,7 +26,6 @@ interface Props {
 export function SettingsManager({
   initialNavLinks,
   initialCustomJs,
-  initialCategories,
   initialBodyFont,
   initialDefaultTheme,
   initialRuntimeCapabilities,
@@ -101,12 +92,6 @@ export function SettingsManager({
           />
         </div>
       ),
-    },
-    {
-      id: 'categories',
-      label: '分类设置',
-      group: '站点',
-      content: <CategoryManager initialCategories={initialCategories} />,
     },
     {
       id: 'code',

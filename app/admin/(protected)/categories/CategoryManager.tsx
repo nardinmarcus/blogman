@@ -109,6 +109,28 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
     }
   }
 
+  const moveCategory = async (index: number, direction: 'up' | 'down') => {
+    const swapIndex = direction === 'up' ? index - 1 : index + 1
+    if (swapIndex < 0 || swapIndex >= categories.length) return
+
+    const next = [...categories]
+    next[index] = categories[swapIndex]
+    next[swapIndex] = categories[index]
+
+    try {
+      const res = await fetch('/api/admin/categories', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slugs: next.map((c) => c.slug) }),
+      })
+      if (!res.ok) throw new Error()
+      setCategories(next)
+      router.refresh()
+    } catch {
+      toast.error('排序失败')
+    }
+  }
+
   // Auto-generate slug from name
   const handleNameChange = (val: string) => {
     setName(val)
@@ -195,7 +217,27 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
                   <span className="text-sm font-medium text-[var(--editor-ink)]">{cat.name}</span>
                   <span className="text-xs text-[var(--editor-muted)] font-mono">{cat.slug}</span>
                   <span className="text-xs text-[var(--editor-muted)] text-right tabular-nums">{cat.post_count}</span>
-                  <div className="flex gap-2">
+                  <div className="flex items-center gap-2">
+                    <div className="flex gap-0.5">
+                      <button
+                        type="button"
+                        disabled={categories.findIndex((c) => c.slug === cat.slug) === 0}
+                        onClick={() => moveCategory(categories.findIndex((c) => c.slug === cat.slug), 'up')}
+                        title="上移"
+                        className="rounded px-1 text-[var(--editor-muted)] hover:bg-[var(--editor-soft)] disabled:opacity-30"
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        disabled={categories.findIndex((c) => c.slug === cat.slug) === categories.length - 1}
+                        onClick={() => moveCategory(categories.findIndex((c) => c.slug === cat.slug), 'down')}
+                        title="下移"
+                        className="rounded px-1 text-[var(--editor-muted)] hover:bg-[var(--editor-soft)] disabled:opacity-30"
+                      >
+                        ↓
+                      </button>
+                    </div>
                     <button type="button" onClick={() => startEditing(cat)} className="text-xs text-[var(--editor-accent)] hover:underline">编辑</button>
                     <button type="button" onClick={() => handleDelete(cat.slug, cat.name)} className="text-xs text-rose-500 hover:underline">删除</button>
                   </div>

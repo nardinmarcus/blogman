@@ -1,5 +1,5 @@
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
-import { getSetting, getCategories } from '@/lib/db'
+import { getSetting } from '@/lib/db'
 import { detectRuntimeCapabilities } from '@/lib/runtime-capabilities'
 import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 import { SettingsManager } from './SettingsManager'
@@ -11,7 +11,6 @@ export default async function SettingsPage() {
   let customJs = ''
   let bodyFont = ''
   let defaultTheme = ''
-  let categories: Awaited<ReturnType<typeof getCategories>> = []
   let runtimeCapabilities = detectRuntimeCapabilities()
 
   try {
@@ -22,7 +21,6 @@ export default async function SettingsPage() {
       customJs = (await getSetting(env.DB, 'custom_js')) || ''
       bodyFont = (await getSetting(env.DB, 'body_font')) || ''
       defaultTheme = (await getSetting(env.DB, 'default_theme')) || ''
-      categories = await getCategories(env.DB)
     }
   } catch (error) {
     rethrowIfDatabaseMigrationRequired(error)
@@ -39,7 +37,6 @@ export default async function SettingsPage() {
       <SettingsManager
         initialNavLinks={navLinks}
         initialCustomJs={customJs}
-        initialCategories={categories}
         initialBodyFont={bodyFont}
         initialDefaultTheme={defaultTheme}
         initialRuntimeCapabilities={runtimeCapabilities}

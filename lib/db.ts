@@ -26,6 +26,7 @@ export {
   deleteCategory,
   getCategories,
   getPublicCategories,
+  reorderCategories,
   updateCategory,
 } from '@/lib/repositories/categories'
 export { getSetting, setSetting } from '@/lib/repositories/settings'

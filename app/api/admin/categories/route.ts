@@ -1,4 +1,4 @@
-import { getCategories, createCategory, updateCategory, deleteCategory } from '@/lib/db'
+import { getCategories, createCategory, updateCategory, deleteCategory, reorderCategories } from '@/lib/db'
 import {
   ensureAuthenticatedRequest,
   getRouteEnvWithDb,
@@ -22,6 +22,10 @@ interface UpdateCategoryBody {
 
 interface DeleteCategoryBody {
   slug?: string
+}
+
+interface ReorderCategoriesBody {
+  slugs?: unknown
 }
 
 function categoryErrorResponse(error: unknown) {
@@ -76,6 +80,26 @@ export async function PATCH(req: NextRequest) {
     }
 
     await updateCategory(route.db, oldSlug, name, slug)
+    return jsonOk({ success: true })
+  } catch (err) {
+    return categoryErrorResponse(err)
+  }
+}
+
+export async function PUT(req: NextRequest) {
+  try {
+    const route = await getRouteEnvWithDb('DB not available')
+    if (!route.ok) return route.response
+    const authError = await ensureAuthenticatedRequest(req, route.db, '未授权')
+    if (authError) return authError
+
+    const { slugs } = await parseJsonBody<ReorderCategoriesBody>(req)
+    if (!Array.isArray(slugs) || slugs.length === 0
+      || slugs.some((slug) => typeof slug !== 'string' || !slug)) {
+      return jsonError('排序数据格式不正确', 400)
+    }
+
+    await reorderCategories(route.db, slugs)
     return jsonOk({ success: true })
   } catch (err) {
     return categoryErrorResponse(err)

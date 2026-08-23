@@ -1,7 +1,31 @@
 import type { Database } from '@/lib/repositories/schema'
 import type { CategoryRow } from '@/lib/repositories/types'
 import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
+import { getSetting, setSetting } from '@/lib/repositories/settings'
 import { setCategory } from '@/lib/article-commands'
+
+// 分类展示顺序存于 site_settings（与 nav_links 同一模式），避免 schema 变更
+const CATEGORY_ORDER_KEY = 'category_order'
+
+async function getCategoryOrder(db: Database): Promise<string[]> {
+  const raw = await getSetting(db, CATEGORY_ORDER_KEY)
+  if (!raw) return []
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+// rows 已按 name 排序；排序数组中未知的 slug 保持名称序排到末尾（sort 是稳定排序）
+function applyCategoryOrder(rows: CategoryRow[], order: string[]): CategoryRow[] {
+  if (order.length === 0) return rows
+  const position = new Map(order.map((slug, index) => [slug, index]))
+  return [...rows].sort(
+    (a, b) => (position.get(a.slug) ?? Number.MAX_SAFE_INTEGER) - (position.get(b.slug) ?? Number.MAX_SAFE_INTEGER),
+  )
+}
 
 // 获取所有分类
 export async function getCategories(db: Database): Promise<CategoryRow[]> {
@@ -9,7 +33,7 @@ export async function getCategories(db: Database): Promise<CategoryRow[]> {
     .prepare('SELECT name, slug, post_count FROM categories ORDER BY name')
     .all<CategoryRow>()
 
-  return results
+  return applyCategoryOrder(results, await getCategoryOrder(db))
 }
 
 export async function getPublicCategories(db: Database): Promise<CategoryRow[]> {
@@ -47,12 +71,17 @@ export async function getPublicCategories(db: Database): Promise<CategoryRow[]> 
     )
     .all<CategoryRow>()
 
-  return results ?? []
+  return applyCategoryOrder(results ?? [], await getCategoryOrder(db))
 }
 
 // 创建分类
 export async function createCategory(db: Database, name: string, slug: string): Promise<void> {
   await db.prepare('INSERT OR IGNORE INTO categories (name, slug) VALUES (?, ?)').bind(name, slug).run()
+}
+
+// 保存分类排序（全量 slug 顺序，与 nav_links 同为设置项写入）
+export async function reorderCategories(db: Database, slugs: string[]): Promise<void> {
+  await setSetting(db, CATEGORY_ORDER_KEY, JSON.stringify(slugs))
 }
 
 // 更新分类
@@ -97,9 +126,28 @@ export async function updateCategory(db: Database, oldSlug: string, name: string
   }
 
   await db.prepare('UPDATE categories SET name = ?, slug = ? WHERE slug = ?').bind(name, newSlug, oldSlug).run()
+
+  // slug 变更后同步排序设置，避免顺序丢失
+  if (oldSlug !== newSlug) {
+    const order = await getCategoryOrder(db)
+    if (order.includes(oldSlug)) {
+      await setSetting(db, CATEGORY_ORDER_KEY, JSON.stringify(order.map((s) => (s === oldSlug ? newSlug : s))))
+    }
+  }
 }
 
 // 删除分类
 export async function deleteCategory(db: Database, slug: string): Promise<void> {
   await db.prepare('DELETE FROM categories WHERE slug = ?').bind(slug).run()
+
+  const order = await getCategoryOrder(db)
+  if (order.includes(slug)) {
+    const next = order.filter((s) => s !== slug)
+    // 空顺序等同于未设置，删除该 key 避免留下空壳设置行
+    if (next.length === 0) {
+      await db.prepare('DELETE FROM site_settings WHERE key = ?').bind(CATEGORY_ORDER_KEY).run()
+    } else {
+      await setSetting(db, CATEGORY_ORDER_KEY, JSON.stringify(next))
+    }
+  }
 }

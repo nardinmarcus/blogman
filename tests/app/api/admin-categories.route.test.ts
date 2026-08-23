@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   createCategory: vi.fn(),
   updateCategory: vi.fn(),
   deleteCategory: vi.fn(),
+  reorderCategories: vi.fn(),
   ensureAuthenticatedRequest: vi.fn(),
   getRouteEnvWithDb: vi.fn(),
   parseJsonBody: vi.fn(),
@@ -15,6 +16,7 @@ vi.mock('@/lib/db', () => ({
   createCategory: mocks.createCategory,
   updateCategory: mocks.updateCategory,
   deleteCategory: mocks.deleteCategory,
+  reorderCategories: mocks.reorderCategories,
 }))
 
 vi.mock('@/lib/server/route-helpers', () => ({
@@ -25,7 +27,7 @@ vi.mock('@/lib/server/route-helpers', () => ({
   parseJsonBody: mocks.parseJsonBody,
 }))
 
-import { DELETE, GET, POST } from '@/app/api/admin/categories/route'
+import { DELETE, GET, POST, PUT } from '@/app/api/admin/categories/route'
 
 describe('/api/admin/categories route', () => {
   beforeEach(() => {
@@ -74,5 +76,23 @@ describe('/api/admin/categories route', () => {
     expect(response.status).toBe(401)
     await expect(response.json()).resolves.toEqual({ error: '未授权' })
     expect(mocks.deleteCategory).not.toHaveBeenCalled()
+  })
+
+  it('reorders categories by saving the slug order', async () => {
+    mocks.parseJsonBody.mockResolvedValue({ slugs: ['product', 'ai'] })
+
+    const response = await PUT({} as never)
+
+    expect(response.status).toBe(200)
+    expect(mocks.reorderCategories).toHaveBeenCalledWith({ kind: 'db' }, ['product', 'ai'])
+  })
+
+  it('rejects malformed reorder payloads', async () => {
+    mocks.parseJsonBody.mockResolvedValue({ slugs: ['ai', 1] })
+
+    const response = await PUT({} as never)
+
+    expect(response.status).toBe(400)
+    expect(mocks.reorderCategories).not.toHaveBeenCalled()
   })
 })
