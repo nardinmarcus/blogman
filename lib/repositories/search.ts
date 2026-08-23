@@ -59,7 +59,12 @@ async function searchCanonical(
   includeDeleted: boolean,
 ): Promise<PostWithTags[]> {
   const conditions: string[] = []
-  const params: unknown[] = [query]
+  // FTS5 safety: a raw user query containing ':' (e.g. a title "in 2026: 12
+  // steps") makes FTS5 parse "2026:" as a column filter → "no such column".
+  // Quote the whole query as one phrase and escape embedded quotes, so the
+  // MATCH argument is always a syntactically-safe string literal.
+  const ftsSafeQuery = `"${query.replace(/"/g, '""')}"`
+  const params: unknown[] = [ftsSafeQuery]
   if (!includeDrafts) conditions.push(`f.lifecycle = 'published'`)
   if (!includeDeleted) conditions.push(`${SNAP.deleted_at} = 0`)
   if (!includeEncrypted) conditions.push(`${SNAP.password} = ''`)

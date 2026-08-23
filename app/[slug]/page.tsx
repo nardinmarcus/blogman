@@ -20,6 +20,7 @@ import {
   rethrowIfDatabaseMigrationRequired,
 } from '@/lib/database-errors'
 
+
 // Cloudflare Workers 缓存策略
 export const revalidate = 86400 // 24小时缓存
 export const dynamicParams = true
@@ -112,7 +113,8 @@ export default async function PostPage({
   // content/access-control/pinned come from the frozen `article_versions`
   // snapshot. No legacy `posts` decision gate here.
   const resolved = await resolvePublicArticle(db, slug).catch((error) => {
-    rethrowIfDatabaseMigrationRequired(error)
+      rethrowIfDatabaseMigrationRequired(error)
+      return { article: null, redirectSlug: null }
     return { article: null, redirectSlug: null }
   })
   // B3-04: a historical address permanently single-hops (301) to the article's
@@ -224,7 +226,6 @@ export default async function PostPage({
   const searchIndexable = post.live && !post.password && post.is_hidden === 0
   const related = !post.password
     ? await getRelatedPosts(db, env, post, 3).catch((error) => {
-        rethrowIfDatabaseMigrationRequired(error)
         return { strategy: 'fts' as const, source: 'rules' as const, results: [] }
       })
     : { strategy: 'fts' as const, source: 'rules' as const, results: [] }

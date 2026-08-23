@@ -111,7 +111,10 @@ export default async function RootLayout({
       defaultTheme = normalizeTheme(defaultThemeValue)
     }
   } catch (error) {
-    rethrowIfDatabaseMigrationRequired(error)
+    // TEMP DIAG + fix: the root layout must degrade (defaults) instead of
+    // rethrowing a schema error into a whole-page 500. Log the raw cause so the
+    // offending SQL stays observable, then continue with defaults.
+    console.error('layout settings degraded:', error instanceof Error ? error.message : String(error))
   }
 
   const font = FONT_CONFIG[bodyFont]
