@@ -227,7 +227,7 @@ export function MobilePublishConfirm({
               </div>
               <button
                 type="button"
-                onClick={() => router.refresh()}
+                onClick={() => router.push('/admin/today')}
                 className="w-full rounded-lg border border-emerald-300 py-2.5 text-sm font-medium text-emerald-800 hover:bg-emerald-100"
               >
                 返回工作台
@@ -236,7 +236,8 @@ export function MobilePublishConfirm({
           )}
         </main>
 
-        {/* single result-type primary action (no second modal; disables on click) */}
+        {/* single result-type primary action (no second modal; disables on click); hidden once the receipt shows */}
+        {!receipt && (
         <footer className="fixed bottom-0 inset-x-0 z-40 border-t border-[var(--editor-line)] bg-[var(--editor-panel)]/95 backdrop-blur">
           <div className="mx-auto max-w-[430px] px-4 py-3">
             <button
@@ -261,6 +262,7 @@ export function MobilePublishConfirm({
             </button>
           </div>
         </footer>
+        )}
       </div>
     </div>
   )
