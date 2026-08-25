@@ -7,7 +7,7 @@
 
 **An open-source, self-hosted blog platform that runs entirely on Cloudflare, Next.js 16 + Workers + D1 + R2. Not a static template: a full writing platform with a WYSIWYG editor, AI writing assistance, AI image generation, and a theme system.**
 
-![Blogman editor with autosave and word count](docs/screenshots/editor-overview.webp)
+![Blogman editor with autosave status](docs/screenshots/editor-overview.webp)
 
 ## What it does
 
@@ -40,7 +40,7 @@ Blogman gives you a complete blog you own end to end: write in a Notion-style ed
 
 | Homepage themes | Ask AI bubble menu | Publish states |
 | --- | --- | --- |
-| ![Mobile homepage of a blog running Blogman](docs/screenshots/home-themes.webp) | ![Ask AI bubble menu with rewrite, expand, translate actions](docs/screenshots/ask-ai.png) | ![Publish state picker: public, draft, password, link-only](docs/screenshots/publish-states.png) |
+| ![Homepage with theme switcher showing the 4 built-in themes](docs/screenshots/home-themes.webp) | ![Ask AI bubble menu with rewrite, expand, translate actions](docs/screenshots/ask-ai.png) | ![Publish state picker: public, draft, password, link-only](docs/screenshots/publish-states.png) |
 
 ## Quick start
 

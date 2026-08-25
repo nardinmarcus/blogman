@@ -7,7 +7,7 @@
 
 **开源自托管博客平台，整套系统跑在 Cloudflare 上 —— Next.js 16 + Workers + D1 + R2。不是静态模板，而是完整的写作平台：所见即所得编辑器、AI 写作辅助、AI 生图、主题系统一应俱全。**
 
-![Blogman 编辑器，带自动保存和字数统计](docs/screenshots/editor-overview.webp)
+![Blogman 编辑器，带自动保存状态](docs/screenshots/editor-overview.webp)
 
 ## 它做什么
 
@@ -40,7 +40,7 @@ Blogman 让你拥有一个完全属于自己的博客：在 Notion 风格的编�
 
 | 首页主题 | Ask AI 气泡菜单 | 发布状态 |
 | --- | --- | --- |
-| ![运行 Blogman 的博客移动端首页](docs/screenshots/home-themes.webp) | ![Ask AI 气泡菜单：润色、缩写、扩写、总结、翻译](docs/screenshots/ask-ai.png) | ![发布状态选择：公开、草稿、加密、链接访问](docs/screenshots/publish-states.png) |
+| ![首页主题切换下拉，展示 4 套内置主题](docs/screenshots/home-themes.webp) | ![Ask AI 气泡菜单：润色、缩写、扩写、总结、翻译](docs/screenshots/ask-ai.png) | ![发布状态选择：公开、草稿、加密、链接访问](docs/screenshots/publish-states.png) |
 
 ## 快速开始
 
