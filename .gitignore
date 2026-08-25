@@ -43,9 +43,17 @@ yarn-error.log*
 next-env.d.ts
 .gstack/
 .wrangler/
-.wrangler/
 skills/
+.impeccable/
+.pi/
+.scratch/
 wrangler.local.toml
+wrangler.dry.toml
+wrangler.prod.toml
+
+# repo uses npm (package-lock.json); pnpm files are local artifacts
+pnpm-lock.yaml
+pnpm-workspace.yaml
 worker-configuration.d.ts
 
 # Issue #23 durable terminal evidence runtime
