@@ -3,18 +3,24 @@
 import { createContext, useContext, useState, useCallback, ReactNode } from 'react'
 import { X } from 'lucide-react'
 
+interface ToastAction {
+  label: string
+  onClick: () => void
+}
+
 interface Toast {
   id: string
   message: string
   type: 'success' | 'error' | 'warning' | 'info'
   duration: number
+  action?: ToastAction
 }
 
 interface ToastContextValue {
-  success: (message: string, duration?: number) => void
-  error: (message: string, duration?: number) => void
-  warning: (message: string, duration?: number) => void
-  info: (message: string, duration?: number) => void
+  success: (message: string, duration?: number, action?: ToastAction) => void
+  error: (message: string, duration?: number, action?: ToastAction) => void
+  warning: (message: string, duration?: number, action?: ToastAction) => void
+  info: (message: string, duration?: number, action?: ToastAction) => void
 }
 
 const ToastContext = createContext<ToastContextValue | null>(null)
@@ -30,9 +36,9 @@ export function useToast() {
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([])
 
-  const addToast = useCallback((message: string, type: Toast['type'], duration = 3000) => {
+  const addToast = useCallback((message: string, type: Toast['type'], duration = 3000, action?: ToastAction) => {
     const id = Math.random().toString(36).substring(2, 9)
-    const toast: Toast = { id, message, type, duration }
+    const toast: Toast = { id, message, type, duration, action }
 
     setToasts(prev => [...prev, toast])
 
@@ -48,16 +54,16 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const value: ToastContextValue = {
-    success: (message, duration) => addToast(message, 'success', duration),
-    error: (message, duration) => addToast(message, 'error', duration),
-    warning: (message, duration) => addToast(message, 'warning', duration),
-    info: (message, duration) => addToast(message, 'info', duration),
+    success: (message, duration, action) => addToast(message, 'success', duration, action),
+    error: (message, duration, action) => addToast(message, 'error', duration, action),
+    warning: (message, duration, action) => addToast(message, 'warning', duration, action),
+    info: (message, duration, action) => addToast(message, 'info', duration, action),
   }
 
   return (
     <ToastContext.Provider value={value}>
       {children}
-      <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+      <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none" aria-live="polite">
         {toasts.map(toast => (
           <ToastItem key={toast.id} toast={toast} onClose={() => removeToast(toast.id)} />
         ))}
@@ -89,6 +95,17 @@ function ToastItem({ toast, onClose }: { toast: Toast; onClose: () => void }) {
         aria-hidden="true"
       />
       <p className="flex-1 text-sm leading-6">{toast.message}</p>
+      {toast.action && (
+        <button
+          onClick={() => {
+            toast.action!.onClick()
+            onClose()
+          }}
+          className="flex-shrink-0 self-center rounded px-1.5 py-0.5 text-sm font-medium text-[var(--editor-accent)] transition hover:bg-[var(--editor-soft)]"
+        >
+          {toast.action.label}
+        </button>
+      )}
       <button
         onClick={onClose}
         className="flex-shrink-0 rounded p-0.5 text-[var(--editor-muted)] transition hover:bg-[var(--editor-soft)] hover:text-[var(--editor-ink)]"

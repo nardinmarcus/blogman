@@ -11,6 +11,7 @@
   --editor-ink: #141413;
   --editor-muted: #5e5d59;
   --editor-accent: #c96442;
+  --editor-accent-strong: #b4552f;
   --editor-accent-ink: #faf9f5;
   --editor-link: #c96442;
   --editor-code-bg: #faf9f5;
@@ -46,6 +47,7 @@
     --editor-ink: #e8ecf3;
     --editor-muted: #a5b0c5;
     --editor-accent: #e08a67;
+    --editor-accent-strong: #e08a67;
     --editor-accent-ink: #151a23;
     --editor-link: #f0a07c;
     --editor-code-bg: #121722;
@@ -74,10 +76,32 @@ body {
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
 
-/* Focus states */
-*:focus-visible {
-  outline: 2px solid var(--editor-accent);
+/* Focus states — DESIGN.md 指定的全局唯一冷色 Focus Blue */
+:focus-visible {
+  outline: 2px solid #3898ec;
   outline-offset: 2px;
+}
+
+/* 设置页 tab 切换过渡（尊重 prefers-reduced-motion） */
+@keyframes tab-panel-fade {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.tab-panel-fade {
+  animation: tab-panel-fade 150ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-panel-fade {
+    animation: none;
+  }
 }
 
 /* Smooth scrolling */
@@ -889,6 +913,7 @@ body {
   --editor-ink: #c8d3e8;
   --editor-muted: #8a96b4;
   --editor-accent: #4ade80;
+  --editor-accent-strong: #4ade80;
   --editor-accent-ink: #0f1117;
   --editor-link: #4ade80;
   --editor-code-bg: #12141f;

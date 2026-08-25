@@ -75,6 +75,8 @@ interface ProviderListTableProps<T extends BaseProviderProfile> {
   profiles: T[]
   defaultProfileId: number | null
   emptyText: string
+  /** 每个 profile id 被多少个提示词引用（用于行内元信息与删除影响面） */
+  usageCounts?: Record<number, number>
   onEdit: (profile: T) => void
   onDelete: (profile: T) => void
   onSetDefault: (profile: T) => void
@@ -84,6 +86,7 @@ export function ProviderListTable<T extends BaseProviderProfile>({
   profiles,
   defaultProfileId,
   emptyText,
+  usageCounts,
   onEdit,
   onDelete,
   onSetDefault,
@@ -106,7 +109,12 @@ export function ProviderListTable<T extends BaseProviderProfile>({
               <td className="px-3 py-2 font-medium text-[var(--editor-ink)]">
                 {profile.name}
                 {profile.id === defaultProfileId || profile.is_default === 1 ? (
-                  <span className="ml-2 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-600">默认</span>
+                  <span className="ml-2 rounded bg-[var(--editor-accent)]/10 px-1.5 py-0.5 text-[10px] text-[var(--editor-accent-strong)]">默认</span>
+                ) : null}
+                {(usageCounts?.[profile.id] ?? 0) > 0 ? (
+                  <div className="mt-0.5 text-xs font-normal text-[var(--editor-muted)]">
+                    被 {usageCounts?.[profile.id]} 个提示词使用
+                  </div>
                 ) : null}
               </td>
               <td className="hidden px-3 py-2 text-[var(--editor-muted)] sm:table-cell">
@@ -121,9 +129,9 @@ export function ProviderListTable<T extends BaseProviderProfile>({
                   <button
                     type="button"
                     onClick={() => onSetDefault(profile)}
-                    className="text-xs text-[var(--editor-accent)] hover:underline"
+                    className="text-xs font-medium text-[var(--editor-accent)] hover:underline"
                   >
-                    默认
+                    设为默认
                   </button>
                 ) : null}
                 <button

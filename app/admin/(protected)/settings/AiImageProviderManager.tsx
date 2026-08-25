@@ -23,6 +23,9 @@ import {
 
 const CUSTOM_PROVIDER_ID = 'custom'
 
+/** 带撤销的 toast 停留更久，给用户反应时间 */
+const UNDO_TOAST_DURATION = 5000
+
 type ProviderProfile = BaseProviderProfile
 
 type ProviderFormState = BaseProviderFormState
@@ -60,7 +63,7 @@ function mapProfileToForm(profile: ProviderProfile): ProviderFormState {
   }
 }
 
-export function AiImageProviderManager() {
+export function AiImageProviderManager({ usageCounts }: { usageCounts?: Record<number, number> }) {
   const toast = useToast()
 
   const [profiles, setProfiles] = useState<ProviderProfile[]>([])
@@ -257,8 +260,39 @@ export function AiImageProviderManager() {
     }
   }
 
+  const isDefaultProfile = (profile: ProviderProfile) =>
+    profile.is_default === 1 || profile.id === defaultProfileId
+
+  /** 通过 PUT 完整字段把某个配置的默认标记置为指定值（不触碰 api_key） */
+  const saveDefaultFlag = async (target: ProviderProfile, isDefault: boolean) => {
+    const res = await fetch('/api/admin/ai-image-provider', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: target.id,
+        name: target.name,
+        provider: target.provider,
+        provider_name: target.provider_name,
+        provider_type: target.provider_type,
+        provider_category: target.provider_category,
+        api_key_url: target.api_key_url,
+        base_url: target.base_url,
+        model: target.model,
+        is_default: isDefault,
+      }),
+    })
+    const data = await res.json().catch(() => ({})) as { error?: string }
+    if (!res.ok) throw new Error(data.error || '设置默认失败')
+  }
+
   const handleDelete = async () => {
     if (!deleteTarget) return
+
+    const wasDefault = isDefaultProfile(deleteTarget)
+    // 后端删除默认配置后不会自动扶正其他配置；这里删完后补一次 PUT，让弹窗里的承诺成立
+    const fallback = wasDefault
+      ? profiles.find((profile) => profile.id !== deleteTarget.id) ?? null
+      : null
 
     try {
       const res = await fetch('/api/admin/ai-image-provider', {
@@ -268,6 +302,12 @@ export function AiImageProviderManager() {
       })
       const data = await res.json().catch(() => ({})) as { error?: string }
       if (!res.ok) throw new Error(data.error || '删除失败')
+
+      if (fallback) {
+        await saveDefaultFlag(fallback, true)
+      }
+
+      // 不提供撤销：重建配置无法恢复已删除的 API Key（列表里只有掩码）
       toast.success('图片模型配置已删除')
       setDeleteTarget(null)
       await loadProfiles()
@@ -277,30 +317,34 @@ export function AiImageProviderManager() {
   }
 
   const setAsDefault = async (profile: ProviderProfile) => {
-    if (profile.id === defaultProfileId || profile.is_default === 1) return
+    if (isDefaultProfile(profile)) return
+
+    const previousDefault = profiles.find((item) => isDefaultProfile(item)) ?? null
 
     try {
-      const res = await fetch('/api/admin/ai-image-provider', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: profile.id,
-          name: profile.name,
-          provider: profile.provider,
-          provider_name: profile.provider_name,
-          provider_type: profile.provider_type,
-          provider_category: profile.provider_category,
-          api_key_url: profile.api_key_url,
-          base_url: profile.base_url,
-          model: profile.model,
-          is_default: true,
-        }),
-      })
-      const data = await res.json().catch(() => ({})) as { error?: string }
-      if (!res.ok) throw new Error(data.error || '设置默认失败')
-
-      toast.success('已设为默认图片模型')
+      await saveDefaultFlag(profile, true)
       await loadProfiles()
+
+      toast.success(
+        `已将「${profile.name}」设为默认图片模型`,
+        UNDO_TOAST_DURATION,
+        previousDefault
+          ? {
+              label: '撤销',
+              onClick: () => {
+                void (async () => {
+                  try {
+                    await saveDefaultFlag(previousDefault, true)
+                    await loadProfiles()
+                    toast.success('已撤销')
+                  } catch {
+                    toast.error('撤销失败，请重试')
+                  }
+                })()
+              },
+            }
+          : undefined,
+      )
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '设置默认失败')
     }
@@ -331,6 +375,7 @@ export function AiImageProviderManager() {
         profiles={profiles}
         defaultProfileId={defaultProfileId}
         emptyText="暂无配置"
+        usageCounts={usageCounts}
         onEdit={openEdit}
         onDelete={setDeleteTarget}
         onSetDefault={setAsDefault}
@@ -403,17 +448,44 @@ export function AiImageProviderManager() {
         />
       )}
 
-      {deleteTarget && (
-        <Modal
-          isOpen={!!deleteTarget}
-          onClose={() => setDeleteTarget(null)}
-          onConfirm={handleDelete}
-          title="确认删除"
-          description={`确定要删除配置「${deleteTarget.name}」吗？已绑定的图片提示将回退到当前默认配置。`}
-          confirmText="删除"
-          type="danger"
-        />
-      )}
+      {deleteTarget && (() => {
+        const usageCount = usageCounts?.[deleteTarget.id] ?? 0
+        const deletingDefault = isDefaultProfile(deleteTarget)
+        const isLastProfile = profiles.length <= 1
+        const nextDefault = profiles.find((profile) => profile.id !== deleteTarget.id) ?? null
+
+        if (isLastProfile) {
+          return (
+            <Modal
+              isOpen
+              onClose={() => setDeleteTarget(null)}
+              title="无法删除"
+              description={`「${deleteTarget.name}」是当前唯一的图片模型配置，删除后将没有可用配置，因此无法删除。请先新增其他配置。`}
+              type="info"
+            />
+          )
+        }
+
+        const impactParts: string[] = []
+        if (usageCount > 0) {
+          impactParts.push(`${usageCount} 个图片提示绑定了此配置，删除后将回落到默认配置。`)
+        }
+        if (deletingDefault && nextDefault) {
+          impactParts.push(`删除后默认配置将切换为「${nextDefault.name}」。`)
+        }
+
+        return (
+          <Modal
+            isOpen
+            onClose={() => setDeleteTarget(null)}
+            onConfirm={handleDelete}
+            title="确认删除"
+            description={`确定要删除配置「${deleteTarget.name}」吗？${impactParts.length > 0 ? ` ${impactParts.join(' ')}` : ''}`}
+            confirmText="删除"
+            type="danger"
+          />
+        )
+      })()}
     </div>
   )
 }

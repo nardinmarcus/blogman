@@ -46,7 +46,16 @@ const emptyAction: Partial<AiImageAction> = {
   profile_id: null,
 }
 
-export function AiImageActionsManager() {
+interface AiImageActionsManagerProps {
+  /** 搜索关键词：按 label / action_key / description 大小写不敏感过滤 */
+  searchQuery?: string
+  /** 「全部」视图下作为小节标题展示（text-sm）；不传则用默认大标题 */
+  heading?: string
+  /** 空态「清除搜索与筛选」按钮回调 */
+  onResetFilter?: () => void
+}
+
+export function AiImageActionsManager({ searchQuery = '', heading, onResetFilter }: AiImageActionsManagerProps) {
   const toast = useToast()
   const [actions, setActions] = useState<AiImageAction[]>([])
   const [profiles, setProfiles] = useState<AiImageProfile[]>([])
@@ -205,10 +214,19 @@ export function AiImageActionsManager() {
     return <div className="py-8 text-center text-sm text-[var(--editor-muted)]">加载中…</div>
   }
 
+  const query = searchQuery.trim().toLowerCase()
+  const visibleActions = query
+    ? actions.filter((action) =>
+        [action.label, action.action_key, action.description]
+          .some((field) => field?.toLowerCase().includes(query)))
+    : actions
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-base font-semibold text-[var(--editor-ink)]">图片快捷提示</h3>
+        <h3 className={heading ? 'text-sm font-semibold text-[var(--editor-ink)]' : 'text-base font-semibold text-[var(--editor-ink)]'}>
+          {heading ?? '图片快捷提示'}
+        </h3>
         <button
           type="button"
           onClick={() => {
@@ -222,6 +240,21 @@ export function AiImageActionsManager() {
         </button>
       </div>
 
+      {query && visibleActions.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-[var(--editor-line)] px-5 py-10 text-center">
+          <div className="text-sm font-medium text-[var(--editor-ink)]">没有匹配的提示词</div>
+          <div className="mt-1 text-sm text-[var(--editor-muted)]">换个关键词，或清除筛选条件。</div>
+          {onResetFilter ? (
+            <button
+              type="button"
+              onClick={onResetFilter}
+              className="mt-4 rounded-lg border border-[var(--editor-line)] px-3.5 py-1.5 text-sm text-[var(--editor-muted)] transition hover:bg-[var(--editor-soft)] hover:text-[var(--editor-ink)]"
+            >
+              清除搜索与筛选
+            </button>
+          ) : null}
+        </div>
+      ) : (
       <div className="overflow-hidden rounded-lg border border-[var(--editor-line)]">
         <table className="w-full text-sm">
           <thead>
@@ -238,13 +271,15 @@ export function AiImageActionsManager() {
             </tr>
           </thead>
           <tbody>
-            {actions.map((action, index) => (
+            {visibleActions.map((action) => {
+              const index = actions.findIndex((item) => item.id === action.id)
+              return (
               <tr key={action.id} className="border-t border-[var(--editor-line)] hover:bg-[var(--editor-panel)]">
                 <td className="px-3 py-2">
                   <div className="flex gap-0.5">
                     <button
                       type="button"
-                      disabled={index === 0}
+                      disabled={query !== '' || index <= 0}
                       onClick={() => moveAction(index, 'up')}
                       className="rounded px-1 text-[var(--editor-muted)] hover:bg-[var(--editor-soft)] disabled:opacity-30"
                     >
@@ -252,7 +287,7 @@ export function AiImageActionsManager() {
                     </button>
                     <button
                       type="button"
-                      disabled={index === actions.length - 1}
+                      disabled={query !== '' || index < 0 || index === actions.length - 1}
                       onClick={() => moveAction(index, 'down')}
                       className="rounded px-1 text-[var(--editor-muted)] hover:bg-[var(--editor-soft)] disabled:opacity-30"
                     >
@@ -294,10 +329,12 @@ export function AiImageActionsManager() {
                   </button>
                 </td>
               </tr>
-            ))}
+              )
+            })}
           </tbody>
         </table>
       </div>
+      )}
 
       {editAction && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={() => setEditAction(null)}>

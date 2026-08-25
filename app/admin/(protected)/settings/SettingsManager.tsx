@@ -1,19 +1,17 @@
 'use client'
 
-import { useState } from 'react'
 import { Tabs } from '@/components/Tabs'
+import { useToast } from '@/components/Toast'
 import type { RuntimeCapabilities } from '@/lib/runtime-capabilities'
 import { normalizeTheme, type BodyFont, type Theme } from '@/lib/appearance'
-import { NavLinksEditor } from './NavLinksEditor'
+import { SettingsSection } from './SettingsSection'
+import { RuntimeStatusStrip } from './RuntimeStatusStrip'
+import { NavLinksEditor, type AutosaveOptions } from './NavLinksEditor'
 import { CustomJsEditor } from './CustomJsEditor'
-import { ThemeManager } from './ThemeManager'
-import { AiProviderManager } from './AiProviderManager'
-import { AiActionsManager } from './AiActionsManager'
-import { AiImageProviderManager } from './AiImageProviderManager'
-import { AiImageActionsManager } from './AiImageActionsManager'
-import { AiPostGeneratorsManager } from './AiPostGeneratorsManager'
-import { RuntimeCapabilitiesPanel } from './RuntimeCapabilitiesPanel'
+import { ThemeManager, type ThemeSaveOptions } from './ThemeManager'
 import { ThirdPartyPublishingManager } from './ThirdPartyPublishingManager'
+import { ModelsSettings } from './ModelsSettings'
+import { PromptsSettings } from './PromptsSettings'
 
 interface Props {
   initialNavLinks: string
@@ -23,6 +21,9 @@ interface Props {
   initialRuntimeCapabilities: RuntimeCapabilities
 }
 
+/** 带撤销的 toast 停留更久，给用户反应时间 */
+const UNDO_TOAST_DURATION = 5000
+
 export function SettingsManager({
   initialNavLinks,
   initialCustomJs,
@@ -30,8 +31,7 @@ export function SettingsManager({
   initialDefaultTheme,
   initialRuntimeCapabilities,
 }: Props) {
-  const [saving, setSaving] = useState(false)
-  const [msg, setMsg] = useState('')
+  const toast = useToast()
 
   const persistSetting = async (key: string, value: string) => {
     const res = await fetch('/api/admin/settings', {
@@ -42,135 +42,110 @@ export function SettingsManager({
     if (!res.ok) throw new Error('保存失败')
   }
 
-  const save = async (key: string, value: string) => {
-    setSaving(true)
-    setMsg('')
+  const rollback = async (persist: () => Promise<unknown>) => {
     try {
-      await persistSetting(key, value)
-      setMsg('已保存')
-      setTimeout(() => setMsg(''), 2000)
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : '保存失败')
-    } finally {
-      setSaving(false)
+      await persist()
+      toast.success('已撤销')
+    } catch {
+      toast.error('撤销失败，请重试')
     }
   }
 
-  const saveThemeSettings = async ({ theme, font }: { theme: Theme; font: BodyFont }) => {
-    setSaving(true)
-    setMsg('')
+  const save = async (key: string, value: string, opts: AutosaveOptions) => {
+    try {
+      await persistSetting(key, value)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '保存失败')
+      throw e
+    }
+    toast.success('已自动保存', UNDO_TOAST_DURATION, {
+      label: '撤销',
+      onClick: () => {
+        opts.onUndo()
+        void rollback(() => persistSetting(key, opts.undoValue))
+      },
+    })
+  }
+
+  const saveThemeSettings = async (
+    values: { theme: Theme; font: BodyFont },
+    opts: ThemeSaveOptions,
+  ) => {
     try {
       await Promise.all([
-        persistSetting('default_theme', theme),
-        persistSetting('body_font', font),
+        persistSetting('default_theme', values.theme),
+        persistSetting('body_font', values.font),
       ])
-      setMsg('已保存')
-      setTimeout(() => setMsg(''), 2000)
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : '保存失败')
-    } finally {
-      setSaving(false)
+      toast.error(e instanceof Error ? e.message : '保存失败')
+      throw e
     }
+    toast.success(opts.label, UNDO_TOAST_DURATION, {
+      label: '撤销',
+      onClick: () => {
+        opts.onUndo()
+        void rollback(async () => {
+          await Promise.all([
+            persistSetting('default_theme', opts.undoValues.theme),
+            persistSetting('body_font', opts.undoValues.font),
+          ])
+        })
+      },
+    })
   }
 
   const tabs = [
     {
-      id: 'nav',
-      label: '导航设置',
-      group: '站点',
+      id: 'site',
+      label: '站点',
       content: (
-        <div className="space-y-4">
-          {msg && (
-            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-800">
-              {msg}
-            </div>
-          )}
-          <NavLinksEditor
-            initialValue={initialNavLinks}
-            onSave={(val) => save('nav_links', val)}
-            saving={saving}
-          />
+        <div className="space-y-5">
+          <RuntimeStatusStrip capabilities={initialRuntimeCapabilities} />
+          <SettingsSection title="导航设置" description="站点顶部导航的自定义链接。">
+            <NavLinksEditor
+              initialValue={initialNavLinks}
+              onSave={(val, opts) => save('nav_links', val, opts)}
+            />
+          </SettingsSection>
+          <SettingsSection
+            title="自定义代码"
+            description="注入到所有页面的 <head>，适合统计代码（Google Analytics、百度统计等）。输入停止后自动保存。"
+          >
+            <CustomJsEditor
+              initialValue={initialCustomJs}
+              onSave={(val, opts) => save('custom_js', val, opts)}
+            />
+          </SettingsSection>
         </div>
       ),
     },
     {
-      id: 'code',
-      label: '自定义代码',
-      group: '站点',
-      content: (
-        <div className="space-y-4">
-          {msg && (
-            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-800">
-              {msg}
-            </div>
-          )}
-          <p className="text-sm text-[var(--editor-muted)]">
-            此代码会注入到所有页面的 &lt;head&gt; 中，适合添加统计代码（如 Google Analytics、百度统计等）。
-          </p>
-          <CustomJsEditor
-            initialValue={initialCustomJs}
-            onSave={(val) => save('custom_js', val)}
-            saving={saving}
-          />
-        </div>
-      ),
-    },
-    {
-      id: 'theme',
-      label: '主题管理',
-      group: '外观',
+      id: 'appearance',
+      label: '外观',
       content: (
         <ThemeManager
           initialTheme={normalizeTheme(initialDefaultTheme)}
           initialFont={(initialBodyFont || 'default') as BodyFont}
           onSave={saveThemeSettings}
-          saving={saving}
         />
       ),
     },
     {
-      id: 'tokens',
-      label: '第三方发布',
-      group: '发布',
+      id: 'publish',
+      label: '发布',
       content: <ThirdPartyPublishingManager />,
     },
     {
-      id: 'ai-provider',
-      label: 'AI 模型',
-      group: 'AI',
-      content: <AiProviderManager />,
+      id: 'models',
+      label: '模型',
+      content: <ModelsSettings />,
     },
     {
-      id: 'ai-actions',
-      label: 'AI 操作',
-      group: 'AI',
-      content: <AiActionsManager />,
-    },
-    {
-      id: 'ai-image-provider',
-      label: '图片模型',
-      group: 'AI',
-      content: <AiImageProviderManager />,
-    },
-    {
-      id: 'ai-image-actions',
-      label: '图片提示',
-      group: 'AI',
-      content: <AiImageActionsManager />,
-    },
-    {
-      id: 'ai-post-generators',
-      label: '文章生成',
-      group: 'AI',
-      content: <AiPostGeneratorsManager />,
-    },
-    {
-      id: 'runtime',
-      label: '运行环境',
-      group: '运行',
-      content: <RuntimeCapabilitiesPanel capabilities={initialRuntimeCapabilities} />,
+      id: 'prompts',
+      label: '提示词',
+      content: <PromptsSettings />,
     },
   ]
 
-  return <Tabs tabs={tabs} defaultTab="nav" />
+  return <Tabs tabs={tabs} defaultTab="site" ariaLabel="设置分类" />
 }

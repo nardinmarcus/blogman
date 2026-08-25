@@ -28,12 +28,18 @@ export default async function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <h1
-        className="text-2xl font-medium text-[var(--editor-ink)]"
-        style={{ fontFamily: 'Georgia, serif' }}
-      >
-        站点设置
-      </h1>
+      <div className="space-y-1.5">
+        <h1
+          className="text-2xl font-medium text-[var(--editor-ink)]"
+          style={{ fontFamily: 'Georgia, serif' }}
+        >
+          站点设置
+        </h1>
+        <p className="flex items-center gap-2 text-sm text-[var(--editor-muted)]">
+          <span className="h-2 w-2 rounded-full bg-emerald-600" aria-hidden="true" />
+          所有更改自动保存，可撤销
+        </p>
+      </div>
       <SettingsManager
         initialNavLinks={navLinks}
         initialCustomJs={customJs}
