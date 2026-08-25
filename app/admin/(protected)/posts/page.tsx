@@ -80,7 +80,8 @@ export default async function AdminPostsPage({
   ) as string[]
 
   const stats = {
-    all: sourcePosts.length,
+    // 全部 = 未删除的文章；已删除文章只在「已删除」tab 可见
+    all: sourcePosts.filter((p) => p.status !== 'deleted').length,
     published: sourcePosts.filter((p) => p.status === 'published').length,
     draft: sourcePosts.filter((p) => p.status === 'draft').length,
     deleted: sourcePosts.filter((p) => p.status === 'deleted').length,
@@ -90,7 +91,10 @@ export default async function AdminPostsPage({
   }
 
   let filteredPosts = posts
-  if (status && status !== 'all') {
+  if (!status || status === 'all') {
+    // 默认视图不展示已删除文章（回收站语义：仅在「已删除」tab 可见）
+    filteredPosts = filteredPosts.filter((p) => p.status !== 'deleted')
+  } else {
     switch (status) {
       case 'encrypted':
         filteredPosts = filteredPosts.filter((p) => !!p.password)
@@ -144,7 +148,7 @@ export default async function AdminPostsPage({
           </div>
         </div>
       ) : (
-        <PostListClient posts={posts} categories={dbCategories} />
+        <PostListClient posts={filteredPosts} categories={dbCategories} />
       )}
     </div>
   )

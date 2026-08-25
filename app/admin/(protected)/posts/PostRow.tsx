@@ -45,7 +45,6 @@ function formatDate(ts: number) {
 export function PostRow({ post, categories, preferMenuUp = false, selected = false, onSelectChange }: PostRowProps) {
   const [showPasswordModal, setShowPasswordModal] = useState(false)
   const [showDeleteModal, setShowDeleteModal] = useState(false)
-  const [showPermanentModal, setShowPermanentModal] = useState(false)
   const [showPinModal, setShowPinModal] = useState(false)
   const [showHiddenModal, setShowHiddenModal] = useState(false)
   const [showStatusModal, setShowStatusModal] = useState(false)
@@ -261,38 +260,6 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
     if (ok) router.refresh()
   }
 
-  // 永久删除
-  const handlePermanentDelete = async () => {
-    setLoading(true)
-    try {
-      const res = await fetch(`/api/admin/posts/${post.slug}`, { method: 'DELETE' })
-
-      let data: { success?: boolean; error?: string }
-      try {
-        data = (await res.json()) as { success?: boolean; error?: string }
-      } catch {
-        toast.error(`删除失败: HTTP ${res.status}`)
-        return false
-      }
-
-      if (res.ok && data.success) {
-        toast.success('已永久删除')
-        setShowPermanentModal(false)
-        router.refresh()
-        return true
-      } else {
-        toast.error(data.error || `删除失败 (${res.status})`)
-        return false
-      }
-    } catch (err) {
-      console.error('Delete error:', err)
-      toast.error(`网络错误: ${err instanceof Error ? err.message : '未知'}`)
-      return false
-    } finally {
-      setLoading(false)
-    }
-  }
-
   return (
     <>
       {/* 桌面端 */}
@@ -400,26 +367,15 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
         {/* 操作列 */}
         <div className="flex items-center justify-end gap-1">
           {isDeleted ? (
-            <>
-              <button
-                type="button"
-                onClick={handleRestore}
-                disabled={loading}
-                className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
-                title="恢复"
-              >
-                <Check className="w-4 h-4 text-emerald-600" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowPermanentModal(true)}
-                disabled={loading}
-                className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
-                title="永久删除"
-              >
-                <Trash2 className="w-4 h-4 text-rose-500" />
-              </button>
-            </>
+            <button
+              type="button"
+              onClick={handleRestore}
+              disabled={loading}
+              className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
+              title="恢复"
+            >
+              <Check className="w-4 h-4 text-emerald-600" />
+            </button>
           ) : (
             <>
               <button
@@ -619,26 +575,15 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
 
         <div className="flex items-center gap-2 ml-9 flex-wrap">
           {isDeleted ? (
-            <>
-              <button
-                type="button"
-                onClick={handleRestore}
-                disabled={loading}
-                className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
-                title="恢复"
-              >
-                <Check className="w-4 h-4 text-emerald-600" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowPermanentModal(true)}
-                disabled={loading}
-                className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
-                title="永久删除"
-              >
-                <Trash2 className="w-4 h-4 text-rose-500" />
-              </button>
-            </>
+            <button
+              type="button"
+              onClick={handleRestore}
+              disabled={loading}
+              className="p-1.5 rounded hover:bg-[var(--editor-soft)] transition-colors disabled:opacity-50"
+              title="恢复"
+            >
+              <Check className="w-4 h-4 text-emerald-600" />
+            </button>
           ) : (
             <>
               <button
@@ -809,16 +754,6 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
         description={`确定要删除「${post.title}」吗？删除后可以在已删除列表中恢复。`}
         confirmText="删除"
         type="warning"
-      />
-
-      <Modal
-        isOpen={showPermanentModal}
-        onClose={() => setShowPermanentModal(false)}
-        onConfirm={handlePermanentDelete}
-        title="永久删除"
-        description={`确定要永久删除「${post.title}」吗？此操作不可恢复！`}
-        confirmText="永久删除"
-        type="danger"
       />
     </>
   )
