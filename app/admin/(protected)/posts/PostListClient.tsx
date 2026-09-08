@@ -1,25 +1,16 @@
 'use client'
 
 import { useState } from 'react'
-import { useRouter } from 'next/navigation'
-import { useToast } from '@/components/Toast'
 import { Dropdown } from '@/components/Dropdown'
 import { PostRow } from './PostRow'
+import { useArticleCommand } from '@/lib/article-command-client'
 import type { AdminListPost } from './page'
-
-/** Client-side operation id — stable per user action, replayed server-side. */
-function operationId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID()
-  }
-  return `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`
-}
 
 /**
  * B2-06 — the admin posts list client. Owns row selection for batch
- * classification (each article carries its own expected version + operation
- * id; the server returns per-article applied/conflict and never silently
- * overwrites a conflicting article).
+ * classification; every article keeps its own version precondition and the
+ * Article Command Client reports per-article applied/conflict (a conflicting
+ * article is never silently overwritten).
  */
 export function PostListClient({
   posts,
@@ -30,9 +21,7 @@ export function PostListClient({
 }) {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [batchCategory, setBatchCategory] = useState('')
-  const [applying, setApplying] = useState(false)
-  const router = useRouter()
-  const toast = useToast()
+  const { runBatch, loading: applying } = useArticleCommand()
 
   const toggle = (slug: string) => {
     setSelected((prev) => {
@@ -69,35 +58,11 @@ export function PostListClient({
         slug: p.slug,
         articleId: p.articleId,
         expectedVersion: p.version,
-        operationId: operationId(),
         category: batchCategory || null,
       }))
     if (items.length === 0) return
-    setApplying(true)
-    try {
-      const res = await fetch('/api/article-commands', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'batchSetCategory', items }),
-      })
-      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
-      if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : '批量分类失败')
-      const results = Array.isArray(data.items) ? (data.items as Array<{ outcome?: string }>) : []
-      const applied = results.filter((r) => r.outcome === 'applied' || r.outcome === 'legacy-applied').length
-      const conflicts = results.filter((r) => r.outcome === 'conflict').length
-      const skipped = results.filter((r) => r.outcome === 'invalid' || r.outcome === 'not-found' || r.outcome === 'error').length
-      if (conflicts > 0 || skipped > 0) {
-        toast.error(`部分文章冲突或失败：成功 ${applied}，冲突 ${conflicts}，其他 ${skipped}。冲突的文章未被覆盖，请刷新后重试。`)
-      } else {
-        toast.success(`已批量更新 ${applied} 篇文章的分类`)
-      }
-      setSelected(new Set())
-      router.refresh()
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : '批量分类失败')
-    } finally {
-      setApplying(false)
-    }
+    const result = await runBatch(items)
+    if (result.ok) setSelected(new Set())
   }
 
   return (

@@ -268,8 +268,8 @@ async function dispatchArticleLevelAction(
 /**
  * B2-06 — batch classification. Every article keeps its own version
  * precondition + operation id; conflicts are reported per article and never
- * silently overwritten. On a ledger-only DB each item falls back to the legacy
- * direct write (no version conditions exist there).
+ * silently overwritten. Rows without versioned authority (ledger-only DBs)
+ * are refused per-item as not-found — there is no legacy fallback here.
  */
 async function dispatchBatchSetCategory(
   env: RouteEnv,

@@ -8,6 +8,8 @@ import { useToast } from '@/components/Toast'
 import { Modal } from '@/components/Modal'
 import { PasswordModal } from '@/components/PasswordModal'
 import { Dropdown } from '@/components/Dropdown'
+import { useArticleCommand } from '@/lib/article-command-client'
+import type { ArticleCommandRequest } from '@/lib/article-command-client'
 import { getSiteUrl } from '@/lib/site-config'
 import type { AdminListPost } from './page'
 
@@ -17,14 +19,6 @@ interface PostRowProps {
   preferMenuUp?: boolean
   selected?: boolean
   onSelectChange?: () => void
-}
-
-/** Client-side operation id — stable per user action, replayed server-side. */
-function operationId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID()
-  }
-  return `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`
 }
 
 function formatDate(ts: number) {
@@ -49,80 +43,22 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
   const [showHiddenModal, setShowHiddenModal] = useState(false)
   const [showStatusModal, setShowStatusModal] = useState(false)
   const [showMoreMenu, setShowMoreMenu] = useState(false)
-  const [loading, setLoading] = useState(false)
 
   const router = useRouter()
   const toast = useToast()
 
-  // B2-06 — under versioned authority every list write goes through the explicit
-  // /api/article-commands protocol carrying expected version + operation id. On a
-  // ledger-only DB (no identity tables ⇒ articleId/version are null) the same
-  // action falls back to the legacy direct PUT so existing CRUD never 503s.
+  // B2-06 — every list write goes through the Article Command Client seam
+  // (expected version + operation id). The ledger-only legacy PUT bypass lives
+  // inside the module, not in this component.
   const hasAuthority = typeof post.articleId === 'number' && typeof post.version === 'number'
-  const command = async (action: string, value: Record<string, unknown>): Promise<Response> => {
-    if (!hasAuthority) {
-      const legacyBody: Record<string, unknown> =
-        action === 'setPinned' ? { is_pinned: value.is_pinned }
-          : action === 'setHidden' ? { is_hidden: value.is_hidden }
-            : action === 'setPassword' ? { password: value.password }
-              : action === 'setCategory' ? { category: value.category }
-                : action === 'softDelete' ? { status: 'deleted' }
-                  : action === 'restore' ? { status: 'draft' }
-                    : action === 'publishTemp' ? { status: value.status }
-                      : {}
-      return fetch(`/api/admin/posts/${post.slug}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(legacyBody),
-      })
-    }
-    return fetch('/api/article-commands', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action,
-        slug: post.slug,
-        articleId: post.articleId,
-        expectedVersion: post.version,
-        operationId: operationId(),
-        ...value,
-      }),
-    })
-  }
+  const { run: runCommand, loading } = useArticleCommand({
+    target: { slug: post.slug, articleId: post.articleId, expectedVersion: post.version },
+  })
 
-  /**
-   * Execute one explicit list command. A server-side `conflict` outcome (HTTP
-   * 200 with `outcome: conflict`) surfaces explicitly — the stale action is
-   * never applied and never reported as a success.
-   */
-  const run = async (action: string, value: Record<string, unknown>, successMsg: string): Promise<boolean> => {
-    setLoading(true)
-    try {
-      const res = await command(action, value)
-      let data: { outcome?: string; error?: string } | null = null
-      try {
-        data = (await res.json()) as { outcome?: string; error?: string }
-      } catch {
-        data = null
-      }
-      const outcome = data?.outcome
-      if (res.ok && (outcome === undefined || outcome === 'applied' || outcome === 'replayed' || outcome === 'legacy-applied')) {
-        toast.success(successMsg)
-        return true
-      }
-      if (outcome === 'conflict') {
-        toast.error('版本冲突：这篇文章已被他人修改，未应用改动，请刷新后重试')
-      } else {
-        toast.error(data?.error || '操作失败，请重试')
-      }
-      router.refresh()
-      return false
-    } catch {
-      toast.error('网络错误，请重试')
-      return false
-    } finally {
-      setLoading(false)
-    }
+  /** Execute one typed list command; conflicts surface via toast + refresh. */
+  const run = async (request: ArticleCommandRequest, successMsg: string): Promise<boolean> => {
+    const result = await runCommand(request, { successMsg })
+    return result.ok
   }
 
   const siteUrl = getSiteUrl()
@@ -183,14 +119,14 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
 
   // 更新分类
   const handleCategoryChange = async (newCategory: string) => {
-    const ok = await run('setCategory', { category: newCategory || null }, '分类已更新')
+    const ok = await run({ action: 'setCategory', category: newCategory || null }, '分类已更新')
     if (ok) router.refresh()
   }
 
   // 置顶切换
   const handlePinToggle = async () => {
     const newPinned = post.is_pinned === 1 ? 0 : 1
-    const ok = await run('setPinned', { is_pinned: newPinned }, newPinned === 1 ? '已置顶' : '已取消置顶')
+    const ok = await run({ action: 'setPinned', is_pinned: newPinned }, newPinned === 1 ? '已置顶' : '已取消置顶')
     if (ok) {
       setShowPinModal(false)
       router.refresh()
@@ -201,7 +137,7 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
   // 隐藏切换
   const handleHiddenToggle = async () => {
     const newHidden = post.is_hidden === 1 ? 0 : 1
-    const ok = await run('setHidden', { is_hidden: newHidden }, newHidden === 1 ? '已隐藏' : '已取消隐藏')
+    const ok = await run({ action: 'setHidden', is_hidden: newHidden }, newHidden === 1 ? '已隐藏' : '已取消隐藏')
     if (ok) {
       setShowHiddenModal(false)
       router.refresh()
@@ -224,7 +160,7 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
     if (hasAuthority) {
       // 曾正式发布：生命周期命令，不使用 publishTemp。
       const action = post.status === 'published' ? 'unpublish' : 'relive'
-      const ok = await run(action, { content: 'formal' }, action === 'unpublish' ? '已取消发布' : '已重新上线')
+      const ok = await run({ action, content: 'formal' }, action === 'unpublish' ? '已取消发布' : '已重新上线')
       if (ok) {
         setShowStatusModal(false)
         router.refresh()
@@ -233,8 +169,7 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
     }
     const newStatus = post.status === 'published' ? 'draft' : 'published'
     const ok = await run(
-      'publishTemp',
-      { currentStatus: post.status === 'published' ? 'published' : 'draft', status: newStatus },
+      { action: 'publishTemp', currentStatus: post.status === 'published' ? 'published' : 'draft', status: newStatus },
       newStatus === 'published' ? '已发布' : '已转为草稿',
     )
     if (ok) {
@@ -246,7 +181,7 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
 
   // 软删除
   const handleSoftDelete = async () => {
-    const ok = await run('softDelete', {}, '已删除（可恢复）')
+    const ok = await run({ action: 'softDelete' }, '已删除（可恢复）')
     if (ok) {
       setShowDeleteModal(false)
       router.refresh()
@@ -256,7 +191,7 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
 
   // 恢复
   const handleRestore = async () => {
-    const ok = await run('restore', {}, '已恢复为草稿')
+    const ok = await run({ action: 'restore' }, '已恢复为草稿')
     if (ok) router.refresh()
   }
 
@@ -695,13 +630,10 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
         isOpen={showPasswordModal}
         onClose={() => setShowPasswordModal(false)}
         slug={post.slug}
-        articleId={hasAuthority ? post.articleId : null}
-        version={hasAuthority ? post.version : null}
+        articleId={post.articleId}
+        version={post.version}
         currentPassword={post.password}
         articleUrl={baseArticleUrl}
-        onSuccess={() => {
-          window.location.reload()
-        }}
       />
 
       <Modal
