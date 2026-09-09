@@ -52,7 +52,9 @@ const CLIENT_MATRIX: Array<{ client: string; file: string; requires: string[] }>
   {
     client: '管理后台 (文章列表)',
     file: 'app/admin/(protected)/posts/PostRow.tsx',
-    requires: ['setPinned', 'setHidden', 'setCategory', 'publishTemp'],
+    // ADR 0011 + Publication Intent：列表写走 Article Command Client 传输 seam，
+    // 上/下公共面选型走意图解析器；publishTemp 不得再出现在列表（类型层已禁）。
+    requires: ['useArticleCommand', 'resolvePublicationIntent', 'setPinned', 'setHidden', 'setCategory'],
   },
   {
     client: '管理后台 (批量分类)',
