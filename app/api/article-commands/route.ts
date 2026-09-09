@@ -32,7 +32,8 @@ import { invalidatePublicContentCache } from '@/lib/cache'
 import { enqueueBackgroundJob, aiProcessPostOperationId } from '@/lib/background-jobs'
 import { normalizePostSlug } from '@/lib/post-utils'
 import { nanoid } from 'nanoid'
-import { getByPostRef, listVersions } from '@/lib/repositories/articles'
+import { getByPostRef, latestAppliedFacts, latestVersionAuthority, listVersions } from '@/lib/repositories/articles'
+import { resolveArticleIdBySlug } from '@/lib/server/resolve-article'
 import { getSiteUrl } from '@/lib/site-config'
 import type { ArticleIdentitySnapshot } from '@/lib/article-identity'
 
@@ -113,44 +114,14 @@ async function attachFacts<T>(db: D1Database, result: T): Promise<T & { slug?: s
     r.postRef !== undefined &&
     (outcome === 'applied' || outcome === 'created' || outcome === 'replayed' || outcome === 'existing')
   ) {
-    // Canonical facts only: current registry address (fallback: snapshot slug)
-    // + the latest frozen snapshot's observable published time.
-    const post = await db
-      .prepare(
-        `SELECT COALESCE(
-            (SELECT slug FROM article_slug_addresses WHERE article_id = a.id AND kind = 'current'),
-            json_extract(v.snapshot_json, '$.fields.slug')) AS slug,
-          json_extract(v.snapshot_json, '$.fields.published_at') AS published_at
-         FROM articles a
-         JOIN article_versions v ON v.article_id = a.id
-           AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
-         WHERE a.post_ref = ?`,
-      )
-      .bind(r.postRef)
-      .first<{ slug: string; published_at: number | null }>()
+    // Canonical facts only (single home: repositories/articles).
+    const post = await latestAppliedFacts(db, r.postRef)
     if (post) {
       r.slug = post.slug
-      r.publishedAt = post.published_at ?? null
+      r.publishedAt = post.publishedAt
     }
   }
   return r
-}
-
-/** Resolve an article id by slug through the address registry (ADR 0009). */
-async function resolveArticleIdBySlug(db: D1Database, slug: string): Promise<number | null> {
-  const normalized = normalizePostSlug(slug)
-  if (!normalized) return null
-  // Errors propagate: a broken schema surfaces as the fixed safe 503.
-  const byRegistry = await db
-    .prepare('SELECT article_id FROM article_slug_addresses WHERE slug = ?')
-    .bind(normalized)
-    .first<{ article_id: number }>()
-  if (byRegistry) return byRegistry.article_id
-  const byIdentity = await db
-    .prepare('SELECT id FROM articles WHERE slug = ?')
-    .bind(normalized)
-    .first<{ id: number }>()
-  return byIdentity?.id ?? null
 }
 
 /** Run the best-effort out-of-transaction projections for a content-affecting result. */
@@ -197,22 +168,15 @@ async function dispatchArticleLevelAction(
 
   const projections = afterCommit(env, ctx)
 
-  // Versioned-authority facts straight from canonical identity + versions.
-  const authority = await (async () => {
-    const v = await db
-      .prepare('SELECT COALESCE(MAX(version), 0) AS version FROM article_versions WHERE article_id = ?')
-      .bind(resolvedArticleId)
-      .first<{ version: number }>()
-    if (!v || v.version === 0) return null
-    return { articleId: resolvedArticleId, version: v.version }
-  })()
-
-  if (!authority) {
+  // Versioned-authority facts straight from canonical identity + versions
+  // (single home: repositories/articles).
+  const authorityVersion = await latestVersionAuthority(db, resolvedArticleId)
+  if (authorityVersion === null) {
     return jsonError(`${action}: 文章尚未启用版本化写入`, 409)
   }
 
-  if (authority.articleId !== articleId) {
-    return jsonError(`${action}: articleId 与 slug 不匹配 (期望 ${authority.articleId})`, 409)
+  if (resolvedArticleId !== articleId) {
+    return jsonError(`${action}: articleId 与 slug 不匹配 (期望 ${resolvedArticleId})`, 409)
   }
 
   // B3-05 (issue #37): lifecycle commands write the immutable lifecycle ledger.
@@ -299,16 +263,13 @@ async function dispatchBatchSetCategory(
       continue
     }
     // Version facts straight from canonical identity (same anchor as dispatch).
-    const vRow = await db
-      .prepare('SELECT COALESCE(MAX(version), 0) AS version FROM article_versions WHERE article_id = ?')
-      .bind(resolvedArticleId)
-      .first<{ version: number }>()
-    if (!vRow || vRow.version === 0) {
+    const serverVersion = await latestVersionAuthority(db, resolvedArticleId)
+    if (serverVersion === null) {
       items.push({ outcome: 'not-found', articleId, expectedVersion, operationId, slug })
       continue
     }
     if (resolvedArticleId !== articleId) {
-      items.push({ outcome: 'conflict', articleId, expectedVersion, serverVersion: vRow.version, slug, facts: null })
+      items.push({ outcome: 'conflict', articleId, expectedVersion, serverVersion, slug, facts: null })
       continue
     }
     try {

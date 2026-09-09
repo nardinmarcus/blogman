@@ -34,6 +34,7 @@ import {
   parseJsonBody,
   type RouteDbEnv,
 } from '@/lib/server/route-helpers'
+import { latestAppliedFacts } from '@/lib/repositories/articles'
 import { migrationRequiredResponse } from '@/lib/database-errors'
 import { invalidatePublicContentCache } from '@/lib/cache'
 import { enqueueBackgroundJob } from '@/lib/background-jobs'
@@ -63,8 +64,8 @@ function afterCommit(env: RouteEnv, ctx?: { waitUntil?: (promise: Promise<unknow
   }
 }
 
-/** Attach the applied slug / published_at facts from CANONICAL sources:
- *  the current registry address + the latest frozen version snapshot. */
+/** Attach the applied slug / published_at facts from CANONICAL sources
+ *  (single home: repositories/articles.latestAppliedFacts). */
 async function attachFacts<T>(db: D1Database, result: T): Promise<T & { slug?: string; publishedAt?: number | null }> {
   const r = result as T & { postRef?: number; slug?: string; publishedAt?: number | null }
   const outcome = (result as unknown as { outcome?: string }).outcome
@@ -72,22 +73,10 @@ async function attachFacts<T>(db: D1Database, result: T): Promise<T & { slug?: s
     r.postRef !== undefined &&
     (outcome === 'applied' || outcome === 'created' || outcome === 'replayed' || outcome === 'existing')
   ) {
-    const post = await db
-      .prepare(
-        `SELECT COALESCE(
-            (SELECT slug FROM article_slug_addresses WHERE article_id = a.id AND kind = 'current'),
-            json_extract(v.snapshot_json, '$.fields.slug')) AS slug,
-          json_extract(v.snapshot_json, '$.fields.published_at') AS published_at
-         FROM articles a
-         JOIN article_versions v ON v.article_id = a.id
-          AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
-         WHERE a.post_ref = ?`,
-      )
-      .bind(r.postRef)
-      .first<{ slug: string; published_at: number | null }>()
+    const post = await latestAppliedFacts(db, r.postRef)
     if (post) {
       r.slug = post.slug
-      r.publishedAt = post.published_at ?? null
+      r.publishedAt = post.publishedAt
     }
   }
   return r

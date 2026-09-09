@@ -12,6 +12,7 @@ import {
 import { getRouteContextWithDb, jsonError, jsonOk, parseJsonBody } from '@/lib/server/route-helpers'
 import { rethrowIfDatabaseMigrationRequired, withDatabaseErrorResponse } from '@/lib/database-errors'
 import { resolveArticleIdBySlug } from '@/lib/server/resolve-article'
+import { latestVersionAuthority } from '@/lib/repositories/articles'
 import type { NextRequest } from 'next/server'
 
 async function checkAuth(req: NextRequest): Promise<boolean> {
@@ -80,11 +81,7 @@ async function updatePostRoute(req: NextRequest, { params }: Ctx) {
     }
 
     // Resolve the current version fact for the command preconditions.
-    const vRow = await db
-      .prepare('SELECT COALESCE(MAX(version), 0) AS version FROM article_versions WHERE article_id = ?')
-      .bind(articleId)
-      .first<{ version: number }>()
-    const expectedVersion = vRow?.version ?? 0
+    const expectedVersion = (await latestVersionAuthority(db, articleId)) ?? 0
     if (expectedVersion === 0) {
       // No canonical version facts — the legacy write surface is retired.
       return jsonError('文章尚未启用版本化写入', 409)
@@ -155,11 +152,7 @@ async function deletePostRoute(req: NextRequest, { params }: Ctx) {
       return jsonOk({ success: false, error: '文章不存在' })
     }
 
-    const vRow = await db
-      .prepare('SELECT COALESCE(MAX(version), 0) AS version FROM article_versions WHERE article_id = ?')
-      .bind(articleId)
-      .first<{ version: number }>()
-    const expectedVersion = vRow?.version ?? 0
+    const expectedVersion = (await latestVersionAuthority(db, articleId)) ?? 0
     if (expectedVersion === 0) {
       return jsonOk({ success: false, error: '文章尚未启用版本化写入' })
     }

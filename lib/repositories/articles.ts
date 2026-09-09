@@ -37,8 +37,7 @@ export interface AppendVersionInput {
   publishedAt: number | null
 }
 
-/** B2-06 — identity + current-version facts for a set of post refs (admin list read model). */
-export interface PostVersionFact {
+/** B2-06 — identity + current-version facts for a set of post refs (admin list read model). */export interface PostVersionFact {
   postRef: number
   articleId: number
   /** Current body version (0 when an identity exists but no version snapshot is present). */
@@ -194,4 +193,48 @@ export async function appendVersion(
     )
   }
   return inserted
+}
+
+/**
+ * Current body-version authority for command preconditions. Returns null for
+ * the versionless state (identity exists, no version snapshot) that every
+ * write path refuses with 409. Single home for the MAX(version) read that
+ * routes used to inline (ADR 0009's registry is resolved by
+ * lib/server/resolve-article; the in-transaction HAVING guards inside the
+ * command kernels are implementation details and stay there).
+ */
+export async function latestVersionAuthority(db: Database, articleId: number): Promise<number | null> {
+  const row = await db
+    .prepare('SELECT COALESCE(MAX(version), 0) AS version FROM article_versions WHERE article_id = ?')
+    .bind(articleId)
+    .first<{ version: number }>()
+  const version = row?.version ?? 0
+  return version > 0 ? version : null
+}
+
+/**
+ * Applied-command facts for editor/list confirmations: the current registry
+ * address (ADR 0009; fallback: latest snapshot slug) + the latest frozen
+ * snapshot's observable published time. Null when the article has no version
+ * snapshot. Single home for the JOIN the command routes used to inline twice.
+ */
+export async function latestAppliedFacts(
+  db: Database,
+  postRef: number,
+): Promise<{ slug: string; publishedAt: number | null } | null> {
+  const row = await db
+    .prepare(
+      `SELECT COALESCE(
+          (SELECT slug FROM article_slug_addresses WHERE article_id = a.id AND kind = 'current'),
+          json_extract(v.snapshot_json, '$.fields.slug')) AS slug,
+        json_extract(v.snapshot_json, '$.fields.published_at') AS published_at
+       FROM articles a
+       JOIN article_versions v ON v.article_id = a.id
+        AND v.version = (SELECT MAX(version) FROM article_versions WHERE article_id = a.id)
+       WHERE a.post_ref = ?`,
+    )
+    .bind(postRef)
+    .first<{ slug: string; published_at: number | null }>()
+  if (!row) return null
+  return { slug: row.slug, publishedAt: row.published_at ?? null }
 }
