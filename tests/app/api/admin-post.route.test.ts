@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   parseJsonBody: vi.fn(),
   getByPostRef: vi.fn(),
   listVersions: vi.fn(),
+  latestVersionAuthority: vi.fn(),
   setPinned: vi.fn(),
   setHidden: vi.fn(),
   setPassword: vi.fn(),
@@ -26,6 +27,7 @@ vi.mock('@/lib/db', () => ({
 vi.mock('@/lib/repositories/articles', () => ({
   getByPostRef: mocks.getByPostRef,
   listVersions: mocks.listVersions,
+  latestVersionAuthority: mocks.latestVersionAuthority,
 }))
 
 vi.mock('@/lib/article-commands', () => ({
@@ -37,11 +39,8 @@ vi.mock('@/lib/article-commands', () => ({
   restore: mocks.restore,
 }))
 
-/** SQL-aware db stub: registry slug → article id, article id → MAX(version). */
-function fakeDb(
-  registry: Record<string, number> = { 'old-slug': 5 },
-  versions: Record<number, number> = { 5: 2 },
-) {
+/** db stub for the slug registry only — version facts come from the repository mock. */
+function fakeDb(registry: Record<string, number> = { 'old-slug': 5 }) {
   return {
     prepare: (sql: string) => ({
       bind: (...binds: unknown[]) => ({
@@ -49,9 +48,6 @@ function fakeDb(
           if (sql.includes('FROM article_slug_addresses')) {
             const slug = String(binds[0] ?? '')
             return slug in registry ? { article_id: registry[slug] } : null
-          }
-          if (sql.includes('MAX(version)')) {
-            return { version: versions[Number(binds[0])] ?? 0 }
           }
           return null
         },
@@ -93,6 +89,7 @@ describe('/api/admin/posts/[slug] route', () => {
       ctx: { waitUntil: vi.fn() },
     })
     mocks.getPostBySlug.mockResolvedValue({ id: 7, slug: 'old-slug' })
+    mocks.latestVersionAuthority.mockResolvedValue(2)
     mocks.invalidatePublicContentCache.mockRejectedValue(new Error('cache down'))
   })
 
@@ -163,10 +160,11 @@ describe('/api/admin/posts/[slug] route', () => {
   })
 
   it('refuses a versionless article with 409 — no legacy fallback', async () => {
+    mocks.latestVersionAuthority.mockResolvedValue(null)
     mocks.getRouteContextWithDb.mockResolvedValue({
       ok: true,
       env: { CACHE: {} },
-      db: fakeDb({ 'old-slug': 5 }, { 5: 0 }),
+      db: fakeDb(),
       ctx: { waitUntil: vi.fn() },
     })
     mocks.parseJsonBody.mockResolvedValue({ is_pinned: 1 })

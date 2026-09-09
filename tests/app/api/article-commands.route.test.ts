@@ -30,6 +30,8 @@ const mocks = vi.hoisted(() => ({
   updatePost: vi.fn(),
   getByPostRef: vi.fn(),
   listVersions: vi.fn(),
+  latestVersionAuthority: vi.fn(),
+  latestAppliedFacts: vi.fn(),
   nanoid: vi.fn(() => 'abc123'),
 }))
 
@@ -72,6 +74,8 @@ vi.mock('@/lib/db', () => ({
 vi.mock('@/lib/repositories/articles', () => ({
   getByPostRef: mocks.getByPostRef,
   listVersions: mocks.listVersions,
+  latestVersionAuthority: mocks.latestVersionAuthority,
+  latestAppliedFacts: mocks.latestAppliedFacts,
 }))
 
 vi.mock('nanoid', () => ({
@@ -80,25 +84,16 @@ vi.mock('nanoid', () => ({
 
 import { POST } from '@/app/api/article-commands/route'
 
-function fakeDb(
-  registry: Record<string, number> = { s: 5 },
-  versions: Record<number, number> = { 5: 2 },
-) {
+function fakeDb(registry: Record<string, number> = { s: 5 }) {
   return {
     prepare: (sql: string) => ({
       bind: (...binds: unknown[]) => ({
         first: async () => {
-          if (sql.includes("json_extract(v.snapshot_json, '$.fields.slug')")) {
-            return { slug: 'persisted-slug', published_at: 1700000000 }
-          }
           if (sql.includes('FROM article_slug_addresses')) {
             const slug = String(binds[0] ?? '')
             return slug in registry ? { article_id: registry[slug] } : null
           }
-          if (sql.includes('MAX(version)')) {
-            return { version: versions[Number(binds[0])] ?? 0 }
-          }
-          return { slug: 'persisted-slug', published_at: 1700000000 }
+          return null
         },
       }),
     }),
@@ -107,6 +102,7 @@ function fakeDb(
 
 /** Versioned-authority defaults for B2-06 dispatch tests. */
 function mockAuthority(articleId = 5, version = 2) {
+  mocks.latestVersionAuthority.mockResolvedValue(version)
   mocks.getByPostRef.mockResolvedValue({ id: articleId, post_ref: 1, slug: 's', draft_ref: null, source_page_identity: null, created_at: 1 })
   mocks.listVersions.mockResolvedValue([{ id: 10, article_id: articleId, version, operation_id: 'x', snapshot_json: '{}', content_snapshot_sha256: '', published_at: null, created_at: 1 } as never])
 }
@@ -124,6 +120,8 @@ describe('/api/article-commands — dispatch', () => {
     mocks.ensureAuthenticatedRequest.mockResolvedValue(null)
     mocks.invalidatePublicContentCache.mockResolvedValue(undefined)
     mocks.enqueueBackgroundJob.mockResolvedValue(undefined)
+    mocks.latestVersionAuthority.mockResolvedValue(2)
+    mocks.latestAppliedFacts.mockResolvedValue({ slug: 'persisted-slug', publishedAt: 1700000000 })
   })
 
   it('rejects unauthenticated writes', async () => {
@@ -299,9 +297,10 @@ describe('/api/article-commands — dispatch', () => {
     mocks.getRouteContextWithDb.mockResolvedValue({
       ok: true,
       env: {},
-      db: fakeDb({ s: 99 }, { 99: 3 }),
+      db: fakeDb({ s: 99 }),
       ctx: { waitUntil: vi.fn() },
     })
+    mocks.latestVersionAuthority.mockResolvedValue(3)
     mocks.parseJsonBody.mockResolvedValue({
       action: 'setHidden',
       slug: 's',
@@ -317,10 +316,11 @@ describe('/api/article-commands — dispatch', () => {
 
   it('refuses a versionless article (no version facts) with 409 — no legacy fallback', async () => {
     // Registry resolves the slug but the article carries zero version facts.
+    mocks.latestVersionAuthority.mockResolvedValue(null)
     mocks.getRouteContextWithDb.mockResolvedValue({
       ok: true,
       env: {},
-      db: fakeDb({ s: 5 }, { 5: 0 }),
+      db: fakeDb({ s: 5 }),
       ctx: { waitUntil: vi.fn() },
     })
     mocks.parseJsonBody.mockResolvedValue({
@@ -339,10 +339,11 @@ describe('/api/article-commands — dispatch', () => {
   })
 
   it('batchSetCategory returns per-article applied + conflict, never blocking each other', async () => {
+    mocks.latestVersionAuthority.mockResolvedValueOnce(2).mockResolvedValueOnce(5)
     mocks.getRouteContextWithDb.mockResolvedValue({
       ok: true,
       env: {},
-      db: fakeDb({ a: 5, b: 6 }, { 5: 2, 6: 5 }),
+      db: fakeDb({ a: 5, b: 6 }),
       ctx: { waitUntil: vi.fn() },
     })
     mocks.setCategory.mockResolvedValueOnce({

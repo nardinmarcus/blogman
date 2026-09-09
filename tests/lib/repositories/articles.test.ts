@@ -9,11 +9,13 @@ import {
   cleanupStates,
   configPath,
   createState,
+  query,
   repoRoot,
   runD1,
 } from '@/tests/helpers/article-identity-state'
 import type { Database } from '@/lib/repositories/schema'
-import { appendVersion, getByPostRef, listVersions } from '@/lib/repositories/articles'
+import { appendVersion, getByPostRef, latestAppliedFacts, latestVersionAuthority, listVersions } from '@/lib/repositories/articles'
+import { SLUG_ADDRESS_DDL_STATEMENTS } from '@/lib/slug-address/ddl'
 
 function literal(value: unknown): string {
   if (value === null || value === undefined) return 'NULL'
@@ -115,5 +117,71 @@ describe('lib/repositories/articles', () => {
     expect(ident!.source_page_identity).toBeNull()
 
     expect(await getByPostRef(db, 999)).toBeNull()
+  })
+
+  it('latestVersionAuthority returns the current version and null for versionless identities', { timeout: 300_000 }, async () => {
+    const state = createState()
+    applyLedger(state)
+    applyArticleIdentityDdl(state)
+    runD1(state, "INSERT INTO articles (post_ref) VALUES (11)")
+    runD1(state, "INSERT INTO articles (post_ref) VALUES (12)")
+    const db = createDatabase(state)
+    const versionedId = query<{ id: number }>(state, 'SELECT id FROM articles WHERE post_ref = 11')[0].id
+    const versionlessId = query<{ id: number }>(state, 'SELECT id FROM articles WHERE post_ref = 12')[0].id
+
+    // Versionless identity and unknown article both refuse (null — the write paths' 409).
+    expect(await latestVersionAuthority(db, versionlessId)).toBeNull()
+    expect(await latestVersionAuthority(db, 424242)).toBeNull()
+
+    await appendVersion(db, versionedId, {
+      operationId: 'op-1',
+      snapshotJson: JSON.stringify({ fields: { slug: 'legacy-slug' } }),
+      contentSnapshotSha256: 'c'.repeat(64),
+      publishedAt: null,
+    })
+    await appendVersion(db, versionedId, {
+      operationId: 'op-2',
+      snapshotJson: JSON.stringify({ fields: { slug: 'legacy-slug' } }),
+      contentSnapshotSha256: 'd'.repeat(64),
+      publishedAt: 1_700_000_500,
+    })
+    expect(await latestVersionAuthority(db, versionedId)).toBe(2)
+  })
+
+  it('latestAppliedFacts prefers the registry current address and falls back to the snapshot slug', { timeout: 300_000 }, async () => {
+    const state = createState()
+    applyLedger(state)
+    applyArticleIdentityDdl(state)
+    for (const statement of SLUG_ADDRESS_DDL_STATEMENTS) runD1(state, statement)
+    runD1(state, "INSERT INTO articles (post_ref) VALUES (21)")
+    runD1(state, "INSERT INTO articles (post_ref) VALUES (22)")
+    const db = createDatabase(state)
+    const registryId = query<{ id: number }>(state, 'SELECT id FROM articles WHERE post_ref = 21')[0].id
+    const fallbackId = query<{ id: number }>(state, 'SELECT id FROM articles WHERE post_ref = 22')[0].id
+
+    // No version snapshots → null (nothing applied yet).
+    expect(await latestAppliedFacts(db, 21)).toBeNull()
+
+    await appendVersion(db, registryId, {
+      operationId: 'op-1',
+      snapshotJson: JSON.stringify({ fields: { slug: 'snapshot-slug-a', published_at: 1_700_000_100 } }),
+      contentSnapshotSha256: 'a'.repeat(64),
+      publishedAt: 1_700_000_100,
+    })
+    await appendVersion(db, fallbackId, {
+      operationId: 'op-2',
+      snapshotJson: JSON.stringify({ fields: { slug: 'snapshot-slug-b', published_at: null } }),
+      contentSnapshotSha256: 'b'.repeat(64),
+      publishedAt: null,
+    })
+
+    // Registry current address wins over the snapshot slug.
+    runD1(state, `INSERT INTO article_slug_addresses (slug, article_id, kind, created_at, updated_at) VALUES ('registry-slug', ${registryId}, 'current', 1, 1)`)
+    const withRegistry = await latestAppliedFacts(db, 21)
+    expect(withRegistry).toEqual({ slug: 'registry-slug', publishedAt: 1_700_000_100 })
+
+    // Registry miss → snapshot slug fallback; published_at null round-trips.
+    const withoutRegistry = await latestAppliedFacts(db, 22)
+    expect(withoutRegistry).toEqual({ slug: 'snapshot-slug-b', publishedAt: null })
   })
 })
