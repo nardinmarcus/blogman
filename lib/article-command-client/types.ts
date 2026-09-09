@@ -5,19 +5,22 @@
  * /api/article-commands wire. Deliberately distinct from:
  *  - the editor save protocol (create/save confirmation) that lives in
  *    `lib/editor-command-transport`;
- *  - the Article-Level Command domain concept, which these requests
- *    transport but do not decide ("which publish command applies" stays
- *    with callers until a publication façade exists).
+ *  - the Article-Level Command domain concept, whose on/off-public-surface
+ *    selection lives in lib/publication-intent (Publication Intent).
  */
 
-/** Identity facts one admin row carries; nulls trigger the legacy bypass. */
+/** Identity facts one admin row carries; nulls are refused client-side with
+ *  the wire's 409 semantics — the legacy PUT bypass is retired (ADR 0011). */
 export interface ArticleCommandTarget {
   slug: string
   articleId: number | null
   expectedVersion: number | null
 }
 
-/** One typed command request; payload fields are flattened per action. */
+/** One typed command request; payload fields are flattened per action.
+ *  `publishTemp` is deliberately NOT here: admin surfaces must never send it
+ *  (Publication Intent owns on/off-public-surface; the editors' save-time
+ *  toggle goes through editor-command-transport). */
 export type ArticleCommandRequest =
   | { action: 'setPinned'; is_pinned: 0 | 1 }
   | { action: 'setHidden'; is_hidden: 0 | 1 }
@@ -27,13 +30,12 @@ export type ArticleCommandRequest =
   | { action: 'restore' }
   | { action: 'unpublish' }
   | { action: 'relive'; content: 'formal' | 'revision' }
-  | { action: 'publishTemp'; currentStatus: string; status: string }
 
 /**
  * Normalized outcome. The raw wire vocabulary (`applied` / `replayed` /
  * `legacy-applied` / `conflict` / bare HTTP errors) never leaks past this
- * seam — that is what makes the legacy-wire retirement (candidate ④) a
- * one-spot change later.
+ * seam — that is what made the legacy-wire retirement (ADR 0011) a
+ * one-spot change.
  */
 export type ArticleCommandOutcome =
   | { kind: 'ok'; ok: true; replayed: boolean }

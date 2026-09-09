@@ -41,7 +41,6 @@ function recordingFetch(responses: Array<{ ok: boolean; body: unknown }>): { fet
 }
 
 const authority: ArticleCommandTarget = { slug: 'hello-world', articleId: 7, expectedVersion: 3 }
-const ledgerOnly: ArticleCommandTarget = { slug: 'hello-world', articleId: null, expectedVersion: null }
 
 let opSeq = 1
 const opId = () => `op-${String(opSeq++)}`
@@ -64,7 +63,6 @@ describe('versioned wire: request bodies', () => {
     [{ action: 'restore' }, {}],
     [{ action: 'unpublish' }, {}],
     [{ action: 'relive', content: 'formal' }, { content: 'formal' }],
-    [{ action: 'publishTemp', currentStatus: 'draft', status: 'published' }, { currentStatus: 'draft', status: 'published' }],
   ] as Array<[ArticleCommandRequest, Record<string, unknown>]>)('sends %j with the authority envelope', async (request, payload) => {
     const { fetchImpl, calls } = recordingFetch([{ ok: true, body: { outcome: 'applied' } }])
     await makeClient(fetchImpl).execute(authority, request)
@@ -95,29 +93,23 @@ describe('versioned wire: request bodies', () => {
   })
 })
 
-describe('legacy bypass (ledger-only rows)', () => {
+describe('refusal without versioned authority (ADR 0011 — bypass retired)', () => {
   it.each([
-    [{ action: 'setPinned', is_pinned: 0 }, { is_pinned: 0 }],
-    [{ action: 'setHidden', is_hidden: 1 }, { is_hidden: 1 }],
-    [{ action: 'setPassword', password: null }, { password: null }],
-    [{ action: 'setCategory', category: null }, { category: null }],
-    [{ action: 'softDelete' }, { status: 'deleted' }],
-    [{ action: 'restore' }, { status: 'draft' }],
-    [{ action: 'publishTemp', currentStatus: 'draft', status: 'published' }, { status: 'published' }],
-    [{ action: 'unpublish' }, {}],
-    [{ action: 'relive', content: 'revision' }, {}],
-  ] as Array<[ArticleCommandRequest, Record<string, unknown>]>)('PUTs %j to the legacy route with the mapped body', async (request, body) => {
-    const { fetchImpl, calls } = recordingFetch([{ ok: true, body: { ok: true } }])
-    await makeClient(fetchImpl).execute(ledgerOnly, request)
-    expect(calls[0].url).toBe('/api/admin/posts/hello-world')
-    expect(calls[0].init.method).toBe('PUT')
-    expect(JSON.parse(calls[0].init.body)).toEqual(body)
+    { slug: 'hello-world', articleId: null, expectedVersion: null },
+    { slug: 'hello-world', articleId: 7, expectedVersion: null },
+    { slug: 'hello-world', articleId: null, expectedVersion: 3 },
+  ])('never touches the wire for %j — refuses with the 409 message', async (target) => {
+    const fetchImpl = vi.fn()
+    const result = await makeClient(fetchImpl as unknown as FetchLike).execute(target, { action: 'softDelete' })
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(result).toEqual({ kind: 'error', ok: false, message: '文章尚未启用版本化写入' })
   })
 
-  it('encodes the slug into the legacy URL', async () => {
-    const { fetchImpl, calls } = recordingFetch([{ ok: true, body: {} }])
-    await makeClient(fetchImpl).execute({ ...ledgerOnly, slug: 'a b/中文' }, { action: 'softDelete' })
-    expect(calls[0].url).toBe('/api/admin/posts/a%20b%2F%E4%B8%AD%E6%96%87')
+  it('encodes the slug into the versioned envelope once authority exists', async () => {
+    const { fetchImpl, calls } = recordingFetch([{ ok: true, body: { outcome: 'applied' } }])
+    await makeClient(fetchImpl).execute({ ...authority, slug: 'a b/中文' }, { action: 'softDelete' })
+    expect(calls[0].url).toBe('/api/article-commands')
+    expect(JSON.parse(calls[0].init.body).slug).toBe('a b/中文')
   })
 })
 
