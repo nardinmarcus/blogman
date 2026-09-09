@@ -67,5 +67,9 @@ A state change that does not revise body content (pin, hide, password, category,
 _Avoid_: Field patch, in-place update, side-table write
 
 **Article Command Client**:
-The single client-side seam through which admin surfaces (list rows, the batch bar, the password modal) issue every command on the `/api/article-commands` wire: request building, operation-id generation, the ledger-only legacy direct-write bypass, and normalized outcomes. It is the client counterpart of the wire route — distinct from the editor save protocol in `editor-command-transport` and from the Article-Level Command domain concept it transports.
+The single client-side seam through which admin surfaces (list rows, the batch bar, the password modal) issue every command on the `/api/article-commands` wire: request building, operation-id generation, and normalized outcomes. Targets without versioned authority are refused client-side (ADR 0011 retired the ledger-only legacy PUT bypass). It is the client counterpart of the wire route — distinct from the editor save protocol in `editor-command-transport` and from the Article-Level Command domain concept it transports.
 _Avoid_: editor-command-transport, the Article-Level Command domain concept, per-caller fetch wrappers
+
+**Publication Intent**:
+The single mapping from canonical facts (versioned authority, formal publication, lifecycle status) to the ONE publish-surface action and its copy: the first-publish confirmation page, an unpublish/relive command, or a client-side refusal. Editors' save-time status toggles (publishTemp via the save coordinator) and the external write API are out of scope.
+_Avoid_: publish-button branching, per-caller publish-command guessing, first-publish vs relive heuristics

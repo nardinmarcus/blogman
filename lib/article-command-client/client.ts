@@ -6,10 +6,11 @@
  * request bodies and the normalization of every outcome the wire emits
  * (issue #19 / PR #239 was exactly a caller drifting off this contract).
  *
- * The legacy direct-write bypass for ledger-only rows (null identity
- * facts → PUT /api/admin/posts/[slug]) is part of this interface on
- * purpose: callers must not decide which wire to use. When that bypass
- * retires, it dies here alone.
+ * There is exactly ONE wire. Targets without versioned authority are
+ * refused client-side with the server's 409 semantics — the former
+ * ledger-only legacy PUT bypass served no reachable state and was retired
+ * (ADR 0011; the /api/admin/posts/[slug] route remains as the versionless
+ * write adapter for stale clients, not as a legacy-compat surface).
  */
 
 import type {
@@ -29,33 +30,6 @@ function defaultOperationId(): string {
     return crypto.randomUUID()
   }
   return `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`
-}
-
-/**
- * Legacy direct-write body per action, byte-compatible with the mapping
- * table PostRow used to inline. `unpublish` / `relive` never legitimately
- * reach the legacy wire (callers only send them under versioned
- * authority); they map to an empty body as the old code did.
- */
-function legacyBody(request: ArticleCommandRequest): Record<string, unknown> {
-  switch (request.action) {
-    case 'setPinned':
-      return { is_pinned: request.is_pinned }
-    case 'setHidden':
-      return { is_hidden: request.is_hidden }
-    case 'setPassword':
-      return { password: request.password }
-    case 'setCategory':
-      return { category: request.category }
-    case 'softDelete':
-      return { status: 'deleted' }
-    case 'restore':
-      return { status: 'draft' }
-    case 'publishTemp':
-      return { status: request.status }
-    default:
-      return {}
-  }
 }
 
 export interface ArticleCommandClient {
@@ -96,30 +70,25 @@ export function createArticleCommandClient(
 
   return {
     async execute(target, request) {
-      const hasAuthority = typeof target.articleId === 'number' && typeof target.expectedVersion === 'number'
+      if (typeof target.articleId !== 'number' || typeof target.expectedVersion !== 'number') {
+        // Versioned authority is the only write surface (ADR 0011) — refuse
+        // client-side with the same semantics the wire route returns (409).
+        return { kind: 'error', ok: false, message: '文章尚未启用版本化写入' }
+      }
       try {
-        let res: Pick<Response, 'ok' | 'json'>
-        if (hasAuthority) {
-          const { action, ...payload } = request
-          res = await doFetch(COMMAND_URL, {
-            method: 'POST',
-            headers: JSON_HEADERS,
-            body: JSON.stringify({
-              action,
-              slug: target.slug,
-              articleId: target.articleId,
-              expectedVersion: target.expectedVersion,
-              operationId: newOperationId(),
-              ...payload,
-            }),
-          })
-        } else {
-          res = await doFetch(`/api/admin/posts/${encodeURIComponent(target.slug)}`, {
-            method: 'PUT',
-            headers: JSON_HEADERS,
-            body: JSON.stringify(legacyBody(request)),
-          })
-        }
+        const { action, ...payload } = request
+        const res = await doFetch(COMMAND_URL, {
+          method: 'POST',
+          headers: JSON_HEADERS,
+          body: JSON.stringify({
+            action,
+            slug: target.slug,
+            articleId: target.articleId,
+            expectedVersion: target.expectedVersion,
+            operationId: newOperationId(),
+            ...payload,
+          }),
+        })
         return await interpret(res)
       } catch {
         return { kind: 'error', ok: false, message: '网络错误，请重试' }

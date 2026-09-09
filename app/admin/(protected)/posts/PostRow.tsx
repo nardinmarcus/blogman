@@ -10,6 +10,7 @@ import { PasswordModal } from '@/components/PasswordModal'
 import { Dropdown } from '@/components/Dropdown'
 import { useArticleCommand } from '@/lib/article-command-client'
 import type { ArticleCommandRequest } from '@/lib/article-command-client'
+import { publicationActionCopy, resolvePublicationIntent } from '@/lib/publication-intent'
 import { getSiteUrl } from '@/lib/site-config'
 import type { AdminListPost } from './page'
 
@@ -48,9 +49,8 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
   const toast = useToast()
 
   // B2-06 — every list write goes through the Article Command Client seam
-  // (expected version + operation id). The ledger-only legacy PUT bypass lives
-  // inside the module, not in this component.
-  const hasAuthority = typeof post.articleId === 'number' && typeof post.version === 'number'
+  // (expected version + operation id). Rows without versioned authority are
+  // refused inside the module (ADR 0011 — the legacy PUT bypass is retired).
   const { run: runCommand, loading } = useArticleCommand({
     target: { slug: post.slug, articleId: post.articleId, expectedVersion: post.version },
   })
@@ -91,16 +91,15 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
     ...categories.map((cat) => ({ value: cat, label: cat })),
   ]
 
-  // B3 分流文案：从未正式发布 → 首次上线；曾正式发布 → 重新上线；ledger-only → 旧「发布文章」
-  const canFirstPublish = hasAuthority && post.formalPublished !== true
-  const publishLabel =
-    post.status === 'published'
-      ? '转为草稿'
-      : canFirstPublish
-        ? '发布（首次上线）'
-        : hasAuthority
-          ? '重新上线'
-          : '发布文章'
+  // Publication Intent（CONTEXT.md）——文案与动作同源，分叉不可表达。
+  const publicationFacts = {
+    articleId: post.articleId,
+    expectedVersion: post.version,
+    formalPublished: post.formalPublished,
+    status: post.status,
+  }
+  const actionCopy = publicationActionCopy(publicationFacts)
+  const publishLabel = actionCopy.label
 
   // 查看文章
   const handleView = () => {
@@ -145,33 +144,25 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
     return ok
   }
 
-  // 状态切换（发布/取消发布）—— B3 canonical 分流：
-  //   · 从未正式发布（无 formal_publication）→ 打开首次发布确认流（prepare →
-  //     四阻塞项与精确版本 → confirm → publicUrl 回执），绝不走临时命令；
-  //   · 曾正式发布 → relive / unpublish 生命周期命令；
-  //   · ledger-only 库（无身份表）→ 保留旧直写回退。
+  // 状态切换（上/下公共面）—— Publication Intent 唯一映射：
+  //   · 从未正式发布（含临时发布态）→ 首次发布确认页（prepare → 阻塞项 →
+  //     confirm → publicUrl 回执），绝不走临时命令；
+  //   · 曾正式发布 → unpublish / relive 生命周期命令；
+  //   · 无版本化权限 → 客户端拒绝（ADR 0011：旁路已退役）。
   const handleStatusToggle = async () => {
-    if (hasAuthority && post.formalPublished !== true) {
+    const intent = resolvePublicationIntent(publicationFacts)
+    if (intent.kind === 'refused') {
+      toast.error(intent.message)
+      setShowStatusModal(false)
+      return false
+    }
+    if (intent.kind === 'first-publish') {
       // 首次上线：交给共享 #33/#34 发布确认页（服务端 prepare/confirm + 回执）。
-      router.push(`/admin/publish/${post.articleId}`)
+      router.push(`/admin/publish/${intent.articleId}`)
       setShowStatusModal(false)
       return true
     }
-    if (hasAuthority) {
-      // 曾正式发布：生命周期命令，不使用 publishTemp。
-      const action = post.status === 'published' ? 'unpublish' : 'relive'
-      const ok = await run({ action, content: 'formal' }, action === 'unpublish' ? '已取消发布' : '已重新上线')
-      if (ok) {
-        setShowStatusModal(false)
-        router.refresh()
-      }
-      return ok
-    }
-    const newStatus = post.status === 'published' ? 'draft' : 'published'
-    const ok = await run(
-      { action: 'publishTemp', currentStatus: post.status === 'published' ? 'published' : 'draft', status: newStatus },
-      newStatus === 'published' ? '已发布' : '已转为草稿',
-    )
+    const ok = await run(intent.request, intent.successMsg)
     if (ok) {
       setShowStatusModal(false)
       router.refresh()
@@ -664,16 +655,8 @@ export function PostRow({ post, categories, preferMenuUp = false, selected = fal
         isOpen={showStatusModal}
         onClose={() => setShowStatusModal(false)}
         onConfirm={handleStatusToggle}
-        title={post.status === 'published' ? '转为草稿' : publishLabel}
-        description={
-          post.status === 'published'
-            ? '转为草稿后，文章将不再公开显示。'
-            : canFirstPublish
-              ? '将进入首次发布确认：展示精确版本与四项阻塞检查，确认后创建正式发布并生成公开地址。'
-              : hasAuthority
-                ? '将基于正式版本重新上线，文章将在首页和 RSS 中显示。'
-                : '发布后，文章将在首页和 RSS 中显示。'
-        }
+        title={actionCopy.modalTitle}
+        description={actionCopy.modalDescription}
         confirmText="确认"
         type="info"
       />
