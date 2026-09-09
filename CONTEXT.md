@@ -65,3 +65,7 @@ _Avoid_: Slug lookup table, title slug
 **Article-Level Command**:
 A state change that does not revise body content (pin, hide, password, category, soft delete, restore), recorded as its own immutable version snapshot.
 _Avoid_: Field patch, in-place update, side-table write
+
+**Article Command Client**:
+The single client-side seam through which admin surfaces (list rows, the batch bar, the password modal) issue every command on the `/api/article-commands` wire: request building, operation-id generation, the ledger-only legacy direct-write bypass, and normalized outcomes. It is the client counterpart of the wire route — distinct from the editor save protocol in `editor-command-transport` and from the Article-Level Command domain concept it transports.
+_Avoid_: editor-command-transport, the Article-Level Command domain concept, per-caller fetch wrappers
