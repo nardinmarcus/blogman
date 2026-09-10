@@ -3,6 +3,7 @@ import { verifyPassword } from '@/lib/password'
 import { notFound, permanentRedirect } from 'next/navigation'
 import { Suspense } from 'react'
 import Link from 'next/link'
+import { formatDate } from '@/lib/public-date'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
 import { FrontPostAdminBoundary } from '@/components/FrontPostAdminBoundary'
@@ -340,11 +341,7 @@ export default async function PostPage({
                     </>
                   )}
                   <time>
-                    {new Date(post.published_at * 1000).toLocaleDateString('zh-CN', {
-                      year: 'numeric',
-                      month: 'short',
-                      day: 'numeric',
-                    })}
+                    {formatDate(post.published_at)}
                   </time>
                   <span aria-hidden>·</span>
                   <span>{post.view_count} 次阅读</span>

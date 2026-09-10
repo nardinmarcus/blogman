@@ -1,4 +1,5 @@
 import { searchPublicArticles } from '@/lib/public-read'
+import { formatDate } from '@/lib/public-date'
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import Link from 'next/link'
 import { SiteHeader } from '@/components/SiteHeader'
@@ -11,14 +12,6 @@ import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 export const metadata = {
   title: '搜索结果',
   robots: { index: false, follow: true },
-}
-
-function formatDate(ts: number) {
-  return new Date(ts * 1000).toLocaleDateString('zh-CN', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  })
 }
 
 export default async function SearchPage({
@@ -93,14 +86,14 @@ export default async function SearchPage({
             {posts.map((post, index) => (
               <article
                 key={post.slug}
-                className="group border-t border-[var(--editor-line)] first:border-t-0"
+                className="group relative border-t border-[var(--editor-line)] first:border-t-0 transition-colors duration-200 hover:bg-[var(--editor-panel)]"
                 style={{
                   animation: `fadeInUp 0.4s ease-out ${index * 0.05}s both`
                 }}
               >
                 <Link
                   href={`/${post.slug}`}
-                  className="block py-6 sm:py-7 relative transition-colors duration-200 hover:bg-[var(--editor-panel)]"
+                  className="block pt-6 sm:pt-7 after:absolute after:inset-0 after:content-['']"
                 >
                   <div className="absolute left-0 top-6 bottom-6 w-1 bg-[var(--editor-accent)] opacity-0 group-hover:opacity-100 transition-opacity duration-200" />
 
@@ -128,31 +121,33 @@ export default async function SearchPage({
                         {post.description}
                       </p>
                     )}
-                    <div className="flex items-center gap-2 text-xs text-[var(--stone-gray)]">
-                      <time>{formatDate(post.published_at)}</time>
-                      {post.category && (
-                        <>
-                          <span aria-hidden>·</span>
-                          {(() => {
-                            const categorySlug = post.category ? categorySlugMap.get(post.category) : null
-                            return categorySlug ? (
-                              <Link
-                                href={`/category/${categorySlug}`}
-                                className="px-2 py-0.5 rounded-full bg-[var(--editor-accent)]/8 text-[var(--editor-accent)] font-medium border border-[var(--editor-accent)]/15 hover:bg-[var(--editor-accent)]/12 transition-colors"
-                              >
-                                {post.category}
-                              </Link>
-                            ) : (
-                              <span className="px-2 py-0.5 rounded-full bg-[var(--editor-accent)]/8 text-[var(--editor-accent)] font-medium border border-[var(--editor-accent)]/15">
-                                {post.category}
-                              </span>
-                            )
-                          })()}
-                          </>
-                        )}
-                    </div>
                   </div>
                 </Link>
+                <div className="pl-0 group-hover:pl-5 transition-[padding] duration-200">
+                  <div className="flex items-center gap-2 text-xs text-[var(--stone-gray)] pb-6 sm:pb-7">
+                    <time>{formatDate(post.published_at)}</time>
+                  {post.category && (
+                    <>
+                      <span aria-hidden>·</span>
+                      {(() => {
+                        const categorySlug = post.category ? categorySlugMap.get(post.category) : null
+                        return categorySlug ? (
+                          <Link
+                            href={`/category/${categorySlug}`}
+                            className="relative z-10 px-2 py-0.5 rounded-full bg-[var(--editor-accent)]/8 text-[var(--editor-accent)] font-medium border border-[var(--editor-accent)]/15 hover:bg-[var(--editor-accent)]/12 transition-colors"
+                          >
+                            {post.category}
+                          </Link>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full bg-[var(--editor-accent)]/8 text-[var(--editor-accent)] font-medium border border-[var(--editor-accent)]/15">
+                            {post.category}
+                          </span>
+                        )
+                      })()}
+                    </>
+                  )}
+                  </div>
+                </div>
               </article>
             ))}
           </div>

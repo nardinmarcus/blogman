@@ -1,18 +1,11 @@
 'use client'
 
 import Link from 'next/link'
+import { formatDate } from '@/lib/public-date'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
 import { Pagination } from '@/components/Pagination'
 import type { HomeProps } from '@/components/HomeClient'
-
-function formatDate(ts: number) {
-  return new Date(ts * 1000).toLocaleDateString('zh-CN', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  })
-}
 
 export function HomeDefault({
   initialTheme,
@@ -42,12 +35,12 @@ export function HomeDefault({
               {posts.map((post, index) => (
                 <article
                   key={post.slug}
-                  className="group border-t border-[var(--editor-line)] first:border-t-0"
+                  className="group relative border-t border-[var(--editor-line)] first:border-t-0 py-6 sm:py-7 pl-4 transition-colors duration-200 hover:bg-[var(--editor-panel)] border-l-2 border-l-transparent hover:border-l-[var(--editor-accent)]"
                   style={{ animation: `fadeInUp 0.4s ease-out ${index * 0.05}s both` }}
                 >
                   <Link
                     href={`/${post.slug}`}
-                    className="block py-6 sm:py-7 transition-all duration-200 hover:bg-[var(--editor-panel)] border-l-2 border-l-transparent hover:border-l-[var(--editor-accent)] pl-4"
+                    className="block after:absolute after:inset-0 after:content-['']"
                   >
                     <div>
                       <h2
@@ -73,31 +66,31 @@ export function HomeDefault({
                           {post.description}
                         </p>
                       )}
-                      <div className="flex items-center gap-2 text-xs text-[var(--stone-gray)]">
-                        <time>{formatDate(post.published_at)}</time>
-                        {post.category && (
-                          <>
-                            <span aria-hidden>·</span>
-                            {(() => {
-                              const slug = categorySlugMap[post.category]
-                              return slug ? (
-                                <Link
-                                  href={`/category/${slug}`}
-                                  className="px-2 py-0.5 rounded-full bg-[var(--editor-accent)]/8 text-[var(--editor-accent)] font-medium border border-[var(--editor-accent)]/15 hover:bg-[var(--editor-accent)]/12 transition-colors"
-                                >
-                                  {post.category}
-                                </Link>
-                              ) : (
-                                <span className="px-2 py-0.5 rounded-full bg-[var(--editor-accent)]/8 text-[var(--editor-accent)] font-medium border border-[var(--editor-accent)]/15">
-                                  {post.category}
-                                </span>
-                              )
-                            })()}
-                          </>
-                        )}
-                      </div>
                     </div>
                   </Link>
+                  <div className="flex items-center gap-2 text-xs text-[var(--stone-gray)]">
+                    <time>{formatDate(post.published_at)}</time>
+                    {post.category && (
+                      <>
+                        <span aria-hidden>·</span>
+                        {(() => {
+                          const slug = categorySlugMap[post.category]
+                          return slug ? (
+                            <Link
+                              href={`/category/${slug}`}
+                              className="relative z-10 px-2 py-0.5 rounded-full bg-[var(--editor-accent)]/8 text-[var(--editor-accent)] font-medium border border-[var(--editor-accent)]/15 hover:bg-[var(--editor-accent)]/12 transition-colors"
+                            >
+                              {post.category}
+                            </Link>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full bg-[var(--editor-accent)]/8 text-[var(--editor-accent)] font-medium border border-[var(--editor-accent)]/15">
+                              {post.category}
+                            </span>
+                          )
+                        })()}
+                      </>
+                    )}
+                  </div>
                 </article>
               ))}
             </div>

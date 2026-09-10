@@ -5,21 +5,11 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
+import { formatDateShort, formatYear } from '@/lib/public-date'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
 import { Pagination } from '@/components/Pagination'
 import type { HomeProps } from '@/components/HomeClient'
-
-function formatDateShort(ts: number) {
-  const d = new Date(ts * 1000)
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${m}.${day}`
-}
-
-function formatYear(ts: number) {
-  return new Date(ts * 1000).getFullYear()
-}
 
 // Category → color mapping (consistent palette)
 const CAT_COLORS: Record<string, string> = {

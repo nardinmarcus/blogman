@@ -5,6 +5,7 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
+import { formatDateLong as formatDate } from '@/lib/public-date'
 import { SiteFooter } from '@/components/SiteFooter'
 import { SearchEntry } from '@/components/SearchEntry'
 import { Pagination } from '@/components/Pagination'
@@ -17,10 +18,6 @@ const BG = '#f6f3ed'
 const FG = '#1a1614'
 const MUTED = '#7a6f68'
 const BORDER = '#d8d2c8'
-
-function formatDate(ts: number) {
-  return new Date(ts * 1000).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' })
-}
 
 function getIssueInfo() {
   const now = new Date()

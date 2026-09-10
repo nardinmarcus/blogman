@@ -18,6 +18,7 @@ export const revalidate = 3600
 
 function formatDate(ts: number) {
   return new Date(ts * 1000).toLocaleDateString('zh-CN', {
+    timeZone: 'Asia/Shanghai',
     year: 'numeric',
     month: 'short',
     day: 'numeric',
