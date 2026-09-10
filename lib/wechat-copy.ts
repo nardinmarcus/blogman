@@ -1,6 +1,5 @@
 'use client'
 
-import html2pdf from 'html2pdf.js'
 import juice from 'juice'
 import { buildWechatExportCss, normalizeWechatExportHtml, type WechatExportStyleTokens } from './wechat-export-style'
 
@@ -490,6 +489,10 @@ export async function downloadArticleAsPdf(title: string, html: string) {
     }
 
     // html2pdf.js runtime supports `pagebreak`, but its bundled d.ts omits it.
+    // Dynamically imported (#244): html2pdf.js (+ html2canvas) is ~270 KB and
+    // was statically reachable from every article page's client graph,
+    // delaying navigation chunks for a rarely-used action.
+    const { default: html2pdf } = await import('html2pdf.js')
     await html2pdf()
       .set(pdfOptions as never)
       .from(prepared.article)
