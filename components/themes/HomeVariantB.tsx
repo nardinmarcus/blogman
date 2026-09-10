@@ -9,7 +9,6 @@ import { formatDateLong as formatDate } from '@/lib/public-date'
 import { SiteFooter } from '@/components/SiteFooter'
 import { SearchEntry } from '@/components/SearchEntry'
 import { Pagination } from '@/components/Pagination'
-import { ThemeDropdown } from '@/components/ThemeDropdown'
 import type { HomeProps } from '@/components/HomeClient'
 import type { SiteNavLink } from '@/lib/site'
 
@@ -27,13 +26,7 @@ function getIssueInfo() {
   return { vol, month, year }
 }
 
-function EditorialNavBar({
-  initialTheme,
-  navLinks,
-}: {
-  initialTheme: HomeProps['initialTheme']
-  navLinks: SiteNavLink[]
-}) {
+function EditorialNavBar({ navLinks }: { navLinks: SiteNavLink[] }) {
   const defaultLinks = [
     { label: 'GitHub', url: 'https://github.com/nardinmarcus/', openInNewTab: true },
     { label: 'Twitter', url: 'https://x.com/nardinmarcus/', openInNewTab: true },
@@ -78,14 +71,6 @@ function EditorialNavBar({
             </Link>
           )
         ))}
-        {/* Theme dropdown — editorial style, self-contained */}
-        <ThemeDropdown
-          initialTheme={initialTheme}
-          buttonStyle={{ color: FG, fontFamily: '"JetBrains Mono", ui-monospace, monospace', fontSize: 12, letterSpacing: '0.08em' }}
-          dropdownStyle={{ background: BG, border: `1px solid ${BORDER}`, fontFamily: '"JetBrains Mono", monospace' }}
-          itemStyle={{ color: FG, fontSize: 12 }}
-          activeItemStyle={{ background: ACCENT, color: '#ffffff' }}
-        />
         {/* Search */}
         <div style={{ color: FG }}>
           <SearchEntry />
@@ -96,7 +81,6 @@ function EditorialNavBar({
 }
 
 export function HomeVariantB({
-  initialTheme,
   posts,
   navLinks,
   currentPage,
@@ -109,7 +93,7 @@ export function HomeVariantB({
 
   return (
     <div className="theme-home-editorial" style={{ background: BG, color: FG, minHeight: '100vh', fontFamily: '"PingFang SC", "Noto Sans SC", system-ui, sans-serif' }}>
-      <EditorialNavBar initialTheme={initialTheme} navLinks={navLinks} />
+      <EditorialNavBar navLinks={navLinks} />
 
       {/* Giant masthead */}
       <div className="editorial-masthead" style={{ padding: '36px 48px 20px', borderBottom: `1px solid ${BORDER}` }}>

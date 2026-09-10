@@ -8,7 +8,6 @@ import { formatDateCompact } from '@/lib/public-date'
 import { SiteFooter } from '@/components/SiteFooter'
 import { SearchEntry } from '@/components/SearchEntry'
 import { Pagination } from '@/components/Pagination'
-import { ThemeDropdown } from '@/components/ThemeDropdown'
 import type { HomeProps } from '@/components/HomeClient'
 import type { SiteNavLink } from '@/lib/site'
 
@@ -19,13 +18,7 @@ const BORDER = '#2a2f48'
 const ACCENT = '#4ade80'   // terminal green
 const ACCENT2 = '#fbbf24'  // amber
 
-function TerminalHeader({
-  initialTheme,
-  navLinks,
-}: {
-  initialTheme: HomeProps['initialTheme']
-  navLinks: SiteNavLink[]
-}) {
+function TerminalHeader({ navLinks }: { navLinks: SiteNavLink[] }) {
   const defaultLinks = [
     { label: '~/github', url: 'https://github.com/nardinmarcus/', openInNewTab: true },
     { label: '~/twitter', url: 'https://x.com/nardinmarcus/', openInNewTab: true },
@@ -52,7 +45,7 @@ function TerminalHeader({
         <span style={{ color: FG }}>./serve --port=443</span>
       </div>
 
-      {/* Right: nav + theme + search */}
+      {/* Right: nav + search */}
       <div className="terminal-home-nav" style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
         {links.map(link => (
           link.url.startsWith('http') ? (
@@ -74,20 +67,6 @@ function TerminalHeader({
           )
         ))}
 
-        {/* Theme dropdown — terminal style, self-contained */}
-        <ThemeDropdown
-          initialTheme={initialTheme}
-          buttonStyle={{ color: MUTED, fontFamily: '"JetBrains Mono", ui-monospace, monospace', fontSize: 12 }}
-          dropdownStyle={{
-            background: BG,
-            border: `1px solid ${BORDER}`,
-            fontFamily: '"JetBrains Mono", ui-monospace, monospace',
-            boxShadow: `0 8px 24px rgba(0,0,0,0.4)`,
-          }}
-          itemStyle={{ color: FG, fontSize: 12 }}
-          activeItemStyle={{ background: ACCENT, color: '#0f1117' }}
-        />
-
         {/* Search */}
         <div style={{ color: MUTED }}>
           <SearchEntry />
@@ -98,7 +77,6 @@ function TerminalHeader({
 }
 
 export function HomeVariantC({
-  initialTheme,
   posts,
   navLinks,
   currentPage,
@@ -154,7 +132,7 @@ export function HomeVariantC({
       }} />
 
       <div className="terminal-home-shell" style={{ maxWidth: 860, margin: '0 auto', padding: '32px 40px 0', position: 'relative', zIndex: 1 }}>
-        <TerminalHeader initialTheme={initialTheme} navLinks={navLinks} />
+        <TerminalHeader navLinks={navLinks} />
 
         {/* ASCII-style banner */}
         <div style={{ marginTop: 36, marginBottom: 28 }}>

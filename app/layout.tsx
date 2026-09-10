@@ -5,7 +5,7 @@ import "./globals.css";
 import { GlobalShortcuts } from "@/components/GlobalShortcuts";
 import { ToastProvider } from "@/components/Toast";
 import { CustomJsInjector } from "@/components/CustomJsInjector";
-import { FONT_CONFIG, THEME_OPTIONS, THEME_STORAGE_KEY, normalizeTheme } from "@/lib/appearance";
+import { FONT_CONFIG, normalizeTheme } from "@/lib/appearance";
 import { getAppCloudflareEnv } from "@/lib/cloudflare";
 import { getPublicSettingForRequest } from "@/lib/public-request-data";
 import { rethrowIfDatabaseMigrationRequired } from "@/lib/database-errors";
@@ -118,18 +118,11 @@ export default async function RootLayout({
   }
 
   const font = FONT_CONFIG[bodyFont]
-  const validThemes = THEME_OPTIONS.map((theme) => theme.id)
 
   const appearanceApplyScript = `
 (function(){
   var f = ${JSON.stringify(FONT_CONFIG)};
   var k = "${bodyFont || ''}";
-  var defaultTheme = "${defaultTheme}";
-  var themeStorageKey = "${THEME_STORAGE_KEY}";
-  var validThemes = ${JSON.stringify(validThemes)};
-  function isTheme(value) {
-    return validThemes.indexOf(value) !== -1;
-  }
   function applyFont(key) {
     var c = f[key];
     document.documentElement.setAttribute('data-font', key || 'default');
@@ -146,19 +139,7 @@ export default async function RootLayout({
       document.documentElement.style.removeProperty('--body-font');
     }
   }
-  function applyTheme(theme) {
-    if (isTheme(theme) && theme !== 'default') {
-      document.documentElement.setAttribute('data-theme', theme);
-    } else {
-      document.documentElement.removeAttribute('data-theme');
-    }
-  }
   applyFont(k);
-  applyTheme(defaultTheme);
-  try {
-    var savedTheme = window.localStorage.getItem(themeStorageKey);
-    if (isTheme(savedTheme)) applyTheme(savedTheme);
-  } catch (e) {}
 })();
 `
 

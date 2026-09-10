@@ -1,6 +1,3 @@
-export const THEME_STORAGE_KEY = 'blogman_site_theme'
-export const THEME_CHANGE_EVENT = 'blogman-theme-change'
-
 export const THEME_OPTIONS = [
   {
     id: 'default',
@@ -74,27 +71,4 @@ export function isTheme(value: string | null | undefined): value is Theme {
 
 export function normalizeTheme(value: string | null | undefined, fallback: Theme = 'default'): Theme {
   return isTheme(value) ? value : fallback
-}
-
-export function getClientThemePreference(fallback: Theme): Theme {
-  if (typeof window === 'undefined') return fallback
-
-  const saved = window.localStorage.getItem(THEME_STORAGE_KEY)
-  if (isTheme(saved)) return saved
-
-  const attr = document.documentElement.getAttribute('data-theme')
-  if (isTheme(attr)) return attr
-
-  return fallback
-}
-
-export function subscribeToThemeChange(onStoreChange: () => void): () => void {
-  if (typeof window === 'undefined') {
-    return () => {}
-  }
-
-  const handler = () => onStoreChange()
-  window.addEventListener(THEME_CHANGE_EVENT, handler)
-
-  return () => window.removeEventListener(THEME_CHANGE_EVENT, handler)
 }
