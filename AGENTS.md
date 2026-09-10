@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Work lives in canonical GitHub Issues for `nardinmarcus/blogman`; always pass `--repo nardinmarcus/blogman` to `gh`. Issue #19 and its native GitHub dependency/sub-issue graph are the sole tracker. See `docs/agents/issue-tracker.md`.
+Work lives in canonical GitHub Issues for `nardinmarcus/blogman`; always pass `--repo nardinmarcus/blogman` to `gh`. Use GitHub native dependencies and sub-issues for active work. Before selecting or creating a task, see `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
