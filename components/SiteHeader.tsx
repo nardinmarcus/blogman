@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { useState, useRef, useEffect } from 'react'
-import { Menu, X, ChevronDown } from 'lucide-react'
+import { Menu, X, ChevronDown, Rss } from 'lucide-react'
 import { SearchEntry } from './SearchEntry'
 import type { Theme } from '@/lib/appearance'
 import type { SiteCategoryLink, SiteNavLink } from '@/lib/site'
@@ -21,6 +21,30 @@ const defaultNavLinks: NavLink[] = [
   { label: 'GitHub', url: 'https://github.com/nardinmarcus/', openInNewTab: true },
   { label: 'RSS', url: '/feed.xml', openInNewTab: false },
 ]
+
+// lucide 已移除品牌图标，GitHub 使用官方 mark 的内联 SVG
+type LinkIconComponent = (props: { className?: string }) => React.ReactNode
+
+function GithubMarkIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className={className}>
+      <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+    </svg>
+  )
+}
+
+// 按 label / url 识别常见站点链接，返回对应图标；未识别则返回 null（回退为文字）
+function getLinkIcon(link: NavLink): LinkIconComponent | null {
+  if (/github/i.test(link.label) || /github\.com/i.test(link.url)) return GithubMarkIcon
+  if (
+    /rss/i.test(link.label) ||
+    /feed\.(xml|json|atom)(\?.*)?$/i.test(link.url) ||
+    /\/(feed|rss)(\/|$)/i.test(link.url)
+  ) {
+    return Rss
+  }
+  return null
+}
 
 function getIssueInfo() {
   const now = new Date()
@@ -52,8 +76,15 @@ export function SiteHeader({
   }, [])
   const activeCategory = categories.find(c => c.slug === activeCategorySlug)
 
-  const renderLink = (link: NavLink, onClick?: () => void) => {
+  const renderLink = (link: NavLink, onClick?: () => void, iconOnly = false) => {
     const className = "text-[var(--editor-muted)] hover:text-[var(--editor-ink)] transition-colors duration-150"
+    const Icon = iconOnly ? getLinkIcon(link) : null
+    const content = Icon ? (
+      <span className="inline-flex items-center" title={link.label}>
+        <Icon className="w-[18px] h-[18px]" />
+        <span className="sr-only">{link.label}</span>
+      </span>
+    ) : link.label
 
     if (link.openInNewTab || link.url.startsWith('http')) {
       return (
@@ -63,9 +94,10 @@ export function SiteHeader({
           target={link.openInNewTab ? '_blank' : undefined}
           rel={link.openInNewTab ? 'noopener noreferrer' : undefined}
           className={className}
+          aria-label={link.label}
           onClick={onClick}
         >
-          {link.label}
+          {content}
         </a>
       )
     }
@@ -75,9 +107,10 @@ export function SiteHeader({
         key={link.label}
         href={link.url}
         className={className}
+        aria-label={link.label}
         onClick={onClick}
       >
-        {link.label}
+        {content}
       </Link>
     )
   }
@@ -183,7 +216,7 @@ export function SiteHeader({
               </div>
             )}
 
-            {links.map(link => renderLink(link))}
+            {links.map(link => renderLink(link, undefined, true))}
             <SearchEntry />
           </nav>
 
