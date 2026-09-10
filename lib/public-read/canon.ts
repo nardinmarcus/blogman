@@ -11,6 +11,7 @@
  * Snapshot field access mirrors the JSON1 paths in `kernel.ts`.
  */
 
+import { cache } from 'react'
 import type { Database } from '@/lib/repositories/schema'
 import type { PostWithTags } from '@/lib/repositories/types'
 
@@ -33,12 +34,12 @@ export interface CanonicalPublicRow {
 }
 
 /**
- * True when the canonical fact tables are present on this DB. Every canonical
- * read path SOFT-SWITCHES: when the migration/DDL is not yet applied it falls
- * back to the legacy `posts` projection so a read never 500s just because a
- * new table is missing.
+ * STRICT canonical-facts probe: rethrows migration-required DB faults (the
+ * site header / categories contract relies on it) while a merely MISSING
+ * table degrades to `false`. The ONLY sqlite_master probe — the lenient
+ * variant below and every canonical read path share this one cached read.
  */
-export async function canonicalFactsAvailable(db: Database): Promise<boolean> {
+export const canonicalFactsAvailableStrictForRequest = cache(async (db: Database): Promise<boolean> => {
   try {
     const row = await db
       .prepare(
@@ -46,9 +47,28 @@ export async function canonicalFactsAvailable(db: Database): Promise<boolean> {
       )
       .first<{ name: string }>()
     return Boolean(row)
+  } catch (error) {
+    const { rethrowIfDatabaseMigrationRequired } = await import('@/lib/database-errors')
+    rethrowIfDatabaseMigrationRequired(error)
+    return false
+  }
+})
+
+/**
+ * LENIENT canonical-facts probe — the historical swallow semantics of this
+ * module (any error → `false`, degrade rather than 500). Shares the strict
+ * probe's single per-request sqlite_master read.
+ */
+export async function canonicalFactsAvailableForRequest(db: Database): Promise<boolean> {
+  try {
+    return await canonicalFactsAvailableStrictForRequest(db)
   } catch {
     return false
   }
+}
+
+export async function canonicalFactsAvailable(db: Database): Promise<boolean> {
+  return canonicalFactsAvailableForRequest(db)
 }
 
 /** Parse a frozen snapshot into its full record + metadata `fields` block. */

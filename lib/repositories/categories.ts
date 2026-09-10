@@ -1,14 +1,24 @@
 import type { Database } from '@/lib/repositories/schema'
 import type { CategoryRow } from '@/lib/repositories/types'
 import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
-import { getSetting, setSetting } from '@/lib/repositories/settings'
+import { getPublicSettingsForRequest } from '@/lib/public-request-data'
+import { canonicalFactsAvailableStrictForRequest } from '@/lib/public-read/canon'
 import { setCategory } from '@/lib/article-commands'
+import { setSetting, getSetting } from '@/lib/repositories/settings'
 
 // 分类展示顺序存于 site_settings（与 nav_links 同一模式），避免 schema 变更
 const CATEGORY_ORDER_KEY = 'category_order'
 
-async function getCategoryOrder(db: Database): Promise<string[]> {
-  const raw = await getSetting(db, CATEGORY_ORDER_KEY)
+async function getCategoryOrder(db: Database, useRequestCache = false): Promise<string[]> {
+  // #244 — the fixed public allowlist batch (one parameterized SELECT).
+  // Request-cached ONLY on the public read path (getPublicCategories). The
+  // admin path keeps the RAW repositories.getSetting: its semantics are
+  // any-error-throws (schema faults reclassified, others propagated), and a
+  // setSetting inside the same request must never be shadowed by a stale
+  // request-cached map.
+  const raw = useRequestCache
+    ? (await getPublicSettingsForRequest(db)).get(CATEGORY_ORDER_KEY)
+    : await getSetting(db, CATEGORY_ORDER_KEY)
   if (!raw) return []
   try {
     const parsed: unknown = JSON.parse(raw)
@@ -41,9 +51,11 @@ export async function getPublicCategories(db: Database): Promise<CategoryRow[]> 
   // fact tables are absent the header / sitemap get an empty category list
   // rather than a legacy `posts` read.
   try {
-    const has = await db
-      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='formal_publications'`)
-      .first<{ name: string }>()
+    // #244 — request-scoped schema probe (single cached sqlite_master read,
+    // shared with detail/related/search). STRICT variant: a migration-required
+    // DB must still surface DATABASE_MIGRATION_REQUIRED (the site header /
+    // request-db-readonly path relies on it).
+    const has = await canonicalFactsAvailableStrictForRequest(db)
     if (!has) return []
   } catch (error) {
     // A migration-required DB must still surface DATABASE_MIGRATION_REQUIRED
@@ -71,7 +83,7 @@ export async function getPublicCategories(db: Database): Promise<CategoryRow[]> 
     )
     .all<CategoryRow>()
 
-  return applyCategoryOrder(results ?? [], await getCategoryOrder(db))
+  return applyCategoryOrder(results ?? [], await getCategoryOrder(db, true))
 }
 
 // 创建分类

@@ -7,7 +7,7 @@ import { ToastProvider } from "@/components/Toast";
 import { CustomJsInjector } from "@/components/CustomJsInjector";
 import { FONT_CONFIG, THEME_OPTIONS, THEME_STORAGE_KEY, normalizeTheme } from "@/lib/appearance";
 import { getAppCloudflareEnv } from "@/lib/cloudflare";
-import { getSetting } from "@/lib/db";
+import { getPublicSettingForRequest } from "@/lib/public-request-data";
 import { rethrowIfDatabaseMigrationRequired } from "@/lib/database-errors";
 import { resolveDefaultSiteCoverImage } from "@/lib/default-cover-images";
 import { getSiteUrl, getSiteUrlObject } from "@/lib/site-config";
@@ -102,9 +102,9 @@ export default async function RootLayout({
     const env = await getAppCloudflareEnv()
     if (env?.DB) {
       const [customJsValue, bodyFontValue, defaultThemeValue] = await Promise.all([
-        getSetting(env.DB, 'custom_js'),
-        getSetting(env.DB, 'body_font'),
-        getSetting(env.DB, 'default_theme'),
+        getPublicSettingForRequest(env.DB, 'custom_js'),
+        getPublicSettingForRequest(env.DB, 'body_font'),
+        getPublicSettingForRequest(env.DB, 'default_theme'),
       ])
       customJs = customJsValue || ''
       bodyFont = bodyFontValue || ''

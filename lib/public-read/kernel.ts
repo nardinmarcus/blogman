@@ -11,6 +11,7 @@
  */
 
 import type { Database } from '@/lib/repositories/schema'
+import { canonicalFactsAvailableForRequest } from '@/lib/public-read/canon'
 import { resolveArticleAddress } from '@/lib/slug-address'
 import type {
   PublicArticle,
@@ -55,9 +56,6 @@ interface VersionRow {
   content_snapshot_sha256: string | null
 }
 
-interface PostRefRow {
-  post_ref: number
-}
 
 /** Parse a frozen snapshot into its full record + metadata `fields` block. */
 function parseSnapshot(snapshotJson: string): { record: Record<string, unknown>; fields: Record<string, unknown> } {
@@ -110,16 +108,8 @@ function deriveStatus(lifecycle: PublicLifecycle, deletedAt: number): 'draft' | 
  * return empty / degraded results so they never 500 on a missing table.
  */
 async function canonicalAvailable(db: Database): Promise<boolean> {
-  try {
-    const row = await db
-      .prepare(
-        `SELECT name FROM sqlite_master WHERE type='table' AND name='formal_publications'`,
-      )
-      .first<{ name: string }>()
-    return Boolean(row)
-  } catch {
-    return false
-  }
+  // #244 P1 — shared request-scoped probe (swallow semantics preserved).
+  return canonicalFactsAvailableForRequest(db)
 }
 
 /**
@@ -167,62 +157,161 @@ function buildPublicArticle(
   }
 }
 
-async function findPostRef(db: Database, articleId: number): Promise<number> {
-  const row = await db
-    .prepare('SELECT post_ref FROM articles WHERE id = ?')
-    .bind(articleId)
-    .first<PostRefRow>()
-    .catch(() => null)
-  return row?.post_ref ?? 0
-}
-
-async function findFormalByArticle(db: Database, articleId: number): Promise<FormalRow | null> {
-  return db
-    .prepare(
-      `SELECT article_id, version, slug, lifecycle, first_published_at, published_at
-       FROM formal_publications WHERE article_id = ?`,
-    )
-    .bind(articleId)
-    .first<FormalRow>()
-    .catch(() => null)
-}
-
-async function findFormalBySlug(db: Database, slug: string): Promise<FormalRow | null> {
-  return db
-    .prepare(
-      `SELECT article_id, version, slug, lifecycle, first_published_at, published_at
-       FROM formal_publications WHERE slug = ?`,
-    )
-    .bind(slug)
-    .first<FormalRow>()
-    .catch(() => null)
-}
-
-async function findVersion(db: Database, articleId: number, version: number): Promise<VersionRow | null> {
-  return db
-    .prepare(
-      `SELECT snapshot_json, content_snapshot_sha256 FROM article_versions
-       WHERE article_id = ? AND version = ?`,
-    )
-    .bind(articleId, version)
-    .first<VersionRow>()
-    .catch(() => null)
-}
-
-async function findLatestVersionRow(db: Database, articleId: number): Promise<VersionRow | null> {
-  return db
-    .prepare(
-      `SELECT snapshot_json, content_snapshot_sha256 FROM article_versions
-       WHERE article_id = ? ORDER BY version DESC LIMIT 1`,
-    )
-    .bind(articleId)
-    .first<VersionRow>()
-    .catch(() => null)
-}
-
 /* ------------------------------------------------------------------ */
 /* single-hop detail resolution                                        */
 /* ------------------------------------------------------------------ */
+
+interface DetailRow {
+  reg_kind: 'current' | 'candidate' | 'historical' | null
+  reg_article_id: number | null
+  reg_current_slug: string | null
+  article_id: number | null
+  version: number | null
+  slug: string | null
+  lifecycle: PublicLifecycle | null
+  first_published_at: number | null
+  published_at: number | null
+  snapshot_json: string | null
+  latest_snapshot_json: string | null
+  post_ref: number | null
+}
+
+/**
+ * ONE collapsed detail-resolution read (#244 P0): the slug-address registry
+ * (current/candidate/historical + historical single-hop target), the formal
+ * publication row (registry miss → formal-slug fallback), the formal version
+ * snapshot, the LATEST version snapshot (ADR 0007 management fields) and the
+ * legacy post_ref all arrive in a single roundtrip.
+ *
+ * Semantics preserved vs. the previous six sequential reads:
+ *   - `current`    → served directly,
+ *   - `historical` → 301 single-hop to the registry's current address
+ *     (historical without a registered current → formal-slug fallback),
+ *   - `candidate`  → not publicly resolvable,
+ *   - registry miss → `formal_publications.slug` fallback (pre-backfill),
+ *   - formal row without its frozen version snapshot → no observable article.
+ */
+const DETAIL_QUERY = `
+SELECT
+  reg.kind AS reg_kind,
+  reg.article_id AS reg_article_id,
+  regcur.slug AS reg_current_slug,
+  f.article_id, f.version, f.slug AS slug, f.lifecycle,
+  f.first_published_at, f.published_at,
+  v.snapshot_json,
+  lv.snapshot_json AS latest_snapshot_json,
+  COALESCE(a.post_ref, 0) AS post_ref
+FROM article_slug_addresses reg
+LEFT JOIN article_slug_addresses regcur
+  ON regcur.article_id = reg.article_id AND regcur.kind = 'current'
+LEFT JOIN formal_publications f ON f.article_id = reg.article_id
+LEFT JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+LEFT JOIN article_versions lv ON lv.article_id = f.article_id
+  AND lv.version = (SELECT MAX(version) FROM article_versions WHERE article_id = f.article_id)
+LEFT JOIN articles a ON a.id = f.article_id
+WHERE reg.slug = ?
+UNION ALL
+SELECT
+  NULL, NULL, NULL,
+  f.article_id, f.version, f.slug, f.lifecycle,
+  f.first_published_at, f.published_at,
+  v.snapshot_json,
+  lv.snapshot_json,
+  COALESCE(a.post_ref, 0)
+FROM formal_publications f
+JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+LEFT JOIN article_versions lv ON lv.article_id = f.article_id
+  AND lv.version = (SELECT MAX(version) FROM article_versions WHERE article_id = f.article_id)
+LEFT JOIN articles a ON a.id = f.article_id
+WHERE f.slug = ?
+  AND NOT EXISTS (SELECT 1 FROM article_slug_addresses WHERE slug = ?)`
+
+/** Formal-only branch — the pre-DDL fallback when the registry is absent. */
+const FORMAL_ONLY_QUERY = `
+SELECT
+  NULL AS reg_kind, NULL AS reg_article_id, NULL AS reg_current_slug,
+  f.article_id, f.version, f.slug AS slug, f.lifecycle,
+  f.first_published_at, f.published_at,
+  v.snapshot_json,
+  lv.snapshot_json AS latest_snapshot_json,
+  COALESCE(a.post_ref, 0) AS post_ref
+FROM formal_publications f
+JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+LEFT JOIN article_versions lv ON lv.article_id = f.article_id
+  AND lv.version = (SELECT MAX(version) FROM article_versions WHERE article_id = f.article_id)
+LEFT JOIN articles a ON a.id = f.article_id
+WHERE f.slug = ?`
+
+/** Formal-only WITHOUT the articles join but WITH the registry columns —
+ * `articles` pre-DDL fallback; the legacy post_ref lookup failed silently
+ * (id → 0) while registry resolution/redirect still worked. */
+const REGISTRY_NO_REF_QUERY = `
+SELECT
+  reg.kind AS reg_kind,
+  reg.article_id AS reg_article_id,
+  regcur.slug AS reg_current_slug,
+  f.article_id, f.version, f.slug AS slug, f.lifecycle,
+  f.first_published_at, f.published_at,
+  v.snapshot_json,
+  lv.snapshot_json AS latest_snapshot_json,
+  0 AS post_ref
+FROM article_slug_addresses reg
+LEFT JOIN article_slug_addresses regcur
+  ON regcur.article_id = reg.article_id AND regcur.kind = 'current'
+JOIN formal_publications f ON f.article_id = reg.article_id
+JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+LEFT JOIN article_versions lv ON lv.article_id = f.article_id
+  AND lv.version = (SELECT MAX(version) FROM article_versions WHERE article_id = f.article_id)
+WHERE reg.slug = ?`
+
+/** Formal-only WITHOUT the articles join — registry AND articles both absent;
+ * post_ref degrades to 0 and no registry resolution exists. */
+const FORMAL_ONLY_NO_REF_QUERY = `
+SELECT
+  NULL AS reg_kind, NULL AS reg_article_id, NULL AS reg_current_slug,
+  f.article_id, f.version, f.slug AS slug, f.lifecycle,
+  f.first_published_at, f.published_at,
+  v.snapshot_json,
+  lv.snapshot_json AS latest_snapshot_json,
+  0 AS post_ref
+FROM formal_publications f
+JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+LEFT JOIN article_versions lv ON lv.article_id = f.article_id
+  AND lv.version = (SELECT MAX(version) FROM article_versions WHERE article_id = f.article_id)
+WHERE f.slug = ?`
+
+/** True ONLY for a missing-table error naming EXACTLY `table` (full-name
+ * match — `articles_archive` must not count as `articles`); any other
+ * failure is a real DB fault that must propagate. */
+function isMissingTableError(error: unknown, table: string): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return new RegExp(`no such table:? ${table}(?![\\w])`, 'i').test(message)
+}
+
+/**
+ * Terminal degraded resolution for a missing fact table (mirrors the base
+ * per-read silent catches):
+ *   - `article_versions` absent → the article is not observable; a
+ *     historical address still redirects through the registry read.
+ *   - any other KNOWN fact table absent → unresolvable, no redirect.
+ * Unknown faults PROPAGATE.
+ */
+async function degradeDetail(
+  db: Database,
+  slug: string,
+  error: unknown,
+): Promise<{ row: DetailRow | null; redirectSlug: string | null }> {
+  if (isMissingTableError(error, 'article_versions')) {
+    const address = await resolveArticleAddress(db, slug).catch(() => null)
+    return { row: null, redirectSlug: address?.redirect ? address.currentSlug : null }
+  }
+  for (const table of ['formal_publications', 'article_slug_addresses', 'articles'] as const) {
+    if (isMissingTableError(error, table)) {
+      return { row: null, redirectSlug: null }
+    }
+  }
+  throw error
+}
 
 /**
  * Resolve a requested public address to its CANONICAL article:
@@ -246,41 +335,111 @@ export async function resolvePublicArticle(
     return { article: null, redirectSlug: null }
   }
 
-  const address = await resolveArticleAddress(db, slug).catch(() => null)
-
-  let articleId: number | null = address?.articleId ?? null
-  const redirectSlug: string | null = address?.redirect ? address.currentSlug : null
-  const targetSlug = address?.currentSlug ?? slug
-
-  let formal: FormalRow | null = null
-  if (articleId !== null) {
-    formal = await findFormalByArticle(db, articleId)
+  // Single collapsed fact read: registry resolution + formal row + formal
+  // version + latest version + post_ref (#244 P0 query budget), with the
+  // base implementation's per-table silent-catch semantics preserved when an
+  // individual fact table is absent (pre-DDL DB):
+  //   registry missing → formal fallback; articles missing → post_ref 0;
+  //   versions missing → not observable; formal missing → unresolvable.
+  // ANY other error propagates.
+  let row: DetailRow | null = null
+  let degradedRedirectSlug: string | null = null
+  try {
+    const { results } = await db
+      .prepare(DETAIL_QUERY)
+      .bind(slug, slug, slug)
+      .all<DetailRow>()
+    row = results?.[0] ?? null
+  } catch (error) {
+    if (isMissingTableError(error, 'article_slug_addresses')) {
+      try {
+        const { results } = await db.prepare(FORMAL_ONLY_QUERY).bind(slug).all<DetailRow>()
+        row = results?.[0] ?? null
+      } catch (fallbackError) {
+        if (isMissingTableError(fallbackError, 'articles')) {
+          try {
+            const { results } = await db.prepare(FORMAL_ONLY_NO_REF_QUERY).bind(slug).all<DetailRow>()
+            row = results?.[0] ?? null
+          } catch (noRefError) {
+            const degraded = await degradeDetail(db, slug, noRefError)
+            row = degraded.row
+            degradedRedirectSlug = degraded.redirectSlug
+          }
+        } else {
+          const degraded = await degradeDetail(db, slug, fallbackError)
+          row = degraded.row
+          degradedRedirectSlug = degraded.redirectSlug
+        }
+      }
+    } else if (isMissingTableError(error, 'articles')) {
+      try {
+        const { results } = await db.prepare(REGISTRY_NO_REF_QUERY).bind(slug).all<DetailRow>()
+        row = results?.[0] ?? null
+      } catch (regNoRefError) {
+        if (isMissingTableError(regNoRefError, 'article_slug_addresses')) {
+          // Registry absent too → no address resolution at all.
+          try {
+            const { results } = await db.prepare(FORMAL_ONLY_NO_REF_QUERY).bind(slug).all<DetailRow>()
+            row = results?.[0] ?? null
+          } catch (noRefError) {
+            const degraded = await degradeDetail(db, slug, noRefError)
+            row = degraded.row
+            degradedRedirectSlug = degraded.redirectSlug
+          }
+        } else {
+          const degraded = await degradeDetail(db, slug, regNoRefError)
+          row = degraded.row
+          degradedRedirectSlug = degraded.redirectSlug
+        }
+      }
+    } else {
+      const degraded = await degradeDetail(db, slug, error)
+      row = degraded.row
+      degradedRedirectSlug = degraded.redirectSlug
+    }
   }
-  // Registry unknown → try the live formal slug directly (covers legacy slugs
-  // before address backfill; still fully canonical via formal_publications).
-  if (!formal) {
-    formal = await findFormalBySlug(db, targetSlug)
-    if (formal) articleId = formal.article_id
+  if (!row) {
+    return { article: null, redirectSlug: degradedRedirectSlug }
   }
-  if (!formal) {
+
+  const regKind = row.reg_kind
+  // A reserved candidate is not publicly resolvable before go-live.
+  if (regKind === 'candidate') {
+    return { article: null, redirectSlug: null }
+  }
+  // Historical address whose article has no registered current address:
+  // serve only through the formal live slug (pre-backfill semantics).
+  if (regKind === 'historical' && !row.reg_current_slug) {
+    if (row.article_id == null || row.slug !== slug) {
+      return { article: null, redirectSlug: null }
+    }
+  }
+  // Historical single-hop carries the article's CURRENT address for the 301.
+  const redirectSlug = regKind === 'historical' ? row.reg_current_slug ?? null : null
+  // No formal publication fact, or no frozen version snapshot → not observable.
+  if (
+    row.article_id == null ||
+    row.version == null ||
+    !row.snapshot_json ||
+    row.lifecycle == null ||
+    row.slug == null ||
+    row.first_published_at == null ||
+    row.published_at == null
+  ) {
     return { article: null, redirectSlug }
   }
 
-  // Historical address must resolve to the article's CURRENT address; the
-  // formatted slug may change even when the registry is accurate — trust it.
-  const version = await findVersion(db, formal.article_id, formal.version)
-  if (!version) {
-    // No frozen version fact — the article is not observable yet. Only the raw
-    // formal row exists; treat as not publicly resolvable (no body).
-    return { article: null, redirectSlug }
+  const formal: FormalRow = {
+    article_id: row.article_id,
+    version: row.version,
+    slug: row.slug,
+    lifecycle: row.lifecycle,
+    first_published_at: row.first_published_at,
+    published_at: row.published_at,
   }
-
-  const postRef = await findPostRef(db, formal.article_id)
   // Management fields come from the LATEST version (immediate article-level
   // commands); content stays anchored to the formal version.
-  const latest = await findLatestVersionRow(db, formal.article_id)
-  // view_count is not carried by canonical facts (retired with ADR 0010).
-  const article = buildPublicArticle(formal, version.snapshot_json, postRef, 0, latest?.snapshot_json ?? null)
+  const article = buildPublicArticle(formal, row.snapshot_json, row.post_ref ?? 0, 0, row.latest_snapshot_json)
 
   // A historical single-hop must carry the CURRENT slug, never the old one.
   if (redirectSlug) {

@@ -1,5 +1,6 @@
 import { normalizeTheme, type Theme } from '@/lib/appearance'
-import { getPublicCategories, getSetting } from '@/lib/db'
+import { getPublicCategories } from '@/lib/db'
+import { getPublicSettingForRequest } from '@/lib/public-request-data'
 import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 
 export interface SiteNavLink {
@@ -24,9 +25,9 @@ export async function getSiteHeaderData(db: D1Database): Promise<{
 
   try {
     const [navJson, categoryRows, themeValue] = await Promise.all([
-      getSetting(db, 'nav_links'),
+      getPublicSettingForRequest(db, 'nav_links'),
       getPublicCategories(db),
-      getSetting(db, 'default_theme'),
+      getPublicSettingForRequest(db, 'default_theme'),
     ])
 
     if (navJson) {

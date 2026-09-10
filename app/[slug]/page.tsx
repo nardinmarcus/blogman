@@ -1,6 +1,7 @@
 import { getAppCloudflareEnv } from '@/lib/cloudflare'
 import { verifyPassword } from '@/lib/password'
 import { notFound, permanentRedirect } from 'next/navigation'
+import { Suspense } from 'react'
 import Link from 'next/link'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
@@ -11,11 +12,12 @@ import { CopyArticleLink } from '@/components/CopyArticleLink'
 import { TwitterEmbedsEnhancer } from '@/components/TwitterEmbedsEnhancer'
 import { ArticleOutline } from '@/components/ArticleOutline'
 import { getSiteHeaderData } from '@/lib/site'
-import { resolvePublicArticle } from '@/lib/public-read'
-import { getRelatedPosts } from '@/lib/related-content'
+import { getPublicArticleForRequest } from '@/lib/public-request-data'
 import { getSiteUrl } from '@/lib/site-config'
 import { resolvePostCoverImage } from '@/lib/default-cover-images'
 import { buildArticleOutline } from '@/lib/article-outline'
+import { RelatedPosts } from '@/components/RelatedPosts'
+import { ArticleLoading } from '@/components/ArticleLoading'
 import {
   rethrowIfDatabaseMigrationRequired,
 } from '@/lib/database-errors'
@@ -37,8 +39,10 @@ export async function generateMetadata({
 
     if (!env?.DB) return {}
 
-    // L2: read the canonical article; historical addresses single-hop here too.
-    const resolved = await resolvePublicArticle(env.DB, slug).catch((error) => {
+    // L2: read the canonical article; historical addresses single-hop here
+    // too. Request-scoped dedup (#244): this is the SAME execution the page
+    // body awaits below — one resolution per request, never two.
+    const resolved = await getPublicArticleForRequest(env.DB, slug).catch((error) => {
       rethrowIfDatabaseMigrationRequired(error)
       return { article: null, redirectSlug: null }
     })
@@ -107,14 +111,16 @@ export default async function PostPage({
   if (!env?.DB) notFound()
   const db = env!.DB
 
-  // L2: read the CANONICAL article from D1 facts:
-  // lifecycle + current/historical address + first-publish time come from
-  // `formal_publications` + `article_slug_addresses` (single-hop), and the
-  // content/access-control/pinned come from the frozen `article_versions`
-  // snapshot. No legacy `posts` decision gate here.
-  const resolved = await resolvePublicArticle(db, slug).catch((error) => {
-      rethrowIfDatabaseMigrationRequired(error)
-      return { article: null, redirectSlug: null }
+  // L2 + #244 P1: the CANONICAL article resolution (shared with
+  // generateMetadata via the request-scoped cache) and the header data run
+  // CONCURRENTLY — the header no longer waits for the article chain.
+  // allSettled attaches the rejection handler immediately (no unhandled
+  // rejection); a header failure is re-thrown VERBATIM after the article
+  // gates — parallelization must not downgrade real DB faults to an empty
+  // navigation. Missing-schema degradation stays inside getSiteHeaderData.
+  const headerSettled = Promise.allSettled([getSiteHeaderData(db)])
+  const resolved = await getPublicArticleForRequest(db, slug).catch((error) => {
+    rethrowIfDatabaseMigrationRequired(error)
     return { article: null, redirectSlug: null }
   })
   // B3-04: a historical address permanently single-hops (301) to the article's
@@ -124,6 +130,12 @@ export default async function PostPage({
   }
   const post = resolved.article
   if (!post || !post.live) notFound()
+
+  const headerResult = await headerSettled
+  if (headerResult[0].status === 'rejected') {
+    throw headerResult[0].reason
+  }
+  const headerData = headerResult[0].value
 
   // B2-05: canonical versioned facts for the inline editor (expected version
   // + operation id) drive versioned save against the kernel.
@@ -136,8 +148,6 @@ export default async function PostPage({
     isHidden: post.is_hidden,
   }
 
-  const headerData = await getSiteHeaderData(db)
-  const categorySlugMap = new Map(headerData.categories.map((category) => [category.name, category.slug]))
   const activeCategorySlug = headerData.categories.find((category) => category.name === post.category)?.slug ?? null
 
   // 密码保护逻辑保持公开路径纯粹，由前台管理员增强层在客户端接管编辑能力
@@ -224,11 +234,8 @@ export default async function PostPage({
   const textLength = post.content?.length || 0
   const readingMinutes = Math.max(1, Math.ceil(textLength / 400))
   const searchIndexable = post.live && !post.password && post.is_hidden === 0
-  const related = !post.password
-    ? await getRelatedPosts(db, env, post, 3).catch((error) => {
-        return { strategy: 'fts' as const, source: 'rules' as const, results: [] }
-      })
-    : { strategy: 'fts' as const, source: 'rules' as const, results: [] }
+  // #244 P1: recommendations are read INSIDE the Suspense boundary — a slow
+  // or hung read can never hold the title/body. Never pre-read here.
   const contentContainerId = `post-content-${post.slug}`
   const baseUrl = getSiteUrl()
   const canonicalUrl = `${baseUrl}/${post.slug}`
@@ -369,56 +376,10 @@ export default async function PostPage({
               />
               <TwitterEmbedsEnhancer containerId={contentContainerId} html={post.html} />
 
-              {related.results.length > 0 && (
-                <section className="mt-14 sm:mt-16 border-t border-[var(--editor-line)] pt-8 sm:pt-10">
-                  <div className="flex items-center justify-between gap-3 mb-5">
-                    <div>
-                      <h2 className="text-lg sm:text-xl font-semibold text-[var(--editor-ink)]">继续阅读</h2>
-                      <p className="text-xs text-[var(--stone-gray)] mt-1">
-                        {related.source === 'vectorize' ? '基于向量召回' : '基于全文检索与主题相似度'}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="grid gap-4 sm:grid-cols-3">
-                    {related.results.map((item) => {
-                      const itemCategorySlug = item.category ? categorySlugMap.get(item.category) : null
-                      return (
-                        <Link
-                          key={item.slug}
-                          href={`/${item.slug}`}
-                          className="group rounded-2xl border border-[var(--editor-line)] bg-[var(--editor-panel)]/55 p-4 transition-colors hover:border-[var(--editor-accent)]/35 hover:bg-[var(--editor-panel)]"
-                        >
-                          <div className="text-xs text-[var(--stone-gray)] mb-3 flex items-center gap-2 flex-wrap">
-                            {item.category && (
-                              itemCategorySlug ? (
-                                <span className="rounded-full border border-[var(--editor-accent)]/15 bg-[var(--editor-accent)]/8 px-2 py-0.5 text-[var(--editor-accent)]">
-                                  {item.category}
-                                </span>
-                              ) : (
-                                <span>{item.category}</span>
-                              )
-                            )}
-                            <time>
-                              {new Date(item.published_at * 1000).toLocaleDateString('zh-CN', {
-                                year: 'numeric',
-                                month: 'short',
-                                day: 'numeric',
-                              })}
-                            </time>
-                          </div>
-                          <h3 className="text-base font-semibold leading-snug text-[var(--editor-ink)] group-hover:text-[var(--editor-accent)] transition-colors">
-                            {item.title}
-                          </h3>
-                          {item.description && (
-                            <p className="mt-3 line-clamp-3 text-sm leading-relaxed text-[var(--editor-muted)]">
-                              {item.description}
-                            </p>
-                          )}
-                        </Link>
-                      )
-                    })}
-                  </div>
-                </section>
+              {!post.password && (
+                <Suspense fallback={<ArticleLoading />}>
+                  <RelatedPosts db={db} env={env} post={post} categories={headerData.categories} />
+                </Suspense>
               )}
             </article>
           </div>
