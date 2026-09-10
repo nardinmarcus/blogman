@@ -16,7 +16,7 @@ interface TabsProps {
 
 export function Tabs({ tabs, defaultTab, ariaLabel = '设置分类' }: TabsProps) {
   const [activeTab, setActiveTab] = useState(defaultTab || tabs[0]?.id)
-  // 用 ref 持有最新 tabs，避免全局快捷键监听随渲染反复解绑
+  // 用 ref 持有最新 tabs，供挂载时 hash 恢复读取
   const tabsRef = useRef(tabs)
   tabsRef.current = tabs
 
@@ -36,21 +36,6 @@ export function Tabs({ tabs, defaultTab, ariaLabel = '设置分类' }: TabsProps
     }
   }, [])
 
-  // ⌘/Ctrl + 1..N 全局切换（输入框内 ⌘数字 无默认行为，直接全局监听）
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey)) return
-      const n = Number(e.key)
-      if (!Number.isInteger(n) || n < 1 || n > tabsRef.current.length) return
-      const tab = tabsRef.current[n - 1]
-      if (!tab) return
-      e.preventDefault()
-      activate(tab.id)
-    }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [activate])
-
   // 方向键 ←/→ 循环、Home/End，Roving tabindex
   const onTabListKeyDown = (e: React.KeyboardEvent) => {
     const index = tabs.findIndex((t) => t.id === activeTab)
@@ -68,40 +53,38 @@ export function Tabs({ tabs, defaultTab, ariaLabel = '设置分类' }: TabsProps
 
   return (
     <div>
-      <div
-        role="tablist"
-        aria-label={ariaLabel}
-        onKeyDown={onTabListKeyDown}
-        className="mb-6 flex gap-1 overflow-x-auto rounded-2xl border border-[var(--editor-line)] bg-[var(--editor-panel)] p-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-      >
-        {tabs.map((tab) => {
-          const selected = tab.id === active?.id
-          return (
-            <button
-              key={tab.id}
-              type="button"
-              role="tab"
-              id={`settings-tab-${tab.id}`}
-              aria-selected={selected}
-              aria-controls={`settings-panel-${tab.id}`}
-              tabIndex={selected ? 0 : -1}
-              onClick={() => activate(tab.id)}
-              className={`shrink-0 whitespace-nowrap rounded-xl px-4 py-2 text-sm font-medium transition-colors duration-150 ${
-                selected
-                  ? 'bg-[var(--editor-accent-strong)] text-[var(--editor-accent-ink)] shadow-sm'
-                  : 'text-[var(--editor-muted)] hover:bg-[var(--editor-soft)] hover:text-[var(--editor-ink)]'
-              }`}
-            >
-              {tab.label}
-            </button>
-          )
-        })}
-        <span
-          aria-hidden="true"
-          className="ml-auto hidden self-center whitespace-nowrap px-3 text-xs text-[var(--editor-muted)] sm:inline"
+      {/* 吸顶：滚动到后台顶栏（sticky top-0 + h-14）下缘时固定住，不再滚出视野。
+          外层用页面底色 + 内边距包住圆角面板，避免滚动内容从圆角缝隙透出。 */}
+      <div className="sticky top-14 z-30 -mx-1 -mt-2 mb-4 bg-[var(--background)] px-1 pb-2 pt-2">
+        <div
+          role="tablist"
+          aria-label={ariaLabel}
+          onKeyDown={onTabListKeyDown}
+          className="flex gap-1 overflow-x-auto rounded-2xl border border-[var(--editor-line)] bg-[var(--editor-panel)] p-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         >
-          ⌘1–{tabs.length} 切换
-        </span>
+          {tabs.map((tab) => {
+            const selected = tab.id === active?.id
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                id={`settings-tab-${tab.id}`}
+                aria-selected={selected}
+                aria-controls={`settings-panel-${tab.id}`}
+                tabIndex={selected ? 0 : -1}
+                onClick={() => activate(tab.id)}
+                className={`shrink-0 whitespace-nowrap rounded-xl px-4 py-2 text-sm font-medium transition-colors duration-150 ${
+                  selected
+                    ? 'bg-[var(--editor-accent-strong)] text-[var(--editor-accent-ink)] shadow-sm'
+                    : 'text-[var(--editor-muted)] hover:bg-[var(--editor-soft)] hover:text-[var(--editor-ink)]'
+                }`}
+              >
+                {tab.label}
+              </button>
+            )
+          })}
+        </div>
       </div>
 
       {active && (
