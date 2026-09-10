@@ -6,7 +6,7 @@ import Link from 'next/link'
 import { formatDate } from '@/lib/public-date'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
-import { FrontPostAdminBoundary } from '@/components/FrontPostAdminBoundary'
+import { FrontPostAdminBoundary, FrontPostEditButton } from '@/components/FrontPostAdminBoundary'
 import { PasswordPrompt } from '@/components/PasswordPrompt'
 import { DownloadMarkdown } from '@/components/DownloadMarkdown'
 import { CopyArticleLink } from '@/components/CopyArticleLink'
@@ -317,7 +317,6 @@ export default async function PostPage({
             <article className="article-reading-main">
               <header className="mb-10 sm:mb-12">
                 <h1
-                  data-admin-edit-trigger
                   className="article-display-title text-2xl sm:text-3xl lg:text-4xl font-bold text-[var(--editor-ink)] leading-snug mb-4 sm:mb-5"
                 >
                   {post.title}
@@ -351,6 +350,7 @@ export default async function PostPage({
                 <div className="mt-4 flex flex-wrap items-center gap-2">
                   <CopyArticleLink url={canonicalUrl} />
                   <DownloadMarkdown title={post.title} html={post.html} />
+                  <FrontPostEditButton />
                 </div>
               </header>
 
@@ -367,7 +367,6 @@ export default async function PostPage({
 
               <div
                 id={contentContainerId}
-                data-admin-edit-trigger
                 className="rich-content"
                 dangerouslySetInnerHTML={{ __html: articleOutline.html }}
               />

@@ -13,6 +13,7 @@
  */
 
 import { afterAll, describe, expect, it, vi } from 'vitest'
+import { createElement } from 'react'
 
 const SLUG = 'route-slug'
 
@@ -119,6 +120,7 @@ vi.mock('@/components/SiteHeader', () => ({ SiteHeader: () => null }))
 vi.mock('@/components/SiteFooter', () => ({ SiteFooter: () => null }))
 vi.mock('@/components/FrontPostAdminBoundary', () => ({
   FrontPostAdminBoundary: ({ children }: { children: React.ReactNode }) => children,
+  FrontPostEditButton: () => createElement('button', { 'data-testid': 'article-edit-entry' }, '编辑本文'),
 }))
 vi.mock('@/components/PasswordPrompt', () => ({ PasswordPrompt: () => null }))
 vi.mock('@/components/CopyArticleLink', () => ({ CopyArticleLink: () => null }))
@@ -183,6 +185,11 @@ describe('app/[slug] — real PostPage streaming (#244)', { timeout: 120_000 }, 
       ]).finally(() => clearTimeout(timeoutHandle))
       expect(bodyHtml).toContain('路由标题')
       expect(bodyHtml).toContain('路由正文')
+      // #246: the real route places the explicit entry in its header actions,
+      // and neither the title nor the body advertises a hidden click trigger.
+      const header = bodyHtml.slice(bodyHtml.indexOf('<header'), bodyHtml.indexOf('</header>'))
+      expect(header).toContain('data-testid="article-edit-entry"')
+      expect(bodyHtml).not.toContain('data-admin-edit-trigger')
 
       // Phase 2: release the recommendations; the boundary chunk must land.
       relatedGate.release()

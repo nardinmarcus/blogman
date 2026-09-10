@@ -1,8 +1,32 @@
 'use client'
 
-import { useCallback, useState, type MouseEvent, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { Pencil } from 'lucide-react'
 import { InlineArticleEditorClient } from '@/components/InlineArticleEditorClient'
 import { useAdminSession } from '@/lib/admin-session-client'
+
+const ArticleEditContext = createContext<{
+  enterEditing: () => void
+  buttonRef: RefObject<HTMLButtonElement | null>
+} | null>(null)
+
+/** Explicit, admin-only entry placed in the server-rendered article actions. */
+export function FrontPostEditButton() {
+  const entry = useContext(ArticleEditContext)
+  if (!entry) return null
+
+  return (
+    <button
+      ref={entry.buttonRef}
+      type="button"
+      onClick={entry.enterEditing}
+      className="inline-flex items-center gap-1.5 rounded-full border border-[var(--editor-line)] bg-[var(--editor-panel)] px-3 py-1.5 text-xs font-medium text-[var(--editor-ink)] transition hover:border-[var(--editor-accent)]/35 hover:bg-[var(--editor-soft)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--editor-accent)]"
+    >
+      <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+      编辑本文
+    </button>
+  )
+}
 
 interface FrontPostAdminBoundaryProps {
   slug: string
@@ -45,21 +69,31 @@ export function FrontPostAdminBoundary({
   const { authenticated } = useAdminSession()
   const [editing, setEditing] = useState(false)
 
-  const handleReadModeClick = useCallback((event: MouseEvent<HTMLDivElement>) => {
-    if (!authenticated || editing) return
-    if (event.defaultPrevented || event.button !== 0) return
-    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const readingPosition = useRef<{ left: number; top: number } | null>(null)
+  const restoreReading = useRef(false)
 
-    const target = event.target
-    if (!(target instanceof HTMLElement)) return
-    if (target.closest('a, button, input, textarea, select, summary, label, video, audio')) return
-
-    const trigger = target.closest<HTMLElement>('[data-admin-edit-trigger]')
-    if (!trigger) return
-
-    event.preventDefault()
+  const enterEditing = useCallback(() => {
+    if (!authenticated) return
+    readingPosition.current = { left: window.scrollX, top: window.scrollY }
     setEditing(true)
-  }, [authenticated, editing])
+  }, [authenticated])
+
+  const exitEditing = useCallback(() => {
+    restoreReading.current = true
+    setEditing(false)
+  }, [])
+
+  // Restore only after the reading DOM has remounted, before it is painted.
+  // Explicit instant scrolling overrides the site's smooth-scroll CSS.
+  useLayoutEffect(() => {
+    if (editing || !restoreReading.current) return
+    restoreReading.current = false
+    buttonRef.current?.focus({ preventScroll: true })
+    if (readingPosition.current) {
+      window.scrollTo({ ...readingPosition.current, behavior: 'instant' })
+    }
+  }, [editing])
 
   if (authenticated && editing) {
     return (
@@ -74,7 +108,7 @@ export function FrontPostAdminBoundary({
           publishedAt={publishedAt}
           viewCount={viewCount}
           content={content}
-          onExitReading={() => setEditing(false)}
+          onExitReading={exitEditing}
           articleId={articleId}
           version={version}
           status={status}
@@ -87,11 +121,8 @@ export function FrontPostAdminBoundary({
   }
 
   return (
-    <div
-      onClickCapture={handleReadModeClick}
-      data-admin-inline-entry={authenticated ? 'true' : undefined}
-    >
-      {children}
-    </div>
+    <ArticleEditContext.Provider value={authenticated ? { enterEditing, buttonRef } : null}>
+      <div>{children}</div>
+    </ArticleEditContext.Provider>
   )
 }
