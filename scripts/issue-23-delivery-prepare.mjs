@@ -955,13 +955,18 @@ function enumerateArtifactPaths(configuredFiles, buildFiles) {
   return paths
 }
 
+const SCP_REMOTE_PATTERN = /^git@([\w.-]+):([\w.-]+)\/([\w.-]+?)(?:\.git)?$/u
+
 export function canonicalizeRepositoryRemote(remote) {
   if (typeof remote !== 'string' || remote !== remote.trim()) {
     fail('resolved repository remote is not canonical')
   }
+  // SCP 形式（git@host:owner/repo[.git]）与等价 https URL 同样可信，先规范化再校验；
+  // host 仍受下方 github.com 白名单约束
+  const scp = SCP_REMOTE_PATTERN.exec(remote)
   let url
   try {
-    url = new URL(remote)
+    url = new URL(scp ? `https://${scp[1]}/${scp[2]}/${scp[3]}.git` : remote)
   } catch {
     fail('resolved repository remote is not canonical')
   }
