@@ -11,7 +11,7 @@ const SearchBar = dynamic(
     loading: () => (
       <Link
         href="/search"
-        className="inline-flex p-2 text-[var(--editor-muted)] hover:text-[var(--editor-ink)] transition-colors"
+        className="inline-flex size-9 items-center justify-center rounded-md text-[var(--editor-muted)] transition-colors duration-150 hover:bg-[var(--editor-panel)] hover:text-[var(--editor-ink)]"
         aria-label="搜索"
         title="搜索"
       >

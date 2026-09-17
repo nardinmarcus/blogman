@@ -24,20 +24,48 @@ const defaultNavLinks: NavLink[] = [
   { label: 'RSS', url: '/feed.xml', openInNewTab: false },
 ]
 
-// lucide 已移除品牌图标，GitHub 使用官方 mark 的内联 SVG
+// 头部导航统一容器：图标按钮 36px 热区 + hover 底色 + focus 环
+const iconBtnClass =
+  'inline-flex size-9 items-center justify-center rounded-md text-[var(--editor-muted)] transition-colors duration-150 hover:bg-[var(--editor-panel)] hover:text-[var(--editor-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--editor-accent)]/60'
+const textBtnClass =
+  'inline-flex h-9 items-center rounded-md px-2.5 text-[var(--editor-muted)] transition-colors duration-150 hover:bg-[var(--editor-panel)] hover:text-[var(--editor-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--editor-accent)]/60'
+
+// lucide 1.43 已移除品牌图标：GitHub 用 lucide 旧版描边 octocat，RSS 直接用 lucide Rss；
+// X 无官方描边版，用官方字形不加粗，三者同为轻量级
 type LinkIconComponent = (props: { className?: string }) => React.ReactNode
 
-function GithubMarkIcon({ className }: { className?: string }) {
+function GithubIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={className}
+    >
+      <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4" />
+      <path d="M9 18c-4.51 2-5-2-7-2" />
+    </svg>
+  )
+}
+
+function XLogoIcon({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className={className}>
-      <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+      <path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z" />
     </svg>
   )
 }
 
 // 按 label / url 识别常见站点链接，返回对应图标；未识别则返回 null（回退为文字）
 function getLinkIcon(link: NavLink): LinkIconComponent | null {
-  if (/github/i.test(link.label) || /github\.com/i.test(link.url)) return GithubMarkIcon
+  if (/github/i.test(link.label) || /github\.com/i.test(link.url)) return GithubIcon
+  if (/\bx\.com/i.test(link.url) || /twitter\.com/i.test(link.url) || /^x(\s*\(|$)/i.test(link.label)) {
+    return XLogoIcon
+  }
   if (
     /rss/i.test(link.label) ||
     /feed\.(xml|json|atom)(\?.*)?$/i.test(link.url) ||
@@ -80,8 +108,10 @@ export function SiteHeader({
   const activeCategory = categories.find(c => c.slug === activeCategorySlug)
 
   const renderLink = (link: NavLink, onClick?: () => void, iconOnly = false) => {
-    const className = "text-[var(--editor-muted)] hover:text-[var(--editor-ink)] transition-colors duration-150"
     const Icon = iconOnly ? getLinkIcon(link) : null
+    const className = Icon
+      ? iconBtnClass
+      : 'text-[var(--editor-muted)] hover:text-[var(--editor-ink)] transition-colors duration-150'
     const content = Icon ? (
       <span className="inline-flex items-center" title={link.label}>
         <Icon className="w-[18px] h-[18px]" />
@@ -170,17 +200,20 @@ export function SiteHeader({
         <div className="h-14 flex items-center justify-between gap-4">
           {renderLogo()}
 
-          {/* Desktop nav */}
-          <nav className="hidden sm:flex items-center gap-3 text-sm flex-shrink-0">
+          {/* Desktop nav：三组语义分组 —— 站内导航 │ 站外链接 │ 全局功能+管理 */}
+          <nav className="hidden sm:flex items-center gap-1.5 text-sm flex-shrink-0">
             {/* Category dropdown */}
             {categories.length > 0 && (
               <div ref={categoryRef} className="relative">
                 <button
                   onClick={() => setCategoryOpen(!categoryOpen)}
-                  className={`inline-flex items-center gap-1 transition-colors duration-150 ${
+                  aria-expanded={categoryOpen}
+                  className={`inline-flex h-9 items-center gap-1 rounded-md px-2.5 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--editor-accent)]/60 ${
                     activeCategorySlug
-                      ? 'text-[var(--editor-accent)]'
-                      : 'text-[var(--editor-muted)] hover:text-[var(--editor-ink)]'
+                      ? 'bg-[var(--editor-accent)]/5 text-[var(--editor-accent)]'
+                      : categoryOpen
+                        ? 'bg-[var(--editor-panel)] text-[var(--editor-ink)]'
+                        : 'text-[var(--editor-muted)] hover:bg-[var(--editor-panel)] hover:text-[var(--editor-ink)]'
                   }`}
                 >
                   {activeCategory?.name || '分类'}
@@ -219,13 +252,16 @@ export function SiteHeader({
               </div>
             )}
 
+            {categories.length > 0 && links.length > 0 && (
+              <span aria-hidden="true" className="h-3.5 w-px bg-[var(--editor-muted)] opacity-30" />
+            )}
             {links.map(link => renderLink(link, undefined, true))}
+            {links.length > 0 && (
+              <span aria-hidden="true" className="h-3.5 w-px bg-[var(--editor-muted)] opacity-30" />
+            )}
             <SearchEntry />
             {isAdmin && (
-              <Link
-                href="/admin"
-                className="text-[var(--editor-muted)] hover:text-[var(--editor-ink)] transition-colors duration-150"
-              >
+              <Link href="/admin" className={textBtnClass}>
                 管理
               </Link>
             )}
@@ -235,7 +271,7 @@ export function SiteHeader({
           <div className="sm:hidden flex items-center gap-1">
             <SearchEntry />
             <button
-              className="p-2 text-[var(--editor-muted)] hover:text-[var(--editor-ink)] transition-colors"
+              className="inline-flex size-9 items-center justify-center rounded-md text-[var(--editor-muted)] transition-colors hover:bg-[var(--editor-panel)] hover:text-[var(--editor-ink)]"
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
               aria-label={mobileMenuOpen ? '关闭菜单' : '打开菜单'}
             >

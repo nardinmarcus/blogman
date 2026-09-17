@@ -110,7 +110,7 @@ export function SearchBar() {
     <>
       <button
         onClick={() => setIsOpen(true)}
-        className="p-2 text-[var(--editor-muted)] hover:text-[var(--editor-ink)] transition-colors"
+        className="inline-flex size-9 items-center justify-center rounded-md text-[var(--editor-muted)] transition-colors duration-150 hover:bg-[var(--editor-panel)] hover:text-[var(--editor-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--editor-accent)]/60"
         title="搜索 (⌘K)"
         aria-label="搜索"
       >
