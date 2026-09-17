@@ -5,6 +5,7 @@ import { useState, useRef, useEffect } from 'react'
 import { Menu, X, ChevronDown, Rss } from 'lucide-react'
 import { SearchEntry } from './SearchEntry'
 import type { Theme } from '@/lib/appearance'
+import { getThemeDefinition } from '@/lib/themes'
 import type { SiteCategoryLink, SiteNavLink } from '@/lib/site'
 
 export type NavLink = SiteNavLink
@@ -62,7 +63,7 @@ export function SiteHeader({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [categoryOpen, setCategoryOpen] = useState(false)
   const categoryRef = useRef<HTMLDivElement>(null)
-  const theme = initialTheme
+  const headerStyle = getThemeDefinition(initialTheme).header
 
   // 点击外部关闭分类下拉
   useEffect(() => {
@@ -117,7 +118,7 @@ export function SiteHeader({
 
   // 终端主题：logo 区域显示终端提示符
   const renderLogo = () => {
-    if (theme === 'terminal') {
+    if (headerStyle === 'terminal') {
       return (
         <Link
           href="/"
@@ -125,14 +126,14 @@ export function SiteHeader({
           style={{ fontFamily: '"JetBrains Mono", ui-monospace, monospace', fontSize: 13 }}
           suppressHydrationWarning
         >
-          <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#4ade80', display: 'inline-block', boxShadow: '0 0 8px #4ade80', flexShrink: 0 }} />
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--editor-accent)', display: 'inline-block', boxShadow: '0 0 8px var(--editor-accent)', flexShrink: 0 }} />
           <span style={{ color: 'var(--editor-muted)' }}>namoo@blog:~$</span>
           <span style={{ color: 'var(--editor-ink)' }}>./home</span>
         </Link>
       )
     }
 
-    if (theme === 'editorial') {
+    if (headerStyle === 'editorial') {
       const { vol, month, year } = getIssueInfo()
       return (
         <div className="flex items-baseline gap-4 flex-shrink-0" suppressHydrationWarning>
@@ -251,7 +252,7 @@ export function SiteHeader({
                   onClick={() => setMobileMenuOpen(false)}
                   className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
                     activeCategorySlug === null
-                      ? 'bg-[var(--editor-accent)] text-white'
+                      ? 'bg-[var(--editor-accent)] text-[var(--editor-accent-ink)]'
                       : 'bg-[var(--editor-panel)] text-[var(--editor-muted)]'
                   }`}
                 >
@@ -264,7 +265,7 @@ export function SiteHeader({
                     onClick={() => setMobileMenuOpen(false)}
                     className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
                       activeCategorySlug === category.slug
-                        ? 'bg-[var(--editor-accent)] text-white'
+                        ? 'bg-[var(--editor-accent)] text-[var(--editor-accent-ink)]'
                         : 'bg-[var(--editor-panel)] text-[var(--editor-muted)]'
                     }`}
                   >

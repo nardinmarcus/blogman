@@ -6,7 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { HomeClient, type HomeProps } from '@/components/HomeClient'
 import { SiteHeader } from '@/components/SiteHeader'
 import { ThemeManager } from '@/app/admin/(protected)/settings/ThemeManager'
+import { SettingsManager } from '@/app/admin/(protected)/settings/SettingsManager'
+import { detectRuntimeCapabilities } from '@/lib/runtime-capabilities'
 import { THEME_OPTIONS } from '@/lib/appearance'
+
+const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }))
 
 vi.mock('next/dynamic', () => ({
   default: (load: () => Promise<React.ComponentType<HomeProps>>) =>
@@ -15,6 +19,13 @@ vi.mock('next/dynamic', () => ({
 vi.mock('next/link', () => ({ default: ({ children, ...props }: React.PropsWithChildren<{ href: string }>) => h('a', props, children) }))
 vi.mock('@/components/SearchEntry', () => ({ SearchEntry: () => h('button', null, '搜索') }))
 vi.mock('@/components/SiteFooter', () => ({ SiteFooter: () => h('footer') }))
+vi.mock('@/components/Toast', () => ({ useToast: () => toast }))
+vi.mock('@/app/admin/(protected)/settings/RuntimeStatusStrip', () => ({ RuntimeStatusStrip: () => null }))
+vi.mock('@/app/admin/(protected)/settings/NavLinksEditor', () => ({ NavLinksEditor: () => null }))
+vi.mock('@/app/admin/(protected)/settings/CustomJsEditor', () => ({ CustomJsEditor: () => null }))
+vi.mock('@/app/admin/(protected)/settings/ThirdPartyPublishingManager', () => ({ ThirdPartyPublishingManager: () => null }))
+vi.mock('@/app/admin/(protected)/settings/ModelsSettings', () => ({ ModelsSettings: () => null }))
+vi.mock('@/app/admin/(protected)/settings/PromptsSettings', () => ({ PromptsSettings: () => null }))
 
 let dom: JSDOM
 let host: HTMLDivElement
@@ -24,6 +35,8 @@ beforeEach(() => {
   for (const [name, value] of Object.entries({ window: dom.window, document: dom.window.document, React, IS_REACT_ACT_ENVIRONMENT: true })) vi.stubGlobal(name, value)
   window.localStorage.setItem('blogman_site_theme', 'terminal')
   document.documentElement.setAttribute('data-theme', 'terminal')
+  toast.success.mockClear()
+  toast.error.mockClear()
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -51,6 +64,7 @@ describe('#247 owner-controlled site theme', () => {
   it.each(THEME_OPTIONS)('renders $id without visitor controls or stored overrides', async ({ id }) => {
     await render(h(HomeClient, { ...props, initialTheme: id }))
     expectNoThemeControl()
+    expect(Boolean(host.querySelector('.theme-home-refined'))).toBe(id === 'refined' || id === 'porcelain' || id === 'mist')
     expect(Boolean(host.querySelector('.theme-home-editorial'))).toBe(id === 'editorial')
     expect(Boolean(host.querySelector('.theme-home-terminal'))).toBe(id === 'terminal')
     const before = host.innerHTML
@@ -78,23 +92,70 @@ describe('#247 owner-controlled site theme', () => {
 
   it('bootstrap leaves the server theme intact despite old local storage', () => {
     const layout = readFileSync('app/layout.tsx', 'utf8')
-    expect(layout).toContain("data-theme={defaultTheme !== 'default' ? defaultTheme : undefined}")
+    expect(layout).toContain("data-theme={defaultTheme}")
     const script = layout.match(/const appearanceApplyScript = `([\s\S]*?)`/)![1]
       .replace('${JSON.stringify(FONT_CONFIG)}', '{}')
       .replace("${bodyFont || ''}", '')
     for (const { id } of THEME_OPTIONS) {
-      if (id === 'default') document.documentElement.removeAttribute('data-theme')
-      else document.documentElement.setAttribute('data-theme', id)
+      document.documentElement.setAttribute('data-theme', id)
       dom.window.eval(script)
-      expect(document.documentElement.getAttribute('data-theme')).toBe(id === 'default' ? null : id)
+      expect(document.documentElement.getAttribute('data-theme')).toBe(id)
     }
   })
 
-  it('retains all admin choices and saves the selected theme', async () => {
-    const onSave = vi.fn().mockResolvedValue(undefined)
-    await render(h(ThemeManager, { initialTheme: 'default', initialFont: 'default', onSave }))
+  it('retains all admin choices and saves theme and body font independently', async () => {
+    const onSaveTheme = vi.fn().mockResolvedValue(undefined)
+    const onSaveFont = vi.fn().mockResolvedValue(undefined)
+    await render(h(ThemeManager, { initialTheme: 'default', initialFont: 'default', onSaveTheme, onSaveFont }))
     expect(host.querySelectorAll('input[name="default-theme"]')).toHaveLength(THEME_OPTIONS.length)
+
     await act(async () => { (host.querySelector('input[value="editorial"]') as HTMLInputElement).click() })
-    expect(onSave).toHaveBeenCalledWith({ theme: 'editorial', font: 'default' }, expect.objectContaining({ undoValues: { theme: 'default', font: 'default' } }))
+    expect(onSaveTheme).toHaveBeenCalledWith('editorial', expect.objectContaining({ undoValue: 'default' }))
+    expect(onSaveFont).not.toHaveBeenCalled()
+
+    await vi.waitFor(() => expect((host.querySelector('input[value="editorial"]') as HTMLInputElement).disabled).toBe(false))
+    await act(async () => { (host.querySelector('input[value="serif"]') as HTMLInputElement).click() })
+    expect(onSaveFont).toHaveBeenCalledWith('serif', expect.objectContaining({ undoValue: 'default' }))
+    expect(onSaveTheme).toHaveBeenCalledTimes(1)
+  })
+
+  it('restores the selected theme when persistence fails', async () => {
+    const onSaveTheme = vi.fn().mockRejectedValue(new Error('save failed'))
+    await render(h(ThemeManager, { initialTheme: 'default', initialFont: 'default', onSaveTheme, onSaveFont: vi.fn() }))
+
+    await act(async () => { (host.querySelector('input[value="editorial"]') as HTMLInputElement).click() })
+    await vi.waitFor(() => {
+      expect((host.querySelector('input[value="default"]') as HTMLInputElement).checked).toBe(true)
+    })
+  })
+
+  it('persists and rolls back the theme independently from the body font', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+    await render(h(SettingsManager, {
+      initialNavLinks: '',
+      initialCustomJs: '',
+      initialBodyFont: 'default',
+      initialDefaultTheme: 'default',
+      initialRuntimeCapabilities: detectRuntimeCapabilities(),
+    }))
+
+    await act(async () => { ([...host.querySelectorAll('button')] as HTMLButtonElement[]).find((button) => button.textContent === '外观')!.click() })
+    await act(async () => { (host.querySelector('input[value="porcelain"]') as HTMLInputElement).click() })
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/admin/settings', expect.objectContaining({
+      body: JSON.stringify({ key: 'default_theme', value: 'porcelain' }),
+    }))
+    expect(fetchMock.mock.calls.some(([, init]) => String((init as RequestInit).body).includes('body_font'))).toBe(false)
+
+    await vi.waitFor(() => expect(toast.success).toHaveBeenCalled())
+    const successOptions = toast.success.mock.calls[0][2]
+    await act(async () => { successOptions.onClick() })
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/admin/settings', expect.objectContaining({
+      body: JSON.stringify({ key: 'default_theme', value: 'default' }),
+    }))
   })
 })

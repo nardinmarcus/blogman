@@ -3,9 +3,9 @@
 import { useRef, useState } from 'react'
 import { FONT_PRESETS, THEME_OPTIONS, type BodyFont, type Theme } from '@/lib/appearance'
 
-export interface ThemeSaveOptions {
-  /** 本次保存前已持久化的主题/字体，用于撤销回滚 */
-  undoValues: { theme: Theme; font: BodyFont }
+export interface AppearanceSaveOptions<T> {
+  /** 本次保存前已持久化的值，用于撤销回滚 */
+  undoValue: T
   /** 保存成功 toast 文案 */
   label: string
   /** 撤销时恢复组件本地状态 */
@@ -15,57 +15,79 @@ export interface ThemeSaveOptions {
 interface Props {
   initialTheme: Theme
   initialFont: BodyFont
-  onSave: (values: { theme: Theme; font: BodyFont }, opts: ThemeSaveOptions) => Promise<void>
+  onSaveTheme: (theme: Theme, opts: AppearanceSaveOptions<Theme>) => Promise<void>
+  onSaveFont: (font: BodyFont, opts: AppearanceSaveOptions<BodyFont>) => Promise<void>
 }
 
-export function ThemeManager({ initialTheme, initialFont, onSave }: Props) {
-  const [selectedTheme, setSelectedTheme] = useState<Theme>(initialTheme)
-  const [selectedFont, setSelectedFont] = useState<BodyFont>(initialFont)
-  // 最近一次成功持久化的主题/字体；撤销以此为准
-  const persistedRef = useRef({ theme: initialTheme, font: initialFont })
+function usePersistedAppearanceSelection<T extends string>({
+  initialValue,
+  getLabel,
+  onSave,
+}: {
+  initialValue: T
+  getLabel: (value: T) => string
+  onSave: (value: T, opts: AppearanceSaveOptions<T>) => Promise<void>
+}) {
+  const [selected, setSelected] = useState(initialValue)
+  const [saving, setSaving] = useState(false)
+  // 最近一次成功持久化的值；撤销与失败恢复都以此为准
+  const persistedRef = useRef(initialValue)
 
-  const currentFont = FONT_PRESETS.find((preset) => preset.id === selectedFont) || FONT_PRESETS[0]
-
-  const persist = (values: { theme: Theme; font: BodyFont }, label: string) => {
-    const undoValues = persistedRef.current
-    if (values.theme === undoValues.theme && values.font === undoValues.font) return
-    void onSave(values, {
-      undoValues,
-      label,
+  const select = (value: T) => {
+    if (value === selected || saving) return
+    const undoValue = persistedRef.current
+    setSaving(true)
+    setSelected(value)
+    void onSave(value, {
+      undoValue,
+      label: getLabel(value),
       onUndo: () => {
-        persistedRef.current = undoValues
-        setSelectedTheme(undoValues.theme)
-        setSelectedFont(undoValues.font)
+        persistedRef.current = undoValue
+        setSelected(undoValue)
       },
     })
       .then(() => {
-        persistedRef.current = values
+        persistedRef.current = value
       })
       .catch(() => {
-        // 失败 toast 由父级 save 负责
+        setSelected(undoValue)
+      })
+      .finally(() => {
+        setSaving(false)
       })
   }
 
-  const selectTheme = (theme: Theme) => {
-    if (theme === selectedTheme) return
-    setSelectedTheme(theme)
-    const name = THEME_OPTIONS.find((t) => t.id === theme)?.label ?? theme
-    persist({ theme, font: selectedFont }, `已切换主题为「${name}」`)
-  }
+  return { selected, saving, select }
+}
 
-  const selectFont = (font: BodyFont) => {
-    if (font === selectedFont) return
-    setSelectedFont(font)
-    const name = FONT_PRESETS.find((f) => f.id === font)?.name ?? font
-    persist({ theme: selectedTheme, font }, `已切换正文字体为「${name}」`)
-  }
+export function ThemeManager({ initialTheme, initialFont, onSaveTheme, onSaveFont }: Props) {
+  const {
+    selected: selectedTheme,
+    saving: themeSaving,
+    select: selectTheme,
+  } = usePersistedAppearanceSelection({
+    initialValue: initialTheme,
+    getLabel: (theme) => `已切换主题为「${THEME_OPTIONS.find((t) => t.id === theme)?.label ?? theme}」`,
+    onSave: onSaveTheme,
+  })
+  const {
+    selected: selectedFont,
+    saving: fontSaving,
+    select: selectFont,
+  } = usePersistedAppearanceSelection({
+    initialValue: initialFont,
+    getLabel: (font) => `已切换正文字体为「${FONT_PRESETS.find((f) => f.id === font)?.name ?? font}」`,
+    onSave: onSaveFont,
+  })
+
+  const currentFont = FONT_PRESETS.find((preset) => preset.id === selectedFont) || FONT_PRESETS[0]
 
   return (
     <div className="space-y-6">
       <div className="space-y-2">
-        <h3 className="text-base font-medium text-[var(--editor-ink)]">默认主题</h3>
+        <h3 className="text-base font-medium text-[var(--editor-ink)]">站点主题</h3>
         <p className="text-sm text-[var(--editor-muted)]">
-          这里设置的是网站首次访问时的默认主题。访客后续如果自己切换主题，会优先使用本地保存的偏好。选择即生效。
+          主题由站长统一控制，决定公开页面的布局、配色、字体资源和阅读氛围。访客没有单独的主题切换器。选择即生效。
         </p>
         <div className="grid gap-3 sm:grid-cols-2" role="radiogroup" aria-label="站点主题">
           {THEME_OPTIONS.map((theme) => (
@@ -83,6 +105,7 @@ export function ThemeManager({ initialTheme, initialFont, onSave }: Props) {
                 value={theme.id}
                 checked={selectedTheme === theme.id}
                 onChange={() => selectTheme(theme.id)}
+                disabled={themeSaving}
                 className="mt-1 accent-[var(--editor-accent)]"
               />
               <div className="min-w-0 flex-1">
@@ -97,7 +120,7 @@ export function ThemeManager({ initialTheme, initialFont, onSave }: Props) {
       <div className="space-y-2">
         <h3 className="text-base font-medium text-[var(--editor-ink)]">正文字体</h3>
         <p className="text-sm text-[var(--editor-muted)]">
-          设置前台文章正文的字体。主题控制首页风格，字体控制阅读正文体验。选择即生效。
+          设置前台文章正文的阅读字体。它与站点主题相互独立，可作为站长指定的阅读偏好覆盖。选择即生效。
         </p>
         <div className="grid gap-3" role="radiogroup" aria-label="正文字体">
           {FONT_PRESETS.map((preset) => (
@@ -115,6 +138,7 @@ export function ThemeManager({ initialTheme, initialFont, onSave }: Props) {
                 value={preset.id}
                 checked={selectedFont === preset.id}
                 onChange={() => selectFont(preset.id)}
+                disabled={fontSaving}
                 className="mt-1 accent-[var(--editor-accent)]"
               />
               <div className="min-w-0 flex-1">

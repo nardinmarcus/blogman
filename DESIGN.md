@@ -1,5 +1,7 @@
 # Design System Inspired by Claude (Anthropic)
 
+> **Scope**: this document defines the warm parchment visual world used by Blogman's original `default` / `editorial` direction. It is not a global ban on other site themes. Complete sibling themes such as `porcelain` and `mist` own their own token sets and may deliberately use cooler neutral or pale-cyan palettes.
+
 ## 1. Visual Theme & Atmosphere
 
 Claude's interface is a literary salon reimagined as a product page — warm, unhurried, and quietly intellectual. The entire experience is built on a parchment-toned canvas (`#f5f4ed`) that deliberately evokes the feeling of high-quality paper rather than a digital surface. Where most AI product pages lean into cold, futuristic aesthetics, Claude's design radiates human warmth, as if the AI itself has good taste in interior design.
@@ -230,7 +232,7 @@ What makes Claude's design truly distinctive is its warm neutral palette. Every 
 ## 7. Do's and Don'ts
 
 ### Do
-- Use Parchment (`#f5f4ed`) as the primary light background — the warm cream tone IS the Claude personality
+- For the warm parchment theme, use Parchment (`#f5f4ed`) as the primary light background — the warm cream tone IS the Claude personality
 - Use Anthropic Serif at weight 500 for all headlines — the single-weight consistency is intentional
 - Use Terracotta Brand (`#c96442`) only for primary CTAs and the highest-signal brand moments
 - Keep all neutrals warm-toned — every gray should have a yellow-brown undertone
@@ -241,12 +243,12 @@ What makes Claude's design truly distinctive is its warm neutral palette. Every 
 - Apply generous border-radius (12–32px) for a soft, approachable feel
 
 ### Don't
-- Don't use cool blue-grays anywhere — the palette is exclusively warm-toned
+- Within the warm parchment theme, don't use cool blue-grays — its palette is exclusively warm-toned
 - Don't use bold (700+) weight on Anthropic Serif — weight 500 is the ceiling for serifs
 - Don't introduce saturated colors beyond Terracotta — the palette is deliberately muted
 - Don't use sharp corners (< 6px radius) on buttons or cards — softness is core to the identity
 - Don't apply heavy drop shadows — depth comes from ring shadows and background color shifts
-- Don't use pure white (`#ffffff`) as a page background — Parchment (`#f5f4ed`) or Ivory (`#faf9f5`) are always warmer
+- Within the warm parchment theme, don't use pure white (`#ffffff`) as a page background — Parchment (`#f5f4ed`) or Ivory (`#faf9f5`) are always warmer
 - Don't use geometric/tech-style illustrations — Claude's illustrations are organic and hand-drawn-feeling
 - Don't reduce body line-height below 1.40 — the generous spacing supports the editorial personality
 - Don't use monospace fonts for non-code content — Anthropic Mono is strictly for code

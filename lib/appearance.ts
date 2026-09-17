@@ -1,27 +1,5 @@
-export const THEME_OPTIONS = [
-  {
-    id: 'default',
-    label: '默认',
-    description: '温暖、克制的阅读首页',
-  },
-  {
-    id: 'refined',
-    label: '精致极简',
-    description: '更轻、更专注的杂志式列表',
-  },
-  {
-    id: 'editorial',
-    label: '杂志编辑',
-    description: '更强视觉层次的刊物风格',
-  },
-  {
-    id: 'terminal',
-    label: 'AI 终端',
-    description: '偏技术感的深色终端界面',
-  },
-] as const
-
-export type Theme = (typeof THEME_OPTIONS)[number]['id']
+export { THEME_OPTIONS, isTheme, normalizeTheme } from './themes'
+export type { Theme } from './themes'
 
 export const FONT_PRESETS = [
   {
@@ -63,12 +41,4 @@ export const FONT_CONFIG: Record<string, { family: string; link?: string }> = {
   },
   serif: { family: 'Georgia, "Noto Serif SC", "Source Han Serif SC", serif' },
   heiti: { family: '"PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif' },
-}
-
-export function isTheme(value: string | null | undefined): value is Theme {
-  return THEME_OPTIONS.some((option) => option.id === value)
-}
-
-export function normalizeTheme(value: string | null | undefined, fallback: Theme = 'default'): Theme {
-  return isTheme(value) ? value : fallback
 }

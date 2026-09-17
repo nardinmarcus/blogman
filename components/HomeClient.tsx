@@ -1,8 +1,9 @@
 'use client'
 
 import dynamic from 'next/dynamic'
-import { useEffect } from 'react'
+import type { ComponentType } from 'react'
 import type { Theme } from '@/lib/appearance'
+import { getThemeDefinition, type ThemeDefinition } from '@/lib/themes'
 import type { PostWithTags } from '@/lib/db'
 import type { SiteCategoryLink, SiteNavLink } from '@/lib/site'
 import { HomeDefault } from '@/components/themes/HomeDefault'
@@ -31,44 +32,16 @@ const HomeVariantC = dynamic<HomeProps>(() =>
   import('@/components/themes/HomeVariantC').then((module) => module.HomeVariantC)
 )
 
-function injectFont(id: string, href: string) {
-  if (typeof document === 'undefined') return
-  if (!document.getElementById(id)) {
-    const link = document.createElement('link')
-    link.id = id
-    link.rel = 'stylesheet'
-    link.href = href
-    document.head.appendChild(link)
-  }
+const HOME_COMPONENTS: Record<ThemeDefinition['home'], ComponentType<HomeProps>> = {
+  default: HomeDefault,
+  refined: HomeVariantA,
+  editorial: HomeVariantB,
+  terminal: HomeVariantC,
 }
 
 export function HomeClient(props: HomeProps) {
-  const theme = props.initialTheme
-
-  // Inject fonts on demand
-  useEffect(() => {
-    if (theme === 'refined' || theme === 'terminal' || theme === 'editorial') {
-      injectFont(
-        'nm-jetbrains-mono',
-        'https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap',
-      )
-    }
-    if (theme === 'editorial') {
-      injectFont(
-        'nm-noto-serif-sc',
-        'https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700;900&display=swap',
-      )
-    }
-  }, [theme])
-
-  const ThemeComponent =
-    theme === 'refined'
-      ? HomeVariantA
-      : theme === 'editorial'
-        ? HomeVariantB
-        : theme === 'terminal'
-          ? HomeVariantC
-          : HomeDefault
+  const theme = getThemeDefinition(props.initialTheme)
+  const ThemeComponent = HOME_COMPONENTS[theme.home]
 
   return <ThemeComponent {...props} />
 }

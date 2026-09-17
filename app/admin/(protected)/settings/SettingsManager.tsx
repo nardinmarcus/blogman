@@ -8,7 +8,7 @@ import { SettingsSection } from './SettingsSection'
 import { RuntimeStatusStrip } from './RuntimeStatusStrip'
 import { NavLinksEditor, type AutosaveOptions } from './NavLinksEditor'
 import { CustomJsEditor } from './CustomJsEditor'
-import { ThemeManager, type ThemeSaveOptions } from './ThemeManager'
+import { ThemeManager, type AppearanceSaveOptions } from './ThemeManager'
 import { ThirdPartyPublishingManager } from './ThirdPartyPublishingManager'
 import { ModelsSettings } from './ModelsSettings'
 import { PromptsSettings } from './PromptsSettings'
@@ -67,15 +67,13 @@ export function SettingsManager({
     })
   }
 
-  const saveThemeSettings = async (
-    values: { theme: Theme; font: BodyFont },
-    opts: ThemeSaveOptions,
+  const saveAppearanceSetting = async <T extends string>(
+    key: 'default_theme' | 'body_font',
+    value: T,
+    opts: AppearanceSaveOptions<T>,
   ) => {
     try {
-      await Promise.all([
-        persistSetting('default_theme', values.theme),
-        persistSetting('body_font', values.font),
-      ])
+      await persistSetting(key, value)
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '保存失败')
       throw e
@@ -84,15 +82,16 @@ export function SettingsManager({
       label: '撤销',
       onClick: () => {
         opts.onUndo()
-        void rollback(async () => {
-          await Promise.all([
-            persistSetting('default_theme', opts.undoValues.theme),
-            persistSetting('body_font', opts.undoValues.font),
-          ])
-        })
+        void rollback(() => persistSetting(key, opts.undoValue))
       },
     })
   }
+
+  const saveTheme = (theme: Theme, opts: AppearanceSaveOptions<Theme>) =>
+    saveAppearanceSetting('default_theme', theme, opts)
+
+  const saveBodyFont = (font: BodyFont, opts: AppearanceSaveOptions<BodyFont>) =>
+    saveAppearanceSetting('body_font', font, opts)
 
   const tabs = [
     {
@@ -126,7 +125,8 @@ export function SettingsManager({
         <ThemeManager
           initialTheme={normalizeTheme(initialDefaultTheme)}
           initialFont={(initialBodyFont || 'default') as BodyFont}
-          onSave={saveThemeSettings}
+          onSaveTheme={saveTheme}
+          onSaveFont={saveBodyFont}
         />
       ),
     },

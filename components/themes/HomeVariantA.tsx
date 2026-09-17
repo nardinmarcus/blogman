@@ -13,15 +13,15 @@ import type { HomeProps } from '@/components/HomeClient'
 
 // Category → color mapping (consistent palette)
 const CAT_COLORS: Record<string, string> = {
-  'AI工具': '#e07b3a',
-  'AI教程': '#c0522a',
-  '产品': '#7c5cbf',
-  '创业': '#2e8fbb',
-  '健脑房': '#3da86b',
-  '技术': '#d4a017',
-  '生活': '#e04a6e',
+  'AI工具': 'var(--category-ai-tools)',
+  'AI教程': 'var(--category-ai-tutorials)',
+  '产品': 'var(--category-product)',
+  '创业': 'var(--category-startup)',
+  '健脑房': 'var(--category-brain-gym)',
+  '技术': 'var(--category-tech)',
+  '生活': 'var(--category-life)',
 }
-const DEFAULT_CAT_COLOR = '#c96442'
+const DEFAULT_CAT_COLOR = 'var(--category-default)'
 
 function getCatColor(cat: string | null) {
   if (!cat) return DEFAULT_CAT_COLOR

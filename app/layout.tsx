@@ -5,10 +5,10 @@ import "./globals.css";
 import { GlobalShortcuts } from "@/components/GlobalShortcuts";
 import { ToastProvider } from "@/components/Toast";
 import { CustomJsInjector } from "@/components/CustomJsInjector";
-import { FONT_CONFIG, normalizeTheme } from "@/lib/appearance";
+import { FONT_CONFIG, normalizeTheme, type Theme } from "@/lib/appearance";
+import { getThemeDefinition } from "@/lib/themes";
 import { getAppCloudflareEnv } from "@/lib/cloudflare";
 import { getPublicSettingForRequest } from "@/lib/public-request-data";
-import { rethrowIfDatabaseMigrationRequired } from "@/lib/database-errors";
 import { resolveDefaultSiteCoverImage } from "@/lib/default-cover-images";
 import { getSiteUrl, getSiteUrlObject } from "@/lib/site-config";
 
@@ -97,7 +97,7 @@ export default async function RootLayout({
 
   let customJs = ''
   let bodyFont = ''
-  let defaultTheme = 'default'
+  let defaultTheme: Theme = 'default'
   try {
     const env = await getAppCloudflareEnv()
     if (env?.DB) {
@@ -118,6 +118,7 @@ export default async function RootLayout({
   }
 
   const font = FONT_CONFIG[bodyFont]
+  const theme = getThemeDefinition(defaultTheme)
 
   const appearanceApplyScript = `
 (function(){
@@ -148,11 +149,14 @@ export default async function RootLayout({
       lang="zh-CN"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
       data-font={bodyFont || 'default'}
-      data-theme={defaultTheme !== 'default' ? defaultTheme : undefined}
+      data-theme={defaultTheme}
       suppressHydrationWarning
     >
       <head>
         {font?.link && <link rel="stylesheet" href={font.link} />}
+        {theme.fontResources.map((resource) => (
+          <link key={resource.id} rel="stylesheet" href={resource.href} />
+        ))}
         {font && (
           <style dangerouslySetInnerHTML={{ __html: `:root { --body-font: ${font.family}; }` }} />
         )}

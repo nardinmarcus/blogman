@@ -11,12 +11,17 @@ import { Pagination } from '@/components/Pagination'
 import type { HomeProps } from '@/components/HomeClient'
 import type { SiteNavLink } from '@/lib/site'
 
-const BG = '#1a1c2e'
-const FG = '#c8d3e8'
-const MUTED = '#5a6480'
-const BORDER = '#2a2f48'
-const ACCENT = '#4ade80'   // terminal green
-const ACCENT2 = '#fbbf24'  // amber
+const BG = 'var(--editor-app-bg)'
+const FG = 'var(--editor-ink)'
+const MUTED = 'var(--editor-muted)'
+const BORDER = 'var(--editor-line)'
+const ACCENT = 'var(--editor-accent)'
+const ACCENT2 = 'var(--editor-secondary-accent)'
+const ACCENT_GLOW = 'var(--terminal-accent-glow)'
+const ACCENT2_GLOW = 'var(--terminal-secondary-glow)'
+const PANEL_TINT = 'var(--terminal-panel-tint)'
+const ROW_HOVER = 'var(--terminal-row-hover)'
+const SCANLINE = 'var(--terminal-scanline)'
 
 function TerminalHeader({ navLinks }: { navLinks: SiteNavLink[] }) {
   const defaultLinks = [
@@ -119,14 +124,14 @@ export function HomeVariantC({
       color: FG,
       minHeight: '100vh',
       fontFamily: '"JetBrains Mono", "SF Mono", ui-monospace, "PingFang SC", monospace',
-      backgroundImage: `radial-gradient(circle at 20% 0%, rgba(74,222,128,0.06) 0%, transparent 50%), radial-gradient(circle at 80% 100%, rgba(251,191,36,0.05) 0%, transparent 50%)`,
+      backgroundImage: `radial-gradient(circle at 20% 0%, ${ACCENT_GLOW} 0%, transparent 50%), radial-gradient(circle at 80% 100%, ${ACCENT2_GLOW} 0%, transparent 50%)`,
       position: 'relative',
     }}>
       {/* Scanline overlay */}
       <div style={{
         position: 'fixed',
         inset: 0,
-        backgroundImage: `repeating-linear-gradient(0deg, rgba(255,255,255,0.012) 0, rgba(255,255,255,0.012) 1px, transparent 1px, transparent 3px)`,
+        backgroundImage: `repeating-linear-gradient(0deg, ${SCANLINE} 0, ${SCANLINE} 1px, transparent 1px, transparent 3px)`,
         pointerEvents: 'none',
         zIndex: 0,
       }} />
@@ -170,7 +175,7 @@ export function HomeVariantC({
             <div key={s.k} style={{
               border: `1px solid ${BORDER}`,
               padding: '10px 14px',
-              background: 'rgba(255,255,255,0.02)',
+              background: PANEL_TINT,
             }}>
               <div style={{ color: MUTED, fontSize: 10, letterSpacing: '0.1em' }}>[{s.k}]</div>
               <div style={{ color: s.c, fontSize: 20, fontWeight: 600, marginTop: 4 }}>{s.v}</div>
@@ -186,7 +191,7 @@ export function HomeVariantC({
           display: 'flex',
           alignItems: 'center',
           gap: 10,
-          background: 'rgba(255,255,255,0.02)',
+          background: PANEL_TINT,
         }}>
           <span style={{ color: ACCENT, fontSize: 13 }}>$</span>
           <span style={{ color: MUTED, fontSize: 13 }}>grep -r</span>
@@ -245,7 +250,7 @@ export function HomeVariantC({
                   alignItems: 'baseline',
                   textDecoration: 'none',
                   transition: 'background .15s',
-                  background: hoverId === post.slug ? 'rgba(74,222,128,0.05)' : 'transparent',
+                  background: hoverId === post.slug ? ROW_HOVER : 'transparent',
                 }}
                 onMouseEnter={() => setHoverId(post.slug)}
                 onMouseLeave={() => setHoverId(null)}

@@ -12,11 +12,11 @@ import { Pagination } from '@/components/Pagination'
 import type { HomeProps } from '@/components/HomeClient'
 import type { SiteNavLink } from '@/lib/site'
 
-const ACCENT = '#c44a2a' // editorial red-orange
-const BG = '#f6f3ed'
-const FG = '#1a1614'
-const MUTED = '#7a6f68'
-const BORDER = '#d8d2c8'
+const ACCENT = 'var(--editor-accent)'
+const BG = 'var(--editor-app-bg)'
+const FG = 'var(--editor-ink)'
+const MUTED = 'var(--editor-muted)'
+const BORDER = 'var(--editor-line)'
 
 function getIssueInfo() {
   const now = new Date()

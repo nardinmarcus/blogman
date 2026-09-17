@@ -28,7 +28,7 @@ export default async function AdminProtectedLayout({
   const navCls = 'px-3 py-2 rounded-lg text-sm text-[var(--editor-muted)] hover:text-[var(--editor-ink)] hover:bg-[var(--editor-soft)] transition-all duration-150 whitespace-nowrap'
 
   return (
-    <div className="min-h-screen bg-[var(--background)] flex flex-col pb-16 md:pb-0">
+    <div data-theme-scope="workbench" className="min-h-screen bg-[var(--background)] flex flex-col pb-16 md:pb-0">
       <header className="sticky top-0 z-40 bg-[var(--editor-panel)] border-b border-[var(--editor-line)]">
         <div className="mx-auto max-w-6xl px-4 sm:px-6 h-14 flex items-center justify-between">
           <div className="flex items-center gap-3 text-sm">
