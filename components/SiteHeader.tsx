@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { useState, useRef, useEffect } from 'react'
 import { Menu, X, ChevronDown, Rss } from 'lucide-react'
 import { SearchEntry } from './SearchEntry'
+import { useAdminSession } from '@/lib/admin-session-client'
 import type { Theme } from '@/lib/appearance'
 import { getThemeDefinition } from '@/lib/themes'
 import type { SiteCategoryLink, SiteNavLink } from '@/lib/site'
@@ -60,6 +61,7 @@ export function SiteHeader({
   initialTheme = 'default',
 }: SiteHeaderProps) {
   const links = navLinks && navLinks.length > 0 ? navLinks : defaultNavLinks
+  const { authenticated: isAdmin } = useAdminSession()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [categoryOpen, setCategoryOpen] = useState(false)
   const categoryRef = useRef<HTMLDivElement>(null)
@@ -219,6 +221,14 @@ export function SiteHeader({
 
             {links.map(link => renderLink(link, undefined, true))}
             <SearchEntry />
+            {isAdmin && (
+              <Link
+                href="/admin"
+                className="text-[var(--editor-muted)] hover:text-[var(--editor-ink)] transition-colors duration-150"
+              >
+                管理
+              </Link>
+            )}
           </nav>
 
           {/* Mobile: search icon + hamburger */}
@@ -282,6 +292,17 @@ export function SiteHeader({
                 {renderLink(link, () => setMobileMenuOpen(false))}
               </div>
             ))}
+            {isAdmin && (
+              <div className="px-4 py-3 border-b border-[var(--editor-line)]">
+                <Link
+                  href="/admin"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="text-[var(--editor-muted)] hover:text-[var(--editor-ink)] transition-colors duration-150"
+                >
+                  管理
+                </Link>
+              </div>
+            )}
           </nav>
         </div>
       </div>
