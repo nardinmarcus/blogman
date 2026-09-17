@@ -62,7 +62,7 @@ export function HomeVariantA({
                   <article
                     key={post.slug}
                     style={{
-                      borderTop: `1px solid var(--editor-line)`,
+                      borderTop: i === 0 ? 'none' : `1px solid var(--editor-line)`,
                       marginTop: i === 0 ? 20 : 0,
                     }}
                     onMouseEnter={() => setHoverId(post.slug)}

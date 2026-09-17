@@ -1268,6 +1268,11 @@ body {
   max-width: min(100%, 92rem);
 }
 
+/* 精致极简主页：列表首尾不画分隔线，页脚不加上边线 */
+.theme-home-refined footer {
+  border-top: 0;
+}
+
 @media (max-width: 640px) {
   .theme-home-refined .refined-home-filter {
     display: none;
