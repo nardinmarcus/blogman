@@ -166,4 +166,61 @@ describe('page-owned raw settings coordination', () => {
     expect(subscriber).not.toHaveBeenCalled()
   })
 
+  it.each([false, true])('does not dispatch if a busy subscriber disposes before transport (reactivate=%s)', reactivate => {
+    const { c, calls, notices, state } = fixture()
+    c.subscribe(() => {
+      if (state().busy) {
+        c.dispose()
+        if (reactivate) c.activate()
+      }
+    })
+    c.edit('custom_js', 'B')
+    expect(calls).toHaveLength(0)
+    expect(notices).toHaveLength(0)
+    c.dispose()
+  })
+
+  describe.each(['save', 'undo'] as const)('reentrant %s completion', kind => {
+    it.each([
+      { ok: true, mutation: 'dispose' },
+      { ok: true, mutation: 'new-draft' },
+      { ok: false, mutation: 'dispose' },
+      { ok: false, mutation: 'new-draft' },
+    ])('suppresses obsolete notices after subscriber $mutation (success=$ok)', async ({ ok, mutation }) => {
+      const { c, calls, notices, finish, state } = fixture({ custom_js: 'A' })
+      c.edit('custom_js', 'B')
+      if (kind === 'undo') {
+        await finish(0)
+        notices[0].action!.onClick()
+        notices.length = 0
+      }
+      const completionIndex = calls.length - 1
+      let handled = false
+      c.subscribe(() => {
+        if (!handled && !state().busy) {
+          handled = true
+          if (mutation === 'dispose') c.dispose()
+          else c.edit('custom_js', 'C', { debounce: true })
+        }
+      })
+      await finish(completionIndex, ok)
+      expect(handled).toBe(true)
+      expect(notices).toHaveLength(0)
+      const acknowledged = kind === 'save' ? (ok ? 'B' : 'A') : (ok ? 'A' : 'B')
+      expect(state().acknowledged).toBe(acknowledged)
+      expect(calls).toHaveLength(completionIndex + 1)
+      if (mutation === 'new-draft') {
+        expect(state().draft).toBe('C')
+        vi.advanceTimersByTime(999)
+        expect(calls).toHaveLength(completionIndex + 1)
+        vi.advanceTimersByTime(1)
+        expect(calls[completionIndex + 1].value).toBe('C')
+        await finish(completionIndex + 1)
+        notices[0].action!.onClick()
+        expect(calls[completionIndex + 2].value).toBe(acknowledged)
+      }
+      c.dispose()
+    })
+  })
+
 })

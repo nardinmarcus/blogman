@@ -75,6 +75,8 @@ export function createSettingsSaveCoordinator(
     update(key, { busy: true })
     // Capture sync transport errors too; no fire-and-forget rejection escapes.
     void (async () => {
+      // The busy update synchronously calls subscribers, which may dispose the page.
+      if (!active || lifetime !== startedLifetime) return
       let succeeded = false
       try {
         await persist(key, intent.value)
@@ -91,7 +93,8 @@ export function createSettingsSaveCoordinator(
           busy: false,
           ...(current && intent.kind === 'undo' ? { draft: intent.value } : {}),
         })
-        if (current) {
+        // Subscription callbacks may have disposed the page or edited a newer draft.
+        if (active && lifetime === startedLifetime && state.revision === intent.revision) {
           notify(intent.kind === 'undo'
             ? { type: 'success', message: '已撤销' }
             : { type: 'success', message: intent.label, action: action(key, { ...intent, kind: 'undo', value: before }, '撤销') })
@@ -99,7 +102,8 @@ export function createSettingsSaveCoordinator(
       } else {
         const restore = current && intent.kind === 'save' && (key === 'default_theme' || key === 'body_font')
         update(key, { busy: false, ...(restore ? { draft: before } : {}) })
-        if (current) {
+        // Subscription callbacks may have disposed the page or edited a newer draft.
+        if (active && lifetime === startedLifetime && state.revision === intent.revision) {
           notify({
             type: 'error', message: intent.kind === 'undo' ? '撤销失败，请重试' : '保存失败',
             ...(!restore ? { action: action(key, intent, '重试') } : {}),
