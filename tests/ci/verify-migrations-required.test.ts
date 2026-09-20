@@ -69,18 +69,18 @@ describe('verify-migrations change classifier', () => {
     '.github/workflows/verify.yml',
     'scripts/verify-migrations-required.mjs',
     'tests/ci/verify-migrations-required.test.ts',
-  ])('skips %s', (path) => {
+  ])('does not classify %s as a migration input', (path) => {
     expect(isMigrationVerificationPath(path)).toBe(false)
   })
 
-  it('skips a proven-unrelated diff', () => {
+  it('requires actual verification even for a proven-unrelated diff', () => {
     const runGit = vi.fn(() => Buffer.from('M\0docs/issue-23-phase-b-runbook.md\0'))
 
     expect(classifyMigrationVerification({
       eventName: 'pull_request',
       event: { pull_request: { base: { sha: baseSha }, head: { sha: headSha } } },
       runGit,
-    })).toEqual({ required: false, reason: 'not-required' })
+    })).toEqual({ required: true, reason: 'candidate-verification-required' })
     expect(runGit).toHaveBeenCalledWith(baseSha, headSha)
   })
 

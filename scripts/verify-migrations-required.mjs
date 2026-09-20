@@ -86,9 +86,13 @@ export function classifyMigrationVerification({
   try {
     const paths = parseChangedPaths(runGit(baseSha, headSha))
     const matchedPath = paths.find(isMigrationVerificationPath)
+    // An unrelated diff is not evidence that this candidate's migration inputs
+    // passed verification. A newer run can cancel its predecessor, or the PR
+    // base may itself be unverified. Until there is a proven-success reuse
+    // protocol, every candidate must run the suite; paths are diagnostic only.
     return matchedPath
       ? { required: true, reason: `matched:${matchedPath}` }
-      : { required: false, reason: 'not-required' }
+      : { required: true, reason: 'candidate-verification-required' }
   } catch {
     return { required: true, reason: 'diff-failed' }
   }

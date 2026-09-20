@@ -115,16 +115,32 @@ jobs:
             printf 'required=true\nreason=classifier-failed\n' >> "${GITHUB_OUTPUT}"
           fi
 
-      - name: Report migration verification not required
-        if: steps.migration-changes.outputs.required == 'false'
-        run: 'echo "verify-migrations: not-required"'
-
+      # A newer run may cancel unverified migration inputs from any earlier
+      # commit. Classify paths for diagnostics, never as permission to skip.
       - name: Install dependencies
-        if: steps.migration-changes.outputs.required != 'false'
         run: npm ci
 
       - name: Run long migration verification
-        if: steps.migration-changes.outputs.required != 'false'
+        id: migration-tests
         env:
           CI: true
         run: npm run test:run -- tests/migrations/migration-runner.test.ts --reporter=verbose
+
+      - name: Report actual migration verification outcome
+        if: always()
+        env:
+          CLASSIFICATION_REASON: ${{ steps.migration-changes.outputs.reason }}
+          MIGRATION_OUTCOME: ${{ steps.migration-tests.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf '### Migration verification\n\n'
+            printf -- '- Candidate: `%s`\n' "$(git rev-parse HEAD)"
+            printf -- '- Run/attempt: %s/%s/actions/runs/%s/attempts/%s\n' "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
+            printf -- '- Job: `verify-migrations`\n'
+            printf -- '- Policy: every candidate must execute the migration suite\n'
+            printf -- '- Classification: `%s`\n' "${CLASSIFICATION_REASON:-unavailable}"
+            printf -- '- Actual test step outcome: `%s`\n' "${MIGRATION_OUTCOME:-not-executed}"
+            printf -- '- Only `success` is passing test evidence; skipped, cancelled, or missing results are not.\n'
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
