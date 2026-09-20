@@ -6,6 +6,7 @@ This repository uses a single domain context.
 
 - Read the root `CONTEXT.md` when it exists.
 - Read ADRs under `docs/adr/` that touch the area being changed.
+- For public reading, configured navigation or settings save/undo changes, read [module boundaries](../module-boundaries.md) for interface ownership and verification seams.
 - If either location does not exist, proceed without inventing terminology or decisions. The domain-modeling workflow creates files lazily as terms and durable architectural decisions are resolved.
 
 ## Use canonical language
