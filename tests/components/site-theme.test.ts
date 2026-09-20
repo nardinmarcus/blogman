@@ -103,25 +103,29 @@ describe('#247 owner-controlled site theme', () => {
     }
   })
 
-  it('retains all admin choices and saves theme and body font independently', async () => {
-    const onSaveTheme = vi.fn().mockResolvedValue(undefined)
-    const onSaveFont = vi.fn().mockResolvedValue(undefined)
-    await render(h(ThemeManager, { initialTheme: 'default', initialFont: 'default', onSaveTheme, onSaveFont }))
+  it('retains all admin choices and delegates theme and body font selections independently', async () => {
+    const onSelectTheme = vi.fn()
+    const onSelectFont = vi.fn()
+    await render(h(ThemeManager, { selectedTheme: 'default', selectedFont: 'default', themeSaving: false, fontSaving: false, onSelectTheme, onSelectFont }))
     expect(host.querySelectorAll('input[name="default-theme"]')).toHaveLength(THEME_OPTIONS.length)
 
     await act(async () => { (host.querySelector('input[value="editorial"]') as HTMLInputElement).click() })
-    expect(onSaveTheme).toHaveBeenCalledWith('editorial', expect.objectContaining({ undoValue: 'default' }))
-    expect(onSaveFont).not.toHaveBeenCalled()
+    expect(onSelectTheme).toHaveBeenCalledWith('editorial')
+    expect(onSelectFont).not.toHaveBeenCalled()
 
     await vi.waitFor(() => expect((host.querySelector('input[value="editorial"]') as HTMLInputElement).disabled).toBe(false))
     await act(async () => { (host.querySelector('input[value="serif"]') as HTMLInputElement).click() })
-    expect(onSaveFont).toHaveBeenCalledWith('serif', expect.objectContaining({ undoValue: 'default' }))
-    expect(onSaveTheme).toHaveBeenCalledTimes(1)
+    expect(onSelectFont).toHaveBeenCalledWith('serif')
+    expect(onSelectTheme).toHaveBeenCalledTimes(1)
   })
 
   it('restores the selected theme when persistence fails', async () => {
-    const onSaveTheme = vi.fn().mockRejectedValue(new Error('save failed'))
-    await render(h(ThemeManager, { initialTheme: 'default', initialFont: 'default', onSaveTheme, onSaveFont: vi.fn() }))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }))
+    await render(h(SettingsManager, {
+      initialNavLinks: '', initialCustomJs: '', initialBodyFont: 'default', initialDefaultTheme: 'default',
+      initialRuntimeCapabilities: detectRuntimeCapabilities(),
+    }))
+    await act(async () => { ([...host.querySelectorAll('button')] as HTMLButtonElement[]).find(button => button.textContent === '外观')!.click() })
 
     await act(async () => { (host.querySelector('input[value="editorial"]') as HTMLInputElement).click() })
     await vi.waitFor(() => {

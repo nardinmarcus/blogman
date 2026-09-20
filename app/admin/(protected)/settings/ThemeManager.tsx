@@ -1,84 +1,23 @@
 'use client'
 
-import { useRef, useState } from 'react'
 import { FONT_PRESETS, THEME_OPTIONS, type BodyFont, type Theme } from '@/lib/appearance'
 
-export interface AppearanceSaveOptions<T> {
-  /** 本次保存前已持久化的值，用于撤销回滚 */
-  undoValue: T
-  /** 保存成功 toast 文案 */
-  label: string
-  /** 撤销时恢复组件本地状态 */
-  onUndo: () => void
-}
-
 interface Props {
-  initialTheme: Theme
-  initialFont: BodyFont
-  onSaveTheme: (theme: Theme, opts: AppearanceSaveOptions<Theme>) => Promise<void>
-  onSaveFont: (font: BodyFont, opts: AppearanceSaveOptions<BodyFont>) => Promise<void>
+  selectedTheme: Theme
+  selectedFont: BodyFont
+  themeSaving: boolean
+  fontSaving: boolean
+  onSelectTheme: (theme: Theme) => void
+  onSelectFont: (font: BodyFont) => void
 }
 
-function usePersistedAppearanceSelection<T extends string>({
-  initialValue,
-  getLabel,
-  onSave,
-}: {
-  initialValue: T
-  getLabel: (value: T) => string
-  onSave: (value: T, opts: AppearanceSaveOptions<T>) => Promise<void>
-}) {
-  const [selected, setSelected] = useState(initialValue)
-  const [saving, setSaving] = useState(false)
-  // 最近一次成功持久化的值；撤销与失败恢复都以此为准
-  const persistedRef = useRef(initialValue)
-
-  const select = (value: T) => {
-    if (value === selected || saving) return
-    const undoValue = persistedRef.current
-    setSaving(true)
-    setSelected(value)
-    void onSave(value, {
-      undoValue,
-      label: getLabel(value),
-      onUndo: () => {
-        persistedRef.current = undoValue
-        setSelected(undoValue)
-      },
-    })
-      .then(() => {
-        persistedRef.current = value
-      })
-      .catch(() => {
-        setSelected(undoValue)
-      })
-      .finally(() => {
-        setSaving(false)
-      })
+export function ThemeManager({ selectedTheme, selectedFont, themeSaving, fontSaving, onSelectTheme, onSelectFont }: Props) {
+  const selectTheme = (value: Theme) => {
+    if (!themeSaving && value !== selectedTheme) onSelectTheme(value)
   }
-
-  return { selected, saving, select }
-}
-
-export function ThemeManager({ initialTheme, initialFont, onSaveTheme, onSaveFont }: Props) {
-  const {
-    selected: selectedTheme,
-    saving: themeSaving,
-    select: selectTheme,
-  } = usePersistedAppearanceSelection({
-    initialValue: initialTheme,
-    getLabel: (theme) => `已切换主题为「${THEME_OPTIONS.find((t) => t.id === theme)?.label ?? theme}」`,
-    onSave: onSaveTheme,
-  })
-  const {
-    selected: selectedFont,
-    saving: fontSaving,
-    select: selectFont,
-  } = usePersistedAppearanceSelection({
-    initialValue: initialFont,
-    getLabel: (font) => `已切换正文字体为「${FONT_PRESETS.find((f) => f.id === font)?.name ?? font}」`,
-    onSave: onSaveFont,
-  })
+  const selectFont = (value: BodyFont) => {
+    if (!fontSaving && value !== selectedFont) onSelectFont(value)
+  }
 
   const currentFont = FONT_PRESETS.find((preset) => preset.id === selectedFont) || FONT_PRESETS[0]
 

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { Modal } from '@/components/Modal'
 
 interface NavLink {
@@ -9,16 +9,9 @@ interface NavLink {
   openInNewTab: boolean
 }
 
-export interface AutosaveOptions {
-  /** 本次保存前已持久化的值，用于撤销回滚 */
-  undoValue: string
-  /** 撤销时恢复组件本地状态 */
-  onUndo: () => void
-}
-
 interface Props {
-  initialValue: string
-  onSave: (value: string, opts: AutosaveOptions) => Promise<void>
+  value: string
+  onChange: (value: string, debounce: boolean) => void
 }
 
 const defaultLinks: NavLink[] = [
@@ -38,69 +31,26 @@ function parseLinks(value: string): NavLink[] {
   }
 }
 
-export function NavLinksEditor({ initialValue, onSave }: Props) {
-  const [initialLinks] = useState(() => parseLinks(initialValue))
-  const [links, setLinks] = useState<NavLink[]>(initialLinks)
+export function NavLinksEditor({ value, onChange }: Props) {
+  const links = parseLinks(value)
   const [deleteIndex, setDeleteIndex] = useState<number | null>(null)
-  // 最近一次成功持久化的序列化值；撤销以此为准
-  const persistedRef = useRef(JSON.stringify(initialLinks))
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  useEffect(() => {
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current)
-    }
-  }, [])
-
-  const commit = (next: NavLink[]) => {
-    const value = JSON.stringify(next)
-    const undoValue = persistedRef.current
-    if (value === undoValue) return
-    void onSave(value, {
-      undoValue,
-      onUndo: () => {
-        if (timerRef.current) clearTimeout(timerRef.current)
-        persistedRef.current = undoValue
-        setLinks(parseLinks(undoValue))
-      },
-    })
-      .then(() => {
-        persistedRef.current = value
-      })
-      .catch(() => {
-        // 失败 toast 由父级 save 负责；persistedRef 不变，后续编辑会基于旧基线重试
-      })
-  }
-
-  /** 文本输入：防抖 1 秒自动保存 */
-  const scheduleCommit = (next: NavLink[]) => {
-    if (timerRef.current) clearTimeout(timerRef.current)
-    timerRef.current = setTimeout(() => commit(next), 1000)
-  }
-
-  /** 添加/删除/上下移：立即保存 */
-  const commitNow = (next: NavLink[]) => {
-    if (timerRef.current) clearTimeout(timerRef.current)
-    commit(next)
-  }
+  const scheduleCommit = (next: NavLink[]) => onChange(JSON.stringify(next), true)
+  const commitNow = (next: NavLink[]) => onChange(JSON.stringify(next), false)
 
   const update = (idx: number, field: keyof NavLink, value: string | boolean, immediate = false) => {
     const next = links.map((l, i) => (i === idx ? { ...l, [field]: value } : l))
-    setLinks(next)
     if (immediate) commitNow(next)
     else scheduleCommit(next)
   }
 
   const add = () => {
     const next = [...links, { label: '', url: '', openInNewTab: false }]
-    setLinks(next)
     commitNow(next)
   }
 
   const confirmRemove = () => {
     if (deleteIndex === null) return false
     const next = links.filter((_, i) => i !== deleteIndex)
-    setLinks(next)
     commitNow(next)
     setDeleteIndex(null)
     return true
@@ -110,7 +60,6 @@ export function NavLinksEditor({ initialValue, onSave }: Props) {
     if (idx <= 0) return
     const next = [...links]
     ;[next[idx - 1], next[idx]] = [next[idx], next[idx - 1]]
-    setLinks(next)
     commitNow(next)
   }
 
@@ -118,7 +67,6 @@ export function NavLinksEditor({ initialValue, onSave }: Props) {
     if (idx >= links.length - 1) return
     const next = [...links]
     ;[next[idx], next[idx + 1]] = [next[idx + 1], next[idx]]
-    setLinks(next)
     commitNow(next)
   }
 

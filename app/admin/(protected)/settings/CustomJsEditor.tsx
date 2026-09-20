@@ -1,55 +1,16 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
-import type { AutosaveOptions } from './NavLinksEditor'
-
 interface Props {
-  initialValue: string
-  onSave: (value: string, opts: AutosaveOptions) => Promise<void>
+  value: string
+  onChange: (value: string) => void
 }
 
-export function CustomJsEditor({ initialValue, onSave }: Props) {
-  const [code, setCode] = useState(initialValue)
-  const persistedRef = useRef(initialValue)
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  useEffect(() => {
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current)
-    }
-  }, [])
-
-  const commit = (next: string) => {
-    const undoValue = persistedRef.current
-    if (next === undoValue) return
-    void onSave(next, {
-      undoValue,
-      onUndo: () => {
-        if (timerRef.current) clearTimeout(timerRef.current)
-        persistedRef.current = undoValue
-        setCode(undoValue)
-      },
-    })
-      .then(() => {
-        persistedRef.current = next
-      })
-      .catch(() => {
-        // 失败 toast 由父级 save 负责
-      })
-  }
-
-  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const next = e.target.value
-    setCode(next)
-    if (timerRef.current) clearTimeout(timerRef.current)
-    timerRef.current = setTimeout(() => commit(next), 1000)
-  }
-
+export function CustomJsEditor({ value, onChange }: Props) {
   return (
     <div className="space-y-3">
       <textarea
-        value={code}
-        onChange={handleChange}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
         rows={8}
         aria-label="自定义 head 代码"
         spellCheck={false}
