@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { MIGRATION_STEP_NAME } from '../../scripts/verify-migrations-required.mjs'
 
 const repoRoot = process.cwd()
 const longMigrationTest = 'tests/migrations/migration-runner.test.ts'
@@ -80,19 +81,24 @@ describe('Verify workflow test partition', () => {
     expect(macosJob).not.toMatch(/secrets\.|contents: write|actions: write/u)
   })
 
-  it('fails closed while skipping the long suite for proven-unrelated changes', () => {
+  it('requires migrations for every candidate and reports the actual test outcome', () => {
     const workflow = readFileSync(join(repoRoot, '.github', 'workflows', 'verify.yml'), 'utf8')
     const longJob = workflowJob(workflow, 'verify-migrations')
-    const requiredCondition = "if: steps.migration-changes.outputs.required != 'false'"
 
     expect(longJob).toContain('fetch-depth: 0')
     expect(longJob).toContain('id: migration-changes')
     expect(longJob).toContain('node scripts/verify-migrations-required.mjs')
     expect(longJob).toContain('required=true\\nreason=classifier-failed')
-    expect(longJob.match(new RegExp(requiredCondition, 'g'))).toHaveLength(2)
-    expect(longJob).toContain("if: steps.migration-changes.outputs.required == 'false'")
-    expect(longJob).toContain(`run: 'echo "verify-migrations: not-required"'`)
-    expect(longJob.indexOf('id: migration-changes'))
-      .toBeLessThan(longJob.indexOf('name: Install dependencies'))
+    expect(longJob).toContain('GH_TOKEN: ${{ github.token }}')
+    expect(longJob).toContain(`- name: ${MIGRATION_STEP_NAME}`)
+    expect(longJob).not.toContain('outputs.required')
+    expect(longJob).not.toContain('not-required')
+    // The only conditional is the always-run outcome report, never install/test.
+    expect(longJob.match(/^        if:.*$/gm)).toEqual(['        if: always()'])
+    expect(longJob).toContain('id: migration-tests')
+    expect(longJob).toContain('MIGRATION_OUTCOME: ${{ steps.migration-tests.outcome }}')
+    expect(longJob).toContain('GITHUB_RUN_ATTEMPT')
+    expect(longJob).toContain('GITHUB_STEP_SUMMARY')
+    expect(workflow).toContain('cancel-in-progress: true')
   })
 })
