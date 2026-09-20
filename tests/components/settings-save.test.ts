@@ -14,7 +14,8 @@ vi.mock('@/app/admin/(protected)/settings/PromptsSettings', () => ({ PromptsSett
 
 const seed = JSON.stringify([{ label: 'Seed', url: '/seed', openInNewTab: false }])
 let dom: JSDOM
-let root: Root
+let root: Root | undefined
+let windowErrors: unknown[]
 let host: HTMLDivElement
 let calls: { key: string; value: string; finish: (ok?: boolean) => void }[]
 let stored: Record<string, string>
@@ -27,9 +28,13 @@ function EffectProbe() {
   return null
 }
 beforeEach(async () => {
+  root = undefined
+  windowErrors = []
   vi.useFakeTimers()
   dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost' })
-  for (const [name, value] of Object.entries({ window: dom.window, document: dom.window.document, history: dom.window.history, React, IS_REACT_ACT_ENVIRONMENT: true })) vi.stubGlobal(name, value)
+  for (const [name, value] of Object.entries({ window: dom.window, document: dom.window.document, navigator: dom.window.navigator, history: dom.window.history, React, IS_REACT_ACT_ENVIRONMENT: true })) vi.stubGlobal(name, value)
+  // Event handler errors must fail the test even when JSDOM only reports them.
+  dom.window.addEventListener('error', event => { windowErrors.push(event.error ?? event.message) })
   host = document.createElement('div')
   document.body.append(host)
   const { createRoot } = await import('react-dom/client')
@@ -46,16 +51,20 @@ beforeEach(async () => {
   })))
 })
 afterEach(async () => {
-  await act(async () => root.unmount())
-  vi.clearAllTimers()
-  vi.useRealTimers()
-  dom.window.close()
-  vi.unstubAllGlobals()
+  try {
+    await act(async () => root?.unmount())
+  } finally {
+    vi.clearAllTimers()
+    vi.useRealTimers()
+    dom?.window.close()
+    vi.unstubAllGlobals()
+  }
+  expect(windowErrors, 'unexpected window errors').toEqual([])
 })
 async function mount(overrides = {}, strict = false) {
   const page = h(SettingsManager, { initialNavLinks: seed, initialCustomJs: '', initialBodyFont: 'default', initialDefaultTheme: 'default', initialRuntimeCapabilities: detectRuntimeCapabilities(), ...overrides })
   const tree = h(ToastProvider, null, page, strict ? h(EffectProbe) : null)
-  await act(async () => root.render(strict ? h(StrictMode, null, tree) : tree))
+  await act(async () => root!.render(strict ? h(StrictMode, null, tree) : tree))
 }
 const buttons = (label: string) => [...host.querySelectorAll('button')].filter(b => b.textContent === label)
 async function click(el: HTMLElement) { expect(el).toBeDefined(); await act(async () => el.click()) }
@@ -195,14 +204,14 @@ describe('#254 real settings page coordination', () => {
     await mount(); await tab('外观'); await select('editorial'); await finish(0)
     await tab('站点'); await input('textarea', 'unsent')
     // ToastProvider deliberately outlives SettingsManager, as in the root layout.
-    await act(async () => root.render(h(ToastProvider, null, h('div', null, 'another page'))))
+    await act(async () => root!.render(h(ToastProvider, null, h('div', null, 'another page'))))
     await click(buttons('撤销')[0]); await advance()
     expect(calls).toHaveLength(1)
   })
 
   it.each([true, false])('suppresses late completion notices after leaving (success=%s)', async ok => {
     await mount(); await click(buttons('+ 添加链接')[0]); await click(buttons('+ 添加链接')[0])
-    await act(async () => root.render(h(ToastProvider, null, h('div', null, 'another page'))))
+    await act(async () => root!.render(h(ToastProvider, null, h('div', null, 'another page'))))
     await finish(0, ok); await advance()
     expect(calls).toHaveLength(1)
     expect(host.querySelector('[aria-live]')!.textContent).toBe('')
@@ -214,7 +223,7 @@ describe('#254 real settings page coordination', () => {
     await input('textarea', 'strict draft'); await advance(); await finish(0)
     await tab('外观'); await tab('站点'); expect(code()).toBe('strict draft')
     await input('textarea', 'must not send')
-    await act(async () => root.render(h(ToastProvider, null, h('div', null, 'gone'))))
+    await act(async () => root!.render(h(ToastProvider, null, h('div', null, 'gone'))))
     await advance(); expect(calls).toHaveLength(1)
   })
 

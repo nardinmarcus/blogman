@@ -29,10 +29,15 @@ vi.mock('@/app/admin/(protected)/settings/PromptsSettings', () => ({ PromptsSett
 
 let dom: JSDOM
 let host: HTMLDivElement
-let root: Root
+let root: Root | undefined
+let windowErrors: unknown[]
 beforeEach(() => {
+  root = undefined
+  windowErrors = []
   dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost', runScripts: 'outside-only' })
-  for (const [name, value] of Object.entries({ window: dom.window, document: dom.window.document, React, IS_REACT_ACT_ENVIRONMENT: true })) vi.stubGlobal(name, value)
+  for (const [name, value] of Object.entries({ window: dom.window, document: dom.window.document, navigator: dom.window.navigator, history: dom.window.history, React, IS_REACT_ACT_ENVIRONMENT: true })) vi.stubGlobal(name, value)
+  // Event handler errors must fail the test even when JSDOM only reports them.
+  dom.window.addEventListener('error', event => { windowErrors.push(event.error ?? event.message) })
   window.localStorage.setItem('blogman_site_theme', 'terminal')
   document.documentElement.setAttribute('data-theme', 'terminal')
   toast.success.mockClear()
@@ -42,14 +47,18 @@ beforeEach(() => {
   root = createRoot(host)
 })
 afterEach(async () => {
-  await act(async () => root.unmount())
-  dom.window.close()
-  vi.unstubAllGlobals()
+  try {
+    await act(async () => root?.unmount())
+  } finally {
+    dom?.window.close()
+    vi.unstubAllGlobals()
+  }
+  expect(windowErrors, 'unexpected window errors').toEqual([])
 })
 
 const props: HomeProps = { initialTheme: 'default', posts: [], categories: [], navLinks: [], currentPage: 1, totalPages: 1, categorySlugMap: {} }
 async function render(node: React.ReactNode) {
-  await act(async () => { root.render(h(Suspense, { fallback: 'loading' }, node)) })
+  await act(async () => { root!.render(h(Suspense, { fallback: 'loading' }, node)) })
   await vi.waitFor(async () => {
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)) })
     expect(host.textContent).not.toBe('loading')
