@@ -9,13 +9,13 @@
  *   - current + historical address — `formal_publications.slug` +
  *     `article_slug_addresses` (permanent single-hop registry),
  *   - first-published time — `formal_publications.first_published_at`,
- *   - content / access-control / pinned — the frozen `article_versions`
- *     snapshot JSON at the formal version (title, body, password, is_hidden,
- *     is_pinned, category, tags, cover_image).
+ *   - content — formal article version (body, HTML, title, description,
+ *     tags, cover),
+ *   - management — latest immutable version (password, hidden, pinned,
+ *     deletion, category, updated_at).
  *
- * The `posts` table keeps being a kept-in-sync rebuildable projection (retired
- * from the public read surface at L4); the only legacy read left here is
- * `posts.view_count`, a monotonic rebuildable counter.
+ * The Compat Projection is frozen and never read here. The retired view
+ * counter is represented by a constant zero for legacy-shaped consumers.
  */
 
 export type PublicLifecycle = 'published' | 'unpublished'
@@ -57,7 +57,7 @@ export interface PublicArticle {
   /** Display time — mirrors the legacy `published_at` field. */
   published_at: number
   updated_at: number
-  /** Kept-in-sync rebuildable counter from the posts projection. */
+  /** Retired counter; always zero. */
   view_count: number
 }
 
@@ -75,6 +75,6 @@ export interface PublicListOptions {
   includePassword?: boolean
   /** Include hidden (unlisted) articles. */
   includeHidden?: boolean
-  /** Restrict to one formal category name. */
+  /** Restrict to the latest category name. */
   category?: string | null
 }

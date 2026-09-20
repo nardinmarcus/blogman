@@ -1,19 +1,7 @@
-/**
- * L2 — canonical row materialisers (issue #67 follow-up).
- *
- * Shared helpers used by every public read path that is NOT yet inside
- * `lib/public-read/kernel.ts` (currently `lib/repositories/search.ts` and
- * `lib/related-content.ts`). They turn a canonical fact row
- * (`formal_publications` + `article_versions`, anchored via `articles`) into a
- * legacy-compatible `PostWithTags` so downstream legacy-shaped code (scoring,
- * index-token building, search responses) keeps working unchanged.
- *
- * Snapshot field access mirrors the JSON1 paths in `kernel.ts`.
- */
-
 import { cache } from 'react'
 import type { Database } from '@/lib/repositories/schema'
 import type { PostWithTags } from '@/lib/repositories/types'
+import type { PublicArticle } from './types'
 
 export type CanonicalLifecycle = 'published' | 'unpublished'
 
@@ -24,6 +12,7 @@ export type CanonicalLifecycle = 'published' | 'unpublished'
 export interface CanonicalPublicRow {
   post_ref: number
   article_id: number
+  version: number
   slug: string
   lifecycle: CanonicalLifecycle
   first_published_at: number
@@ -72,7 +61,7 @@ export async function canonicalFactsAvailable(db: Database): Promise<boolean> {
 }
 
 /** Parse a frozen snapshot into its full record + metadata `fields` block. */
-export function parseCanonicalSnapshot(
+function parseCanonicalSnapshot(
   snapshotJson: string,
 ): { record: Record<string, unknown>; fields: Record<string, unknown> } {
   try {
@@ -104,12 +93,12 @@ function toTags(value: unknown): string[] {
 
 /**
  * Materialise a legacy-compatible `PostWithTags` from canonical facts. Only
- * the monotonic `view_count` counter is not carried here (0); every decision
+ * the retired `view_count` counter is fixed at 0; every decision
  * field (lifecycle / address / access-control / content) comes from
  * `formal_publications` + the frozen `article_versions` snapshot.
  */
 export function postFromCanonicalRow(row: CanonicalPublicRow): PostWithTags {
-  const { record } = parseCanonicalSnapshot(row.snapshot_json)
+  const { record, fields: content } = parseCanonicalSnapshot(row.snapshot_json)
   // Management / access-control fields come from the LATEST version
   // (immediate article-level commands, ADR 0007); content stays formal.
   const { fields } = parseCanonicalSnapshot(row.latest_snapshot_json ?? row.snapshot_json)
@@ -118,18 +107,18 @@ export function postFromCanonicalRow(row: CanonicalPublicRow): PostWithTags {
     deletedAt !== 0 ? 'deleted' : row.lifecycle === 'published' ? 'published' : 'draft'
   return {
     id: row.post_ref,
-    slug: typeof fields.slug === 'string' && fields.slug ? fields.slug : row.slug,
-    title: typeof fields.title === 'string' ? fields.title : row.slug,
+    slug: row.slug,
+    title: typeof content.title === 'string' ? content.title : row.slug,
     content: typeof record.original_content === 'string' ? record.original_content : '',
     html: typeof record.original_html === 'string' ? record.original_html : '',
-    description: typeof fields.description === 'string' ? fields.description : null,
+    description: typeof content.description === 'string' ? content.description : null,
     category: typeof fields.category === 'string' ? fields.category : null,
-    tags: toTags(fields.tags),
+    tags: toTags(content.tags),
     status,
     password: typeof fields.password === 'string' && fields.password ? fields.password : null,
     is_pinned: toStatus(fields.is_pinned),
     is_hidden: toStatus(fields.is_hidden),
-    cover_image: typeof fields.cover_image === 'string' ? fields.cover_image : null,
+    cover_image: typeof content.cover_image === 'string' ? content.cover_image : null,
     deleted_at: deletedAt !== 0 ? deletedAt : null,
     published_at: row.first_published_at,
     updated_at: toStatus(fields.updated_at) || row.published_at,
@@ -138,15 +127,32 @@ export function postFromCanonicalRow(row: CanonicalPublicRow): PostWithTags {
 }
 
 /**
- * The shared canonical fact projection SELECT (columns) used everywhere a
- * public read wants one full article per formal row without touching `posts`.
- * JOINs `articles` → `formal_publications` (one row per article) →
- * `article_versions` (exactly the formal version), plus the LATEST version
- * for management fields (ADR 0007). Pair with CANONICAL_LATEST_JOIN.
+ * BASE admin compatibility: body/HTML remain formal, while display metadata
+ * and the preferred slug come from latest. The supplied row.slug must be the
+ * formal slug, preserving the original fallback even if the registry differs.
+ * This mapping is intentionally unavailable through the public read interface.
  */
+export function postFromAdminRow(row: CanonicalPublicRow): PostWithTags {
+  const post = postFromCanonicalRow(row)
+  const { fields } = parseCanonicalSnapshot(row.latest_snapshot_json ?? row.snapshot_json)
+  return {
+    ...post,
+    slug: typeof fields.slug === 'string' && fields.slug ? fields.slug : row.slug,
+    title: typeof fields.title === 'string' ? fields.title : row.slug,
+    description: typeof fields.description === 'string' ? fields.description : null,
+    tags: toTags(fields.tags),
+    cover_image: typeof fields.cover_image === 'string' ? fields.cover_image : null,
+  }
+}
+
+/** Registry current address wins; formal slug is the pre-backfill fallback. */
+export const LIVE_SLUG = `COALESCE((SELECT slug FROM article_slug_addresses
+  WHERE article_id = f.article_id AND kind = 'current'), f.slug)`
+
+/** Internal projection shared by all full-article discovery reads. */
 export const CANONICAL_ROW_COLUMNS = `
   a.post_ref,
-  f.article_id, f.slug, f.lifecycle, f.first_published_at, f.published_at,
+  f.article_id, f.version, ${LIVE_SLUG} AS slug, f.lifecycle, f.first_published_at, f.published_at,
   v.snapshot_json,
   lv.snapshot_json AS latest_snapshot_json`
 
@@ -154,3 +160,42 @@ export const CANONICAL_ROW_COLUMNS = `
 export const CANONICAL_LATEST_JOIN = `
   LEFT JOIN article_versions lv ON lv.article_id = f.article_id
    AND lv.version = (SELECT MAX(version) FROM article_versions WHERE article_id = f.article_id)`
+
+/** Internal policy: discovery defaults, with explicit listing exceptions. */
+export const MANAGEMENT = {
+  password: "json_extract(lv.snapshot_json, '$.fields.password')",
+  is_hidden: "json_extract(lv.snapshot_json, '$.fields.is_hidden')",
+  is_pinned: "json_extract(lv.snapshot_json, '$.fields.is_pinned')",
+  deleted_at: "json_extract(lv.snapshot_json, '$.fields.deleted_at')",
+  category: "json_extract(lv.snapshot_json, '$.fields.category')",
+} as const
+
+export function discoveryConditions(options: { includePassword?: boolean; includeHidden?: boolean } = {}): string[] {
+  const conditions = ["f.lifecycle = 'published'", `COALESCE(${MANAGEMENT.deleted_at}, 0) = 0`]
+  if (!options.includePassword) conditions.push(`COALESCE(${MANAGEMENT.password}, '') = ''`)
+  if (!options.includeHidden) conditions.push(`COALESCE(${MANAGEMENT.is_hidden}, 0) = 0`)
+  return conditions
+}
+
+/** All content-bearing public results share this materialization. */
+export function articleFromCanonicalRow(row: CanonicalPublicRow): PublicArticle {
+  const post = postFromCanonicalRow(row)
+  return {
+    ...post,
+    articleId: row.article_id,
+    version: row.version,
+    lifecycle: row.lifecycle,
+    live: post.status === 'published',
+    first_published_at: row.first_published_at,
+  }
+}
+
+/** Preserve pre-registry reads without adding a normal-path schema probe. */
+export async function readCanonicalRows(db: Database, sql: string, params: unknown[]): Promise<CanonicalPublicRow[]> {
+  try {
+    return (await db.prepare(sql).bind(...params).all<CanonicalPublicRow>()).results ?? []
+  } catch (error) {
+    if (!(error instanceof Error) || !/no such table:? article_slug_addresses(?![\w])/i.test(error.message)) throw error
+    return (await db.prepare(sql.replaceAll(LIVE_SLUG, 'f.slug')).bind(...params).all<CanonicalPublicRow>()).results ?? []
+  }
+}

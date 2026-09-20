@@ -5,13 +5,21 @@
  * No legacy `posts` SELECT drives a visibility / lifecycle / address / pinned
  * decision here — those come from `formal_publications` +
  * `article_versions` (+ `article_slug_addresses` for the single-hop registry).
- * HTML/SQLite JSON1 (`json_extract`) reads the frozen version snapshot's
+ * SQLite JSON1 (`json_extract`) reads the latest immutable snapshot's
  * access-control + pinned facts so list filtering and pin-ordering stay
  * canonical and happen in SQL (correct pagination on real D1 / in tests).
  */
 
 import type { Database } from '@/lib/repositories/schema'
-import { canonicalFactsAvailableForRequest } from '@/lib/public-read/canon'
+import {
+  canonicalFactsAvailableForRequest,
+  articleFromCanonicalRow,
+  CANONICAL_ROW_COLUMNS,
+  CANONICAL_LATEST_JOIN,
+  MANAGEMENT,
+  discoveryConditions,
+  readCanonicalRows,
+} from './canon'
 import { resolveArticleAddress } from '@/lib/slug-address'
 import type {
   PublicArticle,
@@ -20,28 +28,6 @@ import type {
   PublicListOptions,
 } from './types'
 
-/** Snapshot JSON field paths surfaced by the LATEST frozen article version.
- *
- * Management / access-control state (password, pin, hide, soft-delete,
- * category) takes effect IMMEDIATELY when an article-level command appends a
- * new immutable version — so these paths always read the latest snapshot,
- * never the formal one (ADR 0007). Content-bearing fields stay anchored to
- * the formal version: only a promoted revision changes the public body.
- */
-const F = {
-  password: "json_extract(lv.snapshot_json, '$.fields.password')",
-  is_hidden: "json_extract(lv.snapshot_json, '$.fields.is_hidden')",
-  is_pinned: "json_extract(lv.snapshot_json, '$.fields.is_pinned')",
-  deleted_at: "json_extract(lv.snapshot_json, '$.fields.deleted_at')",
-  title: "json_extract(v.snapshot_json, '$.fields.title')",
-  description: "json_extract(v.snapshot_json, '$.fields.description')",
-  category: "json_extract(lv.snapshot_json, '$.fields.category')",
-  cover_image: "json_extract(v.snapshot_json, '$.fields.cover_image')",
-  updated_at: "json_extract(lv.snapshot_json, '$.fields.updated_at')",
-  original_content: "json_extract(v.snapshot_json, '$.original_content')",
-  original_html: "json_extract(v.snapshot_json, '$.original_html')",
-} as const
-
 interface FormalRow {
   article_id: number
   version: number
@@ -49,51 +35,6 @@ interface FormalRow {
   lifecycle: PublicLifecycle
   first_published_at: number
   published_at: number
-}
-
-interface VersionRow {
-  snapshot_json: string
-  content_snapshot_sha256: string | null
-}
-
-
-/** Parse a frozen snapshot into its full record + metadata `fields` block. */
-function parseSnapshot(snapshotJson: string): { record: Record<string, unknown>; fields: Record<string, unknown> } {
-  try {
-    const record = JSON.parse(snapshotJson) as { fields?: Record<string, unknown> }
-    return { record: record ?? {}, fields: record?.fields ?? {} }
-  } catch {
-    return { record: {}, fields: {} }
-  }
-}
-
-function toStatus(value: unknown): number {
-  const n = typeof value === 'string' ? Number(value) : value
-  return typeof n === 'number' && Number.isFinite(n) ? n : 0
-}
-
-function toTags(value: unknown): string[] {
-  if (value == null) return []
-  if (Array.isArray(value)) return value.map(String)
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value)
-      return Array.isArray(parsed) ? parsed.map(String) : [value]
-    } catch {
-      return value.trim() ? [value] : []
-    }
-  }
-  return []
-}
-
-function isLive(lifecycle: PublicLifecycle, deletedAt: number): boolean {
-  return lifecycle === 'published' && deletedAt === 0
-}
-
-function deriveStatus(lifecycle: PublicLifecycle, deletedAt: number): 'draft' | 'published' | 'deleted' {
-  if (deletedAt !== 0) return 'deleted'
-  if (lifecycle === 'published') return 'published'
-  return 'draft'
 }
 
 /* ------------------------------------------------------------------ */
@@ -110,51 +51,6 @@ function deriveStatus(lifecycle: PublicLifecycle, deletedAt: number): 'draft' | 
 async function canonicalAvailable(db: Database): Promise<boolean> {
   // #244 P1 — shared request-scoped probe (swallow semantics preserved).
   return canonicalFactsAvailableForRequest(db)
-}
-
-/**
- * Materialize a `PublicArticle` from canonical formal row + version snapshots.
- *
- * Content comes from the FORMAL version; management / access-control fields
- * come from the LATEST version (immediate effect of article-level commands,
- * ADR 0007). `latestJson` falls back to the formal snapshot when absent.
- */
-function buildPublicArticle(
-  formal: FormalRow,
-  snapshotJson: string,
-  postRef: number,
-  viewCount = 0,
-  latestJson?: string | null,
-): PublicArticle {
-  const { record } = parseSnapshot(snapshotJson)
-  const fields = parseSnapshot(latestJson ?? snapshotJson).fields
-  const deletedAt = toStatus(fields.deleted_at)
-  const updatedAt = toStatus(fields.updated_at) || formal.published_at
-
-  return {
-    id: postRef,
-    articleId: formal.article_id,
-    slug: formal.slug,
-    version: formal.version,
-    lifecycle: formal.lifecycle,
-    live: isLive(formal.lifecycle, deletedAt),
-    status: deriveStatus(formal.lifecycle, deletedAt),
-    deleted_at: deletedAt !== 0 ? deletedAt : null,
-    title: typeof fields.title === 'string' ? fields.title : formal.slug,
-    content: typeof record.original_content === 'string' ? record.original_content : '',
-    html: typeof record.original_html === 'string' ? record.original_html : '',
-    description: typeof fields.description === 'string' ? fields.description : null,
-    category: typeof fields.category === 'string' ? fields.category : null,
-    tags: toTags(fields.tags),
-    password: typeof fields.password === 'string' && fields.password ? fields.password : null,
-    is_pinned: toStatus(fields.is_pinned),
-    is_hidden: toStatus(fields.is_hidden),
-    cover_image: typeof fields.cover_image === 'string' ? fields.cover_image : null,
-    first_published_at: formal.first_published_at,
-    published_at: formal.first_published_at,
-    updated_at: updatedAt,
-    view_count: viewCount,
-  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -206,8 +102,7 @@ LEFT JOIN article_slug_addresses regcur
   ON regcur.article_id = reg.article_id AND regcur.kind = 'current'
 LEFT JOIN formal_publications f ON f.article_id = reg.article_id
 LEFT JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
-LEFT JOIN article_versions lv ON lv.article_id = f.article_id
-  AND lv.version = (SELECT MAX(version) FROM article_versions WHERE article_id = f.article_id)
+${CANONICAL_LATEST_JOIN}
 LEFT JOIN articles a ON a.id = f.article_id
 WHERE reg.slug = ?
 UNION ALL
@@ -220,8 +115,7 @@ SELECT
   COALESCE(a.post_ref, 0)
 FROM formal_publications f
 JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
-LEFT JOIN article_versions lv ON lv.article_id = f.article_id
-  AND lv.version = (SELECT MAX(version) FROM article_versions WHERE article_id = f.article_id)
+${CANONICAL_LATEST_JOIN}
 LEFT JOIN articles a ON a.id = f.article_id
 WHERE f.slug = ?
   AND NOT EXISTS (SELECT 1 FROM article_slug_addresses WHERE slug = ?)`
@@ -237,8 +131,7 @@ SELECT
   COALESCE(a.post_ref, 0) AS post_ref
 FROM formal_publications f
 JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
-LEFT JOIN article_versions lv ON lv.article_id = f.article_id
-  AND lv.version = (SELECT MAX(version) FROM article_versions WHERE article_id = f.article_id)
+${CANONICAL_LATEST_JOIN}
 LEFT JOIN articles a ON a.id = f.article_id
 WHERE f.slug = ?`
 
@@ -260,8 +153,7 @@ LEFT JOIN article_slug_addresses regcur
   ON regcur.article_id = reg.article_id AND regcur.kind = 'current'
 JOIN formal_publications f ON f.article_id = reg.article_id
 JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
-LEFT JOIN article_versions lv ON lv.article_id = f.article_id
-  AND lv.version = (SELECT MAX(version) FROM article_versions WHERE article_id = f.article_id)
+${CANONICAL_LATEST_JOIN}
 WHERE reg.slug = ?`
 
 /** Formal-only WITHOUT the articles join — registry AND articles both absent;
@@ -276,8 +168,7 @@ SELECT
   0 AS post_ref
 FROM formal_publications f
 JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
-LEFT JOIN article_versions lv ON lv.article_id = f.article_id
-  AND lv.version = (SELECT MAX(version) FROM article_versions WHERE article_id = f.article_id)
+${CANONICAL_LATEST_JOIN}
 WHERE f.slug = ?`
 
 /** True ONLY for a missing-table error naming EXACTLY `table` (full-name
@@ -432,14 +323,19 @@ export async function resolvePublicArticle(
   const formal: FormalRow = {
     article_id: row.article_id,
     version: row.version,
-    slug: row.slug,
+    slug: row.reg_current_slug ?? row.slug,
     lifecycle: row.lifecycle,
     first_published_at: row.first_published_at,
     published_at: row.published_at,
   }
   // Management fields come from the LATEST version (immediate article-level
   // commands); content stays anchored to the formal version.
-  const article = buildPublicArticle(formal, row.snapshot_json, row.post_ref ?? 0, 0, row.latest_snapshot_json)
+  const article = articleFromCanonicalRow({
+    ...formal,
+    snapshot_json: row.snapshot_json,
+    post_ref: row.post_ref ?? 0,
+    latest_snapshot_json: row.latest_snapshot_json,
+  })
 
   // A historical single-hop must carry the CURRENT slug, never the old one.
   if (redirectSlug) {
@@ -451,19 +347,6 @@ export async function resolvePublicArticle(
 /* ------------------------------------------------------------------ */
 /* canonical public list (home / category / feed / sitemap)            */
 /* ------------------------------------------------------------------ */
-
-const LIST_COLUMNS = `
-  f.article_id, f.version, f.slug, f.lifecycle,
-  f.first_published_at, f.published_at,
-  v.snapshot_json,
-  lv.snapshot_json AS latest_snapshot_json,
-  COALESCE(a.post_ref, 0) AS post_ref
-`
-
-/** The LATEST version join — management fields read from it (ADR 0007). */
-const LATEST_JOIN = `
-  LEFT JOIN article_versions lv ON lv.article_id = f.article_id
-   AND lv.version = (SELECT MAX(version) FROM article_versions WHERE article_id = f.article_id)`
 
 /**
  * List the CANONICAL public articles: lifecycle published (from
@@ -489,45 +372,27 @@ export async function listPublicArticles(
     return []
   }
 
-  const conditions: string[] = [
-    `f.lifecycle = 'published'`,
-    `COALESCE(${F.deleted_at}, 0) = 0`,
-  ]
+  const conditions = discoveryConditions({ includePassword, includeHidden })
   const params: unknown[] = []
-  if (!includePassword) {
-    conditions.push(`COALESCE(${F.password}, '') = ''`)
-  }
-  if (!includeHidden) {
-    conditions.push(`COALESCE(${F.is_hidden}, 0) = 0`)
-  }
   if (category && category.trim()) {
-    conditions.push(`COALESCE(${F.category}, '') = ?`)
+    conditions.push(`COALESCE(${MANAGEMENT.category}, '') = ?`)
     params.push(category)
   }
 
   const where = conditions.join(' AND ')
-  interface ListRow extends FormalRow, VersionRow {
-    post_ref: number
-    latest_snapshot_json: string | null
-  }
-
-  const { results } = await db
-    .prepare(
-      `SELECT ${LIST_COLUMNS}
-       FROM formal_publications f
-       JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
-       ${LATEST_JOIN}
-       JOIN articles a ON a.id = f.article_id
-       WHERE ${where}
-       ORDER BY COALESCE(${F.is_pinned}, 0) DESC, f.first_published_at DESC
-       LIMIT ? OFFSET ?`,
-    )
-    .bind(...params, limit, offset)
-    .all<ListRow>()
-
-  return (results ?? []).map((row) =>
-    buildPublicArticle(row, row.snapshot_json, row.post_ref, 0, row.latest_snapshot_json),
+  const rows = await readCanonicalRows(
+    db,
+    `SELECT ${CANONICAL_ROW_COLUMNS}
+     FROM formal_publications f
+     JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+     ${CANONICAL_LATEST_JOIN}
+     JOIN articles a ON a.id = f.article_id
+     WHERE ${where}
+     ORDER BY COALESCE(${MANAGEMENT.is_pinned}, 0) DESC, f.first_published_at DESC
+     LIMIT ? OFFSET ?`,
+    [...params, limit, offset],
   )
+  return rows.map(articleFromCanonicalRow)
 }
 
 /** Canonical public count (honours the same access-control options). */
@@ -541,24 +406,19 @@ export async function countPublicArticles(
   if (!(await canonicalAvailable(db))) {
     return 0
   }
-  const conditions: string[] = [
-    `f.lifecycle = 'published'`,
-    `COALESCE(${F.deleted_at}, 0) = 0`,
-  ]
+  const conditions = discoveryConditions({ includePassword, includeHidden })
   const params: unknown[] = []
-  if (!includePassword) conditions.push(`COALESCE(${F.password}, '') = ''`)
-  if (!includeHidden) conditions.push(`COALESCE(${F.is_hidden}, 0) = 0`)
   if (category && category.trim()) {
-    conditions.push(`COALESCE(${F.category}, '') = ?`)
+    conditions.push(`COALESCE(${MANAGEMENT.category}, '') = ?`)
     params.push(category)
   }
   const row = await db
     .prepare(
       `SELECT COUNT(*) AS n
-       FROM formal_publications f
-       JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
-       ${LATEST_JOIN}
-       WHERE ${conditions.join(' AND ')}`,
+     FROM formal_publications f
+     JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
+     ${CANONICAL_LATEST_JOIN}
+     WHERE ${conditions.join(' AND ')}`,
     )
     .bind(...params)
     .first<{ n: number }>()
@@ -589,9 +449,9 @@ export async function searchPublicArticles(
     const { results } = await db
       .prepare(
         `SELECT a.post_ref AS post_ref FROM article_fts
-         JOIN articles a ON a.id = article_fts.rowid
-         WHERE article_fts MATCH ?
-         LIMIT ?`,
+       JOIN articles a ON a.id = article_fts.rowid
+       WHERE article_fts MATCH ?
+       LIMIT ?`,
       )
       .bind(query, limit * 4)
       .all<{ post_ref: number }>()

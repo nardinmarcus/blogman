@@ -1,11 +1,5 @@
-import { searchPosts, type Post, type PostWithTags } from '@/lib/db'
-import {
-  CANONICAL_ROW_COLUMNS,
-  CANONICAL_LATEST_JOIN,
-  canonicalFactsAvailable,
-  type CanonicalPublicRow,
-  postFromCanonicalRow,
-} from '@/lib/public-read/canon'
+import type { PostWithTags } from '@/lib/repositories/types'
+import { recallPublicPosts, recentPublicPosts, getIndexablePublicPost, searchPublicPosts } from '@/lib/public-read'
 
 const VECTOR_NAMESPACE = 'posts'
 const DEFAULT_VECTOR_DIMENSIONS = 128
@@ -19,22 +13,6 @@ type RelatedSearchResult = {
   source: RelatedSource
   results: PostWithTags[]
 }
-
-type PublicPostRow = Pick<
-  Post,
-  | 'id'
-  | 'slug'
-  | 'title'
-  | 'content'
-  | 'description'
-  | 'category'
-  | 'tags'
-  | 'status'
-  | 'password'
-  | 'is_hidden'
-  | 'deleted_at'
-  | 'published_at'
->
 
 function readFlag(value: unknown): boolean {
   return typeof value === 'string' && ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
@@ -146,66 +124,6 @@ async function getVectorDimensions(index: VectorizeIndex): Promise<number> {
   }
 }
 
-async function fetchPostsBySlugs(db: D1Database, slugs: string[]): Promise<PostWithTags[]> {
-  if (slugs.length === 0) return []
-
-  const placeholders = slugs.map(() => '?').join(', ')
-  const order = new Map(slugs.map((slug, index) => [slug, index]))
-
-  if (!(await canonicalFactsAvailable(db))) {
-    // posts is retired from the public runtime — degraded empty.
-    return []
-  }
-
-  const { results } = await db
-    .prepare(
-      `SELECT ${CANONICAL_ROW_COLUMNS}
-       FROM articles a
-       JOIN formal_publications f ON f.article_id = a.id
-       JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
-       ${CANONICAL_LATEST_JOIN}
-       WHERE f.slug IN (${placeholders})
-         AND f.lifecycle = 'published'
-         AND COALESCE(json_extract(v.snapshot_json, '$.fields.password'), '') = ''
-         AND COALESCE(json_extract(v.snapshot_json, '$.fields.is_hidden'), 0) = 0
-         AND COALESCE(json_extract(v.snapshot_json, '$.fields.deleted_at'), 0) = 0`
-    )
-    .bind(...slugs)
-    .all<CanonicalPublicRow>()
-
-  return (results ?? [])
-    .map(postFromCanonicalRow)
-    .sort((left, right) => (order.get(left.slug) ?? Number.MAX_SAFE_INTEGER) - (order.get(right.slug) ?? Number.MAX_SAFE_INTEGER))
-}
-
-/** Recent public articles (exclude one slug), read from canonical facts. */
-async function fetchRecentPublicPosts(db: D1Database, excludeSlug: string, limit: number): Promise<PostWithTags[]> {
-  if (!(await canonicalFactsAvailable(db))) {
-    // posts is retired from the public runtime — degraded empty.
-    return []
-  }
-
-  const { results } = await db
-    .prepare(
-      `SELECT ${CANONICAL_ROW_COLUMNS}
-       FROM articles a
-       JOIN formal_publications f ON f.article_id = a.id
-       JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
-       ${CANONICAL_LATEST_JOIN}
-       WHERE f.slug != ?
-         AND f.lifecycle = 'published'
-         AND COALESCE(json_extract(v.snapshot_json, '$.fields.password'), '') = ''
-         AND COALESCE(json_extract(v.snapshot_json, '$.fields.is_hidden'), 0) = 0
-         AND COALESCE(json_extract(v.snapshot_json, '$.fields.deleted_at'), 0) = 0
-       ORDER BY f.first_published_at DESC
-       LIMIT ?`
-    )
-    .bind(excludeSlug, limit)
-    .all<CanonicalPublicRow>()
-
-  return (results ?? []).map(postFromCanonicalRow)
-}
-
 async function tryVectorLookup(
   db: D1Database,
   env: Partial<CloudflareEnv> | null | undefined,
@@ -234,7 +152,7 @@ async function tryVectorLookup(
     if (slugs.length === 0) return []
 
     const uniqueSlugs = Array.from(new Set(slugs))
-    const posts = await fetchPostsBySlugs(db, uniqueSlugs)
+    const posts = await recallPublicPosts(db, uniqueSlugs)
     return posts.slice(0, limit)
   } catch (error) {
     console.warn('Vector lookup failed, falling back to FTS/rules:', error)
@@ -293,8 +211,8 @@ function scoreCandidate(candidate: PostWithTags, current: PostWithTags, currentT
 
 async function getRuleBasedRelatedPosts(db: D1Database, current: PostWithTags, limit: number): Promise<PostWithTags[]> {
   const query = buildRelatedQuery(current)
-  const fromSearch = query ? await searchPosts(db, query, Math.max(limit * 4, 12)) : []
-  const recentPosts = await fetchRecentPublicPosts(db, current.slug, Math.max(limit * 12, 48))
+  const fromSearch = query ? await searchPublicPosts(db, query, Math.max(limit * 4, 12)) : []
+  const recentPosts = await recentPublicPosts(db, current.slug, Math.max(limit * 12, 48))
 
   const merged = new Map<string, PostWithTags>()
   for (const post of [...fromSearch, ...recentPosts]) {
@@ -344,7 +262,7 @@ export async function searchPostsWithStrategy(
   return {
     strategy: 'fts',
     source: 'fts',
-    results: await searchPosts(db, trimmedQuery, limit),
+    results: await searchPublicPosts(db, trimmedQuery, limit),
   }
 }
 
@@ -375,55 +293,10 @@ export async function getRelatedPosts(
   return {
     strategy: 'fts',
     source: 'fts',
-    results: (await searchPosts(db, buildRelatedQuery(post) || post.title, limit + 1))
+    results: (await searchPublicPosts(db, buildRelatedQuery(post) || post.title, limit + 1))
       .filter((candidate) => candidate.slug !== post.slug)
       .slice(0, limit),
   }
-}
-
-async function getPostForIndexing(db: D1Database, postId: number): Promise<PublicPostRow | null> {
-  if (!(await canonicalFactsAvailable(db))) {
-    // posts is retired from the public runtime — nothing to index.
-    return null
-  }
-
-  const row = await db
-    .prepare(
-      `SELECT ${CANONICAL_ROW_COLUMNS}
-       FROM articles a
-       JOIN formal_publications f ON f.article_id = a.id
-       JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
-       ${CANONICAL_LATEST_JOIN}
-       WHERE a.post_ref = ?`
-    )
-    .bind(postId)
-    .first<CanonicalPublicRow>()
-  if (!row) return null
-  const post = postFromCanonicalRow(row)
-  return {
-    id: post.id,
-    slug: post.slug,
-    title: post.title,
-    content: post.content,
-    description: post.description,
-    category: post.category,
-    tags: JSON.stringify(post.tags),
-    status: post.status,
-    password: post.password,
-    is_hidden: post.is_hidden,
-    deleted_at: post.deleted_at,
-    published_at: post.published_at,
-  }
-}
-
-function isIndexablePost(post: PublicPostRow | null): post is PublicPostRow {
-  return Boolean(
-    post &&
-    post.status === 'published' &&
-    !post.password &&
-    post.is_hidden === 0 &&
-    post.deleted_at == null
-  )
 }
 
 export async function syncPostToRelatedIndex(
@@ -432,8 +305,8 @@ export async function syncPostToRelatedIndex(
 ): Promise<'synced' | 'skipped' | 'deleted'> {
   if (!isVectorizeEnabled(env) || !env.DB) return 'skipped'
 
-  const post = await getPostForIndexing(env.DB, postId)
-  if (!isIndexablePost(post)) {
+  const post = await getIndexablePublicPost(env.DB, postId)
+  if (!post) {
     if (env.VECTOR_INDEX.deleteByIds) {
       await env.VECTOR_INDEX.deleteByIds([`post:${postId}`])
       return 'deleted'

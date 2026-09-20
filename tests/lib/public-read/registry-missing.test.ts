@@ -23,7 +23,7 @@ import { backfillCurrentAddresses } from '@/lib/slug-address'
 import { create } from '@/lib/article-commands'
 import { confirmPublish, preparePublish } from '@/lib/first-publish'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands/types'
-import { resolvePublicArticle } from '@/lib/public-read'
+import { resolvePublicArticle, listPublicArticles, searchPublicPosts, recallPublicPosts } from '@/lib/public-read'
 
 let state = ''
 const cleanup: string[] = []
@@ -118,6 +118,9 @@ describe('lib/public-read — #244 missing-fact-table degradation', { timeout: 6
     expect(resolved.article!.slug).toBe(s1)
     expect(resolved.article!.title).toBe('无表标题')
     expect(resolved.article!.content).toContain('无表正文')
+    expect((await listPublicArticles(createDatabase())).map((p) => p.slug)).toContain(s1)
+    expect((await searchPublicPosts(createDatabase(), '无表标题')).map((p) => p.slug)).toContain(s1)
+    expect((await recallPublicPosts(createDatabase(), [s1])).map((p) => p.slug)).toEqual([s1])
   })
 
   it('缺 articles 表 → post_ref 降为 0，文章仍 live（base 语义）', async () => {

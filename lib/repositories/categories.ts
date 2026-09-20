@@ -1,8 +1,7 @@
 import type { Database } from '@/lib/repositories/schema'
 import type { CategoryRow } from '@/lib/repositories/types'
-import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 import { getPublicSettingsForRequest } from '@/lib/public-request-data'
-import { canonicalFactsAvailableStrictForRequest } from '@/lib/public-read/canon'
+import { listPublicCategoryMembership } from '@/lib/public-read'
 import { setCategory } from '@/lib/article-commands'
 import { setSetting, getSetting } from '@/lib/repositories/settings'
 
@@ -47,43 +46,10 @@ export async function getCategories(db: Database): Promise<CategoryRow[]> {
 }
 
 export async function getPublicCategories(db: Database): Promise<CategoryRow[]> {
-  // Degraded: posts is retired from the public runtime. When the canonical
-  // fact tables are absent the header / sitemap get an empty category list
-  // rather than a legacy `posts` read.
-  try {
-    // #244 — request-scoped schema probe (single cached sqlite_master read,
-    // shared with detail/related/search). STRICT variant: a migration-required
-    // DB must still surface DATABASE_MIGRATION_REQUIRED (the site header /
-    // request-db-readonly path relies on it).
-    const has = await canonicalFactsAvailableStrictForRequest(db)
-    if (!has) return []
-  } catch (error) {
-    // A migration-required DB must still surface DATABASE_MIGRATION_REQUIRED
-    // (the site header / request-db-readonly path relies on it).
-    rethrowIfDatabaseMigrationRequired(error)
-    return []
-  }
+  const results = await listPublicCategoryMembership(db)
+  if (results === null) return []
 
-  // L2: the public category reader list derives from the CANONICAL formal
-  // surface (lifecycle published + frozen-snapshot password/hidden/deleted),
-  // grouped by the version snapshot's category — not the posts projection.
-  const { results } = await db
-    .prepare(
-      `SELECT cat.name, cat.slug, COUNT(*) AS post_count
-       FROM formal_publications f
-       JOIN article_versions v ON v.article_id = f.article_id AND v.version = f.version
-       JOIN categories cat ON cat.name = json_extract(v.snapshot_json, '$.fields.category')
-       WHERE f.lifecycle = 'published'
-         AND COALESCE(json_extract(v.snapshot_json, '$.fields.password'), '') = ''
-         AND COALESCE(json_extract(v.snapshot_json, '$.fields.is_hidden'), 0) = 0
-         AND COALESCE(json_extract(v.snapshot_json, '$.fields.deleted_at'), 0) = 0
-         AND COALESCE(json_extract(v.snapshot_json, '$.fields.category'), '') <> ''
-       GROUP BY cat.name, cat.slug
-       ORDER BY cat.name`,
-    )
-    .all<CategoryRow>()
-
-  return applyCategoryOrder(results ?? [], await getCategoryOrder(db, true))
+  return applyCategoryOrder(results, await getCategoryOrder(db, true))
 }
 
 // 创建分类

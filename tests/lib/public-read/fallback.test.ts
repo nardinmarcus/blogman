@@ -65,4 +65,10 @@ describe('lib/public-read — degraded (no posts fallback) on a ledger-only DB',
     const hits = await searchPosts(createDatabase(), 'legacy', 20)
     expect(hits).toEqual([])
   })
+
+  it('unavailable canonical categories do not require a settings table', async () => {
+    await query('DROP TABLE site_settings')
+    expect(await getPublicCategories(createDatabase())).toEqual([])
+  })
+
 })
