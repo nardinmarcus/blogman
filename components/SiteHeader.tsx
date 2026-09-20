@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { useState, useRef, useEffect } from 'react'
 import { Menu, X, ChevronDown, Rss } from 'lucide-react'
 import { SearchEntry } from './SearchEntry'
+import { SiteNavLink as ConfiguredSiteNavLink } from './SiteNavLink'
 import { useAdminSession } from '@/lib/admin-session-client'
 import type { Theme } from '@/lib/appearance'
 import { getThemeDefinition } from '@/lib/themes'
@@ -119,32 +120,16 @@ export function SiteHeader({
       </span>
     ) : link.label
 
-    if (link.openInNewTab || link.url.startsWith('http')) {
-      return (
-        <a
-          key={link.label}
-          href={link.url}
-          target={link.openInNewTab ? '_blank' : undefined}
-          rel={link.openInNewTab ? 'noopener noreferrer' : undefined}
-          className={className}
-          aria-label={link.label}
-          onClick={onClick}
-        >
-          {content}
-        </a>
-      )
-    }
-
     return (
-      <Link
+      <ConfiguredSiteNavLink
         key={link.label}
-        href={link.url}
+        link={link}
         className={className}
         aria-label={link.label}
         onClick={onClick}
       >
         {content}
-      </Link>
+      </ConfiguredSiteNavLink>
     )
   }
 

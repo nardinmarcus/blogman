@@ -8,6 +8,7 @@ import Link from 'next/link'
 import { formatDateLong as formatDate } from '@/lib/public-date'
 import { SiteFooter } from '@/components/SiteFooter'
 import { SearchEntry } from '@/components/SearchEntry'
+import { SiteNavLink as ConfiguredSiteNavLink } from '@/components/SiteNavLink'
 import { Pagination } from '@/components/Pagination'
 import type { HomeProps } from '@/components/HomeClient'
 import type { SiteNavLink } from '@/lib/site'
@@ -55,21 +56,9 @@ function EditorialNavBar({ navLinks }: { navLinks: SiteNavLink[] }) {
       <nav className="editorial-nav-links" style={{ display: 'flex', gap: 20, alignItems: 'center', fontSize: 12, letterSpacing: '0.08em', fontFamily: '"JetBrains Mono", ui-monospace, monospace' }}>
         <Link href="/" style={{ color: FG, textDecoration: 'none' }}>首页</Link>
         {links.map(link => (
-          link.url.startsWith('http') ? (
-            <a
-              key={link.label}
-              href={link.url}
-              target={link.openInNewTab ? '_blank' : undefined}
-              rel={link.openInNewTab ? 'noopener noreferrer' : undefined}
-              style={{ color: FG, textDecoration: 'none' }}
-            >
-              {link.label}
-            </a>
-          ) : (
-            <Link key={link.label} href={link.url} style={{ color: FG, textDecoration: 'none' }}>
-              {link.label}
-            </Link>
-          )
+          <ConfiguredSiteNavLink key={link.label} link={link} style={{ color: FG, textDecoration: 'none' }}>
+            {link.label}
+          </ConfiguredSiteNavLink>
         ))}
         {/* Search */}
         <div style={{ color: FG }}>

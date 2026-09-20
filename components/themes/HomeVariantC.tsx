@@ -7,6 +7,7 @@ import Link from 'next/link'
 import { formatDateCompact } from '@/lib/public-date'
 import { SiteFooter } from '@/components/SiteFooter'
 import { SearchEntry } from '@/components/SearchEntry'
+import { SiteNavLink as ConfiguredSiteNavLink } from '@/components/SiteNavLink'
 import { Pagination } from '@/components/Pagination'
 import type { HomeProps } from '@/components/HomeClient'
 import type { SiteNavLink } from '@/lib/site'
@@ -52,25 +53,21 @@ function TerminalHeader({ navLinks }: { navLinks: SiteNavLink[] }) {
 
       {/* Right: nav + search */}
       <div className="terminal-home-nav" style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
-        {links.map(link => (
-          link.url.startsWith('http') ? (
-            <a
+        {links.map(link => {
+          // Only HTTP links had terminal hover styling, regardless of tab intent.
+          const hasHttpHover = link.url.startsWith('http')
+          return (
+            <ConfiguredSiteNavLink
               key={link.label}
-              href={link.url}
-              target={link.openInNewTab ? '_blank' : undefined}
-              rel={link.openInNewTab ? 'noopener noreferrer' : undefined}
-              style={{ color: MUTED, textDecoration: 'none', transition: 'color .15s' }}
-              onMouseEnter={e => (e.currentTarget.style.color = ACCENT)}
-              onMouseLeave={e => (e.currentTarget.style.color = MUTED)}
+              link={link}
+              style={{ color: MUTED, textDecoration: 'none', transition: hasHttpHover ? 'color .15s' : undefined }}
+              onMouseEnter={hasHttpHover ? e => (e.currentTarget.style.color = ACCENT) : undefined}
+              onMouseLeave={hasHttpHover ? e => (e.currentTarget.style.color = MUTED) : undefined}
             >
               {link.label}
-            </a>
-          ) : (
-            <Link key={link.label} href={link.url} style={{ color: MUTED, textDecoration: 'none' }}>
-              {link.label}
-            </Link>
+            </ConfiguredSiteNavLink>
           )
-        ))}
+        })}
 
         {/* Search */}
         <div style={{ color: MUTED }}>
