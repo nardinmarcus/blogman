@@ -107,6 +107,8 @@ jobs:
       - name: Classify migration changes
         id: migration-changes
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if output="$(node scripts/verify-migrations-required.mjs)"; then
@@ -139,7 +141,7 @@ jobs:
             printf -- '- Candidate: `%s`\n' "$(git rev-parse HEAD)"
             printf -- '- Run/attempt: %s/%s/actions/runs/%s/attempts/%s\n' "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
             printf -- '- Job: `verify-migrations`\n'
-            printf -- '- Policy: every candidate must execute the migration suite\n'
+            printf -- '- Policy: run unless covered by a verified migration-test success\n'
             printf -- '- Classification: `%s`\n' "${CLASSIFICATION_REASON:-unavailable}"
             printf -- '- Actual test step outcome: `%s`\n' "${MIGRATION_OUTCOME:-not-executed}"
             printf -- '- Only `success` is passing test evidence; skipped, cancelled, or missing results are not.\n'

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { MIGRATION_STEP_NAME } from '../../scripts/verify-migrations-required.mjs'
 
 const repoRoot = process.cwd()
 const longMigrationTest = 'tests/migrations/migration-runner.test.ts'
@@ -88,6 +89,8 @@ describe('Verify workflow test partition', () => {
     expect(longJob).toContain('id: migration-changes')
     expect(longJob).toContain('node scripts/verify-migrations-required.mjs')
     expect(longJob).toContain('required=true\\nreason=classifier-failed')
+    expect(longJob).toContain('GH_TOKEN: ${{ github.token }}')
+    expect(longJob).toContain(`- name: ${MIGRATION_STEP_NAME}`)
     expect(longJob).not.toContain('outputs.required')
     expect(longJob).not.toContain('not-required')
     // The only conditional is the always-run outcome report, never install/test.
