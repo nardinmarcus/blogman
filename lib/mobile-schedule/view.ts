@@ -6,6 +6,7 @@
  * client-optimistic facts. Pure reads; writes nothing here.
  */
 
+import { findLiveStateByArticleId } from '@/lib/canonical-live'
 import type { Database } from '@/lib/repositories/schema'
 import type { ScheduleViewStatus } from './model'
 
@@ -57,15 +58,7 @@ export async function getMobileScheduleView(
     .first<ScheduleRow>()
   if (!row) return null
 
-  const identity = await db
-    .prepare(
-      `SELECT a.id, a.post_ref,
-              COALESCE(p.title, '') AS title, COALESCE(p.slug, '') AS slug, COALESCE(p.status, '') AS status
-       FROM articles a LEFT JOIN posts p ON p.id = a.post_ref
-       WHERE a.id = ?`,
-    )
-    .bind(row.article_id)
-    .first<{ id: number; post_ref: number; title: string; slug: string; status: string }>()
+  const live = await findLiveStateByArticleId(db, row.article_id)
 
   const versionRow = await db
     .prepare(
@@ -90,9 +83,9 @@ export async function getMobileScheduleView(
     lastError: row.last_error,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    title: identity?.title ?? '',
-    slug: identity?.slug ?? '',
-    articleStatus: identity?.status ?? '',
+    title: live?.title ?? '',
+    slug: live?.slug ?? '',
+    articleStatus: live?.status ?? '',
     latestVersion: versionRow?.version ?? null,
     published: Boolean(formal),
   }
