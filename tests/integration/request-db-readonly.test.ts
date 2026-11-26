@@ -289,7 +289,7 @@ SELECT 'setting' AS kind, key AS row_key, json_object('value', value) AS row_val
 UNION ALL SELECT 'action', action_key, json_object('id', id, 'label', label, 'description', description, 'prompt', prompt, 'temperature', temperature, 'profile_id', profile_id, 'sort_order', sort_order, 'is_enabled', is_enabled, 'is_builtin', is_builtin, 'created_at', created_at, 'updated_at', updated_at) FROM ai_actions
 UNION ALL SELECT 'image_action', action_key, json_object('id', id, 'label', label, 'description', description, 'prompt', prompt, 'aspect_ratio', aspect_ratio, 'resolution', resolution, 'size', size, 'quality', quality, 'profile_id', profile_id, 'sort_order', sort_order, 'is_enabled', is_enabled, 'is_builtin', is_builtin, 'created_at', created_at, 'updated_at', updated_at) FROM ai_image_actions
 UNION ALL SELECT 'generator', target_key, json_object('id', id, 'label', label, 'description', description, 'prompt', prompt, 'provider_mode', provider_mode, 'text_profile_id', text_profile_id, 'image_profile_id', image_profile_id, 'workers_model', workers_model, 'temperature', temperature, 'max_tokens', max_tokens, 'aspect_ratio', aspect_ratio, 'resolution', resolution, 'is_enabled', is_enabled, 'is_builtin', is_builtin, 'created_at', created_at, 'updated_at', updated_at) FROM ai_post_generators
-UNION ALL SELECT 'post', slug, json_object('title', title, 'content', content, 'html', html, 'status', status, 'view_count', view_count, 'updated_at', updated_at) FROM posts
+UNION ALL SELECT 'article_version', article_id || ':' || version, json_object('operation_id', operation_id, 'snapshot', content_snapshot_sha256, 'published_at', published_at) FROM article_versions
 ORDER BY kind, row_key
 `)
     const profilesBefore = {
@@ -326,7 +326,7 @@ SELECT 'setting' AS kind, key AS row_key, json_object('value', value) AS row_val
 UNION ALL SELECT 'action', action_key, json_object('id', id, 'label', label, 'description', description, 'prompt', prompt, 'temperature', temperature, 'profile_id', profile_id, 'sort_order', sort_order, 'is_enabled', is_enabled, 'is_builtin', is_builtin, 'created_at', created_at, 'updated_at', updated_at) FROM ai_actions
 UNION ALL SELECT 'image_action', action_key, json_object('id', id, 'label', label, 'description', description, 'prompt', prompt, 'aspect_ratio', aspect_ratio, 'resolution', resolution, 'size', size, 'quality', quality, 'profile_id', profile_id, 'sort_order', sort_order, 'is_enabled', is_enabled, 'is_builtin', is_builtin, 'created_at', created_at, 'updated_at', updated_at) FROM ai_image_actions
 UNION ALL SELECT 'generator', target_key, json_object('id', id, 'label', label, 'description', description, 'prompt', prompt, 'provider_mode', provider_mode, 'text_profile_id', text_profile_id, 'image_profile_id', image_profile_id, 'workers_model', workers_model, 'temperature', temperature, 'max_tokens', max_tokens, 'aspect_ratio', aspect_ratio, 'resolution', resolution, 'is_enabled', is_enabled, 'is_builtin', is_builtin, 'created_at', created_at, 'updated_at', updated_at) FROM ai_post_generators
-UNION ALL SELECT 'post', slug, json_object('title', title, 'content', content, 'html', html, 'status', status, 'view_count', view_count, 'updated_at', updated_at) FROM posts
+UNION ALL SELECT 'article_version', article_id || ':' || version, json_object('operation_id', operation_id, 'snapshot', content_snapshot_sha256, 'published_at', published_at) FROM article_versions
 ORDER BY kind, row_key
 `)).toEqual(rowsBefore)
     expect({
@@ -483,7 +483,7 @@ SELECT 'setting' AS kind, key AS row_key, value AS row_value FROM site_settings
 UNION ALL SELECT 'action', action_key, json_object('prompt', prompt, 'updated_at', updated_at) FROM ai_actions
 UNION ALL SELECT 'image_action', action_key, json_object('prompt', prompt, 'updated_at', updated_at) FROM ai_image_actions
 UNION ALL SELECT 'generator', target_key, json_object('prompt', prompt, 'temperature', temperature, 'max_tokens', max_tokens, 'updated_at', updated_at) FROM ai_post_generators
-UNION ALL SELECT 'post', slug, json_object('title', title, 'content', content, 'status', status) FROM posts
+UNION ALL SELECT 'article_version', article_id || ':' || version, json_object('operation_id', operation_id, 'snapshot', content_snapshot_sha256, 'published_at', published_at) FROM article_versions
 ORDER BY kind, row_key
 `)
 
@@ -506,7 +506,7 @@ SELECT 'setting' AS kind, key AS row_key, value AS row_value FROM site_settings
 UNION ALL SELECT 'action', action_key, json_object('prompt', prompt, 'updated_at', updated_at) FROM ai_actions
 UNION ALL SELECT 'image_action', action_key, json_object('prompt', prompt, 'updated_at', updated_at) FROM ai_image_actions
 UNION ALL SELECT 'generator', target_key, json_object('prompt', prompt, 'temperature', temperature, 'max_tokens', max_tokens, 'updated_at', updated_at) FROM ai_post_generators
-UNION ALL SELECT 'post', slug, json_object('title', title, 'content', content, 'status', status) FROM posts
+UNION ALL SELECT 'article_version', article_id || ':' || version, json_object('operation_id', operation_id, 'snapshot', content_snapshot_sha256, 'published_at', published_at) FROM article_versions
 ORDER BY kind, row_key
 `)).toEqual(rowsBefore)
   })

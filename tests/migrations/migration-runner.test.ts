@@ -62,6 +62,8 @@ function copyCanonicalMigrationSet(directory: string): void {
     '008_canonical_article_schema.preflight.sql',
     '009_retire_posts_projection.sql',
     '009_retire_posts_projection.data.mjs',
+    '010_align_schedule_and_wechat_tables.sql',
+    '010_align_schedule_and_wechat_tables.preflight.sql',
   ]) {
     writeFileSync(
       join(directory, name),
@@ -303,6 +305,7 @@ describe('D1 migration runner', () => {
       { number: 7, candidate_id: 'test-candidate-empty' },
       { number: 8, candidate_id: 'test-candidate-empty' },
       { number: 9, candidate_id: 'test-candidate-empty' },
+      { number: 10, candidate_id: 'test-candidate-empty' },
     ])
   })
 
@@ -341,6 +344,7 @@ VALUES ('kept', 'Kept', 'body', '<p>body</p>', 'draft');
       expect.objectContaining({ number: 7, action: 'apply' }),
       expect.objectContaining({ number: 8, action: 'apply' }),
       expect.objectContaining({ number: 9, action: 'apply' }),
+      expect.objectContaining({ number: 10, action: 'apply' }),
     ])
 
     const result = runMigrationCommand(
@@ -410,6 +414,7 @@ DROP INDEX idx_posts_slug;
       expect.objectContaining({ number: 7, action: 'apply' }),
       expect.objectContaining({ number: 8, action: 'apply' }),
       expect.objectContaining({ number: 9, action: 'apply' }),
+      expect.objectContaining({ number: 10, action: 'apply' }),
     ])
     expect(queryD1(stateDirectory, "SELECT COUNT(*) AS count FROM sqlite_schema WHERE name LIKE 'migration_ledger%'"))
       .toEqual([{ count: 0 }])
@@ -470,6 +475,7 @@ FROM ai_actions ORDER BY id
       { number: 7, name: '007_seed_rollout_executor' },
       { number: 8, name: '008_canonical_article_schema' },
       { number: 9, name: '009_retire_posts_projection' },
+      { number: 10, name: '010_align_schedule_and_wechat_tables' },
     ])
     expect(queryD1(stateDirectory, `
 SELECT action_key, label, description, prompt, temperature, sort_order,
@@ -496,7 +502,7 @@ FROM ai_actions ORDER BY id
     )
     expect(repeated.stderr).toBe('')
     expect(repeated.status).toBe(0)
-    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 7 }])
+    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 10 }])
   })
 
   it('accepts the repository historical text AI schema after old runtime ensure and preserves author references', { timeout: 300_000 }, () => {
@@ -538,6 +544,7 @@ FROM ai_actions WHERE action_key = 'improve'
       { number: 7, name: '007_seed_rollout_executor' },
       { number: 8, name: '008_canonical_article_schema' },
       { number: 9, name: '009_retire_posts_projection' },
+      { number: 10, name: '010_align_schedule_and_wechat_tables' },
     ])
     expect(queryD1(stateDirectory, 'SELECT * FROM ai_provider_profiles ORDER BY id')).toEqual(profilesBefore)
     expect(queryD1(stateDirectory, `
@@ -558,7 +565,7 @@ FROM ai_actions WHERE action_key = 'improve'
     )
     expect(repeated.stderr).toBe('')
     expect(repeated.status).toBe(0)
-    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 7 }])
+    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 10 }])
     expect(queryD1(stateDirectory, 'SELECT * FROM ai_provider_profiles ORDER BY id')).toEqual(profilesBefore)
   })
 
@@ -843,6 +850,7 @@ BEGIN SELECT 1; END;
       { number: 7, candidate_id: 'mutable-data-baseline' },
       { number: 8, candidate_id: 'mutable-data-baseline' },
       { number: 9, candidate_id: 'mutable-data-baseline' },
+      { number: 10, candidate_id: 'mutable-data-baseline' },
     ])
   })
 
@@ -982,6 +990,7 @@ ORDER BY action_key
       { number: 7, name: '007_seed_rollout_executor' },
       { number: 8, name: '008_canonical_article_schema' },
       { number: 9, name: '009_retire_posts_projection' },
+      { number: 10, name: '010_align_schedule_and_wechat_tables' },
     ])
   })
 
@@ -1189,6 +1198,7 @@ ORDER BY key
       { number: 7, name: '007_seed_rollout_executor' },
       { number: 8, name: '008_canonical_article_schema' },
       { number: 9, name: '009_retire_posts_projection' },
+      { number: 10, name: '010_align_schedule_and_wechat_tables' },
     ])
   })
 
@@ -1344,6 +1354,7 @@ WHERE key = 'ai_provider_config';
       { number: 7 },
       { number: 8 },
       { number: 9 },
+      { number: 10 },
     ])
     expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM ai_provider_profiles')).toEqual([{ count: 1 }])
 
@@ -1643,6 +1654,7 @@ FROM ai_post_generators WHERE target_key = 'summary'
         { number: 7, name: '007_seed_rollout_executor' },
         { number: 8, name: '008_canonical_article_schema' },
         { number: 9, name: '009_retire_posts_projection' },
+        { number: 10, name: '010_align_schedule_and_wechat_tables' },
       ],
     })
     expect(status.status).toBe(0)
@@ -1844,6 +1856,7 @@ FROM migration_ledger WHERE number = 1;
       { number: 7, candidate_id: 'guard-original' },
       { number: 8, candidate_id: 'guard-original' },
       { number: 9, candidate_id: 'guard-original' },
+      { number: 10, candidate_id: 'guard-original' },
     ])
   })
 
