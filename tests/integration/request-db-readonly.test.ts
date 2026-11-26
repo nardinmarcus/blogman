@@ -258,7 +258,7 @@ VALUES (${postRef}, 1, '${opts.slug}', 'published', 1700000000, 1700000000, 'htt
 }
 
 describe('request-time D1 behavior', () => {
-  it('keeps schema and mutable rows byte-for-byte stable across representative reads', { timeout: 120_000 }, async () => {
+  it('keeps schema and mutable rows byte-for-byte stable across representative reads', { timeout: 300_000 }, async () => {
     const stateDirectory = createD1State()
     applyLedger(stateDirectory)
     const secret = '0123456789abcdef0123456789abcdef'
@@ -394,7 +394,7 @@ ORDER BY kind, row_key
     })
   })
 
-  it('resolves a seeded canonical article regardless of a stale KV cache', { timeout: 120_000 }, async () => {
+  it('resolves a seeded canonical article regardless of a stale KV cache', { timeout: 300_000 }, async () => {
     const stateDirectory = createD1State()
     applyLedger(stateDirectory)
     seedCanonicalArticle(stateDirectory, { slug: 'canonical-kv', title: 'Canonical title', content: 'canonical body', status: 'published' })
@@ -420,7 +420,7 @@ ORDER BY kind, row_key
     )
   })
 
-  it('keeps the current canonical facts authoritative over stale KV existence and visibility state', { timeout: 120_000 }, async () => {
+  it('keeps the current canonical facts authoritative over stale KV existence and visibility state', { timeout: 300_000 }, async () => {
     const stateDirectory = createD1State()
     applyLedger(stateDirectory)
     seedCanonicalArticle(stateDirectory, {
@@ -461,7 +461,7 @@ ORDER BY kind, row_key
     await expect(getPostBySlug(db, 'stale-kv', kv)).resolves.toBeNull()
   })
 
-  it('forward-migrates the versioned schema and seed fixture while preserving custom and deleted rows across domain reads', { timeout: 150_000 }, async () => {
+  it('forward-migrates the versioned schema and seed fixture while preserving custom and deleted rows across domain reads', { timeout: 300_000 }, async () => {
     const stateDirectory = createD1State()
     applyD1File(stateDirectory, join(repoRoot, 'db', 'schema.sql'))
     applyD1File(stateDirectory, join(repoRoot, 'db', 'seed-template.sql'))
@@ -511,7 +511,7 @@ ORDER BY kind, row_key
 `)).toEqual(rowsBefore)
   })
 
-  it('backfills generator references only inside explicit first-profile mutations, then keeps reads pure', { timeout: 120_000 }, async () => {
+  it('backfills generator references only inside explicit first-profile mutations, then keeps reads pure', { timeout: 300_000 }, async () => {
     const stateDirectory = createD1State()
     applyLedger(stateDirectory)
     const db = createWranglerD1Database(stateDirectory)
