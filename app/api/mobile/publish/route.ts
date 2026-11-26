@@ -9,8 +9,10 @@
  *
  * GET  ?articleId=:  authoritative full-page confirmation (path, exact version
  *                    content, blocker status, existing public address).
- * POST:               run ONE mobile publish confirm through the shared kernel,
+ * POST action=confirm: run ONE mobile publish confirm through the shared kernel,
  *                    returning the normalized result + combined receipt.
+ * POST action=schedule: schedule the exact confirmed version for a first
+ *                    publish through the #40 kernel (fired by the Cron scan).
  */
 
 import type { NextRequest } from 'next/server'
@@ -23,7 +25,7 @@ import {
 } from '@/lib/server/route-helpers'
 import { migrationRequiredResponse } from '@/lib/database-errors'
 import { getSiteUrl } from '@/lib/site-config'
-import { confirmMobilePublish, getMobilePublishConfirmation } from '@/lib/mobile-publish'
+import { confirmMobilePublish, getMobilePublishConfirmation, scheduleMobilePublish } from '@/lib/mobile-publish'
 import type { MobilePublishPath } from '@/lib/mobile-publish'
 
 export async function GET(req: NextRequest) {
@@ -82,6 +84,25 @@ export async function POST(req: NextRequest) {
         expectedVersion: rawExpected,
         actor: 'mobile-publish',
         siteUrl: (env.NEXT_PUBLIC_SITE_URL?.trim() || getSiteUrl()).replace(/\/+$/, ''),
+      })
+      return jsonOk(result)
+    }
+
+    if (action === 'schedule') {
+      const articleId = Number(payload.articleId)
+      const expectedVersion = Number(payload.expectedVersion)
+      const scheduledAt = Number(payload.scheduledAt)
+      if (!Number.isInteger(articleId) || articleId <= 0) return jsonError('schedule: articleId 必填', 400)
+      if (!Number.isInteger(expectedVersion) || expectedVersion <= 0) {
+        return jsonError('schedule: expectedVersion 必填', 400)
+      }
+      if (!Number.isInteger(scheduledAt) || scheduledAt <= 0) return jsonError('schedule: scheduledAt 必填', 400)
+
+      const result = await scheduleMobilePublish(db, {
+        articleId,
+        expectedVersion,
+        scheduledAt,
+        actor: 'author',
       })
       return jsonOk(result)
     }

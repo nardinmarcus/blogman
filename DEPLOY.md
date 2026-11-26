@@ -65,6 +65,13 @@ node scripts/migrations.mjs verify --database DB --remote --config wrangler.loca
 
 完整迁移接口和前向修复规则见 [`db/MIGRATIONS.md`](db/MIGRATIONS.md)。
 
+## 定时发布
+
+发布确认页可以为尚未发布的文章选择一个未来时间（按 `Asia/Shanghai` 输入与显示），排期绑定页面上确认的精确版本。Worker 的 Cron 触发器每分钟扫描一次到期排期并执行发布；排期可在 `/admin/schedule/<scheduleId>` 改期、取消或立即发布。
+
+- 模板 `wrangler.toml` 已包含 `[triggers] crons = ["* * * * *"]`。`cf:init` 只在 `wrangler.local.toml` 不存在时复制模板，已有的本地配置需要手动加上同样的 `[triggers]` 段，否则排期不会自动执行。
+- 需要暂停执行器时，设置 `SCHEDULED_PUBLISH_DISABLED=1`（var 或 secret）。排期与尝试记录都会保留，恢复后继续扫描。
+
 ## 本地 Worker 预览
 
 ```bash

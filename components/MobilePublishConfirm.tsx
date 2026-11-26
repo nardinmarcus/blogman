@@ -3,10 +3,16 @@
 import { useCallback, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { ArrowLeft, Check, CircleAlert, Clock, Globe, Send } from 'lucide-react'
+import { ArrowLeft, CalendarClock, Check, CircleAlert, Clock, Globe, Send } from 'lucide-react'
 import { CONFIRM_BLOCKER_LABELS, formatPublishTime } from '@/lib/mobile-publish/model'
 import type { MobilePublishConfirmation } from '@/lib/mobile-publish/view'
-import type { MobileConfirmResult } from '@/lib/mobile-publish/kernel'
+import type { MobileConfirmResult, MobileScheduleResult } from '@/lib/mobile-publish/kernel'
+import {
+  formatScheduleTime,
+  parseScheduleDatetime,
+  SCHEDULE_DISPLAY_TIMEZONE,
+  toDatetimeLocalValue,
+} from '@/lib/mobile-schedule/model'
 import type { ReceiptSurface } from '@/lib/mobile-publish/model'
 
 /**
@@ -44,6 +50,8 @@ export function MobilePublishConfirm({
   const [receipt, setReceipt] = useState<ReceiptSurface[] | null>(null)
   const [receiptFacts, setReceiptFacts] = useState<{ version: number; publicUrl: string; publishedAt: number } | null>(null)
   const [drifted, setDrifted] = useState(false)
+  const [scheduleValue, setScheduleValue] = useState(() => toDatetimeLocalValue(Math.ceil(Date.now() / 3_600_000) * 3600 + 3600))
+  const [scheduled, setScheduled] = useState<{ scheduleId: string; scheduledAt: number } | null>(null)
   const startedPathRef = useRef(conf.path)
 
   const refresh = useCallback(async () => {
@@ -95,6 +103,44 @@ export function MobilePublishConfirm({
       // delivered / replayed / already-published → receipt.
       setReceipt(data.receipt ?? null)
       setReceiptFacts({ version: data.version, publicUrl: data.publicUrl, publishedAt: data.publishedAt ?? 0 })
+    } catch {
+      setFeedback({ type: 'error', message: '网络错误，请重试' })
+    } finally {
+      setInFlight(false)
+    }
+  }
+
+  const schedule = async () => {
+    if (inFlight) return
+    const scheduledAt = parseScheduleDatetime(scheduleValue)
+    if (scheduledAt === null || scheduledAt <= Math.floor(Date.now() / 1000)) {
+      setFeedback({ type: 'error', message: '请选择一个未来的时间' })
+      return
+    }
+    setInFlight(true)
+    setFeedback(null)
+    try {
+      const res = await fetch('/api/mobile/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'schedule', articleId, expectedVersion: conf.exactVersion, scheduledAt }),
+      })
+      const data = (await res.json().catch(() => ({}))) as MobileScheduleResult & { message?: string; error?: string }
+      if (!res.ok) {
+        setFeedback({ type: 'error', message: data.error || data.message || '定时发布失败' })
+        return
+      }
+      if (data.outcome === 'scheduled' || data.outcome === 'replayed') {
+        setScheduled({ scheduleId: data.scheduleId, scheduledAt: data.scheduledAt })
+        return
+      }
+      if (data.outcome === 'conflict') {
+        if (data.serverVersion !== conf.exactVersion) setDrifted(true)
+        setFeedback({ type: 'info', message: data.reason })
+        await refresh()
+        return
+      }
+      setFeedback({ type: 'error', message: 'reason' in data ? data.reason : '文章不存在' })
     } catch {
       setFeedback({ type: 'error', message: '网络错误，请重试' })
     } finally {
@@ -192,6 +238,51 @@ export function MobilePublishConfirm({
               <p className="text-sm text-[var(--editor-muted)]">正文为空</p>
             )}
           </section>
+
+          {/* scheduled first publish (Cron-fired; managed on the schedule page) */}
+          {conf.path === 'first' && !receipt && (
+            <section className="rounded-2xl border border-[var(--editor-line)] bg-[var(--editor-panel)] p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <CalendarClock className="h-4 w-4 text-[var(--editor-muted)]" />
+                <h3 className="text-sm font-semibold text-[var(--editor-ink)]">定时发布</h3>
+              </div>
+              {scheduled ? (
+                <div className="space-y-2 text-sm">
+                  <p className="text-[var(--editor-ink)]">
+                    已排期：v{conf.exactVersion} 将于 {formatScheduleTime(scheduled.scheduledAt)}（{SCHEDULE_DISPLAY_TIMEZONE}）发布
+                  </p>
+                  <Link
+                    href={`/admin/schedule/${encodeURIComponent(scheduled.scheduleId)}`}
+                    className="inline-flex text-sm font-medium text-[var(--editor-accent)] hover:underline"
+                  >
+                    管理排期
+                  </Link>
+                </div>
+              ) : (
+                <>
+                  <label htmlFor="schedule-at" className="block text-xs text-[var(--editor-muted)]">
+                    发布时间（{SCHEDULE_DISPLAY_TIMEZONE}）
+                  </label>
+                  <input
+                    id="schedule-at"
+                    type="datetime-local"
+                    value={scheduleValue}
+                    onChange={(e) => setScheduleValue(e.target.value)}
+                    className="w-full rounded-lg border border-[var(--editor-line)] bg-[var(--editor-soft)] px-3 py-2.5 text-sm text-[var(--editor-ink)] outline-none focus:border-[var(--editor-accent)]"
+                  />
+                  <button
+                    type="button"
+                    disabled={inFlight || !ready}
+                    onClick={() => void schedule()}
+                    className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-[var(--editor-line)] py-2.5 text-sm font-medium text-[var(--editor-ink)] hover:bg-[var(--editor-soft)] disabled:opacity-50"
+                  >
+                    <CalendarClock className="h-4 w-4" />
+                    定时发布这个版本
+                  </button>
+                </>
+              )}
+            </section>
+          )}
 
           {/* receipt — successful publish */}
           {receipt && receiptFacts && (
