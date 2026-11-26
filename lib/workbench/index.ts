@@ -20,4 +20,3 @@ export type {
   WorkbenchGroupView,
   WorkbenchEntry,
 } from './types'
-export { ensureWorkbenchTables, WORKBENCH_DDL_STATEMENTS } from './ddl'

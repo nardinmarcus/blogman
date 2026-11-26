@@ -7,6 +7,5 @@
  */
 
 export * from './url'
-export * from './ddl'
 export * from './types'
 export * from './kernel'

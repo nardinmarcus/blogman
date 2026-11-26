@@ -2,16 +2,13 @@
  * B5-01 — WeChat draft isolated-D1 fixtures (issue #46).
  *
  * One shared in-process Miniflare instance (real D1 binding, zero wrangler CLI
- * spawns) bootstrapped over the revision-loop base (identity + first-publish
- * + revision + slug-address) and layered with the new `wechat_draft_tasks`
- * table through the module's idempotent DDL — exactly what the DDL channel
- * does. A formally published article is produced through the REAL first-publish
+ * spawns) bootstrapped over the revision-loop base; the schema, including
+ * `wechat_draft_tasks`, comes from ledger migration 008. A formally published article is produced through the REAL first-publish
  * loop, and a version switch through the REAL revision-save + promotion loop,
  * so derivations are anchored to genuine frozen version facts.
  */
 
 import { bootstrapRevisionState, createDatabase, query, sha256 } from '@/tests/lib/publish-revision/helpers'
-import { ensureWechatDraftTables } from '@/lib/wechat-draft/ddl'
 import { create } from '@/lib/article-commands'
 import { confirmPublish, preparePublish } from '@/lib/first-publish'
 import { save } from '@/lib/article-commands'
@@ -28,11 +25,9 @@ export function expectSha256(value: string): void {
   }
 }
 
-/** Boot the revision base then the WeChat draft tables (DDL runs twice: idempotency). */
+/** Boot the revision base (the WeChat draft tables come from migration 008). */
 export async function bootstrapWechatDraftState(stateDir: string): Promise<void> {
   await bootstrapRevisionState(stateDir)
-  await ensureWechatDraftTables(createDatabase())
-  await ensureWechatDraftTables(createDatabase())
 }
 
 export interface CreatedFormalArticle {

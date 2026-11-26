@@ -28,8 +28,6 @@ import {
   freshOp,
 } from '@/tests/lib/publish-revision/helpers'
 import { createDraftArticle } from '@/tests/lib/first-publish/helpers'
-import { ensureScheduledPublishTables } from '@/lib/scheduled-publish'
-import { ensureWechatDraftTables } from '@/lib/wechat-draft'
 import { save } from '@/lib/article-commands'
 import { confirmMobilePublish, getMobilePublishConfirmation, readReceiptSurfaces } from '@/lib/mobile-publish'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands/types'
@@ -43,8 +41,6 @@ beforeAll(async () => {
   state = mkdtempSync(join(tmpdir(), 'blogman-b805-mobile-publish-'))
   cleanup.push(state)
   await bootstrapRevisionState(state)
-  await ensureScheduledPublishTables(createDatabase())
-  await ensureWechatDraftTables(createDatabase())
 }, 300_000)
 
 afterAll(async () => {

@@ -34,4 +34,3 @@ export type {
   LifecycleDirection,
   AllowedLifecycle,
 } from './types'
-export { ARTICLE_LIFECYCLE_DDL_STATEMENTS, ensureArticleLifecycleTables } from './ddl'

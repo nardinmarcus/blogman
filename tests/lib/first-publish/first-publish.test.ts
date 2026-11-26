@@ -27,7 +27,6 @@ import {
   sha256,
   type CreatedArticle,
 } from './helpers'
-import { ensureFirstPublishTables } from '@/lib/first-publish/ddl'
 import {
   cancelPrepare,
   confirmPublish,
@@ -44,7 +43,6 @@ beforeAll(async () => {
   state = mkdtempSync(join(tmpdir(), 'blogman-b301-first-publish-'))
   cleanup.push(state)
   await bootstrapState(state)
-  await ensureFirstPublishTables(createDatabase())
 }, 300_000)
 
 afterAll(async () => {

@@ -17,10 +17,6 @@
 export {
   CONFLICT_SAVE_OP_PREFIX,
   CONFLICT_WRITE_BACK_OP_PREFIX,
-  ensureConflictTables,
-  SOURCE_CONFLICT_DDL_STATEMENTS,
-} from './ddl'
-export {
   advanceConflictBaseline,
   confirmConflictWriteBack,
   conflictResolutionByOperation,

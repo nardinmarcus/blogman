@@ -66,13 +66,10 @@ export {
   WECHAT_DRAFT_EXECUTOR_DISABLED_ENV,
 } from './kernel'
 export {
-  ensureWechatDraftTables,
-  WECHAT_DRAFT_ADDITIVE_COLUMNS,
   WECHAT_DRAFT_ATTEMPT_CLASSIFICATIONS,
   WECHAT_DRAFT_ATTEMPT_OUTCOMES,
-  WECHAT_DRAFT_DDL_STATEMENTS,
   WECHAT_DRAFT_TASK_STATUSES,
-} from './ddl'
+} from './types'
 export {
   MockWechatDraftProvider,
   normalizeWechatClassification,

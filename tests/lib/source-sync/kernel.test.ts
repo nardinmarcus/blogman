@@ -22,11 +22,10 @@ import {
   bootstrapRevisionState,
   createFormalArticle,
 } from '@/tests/lib/publish-revision/helpers'
-import { SOURCE_IDENTITY_DDL_STATEMENTS, linkSourceToArticle } from '@/lib/source-identity'
+import { linkSourceToArticle } from '@/lib/source-identity'
 import {
   MockMediaStore,
   MockSourceProvider,
-  SOURCE_SYNC_DDL_STATEMENTS,
   syncSourceAhead,
   type SourceContent,
 } from '@/lib/source-sync'
@@ -49,8 +48,6 @@ beforeAll(async () => {
   await query('DROP TRIGGER IF EXISTS posts_au')
   await query('DROP TRIGGER IF EXISTS posts_ad')
   await query('DROP TABLE IF EXISTS posts_fts')
-  for (const stmt of SOURCE_IDENTITY_DDL_STATEMENTS) await query(stmt)
-  for (const stmt of SOURCE_SYNC_DDL_STATEMENTS) await query(stmt)
 }, 300_000)
 
 afterAll(async () => {

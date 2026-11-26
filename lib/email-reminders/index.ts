@@ -33,7 +33,6 @@ export type {
   SetEmailRemindersConfigInput,
   SetEmailRemindersConfigResult,
 } from './types'
-export { ensureEmailReminderTables, EMAIL_REMINDERS_DDL_STATEMENTS } from './ddl'
 export { buildDigestSubject, buildDigestText, inCooldown, isQuietHours, minuteOfDay, thresholdMet } from './policy'
 export { runEmailRemindersWake } from './scheduled'
 export type { EmailRemindersEnv, EmailRemindersWakeResult } from './scheduled'

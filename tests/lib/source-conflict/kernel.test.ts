@@ -24,9 +24,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands'
 import { create, save } from '@/lib/article-commands'
 import { confirmSourceLink, linkSourceToArticle, resolveSourceUrl } from '@/lib/source-identity'
-import { SOURCE_IDENTITY_DDL_STATEMENTS, type SourceLink } from '@/lib/source-identity'
+import { type SourceLink } from '@/lib/source-identity'
 import { MockMediaStore, normalizeTitle, type SourceContent } from '@/lib/source-sync'
-import { SOURCE_CONFLICT_DDL_STATEMENTS } from '@/lib/source-conflict'
 import {
   confirmConflictWriteBack,
   conflictResolutionByOperation,
@@ -58,8 +57,6 @@ beforeAll(async () => {
   await query('DROP TRIGGER IF EXISTS posts_au')
   await query('DROP TRIGGER IF EXISTS posts_ad')
   await query('DROP TABLE IF EXISTS posts_fts')
-  for (const stmt of SOURCE_IDENTITY_DDL_STATEMENTS) await query(stmt)
-  for (const stmt of SOURCE_CONFLICT_DDL_STATEMENTS) await query(stmt)
 }, 300_000)
 
 afterAll(async () => {

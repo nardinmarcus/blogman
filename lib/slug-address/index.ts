@@ -7,7 +7,6 @@
  * single-hop to the article's current address (no redirect chain).
  */
 
-export { ensureSlugAddressTables, SLUG_ADDRESS_DDL_STATEMENTS } from './ddl'
 export {
   backfillCurrentAddresses,
   isOwnHistorical,

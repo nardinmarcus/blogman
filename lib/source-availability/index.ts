@@ -10,5 +10,4 @@
  */
 
 export * from './types'
-export * from './ddl'
 export * from './kernel'

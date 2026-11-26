@@ -104,38 +104,6 @@ function applyLedger(state: string) {
   if (result.status !== 0) throw new Error(result.stderr || result.stdout)
 }
 
-function applyContentEnvelopeDdl(state: string) {
-  const result = spawnSync(process.execPath, [
-    join(repoRoot, 'scripts', 'apply-content-envelope-ddl.mjs'),
-    '--local', '--persist-to', state, '--database', 'DB', '--config', join(repoRoot, 'wrangler.toml'),
-  ], { cwd: repoRoot, encoding: 'utf8' })
-  if (result.status !== 0) throw new Error(result.stderr || result.stdout)
-}
-
-function applyArticleIdentityDdl(state: string) {
-  const result = spawnSync(process.execPath, [
-    join(repoRoot, 'scripts', 'apply-article-identity-ddl.mjs'),
-    '--local', '--persist-to', state, '--database', 'DB', '--config', join(repoRoot, 'wrangler.toml'),
-  ], { cwd: repoRoot, encoding: 'utf8' })
-  if (result.status !== 0) throw new Error(result.stderr || result.stdout)
-}
-
-function applySlugAddressDdl(state: string) {
-  const result = spawnSync(process.execPath, [
-    join(repoRoot, 'scripts', 'apply-slug-address-ddl.mjs'),
-    '--local', '--persist-to', state, '--database', 'DB', '--config', join(repoRoot, 'wrangler.toml'),
-  ], { cwd: repoRoot, encoding: 'utf8' })
-  if (result.status !== 0) throw new Error(result.stderr || result.stdout)
-}
-
-function applyArticleFtsDdl(state: string) {
-  const result = spawnSync(process.execPath, [
-    join(repoRoot, 'scripts', 'apply-article-fts-ddl.mjs'),
-    '--local', '--persist-to', state, '--database', 'DB', '--config', join(repoRoot, 'wrangler.toml'),
-  ], { cwd: repoRoot, encoding: 'utf8' })
-  if (result.status !== 0) throw new Error(result.stderr || result.stdout)
-}
-
 function literal(value: unknown) {
   if (value === null || value === undefined) return 'NULL'
   if (typeof value === 'number') return String(value)
@@ -288,15 +256,6 @@ describe('real route CRUD on a ledger-migrated D1', () => {
   it('runs article CRUD and keeps FTS synchronized on the canonical ledger schema', { timeout: 180_000 }, async () => {
     const state = createState()
     applyLedger(state)
-    // B2-01b: envelope columns arrive via the independent DDL channel (not a
-    // ledger migration), so the write path needs them applied before POST.
-    applyContentEnvelopeDdl(state)
-    // L1 (#66): the legacy direct-`posts` writer is removed, so versioned
-    // writes need the B2-02 identity tables present.
-    applyArticleIdentityDdl(state)
-    // #234 Phase A — canonical slug registry + article FTS (kernel deps).
-    applySlugAddressDdl(state)
-    applyArticleFtsDdl(state)
     const db = createDatabase(state)
     const env = { DB: db }
     mocks.getAppCloudflareEnv.mockResolvedValue(env)

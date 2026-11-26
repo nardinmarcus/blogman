@@ -31,8 +31,6 @@ beforeAll(async () => {
   state = mkdtempSync(join(tmpdir(), 'blogman-l2-search-canon-'))
   cleanup.push(state)
   await bootstrapSlugAddressState(state)
-  const { ensureArticleLifecycleTables } = await import('@/lib/article-lifecycle')
-  await ensureArticleLifecycleTables(createDatabase())
 }, 300_000)
 
 afterAll(async () => {

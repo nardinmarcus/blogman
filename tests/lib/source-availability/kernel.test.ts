@@ -35,8 +35,6 @@ import {
   query,
   teardownState,
 } from '@/tests/lib/article-commands/helpers'
-import { SOURCE_IDENTITY_DDL_STATEMENTS } from '@/lib/source-identity'
-import { SOURCE_AVAILABILITY_DDL_STATEMENTS } from '@/lib/source-availability'
 import {
   confirmSourceMissing,
   gateSyncConclusion,
@@ -54,9 +52,6 @@ beforeAll(async () => {
   state = mkdtempSync(join(tmpdir(), 'blogman-b605-avail-'))
   cleanup.push(state)
   await bootstrapState(state)
-  for (const stmt of [...SOURCE_IDENTITY_DDL_STATEMENTS, ...SOURCE_AVAILABILITY_DDL_STATEMENTS]) {
-    await query(stmt)
-  }
 }, 300_000)
 
 afterAll(async () => {

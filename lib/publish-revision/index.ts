@@ -9,7 +9,6 @@
  * projection until promotion.
  */
 
-export { ensurePublishRevisionTables, PUBLISH_REVISION_DDL_STATEMENTS } from './ddl'
 export {
   buildPromotedVersionRecord,
   compareRevision,

@@ -19,8 +19,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { bootstrapScheduledState, createDatabase, createDraftArticle, freshSlug, query } from '@/tests/lib/scheduled-publish/helpers'
-import { ensureScheduleControlTables } from '@/lib/schedule-control'
-import { ensureNotificationTables } from '@/lib/notifications'
 import { schedulePublish } from '@/lib/scheduled-publish'
 import { save } from '@/lib/article-commands'
 import { dispatchMobileScheduleAction, getMobileScheduleView } from '@/lib/mobile-schedule'
@@ -35,8 +33,6 @@ beforeAll(async () => {
   state = mkdtempSync(join(tmpdir(), 'blogman-b804-mobile-schedule-'))
   cleanup.push(state)
   await bootstrapScheduledState(state)
-  await ensureScheduleControlTables(createDatabase())
-  await ensureNotificationTables(createDatabase())
 }, 120_000)
 
 afterAll(async () => {

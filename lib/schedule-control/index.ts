@@ -30,4 +30,3 @@ export type {
   ScheduleIntentFacts,
   ScheduleRowLike,
 } from './types'
-export { ensureScheduleControlTables, SCHEDULE_CONTROL_DDL_STATEMENTS } from './ddl'

@@ -60,4 +60,3 @@ export type {
   ScheduleStatus,
   ScheduledScanOutcome,
 } from './types'
-export { ensureScheduledPublishTables, SCHEDULED_PUBLISH_DDL_STATEMENTS } from './ddl'

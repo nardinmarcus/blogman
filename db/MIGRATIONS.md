@@ -41,7 +41,7 @@ node scripts/migrations.mjs apply \
 Migration 可以带 checksum companion，以及一个仅用于 remote baseline 验证的 companion：
 
 - `NNN_name.preflight.sql`：在该 migration 的任何写入前只读验证可兼容的已有 schema 形状；返回任意 `issue` 行都会 fail-closed。
-- `NNN_name.data.mjs`：为必须使用运行时 secret 的一次性数据迁移生成 SQL。模块每次只能执行一条 `SELECT` / `WITH` 查询，生成的 SQL 与主 migration 及账本登记在同一批次提交。
+- `NNN_name.data.mjs`：为必须使用运行时 secret、或必须先读取现有数据才能决定的一次性数据迁移生成 SQL。模块每次只能执行一条 `SELECT` / `WITH` 查询，生成的 SQL 与主 migration 及账本登记在同一批次提交。
 - `NNN_name.remote.baseline.sql`：只允许 runner 内置合同按 migration 编号/名称、完整 baseline SHA、原 statement ordinal/SHA 和 replacement SHA 精确绑定。它只在 remote baseline 验证中用多个较小的只读 query 替换一个或多个已确认受 D1 remote 限制的 statement；任一身份漂移都在首次 Wrangler 调用前停止，且不得回退到原 statement。
 
 主 SQL、baseline、preflight 与 data sidecar 都参与账本 checksum；已应用后任一文件发生变化都会被 `verify` 拒绝。`remote.baseline.sql` 不改变历史 ledger checksum。Runner 在加载 migration 时绑定全部已校验 companion 原始字节，后续不会按路径重新读取。普通 sidecar 仍逐条通过 SQLite `EXPLAIN` 拒绝持久写 opcode；唯一例外是 migration `001` baseline statements `1` 与 `3` remote replacement，原 baseline 字节、本地验证路径和其他 statement 的 opcode proof 均保持不变。两个 replacement group 的六条 query 也各自经过普通 SELECT/WITH 与 `EXPLAIN` gate，并分别要求执行前后 schema fingerprint 完全一致。直接 `PRAGMA`、写型 CTE 和多语句 data query 都会在主 migration 批次前 fail-closed。条件加列由主 SQL 中声明的受限 directive 驱动，runner 先检查真实表/列形状，再把需要的 additive `ALTER TABLE ... ADD COLUMN` 注入同一个原子批次；不得用失败重试或吞错判断 schema。
@@ -59,6 +59,10 @@ Legacy baseline 不把 `categories`、`site_settings`、`ai_actions`、`ai_post_
 `005_fix_posts_fts_sync` 前向替换 canonical `posts_au` / `posts_ad` trigger。更新时先用 FTS5 external-content 的特殊 `delete` 行移除旧 token，再写入新 token；删除时只移除旧 token。文章行不重建、不覆盖，完整 canonical ledger schema 因而支持真实文章 CRUD 并保持搜索索引一致。
 
 `006_add_rollout_safety_controls` 新增 `rollout_controls` 当前控制事实与 `rollout_control_events` 不可变审计事件。它不 seed producer、authority 或 executor 的开启状态；缺少控制行时一律视为关闭。该迁移已登记，不能修改或删除；这两张表的去留由后续前向迁移决定。
+
+`008_canonical_article_schema` 把规范文章 schema 收编进账本：文章身份与版本、正式发布、Slug 地址注册表、生命周期、发布修订与建议、排期、工作台与通知、源稿、微信草稿、邮件提醒以及 `article_fts`。这些对象此前由已退役的 `scripts/apply-*-ddl.mjs` 在账本外创建；语句文本取自生产 `sqlite_schema` 原文并加 `IF NOT EXISTS`。preflight 对每个已存在的同名对象要求存储的 SQL 逐字一致，否则在任何写入前失败；因此已有库保持原样，新库得到与生产相同的 schema。
+
+`009_retire_posts_projection` 退役 `posts` / `posts_fts` 兼容投影及其 trigger（ADR 0008）。data sidecar 在 `posts` 仍有任何行缺少 `articles.post_ref` 对应时失败关闭，并在同一批次用 guard 复查，因此不会丢弃尚未迁移的旧内容；`posts` 不存在时为空操作。
 
 D1 备份与恢复使用 Cloudflare D1 Time Travel（`wrangler d1 time-travel info` / `wrangler d1 time-travel restore`）。恢复会覆盖整个数据库；新事实出现后优先前向修复，不用旧时间点覆盖。
 

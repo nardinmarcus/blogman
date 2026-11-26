@@ -33,7 +33,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { Miniflare } from 'miniflare'
 import {
   bootstrapWechatDraftState,
   createDatabase,
@@ -45,7 +44,6 @@ import {
 import { MockWechatDraftProvider } from '@/lib/wechat-draft/provider'
 import {
   deriveWechatDraft,
-  ensureWechatDraftTables,
   listWechatDraftAttempts,
   reconcileWechatDraft,
   runWechatDraftExecutor,
@@ -541,63 +539,6 @@ describe('lib/wechat-draft — 失败/重试/结果未知状态机 (B5-02)', { t
     expect(after.formal[0]!.version).toBe(1)
   })
 
-  it('DDL 幂等: B5-01 时代旧表经 PRAGMA 升级为 B5-02 形状，重复运行无副作用', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'blogman-b502-ddl-upgrade-'))
-    cleanup.push(dir)
-    const mf = new Miniflare({
-      modules: true,
-      script: 'export default { fetch() { return new Response("ok") } }',
-      d1Databases: { DB: 'b502-ddl-upgrade' },
-      persist: dir,
-    })
-    try {
-      const db = (await mf.getD1Database('DB')) as D1Database
-      // A B5-01-era wechat_draft_tasks — no B5-02 columns, no attempts table.
-      await db.prepare(
-        `CREATE TABLE wechat_draft_tasks (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          task_id TEXT UNIQUE NOT NULL CHECK(length(task_id) > 0),
-          article_id INTEGER NOT NULL CHECK(article_id > 0),
-          post_ref INTEGER NOT NULL CHECK(post_ref > 0),
-          version INTEGER NOT NULL CHECK(version > 0),
-          account_id TEXT NOT NULL CHECK(length(account_id) > 0),
-          status TEXT NOT NULL CHECK(status IN ('draft', 'submitted', 'failed', 'superseded')),
-          title TEXT NOT NULL,
-          html_projection TEXT NOT NULL,
-          plaintext_projection TEXT NOT NULL,
-          cover_image_url TEXT,
-          digest TEXT,
-          content_sha256 TEXT NOT NULL,
-          projection_sha256 TEXT NOT NULL,
-          source_url TEXT NOT NULL,
-          remote_draft_id TEXT,
-          provider_error TEXT,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL,
-          UNIQUE (article_id, version, account_id)
-        ) STRICT`,
-      ).run()
-
-      await ensureWechatDraftTables(db)
-
-      const { results: cols } = await db.prepare('PRAGMA table_info(wechat_draft_tasks)').all<{ name: string }>()
-      const names = new Set(cols.map((c) => c.name))
-      for (const col of ['revision', 'attempt_count', 'classification', 'needs_author', 'next_attempt_at', 'last_error', 'claimed_at', 'lease_token', 'lease_expires_at']) {
-        expect(names.has(col)).toBe(true)
-      }
-      const attemptsTable = await db.prepare(
-        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'wechat_draft_attempts'`,
-      ).first<{ name: string }>()
-      expect(attemptsTable?.name).toBe('wechat_draft_attempts')
-
-      // Idempotent re-run adds nothing and never fails.
-      await ensureWechatDraftTables(db)
-      const { results: cols2 } = await db.prepare('PRAGMA table_info(wechat_draft_tasks)').all<{ name: string }>()
-      expect(cols2.length).toBe(cols.length)
-    } finally {
-      await mf.dispose()
-    }
-  })
 })
 
 /** Read a task row by task_id (the shared read API is (article, version, account)). */

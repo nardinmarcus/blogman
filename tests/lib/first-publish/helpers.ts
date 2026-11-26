@@ -2,9 +2,8 @@
  * B3-01 — first-publish test helpers (issue #33).
  *
  * Reuses the B2-03 shared in-process Miniflare bootstrap (one workerd instance
- * per suite, zero wrangler CLI spawns) and layers the six first-publish fact
- * tables on top via the module's own idempotent DDL — exactly what the route
- * path does in production.
+ * per suite, zero wrangler CLI spawns); the six first-publish fact tables come
+ * from ledger migration 008.
  */
 
 import { createHash } from 'node:crypto'

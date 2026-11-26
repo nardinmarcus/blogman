@@ -27,8 +27,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands'
 import { create, publishTemp, save } from '@/lib/article-commands'
 import { confirmSourceLink, resolveSourceUrl } from '@/lib/source-identity'
-import { SOURCE_IDENTITY_DDL_STATEMENTS } from '@/lib/source-identity'
-import { SOURCE_WRITE_BACK_DDL_STATEMENTS } from '@/lib/source-writeback'
 import { MockSourceWriteProvider } from '@/lib/source-writeback/provider'
 import {
   baselineFor,
@@ -51,12 +49,6 @@ beforeAll(async () => {
   state = mkdtempSync(join(tmpdir(), 'blogman-b603-writeback-'))
   cleanup.push(state)
   await bootstrapState(state)
-  for (const stmt of SOURCE_IDENTITY_DDL_STATEMENTS) {
-    await query(stmt)
-  }
-  for (const stmt of SOURCE_WRITE_BACK_DDL_STATEMENTS) {
-    await query(stmt)
-  }
 }, 300_000)
 
 afterAll(async () => {
