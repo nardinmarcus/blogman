@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { MIGRATION_STEP_NAME } from '../../scripts/verify-migrations-required.mjs'
@@ -57,28 +57,12 @@ describe('Verify workflow test partition', () => {
     }
   })
 
-  it('keeps the exact macOS formal gate in the candidate Verify workflow with read-only GitHub access', () => {
+  it('runs only the quick and long verification jobs with read-only GitHub access', () => {
     const workflow = readFileSync(join(repoRoot, '.github', 'workflows', 'verify.yml'), 'utf8')
-    const macosJob = workflowJob(workflow, 'verify-target-macos')
 
     expect(workflow).toContain('permissions:\n  contents: read\n  actions: read')
-    expect(existsSync(join(repoRoot, '.github', 'workflows', 'formal-rehearsal-macos.yml'))).toBe(false)
-    expect(macosJob).toContain('runs-on: macos-latest')
-    expect(macosJob).toContain('timeout-minutes: 20')
-    expect(macosJob).toContain("ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}")
-    expect(macosJob).toContain('GH_TOKEN: ${{ github.token }}')
-    expect(macosJob.match(/run: npm run test:run/g)).toHaveLength(3)
-    expect(macosJob).toContain(
-      'run: npm run test:run -- tests/scripts/issue-23-delivery-prepare.test.ts --reporter=verbose',
-    )
-    expect(macosJob).toContain(
-      'run: npm run test:run -- tests/scripts/issue-92-formal-rehearsal.test.ts --reporter=verbose',
-    )
-    expect(macosJob).toContain(
-      "run: npm run test:run -- tests/scripts/issue-23-delivery-durability.test.ts -t 'case-equivalent canonical namespace alias' --reporter=verbose",
-    )
-    expect(macosJob).not.toContain('workflow_run')
-    expect(macosJob).not.toMatch(/secrets\.|contents: write|actions: write/u)
+    expect(workflow.match(/^  [a-zA-Z0-9_-]+:\n    runs-on:/gm)).toHaveLength(2)
+    expect(workflow).not.toMatch(/secrets\.|contents: write|actions: write/u)
   })
 
   it('requires migrations for every candidate and reports the actual test outcome', () => {

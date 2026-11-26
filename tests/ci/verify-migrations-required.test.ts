@@ -42,7 +42,6 @@ describe('verify-migrations change classifier', () => {
     'db/seed-template.sql',
     'db/migrations/002_add_ai_actions.sql',
     'db/migrations/004_add_ai_provider_profiles.sql',
-    'db/issue-23-clean-start-reset.sql',
     'scripts/migrations.mjs',
     'tests/migrations/migration-runner.test.ts',
     'lib/ai-provider-profiles.ts',
@@ -57,7 +56,7 @@ describe('verify-migrations change classifier', () => {
   })
 
   it.each([
-    'docs/issue-23-phase-b-runbook.md',
+    'docs/module-boundaries.md',
     'docs/agents/issue-tracker.md',
     'docs/nested/notes.txt',
     'README.md',

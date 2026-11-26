@@ -56,5 +56,3 @@ pnpm-lock.yaml
 pnpm-workspace.yaml
 worker-configuration.d.ts
 
-# Issue #23 durable terminal evidence runtime
-/.issue-23-delivery/
