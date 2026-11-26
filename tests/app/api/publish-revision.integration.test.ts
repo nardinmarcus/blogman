@@ -24,7 +24,6 @@ const mocks = vi.hoisted(() => ({
   getRouteContextWithDb: vi.fn(),
   ensureAuthenticatedRequest: vi.fn(),
   parseJsonBody: vi.fn(),
-  invalidatePublicContentCache: vi.fn(),
   enqueueBackgroundJob: vi.fn(),
 }))
 
@@ -36,7 +35,6 @@ vi.mock('@/lib/server/route-helpers', () => ({
   parseJsonBody: mocks.parseJsonBody,
 }))
 
-vi.mock('@/lib/cache', () => ({ invalidatePublicContentCache: mocks.invalidatePublicContentCache }))
 vi.mock('@/lib/background-jobs', () => ({
   enqueueBackgroundJob: mocks.enqueueBackgroundJob,
   aiProcessPostOperationId: (postRef: number, version: number) =>
@@ -71,7 +69,6 @@ beforeEach(() => {
     ctx: { waitUntil: vi.fn() },
   })
   mocks.ensureAuthenticatedRequest.mockResolvedValue(null)
-  mocks.invalidatePublicContentCache.mockResolvedValue(undefined)
   mocks.enqueueBackgroundJob.mockResolvedValue(undefined)
 })
 
@@ -178,7 +175,6 @@ describe('app/api revision loop — browser autosave never changes live', { time
     expect(formal?.version).toBe(2)
     expect(await query<Record<string, unknown>>(`SELECT * FROM publish_restore_points WHERE article_id = ${article.articleId}`)).toHaveLength(1)
     expect(await query<Record<string, unknown>>(`SELECT * FROM publish_promotions WHERE article_id = ${article.articleId}`)).toHaveLength(1)
-    expect(mocks.invalidatePublicContentCache).toHaveBeenCalled()
 
     // 3) A post-promotion autosave forms the NEXT unique revision; live untouched.
     const next = await post(ArticlePost, {

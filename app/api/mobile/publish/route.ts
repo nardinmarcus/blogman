@@ -22,7 +22,6 @@ import {
   parseJsonBody,
 } from '@/lib/server/route-helpers'
 import { migrationRequiredResponse } from '@/lib/database-errors'
-import { invalidatePublicContentCache } from '@/lib/cache'
 import { getSiteUrl } from '@/lib/site-config'
 import { confirmMobilePublish, getMobilePublishConfirmation } from '@/lib/mobile-publish'
 import type { MobilePublishPath } from '@/lib/mobile-publish'
@@ -83,9 +82,6 @@ export async function POST(req: NextRequest) {
         expectedVersion: rawExpected,
         actor: 'mobile-publish',
         siteUrl: (env.NEXT_PUBLIC_SITE_URL?.trim() || getSiteUrl()).replace(/\/+$/, ''),
-        afterCommit: async () => {
-          await invalidatePublicContentCache(env)
-        },
       })
       return jsonOk(result)
     }

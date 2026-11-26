@@ -15,7 +15,7 @@
 
 import { throwDatabaseMigrationRequired } from '@/lib/database-errors'
 import type { Database } from '@/lib/repositories/schema'
-import type { CountRow, PostWithTags } from '@/lib/repositories/types'
+import type { PostWithTags } from '@/lib/repositories/types'
 
 interface CanonicalListRow {
   post_ref: number
@@ -197,91 +197,4 @@ export async function getPostBySlug(
 
   const row = results[0]
   return row ? toPost(row) : null
-}
-
-// 获取统计数据
-export async function getStats(
-  db: Database,
-): Promise<{ total_posts: number; total_views: number }> {
-  const source = (await formalAvailable(db)) ? LIST_SOURCE : LIST_SOURCE_NO_FORMAL
-  const result = await classified(db
-    .prepare(
-      `SELECT COUNT(*) as total_posts FROM (SELECT 1 AS one ${source}
-       WHERE json_extract(v.snapshot_json, '$.fields.deleted_at') IS NULL)`,
-    )
-    .first<{ total_posts: number }>())
-  return {
-    total_posts: (result?.total_posts as number) ?? 0,
-    // The public view counter was retired with the projection (ADR 0010).
-    total_views: 0,
-  }
-}
-
-// 获取文章总数（默认只统计已发布）
-export async function getPostsCount(
-  db: Database,
-  includeDrafts = false,
-  includeEncrypted = false,
-  includeHidden = false,
-  includeDeleted = false,
-): Promise<number> {
-  const conditions: string[] = []
-  if (!includeDeleted) conditions.push('deleted_at IS NULL')
-  if (!includeEncrypted) conditions.push("COALESCE(password, '') = ''")
-  if (!includeHidden) conditions.push('COALESCE(is_hidden, 0) = 0')
-  if (!includeDrafts) {
-    conditions.push("f.lifecycle = 'published'")
-    conditions.push("authoring_status <> 'draft'")
-  }
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
-  const source = (await formalAvailable(db)) ? LIST_SOURCE : LIST_SOURCE_NO_FORMAL
-  const result = await classified(db
-    .prepare(`SELECT COUNT(*) as count FROM (SELECT 1 AS one ${source} ${where})`)
-    .first<CountRow>())
-  return (result?.count as number) ?? 0
-}
-
-// 根据分类获取文章数
-export async function getPostsCountByCategory(db: Database, category: string): Promise<number> {
-  const source = (await formalAvailable(db)) ? LIST_SOURCE : LIST_SOURCE_NO_FORMAL
-  const result = await classified(db
-    .prepare(
-      `SELECT COUNT(*) as count FROM (SELECT 1 AS one ${source}
-       WHERE category = ?
-         AND f.lifecycle = 'published'
-         AND authoring_status <> 'draft'
-         AND COALESCE(password, '') = ''
-         AND COALESCE(is_hidden, 0) = 0
-         AND deleted_at IS NULL)`,
-    )
-    .bind(category)
-    .first<CountRow>())
-  return (result?.count as number) ?? 0
-}
-
-// 根据分类获取文章
-export async function getPostsByCategory(
-  db: Database,
-  category: string,
-  limit = 50,
-  offset = 0,
-): Promise<PostWithTags[]> {
-  const source = (await formalAvailable(db)) ? LIST_SOURCE : LIST_SOURCE_NO_FORMAL
-  const { results } = await classified(db
-    .prepare(
-      `SELECT * FROM (SELECT ${listFields(source === LIST_SOURCE)}
-       ${source}
-       WHERE category = ?
-         AND f.lifecycle = 'published'
-         AND authoring_status <> 'draft'
-         AND COALESCE(password, '') = ''
-         AND COALESCE(is_hidden, 0) = 0
-         AND deleted_at IS NULL)
-       ORDER BY is_pinned DESC, published_at DESC
-       LIMIT ? OFFSET ?`,
-    )
-    .bind(category, limit, offset)
-    .all<CanonicalListRow>())
-
-  return results.map(toPost)
 }

@@ -19,13 +19,10 @@ import {
   jsonError,
   jsonOk,
   parseJsonBody,
-  type RouteDbEnv,
 } from '@/lib/server/route-helpers'
 import { migrationRequiredResponse } from '@/lib/database-errors'
-import { invalidatePublicContentCache } from '@/lib/cache'
 import { enqueueBackgroundJob } from '@/lib/background-jobs'
 
-type RouteEnv = RouteDbEnv
 
 export async function POST(req: NextRequest) {
   try {
@@ -50,7 +47,6 @@ export async function POST(req: NextRequest) {
       ...(html ? { html } : {}),
       projections: {
         afterCommit: async (r) => {
-          await invalidatePublicContentCache(env)
           await enqueueBackgroundJob(
             env,
             { type: 'sync-post-related-index', postId: r.postRef },

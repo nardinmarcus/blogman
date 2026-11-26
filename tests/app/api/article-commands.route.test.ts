@@ -24,7 +24,6 @@ const mocks = vi.hoisted(() => ({
   getRouteContextWithDb: vi.fn(),
   ensureAuthenticatedRequest: vi.fn(),
   parseJsonBody: vi.fn(),
-  invalidatePublicContentCache: vi.fn(),
   enqueueBackgroundJob: vi.fn(),
   getPostBySlug: vi.fn(),
   updatePost: vi.fn(),
@@ -54,10 +53,6 @@ vi.mock('@/lib/server/route-helpers', () => ({
   jsonError: (message: string, status = 500) => Response.json({ error: message }, { status }),
   jsonOk: (data: unknown, status = 200) => Response.json(data, { status }),
   parseJsonBody: mocks.parseJsonBody,
-}))
-
-vi.mock('@/lib/cache', () => ({
-  invalidatePublicContentCache: mocks.invalidatePublicContentCache,
 }))
 
 vi.mock('@/lib/background-jobs', () => ({
@@ -118,7 +113,6 @@ describe('/api/article-commands — dispatch', () => {
       ctx: { waitUntil: vi.fn() },
     })
     mocks.ensureAuthenticatedRequest.mockResolvedValue(null)
-    mocks.invalidatePublicContentCache.mockResolvedValue(undefined)
     mocks.enqueueBackgroundJob.mockResolvedValue(undefined)
     mocks.latestVersionAuthority.mockResolvedValue(2)
     mocks.latestAppliedFacts.mockResolvedValue({ slug: 'persisted-slug', publishedAt: 1700000000 })
@@ -288,8 +282,6 @@ describe('/api/article-commands — dispatch', () => {
     expect(input.expectedVersion).toBe(2)
     expect(input.operationId).toBe('op-pin-1')
     expect(input.is_pinned).toBe(1)
-    // content-visible change -> public cache invalidated best-effort
-    expect(mocks.invalidatePublicContentCache).toHaveBeenCalled()
   })
 
   it('rejects an articleId/slug mismatch with 409 before touching the kernel', async () => {

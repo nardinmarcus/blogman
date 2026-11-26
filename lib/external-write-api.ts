@@ -11,12 +11,8 @@
  *     authoring snapshot. Creation always lands as a DRAFT; transitions go
  *     through `publishTemp`. Retries reuse the same creation/operation id so
  *     the kernel replays instead of duplicating.
- *   - legacy (no protocol marker): every create is routed through the kernel
- *     too — as a DRAFT even when `published` was requested — and the response
- *     carries a machine-readable upgrade signal. Legacy telemetry records
- *     only client type / operation category / timestamp; never content or
- *     credentials. After the external-write authority switch, legacy
- *     versionless writes are rejected outright.
+ *   - legacy (no protocol marker): versionless writes are rejected; the
+ *     response carries a machine-readable upgrade signal.
  *
  * This module carries no production side effects and is unit-testable with a
  * mocked `db`; the route wires the real D1 + out-of-transaction projections.
@@ -41,13 +37,8 @@ import {
   extractMarkdownDescription,
   normalizePostSlug,
 } from '@/lib/post-utils'
-import { isAuthorityEnabled } from '@/lib/rollout-controls'
 
 export const EXTERNAL_WRITE_PROTOCOL = 'v1' as const
-export const LEGACY_TELEMETRY_KEY = 'legacy_external_write_telemetry' as const
-export const AUTHORITY_KEY = 'external_write_authority' as const
-/** Value that flips the external-write authority to versioned-only. */
-export const AUTHORITY_VERSIONED = 'versioned' as const
 
 export interface UpgradeSignal {
   protocol: string
@@ -69,125 +60,6 @@ export function upgradeSignal(required: boolean, message: string): UpgradeSignal
 /** True when the payload opt-in to the versioned protocol. */
 export function isVersionedProtocol(payload: Record<string, unknown>): boolean {
   return payload.protocol === EXTERNAL_WRITE_PROTOCOL
-}
-
-/**
- * Client-type classification for telemetry. Prefers an explicit header, then
- * falls back to User-Agent sniffing for the known external clients.
- */
-export function resolveClientType(req: {
-  headers?: { get?: (name: string) => string | null } | null
-}): string {
-  const headers = req?.headers
-  if (headers?.get) {
-    const explicit = headers.get('x-blogman-client')?.trim()
-    if (explicit) return explicit.slice(0, 64)
-    const ua = (headers.get('user-agent') ?? '').toLowerCase()
-    if (ua.includes('obsidian')) return 'obsidian'
-    if (ua.includes('chrome') || ua.includes('chromium')) return 'chrome'
-    if (ua.includes('curl') || ua.includes('wget')) return 'cli'
-    if (ua.includes('node') || ua.includes('python') || ua.includes('go-http')) return 'agent'
-  }
-  return 'unknown'
-}
-
-/**
- * True once the external-write authority flips to versioned-only.
- *
- * Source of truth is the B2-G `rollout_controls.authority` (issue #32); the
- * legacy `site_settings` flag from B2-08 remains a tolerated backward-compat
- * signal so pre-switch deployments keep their existing gate until the rollout
- * control rows exist. Reading a ledger-only D1 (no rollout tables, no identity
- * tables yet) reports disabled without crashing.
- */
-export async function isExternalWriteAuthoritySwitched(db: Database): Promise<boolean> {
-  if (await isAuthorityEnabled(db)) return true
-  try {
-    const row = await db
-      .prepare('SELECT value FROM site_settings WHERE key = ?')
-      .bind(AUTHORITY_KEY)
-      .first<{ value: string }>()
-    return row?.value === AUTHORITY_VERSIONED
-  } catch {
-    return false
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* Legacy telemetry — client type / operation category / time only.   */
-/* ------------------------------------------------------------------ */
-
-export interface LegacyTelemetryEntry {
-  /** client type (obsidian / chrome / agent / cli / unknown) */
-  clientType: string
-  /** operation category ('create' | 'update') */
-  operation: 'create' | 'update'
-  /** unix seconds (defaults to now) */
-  at?: number
-}
-
-interface DailyCounts {
-  daily: Record<string, Record<string, Record<string, number>>>
-  total: number
-  updatedAt: number
-}
-
-const TELEMETRY_RETENTION_DAYS = 90
-
-function dayKey(ts: number): string {
-  return new Date(ts * 1000).toISOString().slice(0, 10)
-}
-
-function emptyTelemetry(): DailyCounts {
-  return { daily: {}, total: 0, updatedAt: 0 }
-}
-
-/** Append one legacy-write observation; prunes days older than retention. */
-export async function recordLegacyWrite(
-  db: Database,
-  entry: LegacyTelemetryEntry,
-): Promise<void> {
-  const at = entry.at ?? Math.floor(Date.now() / 1000)
-  const row = await db
-    .prepare('SELECT value FROM site_settings WHERE key = ?')
-    .bind(LEGACY_TELEMETRY_KEY)
-    .first<{ value: string }>()
-  let telemetry: DailyCounts = emptyTelemetry()
-  if (row?.value) {
-    try {
-      telemetry = JSON.parse(row.value) as DailyCounts
-    } catch {
-      telemetry = emptyTelemetry()
-    }
-  }
-  const key = dayKey(at)
-  const day = (telemetry.daily[key] ??= {})
-  const client = (day[entry.clientType] ??= {})
-  client[entry.operation] = (client[entry.operation] ?? 0) + 1
-  telemetry.total += 1
-  telemetry.updatedAt = at
-  // Prune stale days so the blob stays bounded.
-  const cutoff = at - TELEMETRY_RETENTION_DAYS * 86400
-  for (const d of Object.keys(telemetry.daily)) {
-    if (new Date(`${d}T00:00:00Z`).getTime() / 1000 < cutoff) delete telemetry.daily[d]
-  }
-  await db.prepare('INSERT OR REPLACE INTO site_settings (key, value) VALUES (?, ?)')
-    .bind(LEGACY_TELEMETRY_KEY, JSON.stringify(telemetry))
-    .run()
-}
-
-/** Read the legacy-write telemetry blob (diagnostics / seven-day-zero gate). */
-export async function readLegacyTelemetry(db: Database): Promise<DailyCounts> {
-  const row = await db
-    .prepare('SELECT value FROM site_settings WHERE key = ?')
-    .bind(LEGACY_TELEMETRY_KEY)
-    .first<{ value: string }>()
-  if (!row?.value) return emptyTelemetry()
-  try {
-    return JSON.parse(row.value) as DailyCounts
-  } catch {
-    return emptyTelemetry()
-  }
 }
 
 /* ------------------------------------------------------------------ */

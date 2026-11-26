@@ -18,12 +18,10 @@ import {
   query,
   teardownState,
 } from '@/tests/lib/article-commands/helpers'
-import { AUTHORITY_KEY, AUTHORITY_VERSIONED, LEGACY_TELEMETRY_KEY } from '@/lib/external-write-api'
 
 const mocks = vi.hoisted(() => ({
   getRouteContextWithDb: vi.fn(),
   ensureAuthenticatedRequest: vi.fn(),
-  invalidatePublicContentCache: vi.fn(),
   enqueueBackgroundJob: vi.fn(),
 }))
 
@@ -35,7 +33,6 @@ vi.mock('@/lib/server/route-helpers', () => ({
   parseJsonBody: async (req: Request) => req.json(),
 }))
 
-vi.mock('@/lib/cache', () => ({ invalidatePublicContentCache: mocks.invalidatePublicContentCache }))
 vi.mock('@/lib/background-jobs', () => ({ enqueueBackgroundJob: mocks.enqueueBackgroundJob }))
 
 import { PATCH, POST } from '@/app/api/posts/route'
@@ -63,7 +60,6 @@ beforeEach(() => {
     ctx: { waitUntil: vi.fn() },
   })
   mocks.ensureAuthenticatedRequest.mockResolvedValue(null)
-  mocks.invalidatePublicContentCache.mockResolvedValue(undefined)
   mocks.enqueueBackgroundJob.mockResolvedValue(undefined)
 })
 
@@ -207,14 +203,12 @@ describe('app/api/posts — external write integration', { timeout: 600_000 }, (
     expect(result.upgrade.protocol).toBe('v1')
     expect(result.upgrade.required).toBe(true)
 
-    // No row lands and no legacy telemetry is recorded.
+    // No row lands.
     const posts = await query<Record<string, unknown>>(
       `SELECT a.id FROM articles a JOIN article_versions v ON v.article_id = a.id
        WHERE json_extract(v.snapshot_json, '$.fields.title') = '${title}'`,
     )
     expect(posts).toHaveLength(0)
-    const telemetry = (await query<Record<string, unknown>>(`SELECT value FROM site_settings WHERE key = '${LEGACY_TELEMETRY_KEY}'`))[0]?.value as string | undefined
-    expect(telemetry ?? '').not.toContain('"create"')
   })
 
   it('authority switch is moot after removal: legacy versionless writes rejected, versioned writes keep working', async () => {
@@ -223,8 +217,6 @@ describe('app/api/posts — external write integration', { timeout: 600_000 }, (
       protocol: 'v1', action: 'create', creationId: fresh('auth-c'),
       snapshot: snapshot(slug, '版本化文章'),
     }), 'agent/1.0'))).json() as { articleId: number }
-
-    await query(`INSERT OR REPLACE INTO site_settings (key, value) VALUES ('${AUTHORITY_KEY}', '${AUTHORITY_VERSIONED}')`)
 
     // Legacy create → rejected (no authority gate needed to refuse it now).
     const legacyCreate = await POST(await postReq('POST', body({ title: '不支持', content: '正文' }), 'chrome/1.0'))
@@ -242,9 +234,6 @@ describe('app/api/posts — external write integration', { timeout: 600_000 }, (
       expectedVersion: 1, operationId: 'op-auth-1', snapshot: snapshot(slug, '切换后保存'),
     }), 'agent/1.0'))).json() as { outcome: string }
     expect(saved.outcome).toBe('applied')
-
-    // Clean up so the shared state stays green for other tests in the file order.
-    await query(`DELETE FROM site_settings WHERE key = '${AUTHORITY_KEY}'`)
   })
 
   it('legacy update is rejected after writer removal (no versionless save)', async () => {

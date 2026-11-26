@@ -26,24 +26,15 @@ import {
   jsonError,
   jsonOk,
   parseJsonBody,
-  type RouteDbEnv,
 } from '@/lib/server/route-helpers'
 import { migrationRequiredResponse } from '@/lib/database-errors'
-import { invalidatePublicContentCache } from '@/lib/cache'
 import { discardRevision, promoteRevision, readRevisionState, compareRevision, restoreRevisionSnapshot, saveRestorePoint, undoRestoreOperation } from '@/lib/publish-revision'
 import { getSiteUrl } from '@/lib/site-config'
 import { normalizePostSlug } from '@/lib/post-utils'
 import { resolveArticleAddress } from '@/lib/slug-address'
 
-type RouteEnv = RouteDbEnv
 
 /** Best-effort external I/O after a committed promotion (cache invalidation). */
-function afterPromote(env: RouteEnv) {
-  return async () => {
-    await invalidatePublicContentCache(env)
-  }
-}
-
 export async function POST(req: NextRequest) {
   try {
     const route = await getRouteContextWithDb('数据库未配置')
@@ -69,7 +60,6 @@ export async function POST(req: NextRequest) {
         articleId,
         actor,
         siteUrl: (env.NEXT_PUBLIC_SITE_URL?.trim() || getSiteUrl()).replace(/\/+$/, ''),
-        afterCommit: afterPromote(env),
       })
       return jsonOk(result)
     }

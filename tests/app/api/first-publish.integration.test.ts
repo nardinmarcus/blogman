@@ -24,7 +24,6 @@ const mocks = vi.hoisted(() => ({
   getRouteContextWithDb: vi.fn(),
   ensureAuthenticatedRequest: vi.fn(),
   parseJsonBody: vi.fn(),
-  invalidatePublicContentCache: vi.fn(),
 }))
 
 vi.mock('@/lib/server/route-helpers', () => ({
@@ -35,7 +34,6 @@ vi.mock('@/lib/server/route-helpers', () => ({
   parseJsonBody: mocks.parseJsonBody,
 }))
 
-vi.mock('@/lib/cache', () => ({ invalidatePublicContentCache: mocks.invalidatePublicContentCache }))
 
 import { GET, POST } from '@/app/api/first-publish/route'
 
@@ -62,7 +60,6 @@ beforeEach(() => {
     ctx: { waitUntil: vi.fn() },
   })
   mocks.ensureAuthenticatedRequest.mockResolvedValue(null)
-  mocks.invalidatePublicContentCache.mockResolvedValue(undefined)
 })
 
 let seq = 0
@@ -116,7 +113,6 @@ describe('app/api/first-publish — thin route + real kernel + D1', { timeout: 6
       version: 1,
       publicUrl: `https://blog.example.test/${article.slug}`,
     })
-    expect(mocks.invalidatePublicContentCache).toHaveBeenCalledTimes(1)
 
     // 3) GET state shows the separated surfaces: prepare committed, event,
     //    outbox pending, formal publication + public address.

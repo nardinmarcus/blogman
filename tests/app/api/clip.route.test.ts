@@ -17,7 +17,6 @@ const mocks = vi.hoisted(() => ({
   getRouteContextWithDb: vi.fn(),
   parseJsonBody: vi.fn(),
   clipArticle: vi.fn(),
-  invalidatePublicContentCache: vi.fn(),
   enqueueBackgroundJob: vi.fn(),
 }))
 
@@ -30,7 +29,6 @@ vi.mock('@/lib/server/route-helpers', () => ({
 }))
 
 vi.mock('@/lib/clip', () => ({ clipArticle: mocks.clipArticle }))
-vi.mock('@/lib/cache', () => ({ invalidatePublicContentCache: mocks.invalidatePublicContentCache }))
 vi.mock('@/lib/background-jobs', () => ({ enqueueBackgroundJob: mocks.enqueueBackgroundJob }))
 
 import { POST } from '@/app/api/clip/route'

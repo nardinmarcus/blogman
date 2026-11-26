@@ -1,6 +1,5 @@
 import { getPostBySlug } from '@/lib/db'
 import { isAdminAuthenticated, COOKIE_NAME } from '@/lib/admin-auth'
-import { invalidatePublicContentCache } from '@/lib/cache'
 import {
   restore,
   setCategory,
@@ -53,7 +52,7 @@ async function updatePostRoute(req: NextRequest, { params }: Ctx) {
   const { slug } = await params
   const route = await getRouteContextWithDb('DB not configured')
   if (!route.ok) return route.response
-  const { env, db, ctx } = route
+  const { db, ctx } = route
 
   const articleId = await resolveArticleIdBySlug(db, slug)
   if (!articleId) return jsonError('文章不存在', 404)
@@ -119,11 +118,6 @@ async function updatePostRoute(req: NextRequest, { params }: Ctx) {
 
     // Best-effort cache invalidation after an applied/replayed command.
     if (result.outcome === 'applied' || result.outcome === 'replayed') {
-      try {
-        await invalidatePublicContentCache(env)
-      } catch (cacheErr) {
-        console.warn('Cache invalidation failed:', cacheErr)
-      }
     }
     void ctx
     return jsonOk({ success: true, outcome: result.outcome, slug })
@@ -144,7 +138,7 @@ async function deletePostRoute(req: NextRequest, { params }: Ctx) {
   const { slug } = await params
   const route = await getRouteContextWithDb('DB not configured')
   if (!route.ok) return route.response
-  const { env, db, ctx } = route
+  const { db, ctx } = route
 
   try {
     const articleId = await resolveArticleIdBySlug(db, slug)
@@ -163,11 +157,6 @@ async function deletePostRoute(req: NextRequest, { params }: Ctx) {
       operationId: `admin-delete:${articleId}:${Date.now()}`,
     })
 
-    try {
-      await invalidatePublicContentCache(env)
-    } catch (cacheErr) {
-      console.warn('Cache invalidation failed:', cacheErr)
-    }
 
     void ctx
     return jsonOk({ success: true, outcome: result.outcome })

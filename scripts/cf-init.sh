@@ -6,17 +6,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEMPLATE_PATH="${REPO_ROOT}/wrangler.toml"
 LOCAL_CONFIG_PATH="${REPO_ROOT}/wrangler.local.toml"
-DB_NAME="${CF_D1_NAME:-qiaomu-blog-db}"
-R2_NAME="${CF_R2_NAME:-qiaomu-blog-images}"
-KV_NAME="${CF_KV_NAME:-qiaomu-blog-cache}"
+DB_NAME="${CF_D1_NAME:-blogman-db}"
+R2_NAME="${CF_R2_NAME:-blogman-images}"
 SITE_URL="${SITE_URL:-${NEXT_PUBLIC_SITE_URL:-https://your-domain.com}}"
-WITH_KV=0
 
 for arg in "$@"; do
   case "$arg" in
-    --with-kv)
-      WITH_KV=1
-      ;;
     --site-url=*)
       SITE_URL="${arg#*=}"
       ;;
@@ -26,12 +21,9 @@ for arg in "$@"; do
     --r2-name=*)
       R2_NAME="${arg#*=}"
       ;;
-    --kv-name=*)
-      KV_NAME="${arg#*=}"
-      ;;
     *)
       echo "Unknown argument: ${arg}" >&2
-      echo "Usage: npm run cf:init -- [--with-kv] [--site-url=https://your-domain.com] [--db-name=qiaomu-blog-db] [--r2-name=qiaomu-blog-images] [--kv-name=qiaomu-blog-cache]" >&2
+      echo "Usage: npm run cf:init -- [--site-url=https://your-domain.com] [--db-name=blogman-db] [--r2-name=blogman-images]" >&2
       exit 1
       ;;
   esac
@@ -117,13 +109,6 @@ if ! section_has_key "r2_buckets" "bucket_name" "${LOCAL_CONFIG_PATH}"; then
 
   npx wrangler r2 bucket create "${R2_NAME}" \
     --binding IMAGES \
-    --update-config \
-    -c "${LOCAL_CONFIG_PATH}"
-fi
-
-if [[ "${WITH_KV}" == "1" ]] && ! rg -q '^\[\[kv_namespaces\]\]' "${LOCAL_CONFIG_PATH}"; then
-  npx wrangler kv namespace create "${KV_NAME}" \
-    --binding CACHE \
     --update-config \
     -c "${LOCAL_CONFIG_PATH}"
 fi

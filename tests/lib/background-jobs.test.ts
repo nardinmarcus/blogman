@@ -38,7 +38,6 @@ import {
 const mocks = vi.hoisted(() => ({
   processPost: vi.fn(),
   getAiRuntimeEnv: vi.fn(() => ({})),
-  invalidatePublicContentCache: vi.fn(async () => false),
   syncPostToRelatedIndex: vi.fn(async () => 'skipped' as const),
   deletePostFromRelatedIndex: vi.fn(async () => undefined),
   isAutoDescription: vi.fn(() => false),
@@ -47,10 +46,6 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/lib/ai', () => ({
   processPost: mocks.processPost,
   getAiRuntimeEnv: mocks.getAiRuntimeEnv,
-}))
-
-vi.mock('@/lib/cache', () => ({
-  invalidatePublicContentCache: mocks.invalidatePublicContentCache,
 }))
 
 vi.mock('@/lib/related-content', () => ({
@@ -186,7 +181,6 @@ describe('lib/background-jobs — process-post-ai records suggestions, never wri
 
     // Projections never run for the suggestion path (no live commit).
     expect(mocks.syncPostToRelatedIndex).not.toHaveBeenCalled()
-    expect(mocks.invalidatePublicContentCache).not.toHaveBeenCalled()
   })
 
   it('replays the same source without re-recording (idempotent queue retry)', async () => {
