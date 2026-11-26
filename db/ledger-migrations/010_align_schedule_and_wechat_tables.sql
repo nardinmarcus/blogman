@@ -5,18 +5,7 @@
 --   write (SQLite cannot alter a CHECK, so the table is rebuilt; rows, ids
 --   and the due index are preserved);
 -- * wechat_draft_tasks gains the B5-02/B5-03 retry and generation columns.
--- migration-conditional-schema
--- migration-add-column-if-table-exists: wechat_draft_tasks.revision | INTEGER NOT NULL DEFAULT 0
--- migration-add-column-if-table-exists: wechat_draft_tasks.attempt_count | INTEGER NOT NULL DEFAULT 0
--- migration-add-column-if-table-exists: wechat_draft_tasks.classification | TEXT
--- migration-add-column-if-table-exists: wechat_draft_tasks.needs_author | INTEGER NOT NULL DEFAULT 0
--- migration-add-column-if-table-exists: wechat_draft_tasks.next_attempt_at | INTEGER
--- migration-add-column-if-table-exists: wechat_draft_tasks.last_error | TEXT
--- migration-add-column-if-table-exists: wechat_draft_tasks.claimed_at | INTEGER
--- migration-add-column-if-table-exists: wechat_draft_tasks.lease_token | TEXT
--- migration-add-column-if-table-exists: wechat_draft_tasks.lease_expires_at | INTEGER
--- migration-add-column-if-table-exists: wechat_draft_tasks.generation | INTEGER NOT NULL DEFAULT 1
--- migration-add-column-if-table-exists: wechat_draft_tasks.settings_revision | INTEGER NOT NULL DEFAULT 0
+-- The preflight requires both tables to still have the exact 008 shape.
 
 CREATE TABLE publish_schedules_next (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,3 +37,15 @@ ALTER TABLE publish_schedules_next RENAME TO publish_schedules;
 
 CREATE INDEX idx_publish_schedules_due
       ON publish_schedules(status, scheduled_at);
+
+ALTER TABLE wechat_draft_tasks ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE wechat_draft_tasks ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE wechat_draft_tasks ADD COLUMN classification TEXT;
+ALTER TABLE wechat_draft_tasks ADD COLUMN needs_author INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE wechat_draft_tasks ADD COLUMN next_attempt_at INTEGER;
+ALTER TABLE wechat_draft_tasks ADD COLUMN last_error TEXT;
+ALTER TABLE wechat_draft_tasks ADD COLUMN claimed_at INTEGER;
+ALTER TABLE wechat_draft_tasks ADD COLUMN lease_token TEXT;
+ALTER TABLE wechat_draft_tasks ADD COLUMN lease_expires_at INTEGER;
+ALTER TABLE wechat_draft_tasks ADD COLUMN generation INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE wechat_draft_tasks ADD COLUMN settings_revision INTEGER NOT NULL DEFAULT 0;

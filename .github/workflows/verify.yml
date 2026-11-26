@@ -43,6 +43,7 @@ jobs:
         env:
           CI: true
           NEXT_TELEMETRY_DISABLED: '1'
+          WRANGLER_SEND_METRICS: 'false'
         run: npm run verify:quick
 
   verify-migrations:
@@ -84,6 +85,7 @@ jobs:
         id: migration-tests
         env:
           CI: true
+          WRANGLER_SEND_METRICS: 'false'
         run: npm run test:run -- tests/migrations/migration-runner.test.ts --reporter=verbose
 
       - name: Report actual migration verification outcome
