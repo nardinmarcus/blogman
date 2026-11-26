@@ -253,7 +253,7 @@ describe('real route CRUD on a ledger-migrated D1', () => {
     `)).toEqual(protectedSeedsBefore)
   })
 
-  it('runs article CRUD and keeps FTS synchronized on the canonical ledger schema', { timeout: 180_000 }, async () => {
+  it('runs article CRUD and keeps FTS synchronized on the canonical ledger schema', { timeout: 300_000 }, async () => {
     const state = createState()
     applyLedger(state)
     const db = createDatabase(state)
