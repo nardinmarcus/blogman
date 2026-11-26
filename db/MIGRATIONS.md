@@ -64,7 +64,7 @@ Legacy baseline 不把 `categories`、`site_settings`、`ai_actions`、`ai_post_
 
 `009_retire_posts_projection` 退役 `posts` / `posts_fts` 兼容投影及其 trigger（ADR 0008）。data sidecar 在 `posts` 仍有任何行缺少 `articles.post_ref` 对应时失败关闭，并在同一批次用 guard 复查，因此不会丢弃尚未迁移的旧内容；`posts` 不存在时为空操作。
 
-`010_align_schedule_and_wechat_tables` 修正旁路 DDL 留下的两处原地未升级：`CREATE TABLE IF NOT EXISTS` 不会改动已存在的表，所以生产的 `publish_schedules` 状态 CHECK 缺少排期控制命令写入的 `paused`，`wechat_draft_tasks` 缺少 B5-02/B5-03 的重试与代次列。`publish_schedules` 因 SQLite 不能修改 CHECK 而重建（保留全部行、id 与到期索引），preflight 只接受 008 记录的原形状；微信列用条件加列指令补齐。
+`010_align_schedule_and_wechat_tables` 修正旁路 DDL 留下的两处原地未升级：`CREATE TABLE IF NOT EXISTS` 不会改动已存在的表，所以生产的 `publish_schedules` 状态 CHECK 缺少排期控制命令写入的 `paused`，`wechat_draft_tasks` 缺少 B5-02/B5-03 的重试与代次列。`publish_schedules` 因 SQLite 不能修改 CHECK 而重建（保留全部行、id 与到期索引），微信列直接 `ALTER TABLE ADD COLUMN`；preflight 要求两张表都仍是 008 记录的原形状。
 
 D1 备份与恢复使用 Cloudflare D1 Time Travel（`wrangler d1 time-travel info` / `wrangler d1 time-travel restore`）。恢复会覆盖整个数据库；新事实出现后优先前向修复，不用旧时间点覆盖。
 

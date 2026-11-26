@@ -49,18 +49,6 @@ export function splitSqlFile(filePath: string): string[] {
   return statements
 }
 
-/**
- * Ledger migration statements for a fresh in-process D1: the runner's
- * `migration-add-column-if-table-exists` directives become plain ALTERs
- * (the columns are always absent on a fresh database).
- */
-function migrationStatements(filePath: string): string[] {
-  const directives = [...readFileSync(filePath, 'utf8').matchAll(
-    /^-- migration-add-column-if-table-exists: ([a-z_]+)\.([a-z_]+) \| (.+)$/gm,
-  )].map(([, table, column, definition]) => `ALTER TABLE ${table} ADD COLUMN ${column} ${definition.trim()}`)
-  return [...directives, ...splitSqlFile(filePath)]
-}
-
 export interface BootstrapOptions {
   /**
    * #234 Phase A — drop the legacy `posts` / `posts_fts` tables (and their FTS
@@ -87,7 +75,7 @@ export async function bootstrapState(stateDir: string, options: BootstrapOptions
     ? ['001_initial_schema.sql']
     : ['001_initial_schema.sql', '008_canonical_article_schema.sql', '010_align_schedule_and_wechat_tables.sql']
   for (const migration of migrations) {
-    for (const statement of migrationStatements(join(repoRoot, 'db', 'ledger-migrations', migration))) {
+    for (const statement of splitSqlFile(join(repoRoot, 'db', 'ledger-migrations', migration))) {
       await sharedDb.prepare(statement).run()
     }
   }
