@@ -20,8 +20,7 @@ import {
   jsonOk,
   parseJsonBody,
 } from '@/lib/server/route-helpers'
-import { migrationRequiredResponse, rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
-import { ensureScheduleControlTables } from '@/lib/schedule-control'
+import { rethrowIfDatabaseMigrationRequired } from '@/lib/database-errors'
 import {
   dispatchMobileScheduleAction,
   getMobileScheduleView,
@@ -70,15 +69,6 @@ export async function POST(req: NextRequest) {
     payload = (await parseJsonBody<Record<string, unknown>>(req)) ?? {}
   } catch {
     return jsonError('请求体不是有效 JSON', 400)
-  }
-
-  // Guarantee the shared operation-ledger table exists (idempotent DDL).
-  try {
-    await ensureScheduleControlTables(ctx.db)
-  } catch (error) {
-    const response = migrationRequiredResponse(error)
-    if (response) return response
-    return jsonError('数据库就绪失败', 500)
   }
 
   const scheduleId = typeof payload.scheduleId === 'string' ? payload.scheduleId.trim() : ''

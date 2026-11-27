@@ -2,8 +2,8 @@
  * B3-02 — publish-revision test helpers (issue #34).
  *
  * Reuses the shared in-process Miniflare bootstrap (one workerd instance per
- * suite, zero wrangler CLI spawns) and layers the three revision fact tables on
- * top via the module's own idempotent DDL — exactly what the route path does.
+ * suite, zero wrangler CLI spawns); the three revision fact tables come from
+ * ledger migration 008.
  * A formally published article fixture is produced through the REAL first-publish
  * loop (prepare + confirm), so the revision writes are anchored to genuine
  * formal facts (formal_publications + article_versions + posts projection).
@@ -11,9 +11,6 @@
 
 import { createHash } from 'node:crypto'
 import { bootstrapState, createDatabase, query } from '@/tests/lib/article-commands/helpers'
-import { ensureFirstPublishTables } from '@/lib/first-publish/ddl'
-import { ensurePublishRevisionTables } from '@/lib/publish-revision/ddl'
-import { ensureSlugAddressTables } from '@/lib/slug-address'
 import { create } from '@/lib/article-commands'
 import { confirmPublish, preparePublish } from '@/lib/first-publish'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands/types'
@@ -34,9 +31,6 @@ export function sha256(body: string): string {
 /** Boot the identity + first-publish + revision + slug-address schema. */
 export async function bootstrapRevisionState(stateDir: string): Promise<void> {
   await bootstrapState(stateDir)
-  await ensureFirstPublishTables(createDatabase())
-  await ensurePublishRevisionTables(createDatabase())
-  await ensureSlugAddressTables(createDatabase())
 }
 
 function snapshotFor(slug: string, title: string, content: string): ArticleCommandSnapshot {

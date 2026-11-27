@@ -1,9 +1,9 @@
 /**
  * B4-05 — isolated-D1 fixtures + mock email provider (issue #44).
  *
- * Layers the B4-04 notification facts (real #43 kernel + DDL) plus the new
- * additive email-reminder tables over the shared in-process Miniflare D1 —
- * exactly what the DDL channel does. Zero production: the only provider here
+ * Runs the B4-04 notification facts (real #43 kernel) and the email-reminder
+ * tables from ledger migration 008 on the shared in-process Miniflare D1.
+ * Zero production: the only provider here
  * is an in-memory mock recording accepted submissions with injectable
  * outcomes (accept / reject / throw), so tests cover threshold, quiet hours,
  * dedup aggregation and failure retry without ever touching a real mail
@@ -11,16 +11,13 @@
  */
 
 import { bootstrapB404State, createDatabase, query, teardownState } from '@/tests/lib/workbench/helpers'
-import { ensureEmailReminderTables } from '@/lib/email-reminders/ddl'
 import type { EmailProvider, EmailReminderPolicy, EmailSendInput, EmailSendResult } from '@/lib/email-reminders/types'
 
 export { bootstrapB404State, createDatabase, query, teardownState }
 
-/** Boot B4-00..B4-04 then the email-reminder tables (DDL runs twice: idempotency). */
+/** Boot B4-00..B4-04 (the email-reminder tables come from migration 008). */
 export async function bootstrapB405State(stateDir: string): Promise<void> {
   await bootstrapB404State(stateDir)
-  await ensureEmailReminderTables(createDatabase())
-  await ensureEmailReminderTables(createDatabase())
 }
 
 /** In-memory provider: injectable outcome queue, records ACCEPTED submissions only. */

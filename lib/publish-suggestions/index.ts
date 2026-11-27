@@ -18,7 +18,6 @@ export {
   SUGGESTION_TTL,
   DEFAULT_SUGGESTION_FIELDS,
 } from './kernel'
-export { PUBLISH_SUGGESTIONS_DDL_STATEMENTS, ensurePublishSuggestionsTables } from './ddl'
 export type {
   ApplySuggestionInput,
   ApplySuggestionResult,

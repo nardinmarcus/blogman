@@ -19,7 +19,6 @@ import {
   teardownState,
   createDraftArticle,
 } from '@/tests/lib/first-publish/helpers'
-import { ensureFirstPublishTables } from '@/lib/first-publish/ddl'
 
 const mocks = vi.hoisted(() => ({
   getRouteContextWithDb: vi.fn(),
@@ -47,7 +46,6 @@ beforeAll(async () => {
   state = mkdtempSync(join(tmpdir(), 'blogman-b301-route-'))
   cleanup.push(state)
   await bootstrapState(state)
-  await ensureFirstPublishTables(createDatabase())
 }, 300_000)
 
 afterAll(async () => {

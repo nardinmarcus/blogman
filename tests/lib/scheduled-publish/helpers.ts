@@ -2,9 +2,8 @@
  * B4-01 — scheduled-publish isolated-D1 fixtures (issue #40).
  *
  * One shared in-process Miniflare instance (real D1 binding, zero wrangler CLI
- * spawns) bootstrapped from the same article-commands base, layered with the
- * first-publish fact tables and the schedule's own `publish_schedules` table
- * through the module's idempotent DDL — exactly what the DDL channel does.
+ * spawns) bootstrapped from the same article-commands base; the first-publish
+ * and `publish_schedules` tables come from ledger migration 008.
  * A formally published article fixture is produced through the REAL first-
  * publish loop; drafts through the write kernel; all scans run on a frozen
  * epoch-second clock so catch-up / expiry / duplicate ticks are deterministic.
@@ -12,8 +11,6 @@
 
 import { createHash } from 'node:crypto'
 import { bootstrapState, createDatabase, query, teardownState } from '@/tests/lib/article-commands/helpers'
-import { ensureFirstPublishTables } from '@/lib/first-publish/ddl'
-import { ensureScheduledPublishTables } from '@/lib/scheduled-publish/ddl'
 import { create } from '@/lib/article-commands'
 import { confirmPublish, preparePublish } from '@/lib/first-publish'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands/types'
@@ -26,15 +23,12 @@ export interface CreatedArticle {
   slug: string
 }
 
-/** Boot the identity + first-publish + scheduled schema (DDL runs twice: idempotency). */
+/** Boot the shared in-process D1 with the full canonical schema. */
 export async function bootstrapScheduledState(
   stateDir: string,
   options: Parameters<typeof bootstrapState>[1] = {},
 ): Promise<void> {
   await bootstrapState(stateDir, options)
-  await ensureFirstPublishTables(createDatabase())
-  await ensureScheduledPublishTables(createDatabase())
-  await ensureScheduledPublishTables(createDatabase())
 }
 
 /** Canonical sha256 of a body string. */

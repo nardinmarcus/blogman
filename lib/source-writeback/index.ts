@@ -7,7 +7,6 @@
  * external confirmation that is the ONLY thing that advances the baseline.
  */
 
-export * from './ddl'
 export * from './types'
 export * from './provider'
 export * from './kernel'

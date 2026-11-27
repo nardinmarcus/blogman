@@ -25,4 +25,3 @@ export type {
   ResolveNotificationResult,
 } from './types'
 export { notificationDedupKey } from './types'
-export { ensureNotificationTables, NOTIFICATIONS_DDL_STATEMENTS } from './ddl'

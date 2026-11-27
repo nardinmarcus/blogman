@@ -7,12 +7,10 @@
  * command layer actually writes:
  *
  *   - ledger migration 001 (posts incl. FTS triggers, categories, settings,
- *     ai_actions, api_tokens…) — later migrations only add unrelated tables
- *     the kernel never reads or writes,
- *   - the B2-02 article-identity DDL (articles + article_versions), mirrored
- *     verbatim from scripts/apply-article-identity-ddl.mjs,
- *   - the B2-01b envelope columns (content_envelope, *sha256) on `posts`,
- *     mirrored from scripts/apply-content-envelope-ddl.mjs.
+ *     ai_actions, api_tokens…),
+ *   - ledger migration 008 (the canonical article schema),
+ *   - unless `postsless`: the B2-01b envelope columns on `posts`; with
+ *     `postsless`, ledger migration 009 retires the posts projection.
  *
  * `db.batch()` goes straight to the real D1 binding, so multi-statement
  * batches have genuine transaction semantics (mid-batch failure rolls back
@@ -58,11 +56,13 @@ export interface BootstrapOptions {
    * fails loudly. Proves the write kernels work against canonical facts only.
    */
   postsless?: boolean
+  /** Apply only ledger migration 001: a database with no canonical schema yet. */
+  ledgerOnly?: boolean
 }
 
 /** Bootstrap the shared in-process D1 for the whole test file. */
 export async function bootstrapState(stateDir: string, options: BootstrapOptions = {}): Promise<void> {
-  const { postsless = false } = options
+  const { postsless = false, ledgerOnly = false } = options
   mf = new Miniflare({
     modules: true,
     script: 'export default { fetch() { return new Response("ok") } }',
@@ -71,48 +71,19 @@ export async function bootstrapState(stateDir: string, options: BootstrapOptions
   })
   sharedDb = (await mf.getD1Database('DB')) as D1Database
 
-  for (const statement of splitSqlFile(join(repoRoot, 'db', 'ledger-migrations', '001_initial_schema.sql'))) {
-    await sharedDb.prepare(statement).run()
+  const migrations = ledgerOnly
+    ? ['001_initial_schema.sql']
+    : ['001_initial_schema.sql', '008_canonical_article_schema.sql', '010_align_schedule_and_wechat_tables.sql']
+  for (const migration of migrations) {
+    for (const statement of splitSqlFile(join(repoRoot, 'db', 'ledger-migrations', migration))) {
+      await sharedDb.prepare(statement).run()
+    }
   }
 
-  const identityDdl = [
-    `CREATE TABLE IF NOT EXISTS articles (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      post_ref INTEGER UNIQUE NOT NULL,
-      slug TEXT,
-      draft_ref TEXT,
-      source_page_identity TEXT,
-      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
-    )`,
-    `CREATE TABLE IF NOT EXISTS article_versions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      article_id INTEGER NOT NULL,
-      version INTEGER NOT NULL,
-      operation_id TEXT NOT NULL UNIQUE,
-      snapshot_json TEXT NOT NULL,
-      content_snapshot_sha256 TEXT NOT NULL,
-      published_at INTEGER,
-      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-      UNIQUE (article_id, version)
-    )`,
-  ]
-  for (const statement of identityDdl) await sharedDb.prepare(statement).run()
-
-  // B3-04 slug address registry — the single slug authority (ADR 0009).
-  // Idempotent; applied in both modes so every suite sees the same surfaces.
-  const { SLUG_ADDRESS_DDL_STATEMENTS } = await import('@/lib/slug-address/ddl')
-  for (const statement of SLUG_ADDRESS_DDL_STATEMENTS) await sharedDb.prepare(statement).run()
-
-  // #234 — canonical article search index (rebuildable, projection-free).
-  const { ARTICLE_FTS_DDL_STATEMENTS } = await import('@/lib/article-fts/ddl')
-  for (const statement of ARTICLE_FTS_DDL_STATEMENTS) await sharedDb.prepare(statement).run()
-
   if (postsless) {
-    for (const trigger of ['posts_ai', 'posts_au', 'posts_ad']) {
-      await sharedDb.prepare(`DROP TRIGGER IF EXISTS ${trigger}`).run()
+    for (const statement of splitSqlFile(join(repoRoot, 'db', 'ledger-migrations', '009_retire_posts_projection.sql'))) {
+      await sharedDb.prepare(statement).run()
     }
-    await sharedDb.prepare('DROP TABLE IF EXISTS posts_fts').run()
-    await sharedDb.prepare('DROP TABLE IF EXISTS posts').run()
     return
   }
 

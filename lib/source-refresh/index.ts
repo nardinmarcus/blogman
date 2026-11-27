@@ -15,7 +15,6 @@ export {
   confirmRefresh,
   snapshotFingerprint,
 } from './kernel'
-export { ensureSourceRefreshTables, SOURCE_REFRESH_DDL_STATEMENTS } from './ddl'
 export type {
   ConfirmRefreshInput,
   ConfirmRefreshResult,

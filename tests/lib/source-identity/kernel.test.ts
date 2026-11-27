@@ -26,7 +26,6 @@ import {
   query,
   teardownState,
 } from '@/tests/lib/article-commands/helpers'
-import { SOURCE_IDENTITY_DDL_STATEMENTS } from '@/lib/source-identity'
 import {
   cancelSourceLink,
   confirmSourceLink,
@@ -43,9 +42,6 @@ beforeAll(async () => {
   cleanup.push(state)
   await bootstrapState(state)
   // B6-01 source-identity fact surface.
-  for (const stmt of SOURCE_IDENTITY_DDL_STATEMENTS) {
-    await query(stmt)
-  }
 }, 300_000)
 
 afterAll(async () => {

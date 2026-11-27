@@ -27,7 +27,6 @@ import {
   freshSlug,
   query,
 } from './helpers'
-import { ensureScheduledPublishTables } from '@/lib/scheduled-publish/ddl'
 import {
   cancelSchedule,
   heartbeatScheduleLease,
@@ -104,72 +103,6 @@ function attemptsOf(scheduleId: string) {
 /* ------------------------------------------------------------------ */
 /* additive DDL migration                                              */
 /* ------------------------------------------------------------------ */
-
-describe('additive DDL migration (B4-03 over a B4-01 install)', () => {
-  it('upgrades an existing publish_schedules with the new columns and never drops facts', async () => {
-    // Rebuild the table in its exact B4-01 shape (no revision / next_attempt_at /
-    // lease_token, no publish_attempts) and plant a terminal fired row.
-    await createDatabase().prepare('DROP TABLE IF EXISTS publish_attempts').run()
-    await createDatabase().prepare('DROP TABLE publish_schedules').run()
-    await createDatabase()
-      .prepare(
-        `CREATE TABLE publish_schedules (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          schedule_id TEXT UNIQUE NOT NULL CHECK(length(schedule_id) > 0),
-          article_id INTEGER NOT NULL,
-          version INTEGER NOT NULL CHECK(version > 0),
-          scheduled_at INTEGER NOT NULL CHECK(scheduled_at > 0),
-          timezone TEXT NOT NULL CHECK(length(timezone) > 0),
-          status TEXT NOT NULL CHECK(status IN ('pending', 'claimed', 'fired', 'stale', 'cancelled')),
-          attempt_count INTEGER NOT NULL DEFAULT 0,
-          last_error TEXT,
-          claimed_at INTEGER,
-          lease_expires_at INTEGER,
-          stale_reason TEXT,
-          fired_event_id TEXT,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
-        ) STRICT`,
-      )
-      .run()
-    await createDatabase()
-      .prepare(`CREATE INDEX idx_publish_schedules_due ON publish_schedules(status, scheduled_at)`)
-      .run()
-    await createDatabase()
-      .prepare(
-        `INSERT INTO publish_schedules
-           (schedule_id, article_id, version, scheduled_at, timezone, status, attempt_count, fired_event_id, created_at, updated_at)
-         VALUES ('s-old-install', 1, 1, ?, 'Asia/Shanghai', 'fired', 1, 'ev-old', ?, ?)`,
-      )
-      .bind(T0, T0, T0)
-      .run()
-
-    await ensureScheduledPublishTables(createDatabase())
-
-    // The existing fired fact is retained untouched.
-    const kept = (
-      await query<{ status: string; fired_event_id: string | null }>(
-        `SELECT status, fired_event_id FROM publish_schedules WHERE schedule_id = 's-old-install'`,
-      )
-    )[0]
-    expect(kept).toEqual({ status: 'fired', fired_event_id: 'ev-old' })
-
-    // The B4-03 shape is present: new columns + the attempt table + index.
-    const columns = await query<{ name: string }>('PRAGMA table_info(publish_schedules)')
-    const names = new Set(columns.map((row) => row.name))
-    expect([...names]).toEqual(expect.arrayContaining(['revision', 'next_attempt_at', 'lease_token']))
-    const attemptsExists = await query<{ c: number }>(
-      `SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table' AND name = 'publish_attempts'`,
-    )
-    expect(attemptsExists[0].c).toBe(1)
-    expect(await attemptsOf('s-old-install')).toEqual([])
-
-    // Re-running the channel is a no-op (idempotent).
-    await ensureScheduledPublishTables(createDatabase())
-    const columnsAgain = await query<{ name: string }>('PRAGMA table_info(publish_schedules)')
-    expect(new Set(columnsAgain.map((row) => row.name))).toEqual(names)
-  })
-})
 
 /* ------------------------------------------------------------------ */
 /* concurrent lease — one winner                                      */

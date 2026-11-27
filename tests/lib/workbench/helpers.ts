@@ -1,18 +1,13 @@
 /**
  * B4-04 — isolated-D1 fixtures (issue #43).
  *
- * One shared in-process Miniflare instance layering the article-commands base,
- * the first-publish fact tables, scheduled-publish, and the new workbench +
- * notification tables through each module's idempotent DDL — exactly what the
- * DDL channel does. Drafts / formal articles are produced through the REAL
+ * One shared in-process Miniflare instance over the article-commands base; the
+ * first-publish, scheduled-publish, workbench and notification tables come
+ * from ledger migration 008. Drafts / formal articles are produced through the REAL
  * write + first-publish loops; schedules through the real schedule kernel.
  */
 
 import { bootstrapState, createDatabase, query, teardownState } from '@/tests/lib/article-commands/helpers'
-import { ensureFirstPublishTables } from '@/lib/first-publish/ddl'
-import { ensureScheduledPublishTables } from '@/lib/scheduled-publish/ddl'
-import { ensureWorkbenchTables } from '@/lib/workbench/ddl'
-import { ensureNotificationTables } from '@/lib/notifications/ddl'
 import { create } from '@/lib/article-commands'
 import { confirmPublish, preparePublish } from '@/lib/first-publish'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands/types'
@@ -45,17 +40,9 @@ function snapshotFor(slug: string, title: string, content: string): ArticleComma
   }
 }
 
-/** Boot identity + first-publish + scheduled + workbench + notification schema (DDL runs twice: idempotency). */
+/** Boot the shared in-process D1 with the full canonical schema. */
 export async function bootstrapB404State(stateDir: string): Promise<void> {
   await bootstrapState(stateDir)
-  await ensureFirstPublishTables(createDatabase())
-  await ensureScheduledPublishTables(createDatabase())
-  await ensureWorkbenchTables(createDatabase())
-  await ensureNotificationTables(createDatabase())
-  // idempotency re-run
-  await ensureScheduledPublishTables(createDatabase())
-  await ensureWorkbenchTables(createDatabase())
-  await ensureNotificationTables(createDatabase())
 }
 
 /** Create a draft article through the write kernel (stays a draft; v1 fact). */

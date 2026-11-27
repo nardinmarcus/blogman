@@ -24,7 +24,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { bootstrapScheduledState, createDatabase, createDraftArticle, freshSlug, query } from '@/tests/lib/scheduled-publish/helpers'
-import { ensureScheduleControlTables } from '@/lib/schedule-control/ddl'
 import { schedulePublish } from '@/lib/scheduled-publish'
 import {
   cancelScheduleControl,
@@ -44,7 +43,6 @@ beforeAll(async () => {
   state = mkdtempSync(join(tmpdir(), 'blogman-b402-schedule-control-'))
   cleanup.push(state)
   await bootstrapScheduledState(state)
-  await ensureScheduleControlTables(createDatabase())
 }, 120_000)
 
 afterAll(async () => {

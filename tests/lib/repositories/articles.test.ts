@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
-  applyArticleIdentityDdl,
   applyLedger,
   cleanupStates,
   configPath,
@@ -15,7 +14,6 @@ import {
 } from '@/tests/helpers/article-identity-state'
 import type { Database } from '@/lib/repositories/schema'
 import { appendVersion, getByPostRef, latestAppliedFacts, latestVersionAuthority, listVersions } from '@/lib/repositories/articles'
-import { SLUG_ADDRESS_DDL_STATEMENTS } from '@/lib/slug-address/ddl'
 
 function literal(value: unknown): string {
   if (value === null || value === undefined) return 'NULL'
@@ -54,7 +52,6 @@ describe('lib/repositories/articles', () => {
   it('appendVersion is idempotent by operation_id and monotonic by version', { timeout: 300_000 }, async () => {
     const state = createState()
     applyLedger(state)
-    applyArticleIdentityDdl(state)
     runD1(state, "INSERT INTO articles (post_ref) VALUES (101)")
     const db = createDatabase(state)
     const articleId = runD1(state, 'SELECT id FROM articles WHERE post_ref = 101').at(-1)?.results?.[0]?.id as number
@@ -105,7 +102,6 @@ describe('lib/repositories/articles', () => {
   it('getByPostRef returns the identity and preserves the not-guessed NULL identity columns', { timeout: 300_000 }, async () => {
     const state = createState()
     applyLedger(state)
-    applyArticleIdentityDdl(state)
     runD1(state, "INSERT INTO articles (post_ref) VALUES (7)")
     const db = createDatabase(state)
 
@@ -122,7 +118,6 @@ describe('lib/repositories/articles', () => {
   it('latestVersionAuthority returns the current version and null for versionless identities', { timeout: 300_000 }, async () => {
     const state = createState()
     applyLedger(state)
-    applyArticleIdentityDdl(state)
     runD1(state, "INSERT INTO articles (post_ref) VALUES (11)")
     runD1(state, "INSERT INTO articles (post_ref) VALUES (12)")
     const db = createDatabase(state)
@@ -151,8 +146,6 @@ describe('lib/repositories/articles', () => {
   it('latestAppliedFacts prefers the registry current address and falls back to the snapshot slug', { timeout: 300_000 }, async () => {
     const state = createState()
     applyLedger(state)
-    applyArticleIdentityDdl(state)
-    for (const statement of SLUG_ADDRESS_DDL_STATEMENTS) runD1(state, statement)
     runD1(state, "INSERT INTO articles (post_ref) VALUES (21)")
     runD1(state, "INSERT INTO articles (post_ref) VALUES (22)")
     const db = createDatabase(state)

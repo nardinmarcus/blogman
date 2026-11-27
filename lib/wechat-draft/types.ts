@@ -10,11 +10,26 @@
  */
 
 import type { ArticleIdentitySnapshot } from '@/lib/article-identity'
-import type { WechatDraftTaskStatus } from './ddl'
-import type { WechatDraftAttemptClassification, WechatDraftAttemptOutcome } from './ddl'
 
-export type { WechatDraftTaskStatus }
-export type { WechatDraftAttemptClassification, WechatDraftAttemptOutcome }
+export const WECHAT_DRAFT_TASK_STATUSES = ['draft', 'submitted', 'failed', 'superseded'] as const
+
+export type WechatDraftTaskStatus = (typeof WECHAT_DRAFT_TASK_STATUSES)[number]
+
+export const WECHAT_DRAFT_ATTEMPT_CLASSIFICATIONS = ['ok', 'retryable', 'needs-author', 'unknown'] as const
+
+export type WechatDraftAttemptClassification = (typeof WECHAT_DRAFT_ATTEMPT_CLASSIFICATIONS)[number]
+
+export const WECHAT_DRAFT_ATTEMPT_OUTCOMES = [
+  'submitted',
+  'retried',
+  'failed',
+  'unknown',
+  'reconciled',
+  'abandoned',
+  'cancelled',
+] as const
+
+export type WechatDraftAttemptOutcome = (typeof WECHAT_DRAFT_ATTEMPT_OUTCOMES)[number]
 
 /** A single derived WeChat draft task row (`wechat_draft_tasks`). */
 export interface WechatDraftTaskRow {

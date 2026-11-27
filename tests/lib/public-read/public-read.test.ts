@@ -32,8 +32,6 @@ beforeAll(async () => {
   cleanup.push(state)
   await bootstrapSlugAddressState(state)
   // The lifecycle ledger is a separate fact surface — ensure it too.
-  const { ensureArticleLifecycleTables } = await import('@/lib/article-lifecycle')
-  await ensureArticleLifecycleTables(createDatabase())
 }, 300_000)
 
 afterAll(async () => {

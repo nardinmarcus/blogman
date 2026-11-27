@@ -18,8 +18,7 @@ import {
   teardownState,
   createDraftArticle,
 } from '@/tests/lib/first-publish/helpers'
-import { ensureFirstPublishTables } from '@/lib/first-publish/ddl'
-import { ensureArticleLifecycleTables, unpublish } from '@/lib/article-lifecycle'
+import { unpublish } from '@/lib/article-lifecycle'
 import { listIdentityFacts } from '@/lib/repositories/articles'
 
 let state: string
@@ -30,8 +29,6 @@ beforeAll(async () => {
   cleanup.push(state)
   await bootstrapState(state)
   const db = createDatabase()
-  await ensureFirstPublishTables(db)
-  await ensureArticleLifecycleTables(db)
 }, 300_000)
 
 afterAll(async () => {

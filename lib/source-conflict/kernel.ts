@@ -51,7 +51,6 @@ import {
 } from '@/lib/source-sync'
 import type { SourceWriteProvider } from '@/lib/source-writeback'
 import type { MediaStore } from '@/lib/source-sync'
-import { CONFLICT_SAVE_OP_PREFIX, CONFLICT_WRITE_BACK_OP_PREFIX } from './ddl'
 import type {
   BlogmanView,
   ConflictBaseline,
@@ -70,6 +69,10 @@ import type {
   SourceView,
   WriteBackIntent,
 } from './types'
+
+/** Namespaced resolution operation ids (kept apart from the write-back intents). */
+export const CONFLICT_SAVE_OP_PREFIX = 'conflict-src:'
+export const CONFLICT_WRITE_BACK_OP_PREFIX = 'conflict-wb:'
 
 function unixNow(): number {
   return Math.floor(Date.now() / 1000)

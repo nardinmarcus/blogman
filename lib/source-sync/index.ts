@@ -23,7 +23,6 @@ export {
   sha256Hex,
   syncSourceAhead,
 } from './kernel'
-export { ensureSourceSyncTables, SOURCE_SYNC_DDL_STATEMENTS } from './ddl'
 export { MockMediaStore, MockSourceProvider } from './provider'
 export type {
   MediaStore,

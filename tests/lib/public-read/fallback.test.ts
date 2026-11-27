@@ -26,7 +26,7 @@ const cleanup: string[] = []
 beforeAll(async () => {
   state = mkdtempSync(join(tmpdir(), 'blogman-b69-public-read-degraded-'))
   cleanup.push(state)
-  await bootstrapState(state)
+  await bootstrapState(state, { ledgerOnly: true })
 }, 300_000)
 
 afterAll(async () => {

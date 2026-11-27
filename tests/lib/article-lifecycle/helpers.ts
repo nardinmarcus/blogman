@@ -15,11 +15,9 @@ import {
   createFormalArticle,
   freshOp,
 } from '@/tests/lib/publish-revision/helpers'
-import { ensureArticleLifecycleTables } from '@/lib/article-lifecycle/ddl'
 
 export { createDatabase, query, createFormalArticle, freshOp }
 
 export async function bootstrapLifecycleState(stateDir: string): Promise<void> {
   await bootstrapRevisionState(stateDir)
-  await ensureArticleLifecycleTables(createDatabase())
 }

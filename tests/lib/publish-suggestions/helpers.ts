@@ -2,8 +2,8 @@
  * B3-06 — publish-suggestion test helpers (issue #38).
  *
  * Reuses the shared in-process Miniflare bootstrap (one workerd instance per
- * suite, zero wrangler CLI spawns) and layers the suggestion fact tables on top
- * via the module's own idempotent DDL — exactly what the DDL channel does.
+ * suite, zero wrangler CLI spawns); the suggestion fact tables come from
+ * ledger migration 008.
  * A formally published article fixture is produced through the REAL first-publish
  * loop, and drafts through the write kernel, so suggestions can be anchored to
  * real formal facts + revisions.
@@ -11,10 +11,6 @@
 
 import { createHash } from 'node:crypto'
 import { bootstrapState, createDatabase, query } from '@/tests/lib/article-commands/helpers'
-import { ensureFirstPublishTables } from '@/lib/first-publish/ddl'
-import { ensurePublishRevisionTables } from '@/lib/publish-revision/ddl'
-import { ensureSlugAddressTables } from '@/lib/slug-address'
-import { ensurePublishSuggestionsTables } from '@/lib/publish-suggestions/ddl'
 import { create } from '@/lib/article-commands'
 import { confirmPublish, preparePublish } from '@/lib/first-publish'
 import type { ArticleCommandSnapshot } from '@/lib/article-commands/types'
@@ -24,10 +20,6 @@ export { bootstrapState, createDatabase, query }
 /** Boot the identity + first-publish + revision + slug-address + suggestions schema. */
 export async function bootstrapSuggestionState(stateDir: string): Promise<void> {
   await bootstrapState(stateDir)
-  await ensureFirstPublishTables(createDatabase())
-  await ensurePublishRevisionTables(createDatabase())
-  await ensureSlugAddressTables(createDatabase())
-  await ensurePublishSuggestionsTables(createDatabase())
 }
 
 /** Canonical sha256 of a body string. */

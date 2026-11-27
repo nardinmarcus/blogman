@@ -7,7 +7,6 @@
  * never bypass preparation.
  */
 
-export { ensureFirstPublishTables, FIRST_PUBLISH_DDL_STATEMENTS } from './ddl'
 export {
   cancelPrepare,
   confirmPublish,

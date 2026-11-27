@@ -58,6 +58,12 @@ function copyCanonicalMigrationSet(directory: string): void {
     '005_fix_posts_fts_sync.sql',
     '006_add_rollout_safety_controls.sql',
     '007_seed_rollout_executor.sql',
+    '008_canonical_article_schema.sql',
+    '008_canonical_article_schema.preflight.sql',
+    '009_retire_posts_projection.sql',
+    '009_retire_posts_projection.data.mjs',
+    '010_align_schedule_and_wechat_tables.sql',
+    '010_align_schedule_and_wechat_tables.preflight.sql',
   ]) {
     writeFileSync(
       join(directory, name),
@@ -276,13 +282,13 @@ describe('D1 migration runner', () => {
     expect(
       queryD1<{ name: string }>(
         stateDirectory,
-        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('posts', 'ai_image_provider_profiles', 'ai_image_actions', 'migration_ledger') ORDER BY name",
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('posts', 'articles', 'ai_image_provider_profiles', 'ai_image_actions', 'migration_ledger') ORDER BY name",
       ),
     ).toEqual([
       { name: 'ai_image_actions' },
       { name: 'ai_image_provider_profiles' },
+      { name: 'articles' },
       { name: 'migration_ledger' },
-      { name: 'posts' },
     ])
     expect(
       queryD1<{ number: number; candidate_id: string }>(
@@ -297,6 +303,9 @@ describe('D1 migration runner', () => {
       { number: 5, candidate_id: 'test-candidate-empty' },
       { number: 6, candidate_id: 'test-candidate-empty' },
       { number: 7, candidate_id: 'test-candidate-empty' },
+      { number: 8, candidate_id: 'test-candidate-empty' },
+      { number: 9, candidate_id: 'test-candidate-empty' },
+      { number: 10, candidate_id: 'test-candidate-empty' },
     ])
   })
 
@@ -333,6 +342,9 @@ VALUES ('kept', 'Kept', 'body', '<p>body</p>', 'draft');
       expect.objectContaining({ number: 5, action: 'apply' }),
       expect.objectContaining({ number: 6, action: 'apply' }),
       expect.objectContaining({ number: 7, action: 'apply' }),
+      expect.objectContaining({ number: 8, action: 'apply' }),
+      expect.objectContaining({ number: 9, action: 'apply' }),
+      expect.objectContaining({ number: 10, action: 'apply' }),
     ])
 
     const result = runMigrationCommand(
@@ -342,8 +354,12 @@ VALUES ('kept', 'Kept', 'body', '<p>body</p>', 'draft');
       'test-candidate-current',
     )
 
-    expect(result.stderr).toBe('')
-    expect(result.status).toBe(0)
+    // 009 refuses to retire a posts projection that still holds content
+    // without a canonical article identity; everything before it applies.
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain(
+      'posts still holds 1 row(s) without a canonical article identity; migrate them before retiring the projection',
+    )
     expect(
       queryD1(stateDirectory, "SELECT slug, title, status FROM posts WHERE slug = 'kept'"),
     ).toEqual([{ slug: 'kept', title: 'Kept', status: 'draft' }])
@@ -370,6 +386,7 @@ VALUES ('kept', 'Kept', 'body', '<p>body</p>', 'draft');
       { number: 5, candidate_id: 'test-candidate-current' },
       { number: 6, candidate_id: 'test-candidate-current' },
       { number: 7, candidate_id: 'test-candidate-current' },
+      { number: 8, candidate_id: 'test-candidate-current' },
     ])
   })
 
@@ -395,6 +412,9 @@ DROP INDEX idx_posts_slug;
       expect.objectContaining({ number: 5, action: 'apply' }),
       expect.objectContaining({ number: 6, action: 'apply' }),
       expect.objectContaining({ number: 7, action: 'apply' }),
+      expect.objectContaining({ number: 8, action: 'apply' }),
+      expect.objectContaining({ number: 9, action: 'apply' }),
+      expect.objectContaining({ number: 10, action: 'apply' }),
     ])
     expect(queryD1(stateDirectory, "SELECT COUNT(*) AS count FROM sqlite_schema WHERE name LIKE 'migration_ledger%'"))
       .toEqual([{ count: 0 }])
@@ -453,6 +473,9 @@ FROM ai_actions ORDER BY id
       { number: 5, name: '005_fix_posts_fts_sync' },
       { number: 6, name: '006_add_rollout_safety_controls' },
       { number: 7, name: '007_seed_rollout_executor' },
+      { number: 8, name: '008_canonical_article_schema' },
+      { number: 9, name: '009_retire_posts_projection' },
+      { number: 10, name: '010_align_schedule_and_wechat_tables' },
     ])
     expect(queryD1(stateDirectory, `
 SELECT action_key, label, description, prompt, temperature, sort_order,
@@ -479,7 +502,7 @@ FROM ai_actions ORDER BY id
     )
     expect(repeated.stderr).toBe('')
     expect(repeated.status).toBe(0)
-    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 7 }])
+    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 10 }])
   })
 
   it('accepts the repository historical text AI schema after old runtime ensure and preserves author references', { timeout: 300_000 }, () => {
@@ -519,6 +542,9 @@ FROM ai_actions WHERE action_key = 'improve'
       { number: 5, name: '005_fix_posts_fts_sync' },
       { number: 6, name: '006_add_rollout_safety_controls' },
       { number: 7, name: '007_seed_rollout_executor' },
+      { number: 8, name: '008_canonical_article_schema' },
+      { number: 9, name: '009_retire_posts_projection' },
+      { number: 10, name: '010_align_schedule_and_wechat_tables' },
     ])
     expect(queryD1(stateDirectory, 'SELECT * FROM ai_provider_profiles ORDER BY id')).toEqual(profilesBefore)
     expect(queryD1(stateDirectory, `
@@ -539,7 +565,7 @@ FROM ai_actions WHERE action_key = 'improve'
     )
     expect(repeated.stderr).toBe('')
     expect(repeated.status).toBe(0)
-    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 7 }])
+    expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM migration_ledger')).toEqual([{ count: 10 }])
     expect(queryD1(stateDirectory, 'SELECT * FROM ai_provider_profiles ORDER BY id')).toEqual(profilesBefore)
   })
 
@@ -822,6 +848,9 @@ BEGIN SELECT 1; END;
       { number: 5, candidate_id: 'mutable-data-baseline' },
       { number: 6, candidate_id: 'mutable-data-baseline' },
       { number: 7, candidate_id: 'mutable-data-baseline' },
+      { number: 8, candidate_id: 'mutable-data-baseline' },
+      { number: 9, candidate_id: 'mutable-data-baseline' },
+      { number: 10, candidate_id: 'mutable-data-baseline' },
     ])
   })
 
@@ -959,6 +988,9 @@ ORDER BY action_key
       { number: 5, name: '005_fix_posts_fts_sync' },
       { number: 6, name: '006_add_rollout_safety_controls' },
       { number: 7, name: '007_seed_rollout_executor' },
+      { number: 8, name: '008_canonical_article_schema' },
+      { number: 9, name: '009_retire_posts_projection' },
+      { number: 10, name: '010_align_schedule_and_wechat_tables' },
     ])
   })
 
@@ -1164,6 +1196,9 @@ ORDER BY key
       { number: 5, name: '005_fix_posts_fts_sync' },
       { number: 6, name: '006_add_rollout_safety_controls' },
       { number: 7, name: '007_seed_rollout_executor' },
+      { number: 8, name: '008_canonical_article_schema' },
+      { number: 9, name: '009_retire_posts_projection' },
+      { number: 10, name: '010_align_schedule_and_wechat_tables' },
     ])
   })
 
@@ -1317,6 +1352,9 @@ WHERE key = 'ai_provider_config';
       { number: 5 },
       { number: 6 },
       { number: 7 },
+      { number: 8 },
+      { number: 9 },
+      { number: 10 },
     ])
     expect(queryD1(stateDirectory, 'SELECT COUNT(*) AS count FROM ai_provider_profiles')).toEqual([{ count: 1 }])
 
@@ -1614,6 +1652,9 @@ FROM ai_post_generators WHERE target_key = 'summary'
         { number: 5, name: '005_fix_posts_fts_sync' },
         { number: 6, name: '006_add_rollout_safety_controls' },
         { number: 7, name: '007_seed_rollout_executor' },
+        { number: 8, name: '008_canonical_article_schema' },
+        { number: 9, name: '009_retire_posts_projection' },
+        { number: 10, name: '010_align_schedule_and_wechat_tables' },
       ],
     })
     expect(status.status).toBe(0)
@@ -1813,6 +1854,9 @@ FROM migration_ledger WHERE number = 1;
       { number: 5, candidate_id: 'guard-original' },
       { number: 6, candidate_id: 'guard-original' },
       { number: 7, candidate_id: 'guard-original' },
+      { number: 8, candidate_id: 'guard-original' },
+      { number: 9, candidate_id: 'guard-original' },
+      { number: 10, candidate_id: 'guard-original' },
     ])
   })
 

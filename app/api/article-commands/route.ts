@@ -18,7 +18,7 @@
 import type { NextRequest } from 'next/server'
 import type { ArticleCommandProjections, ArticleCommandSnapshot } from '@/lib/article-commands'
 import { create, publishTemp, save, setPinned, setHidden, setPassword, setCategory, softDelete, restore } from '@/lib/article-commands'
-import { ensureArticleLifecycleTables, relive, unpublish } from '@/lib/article-lifecycle'
+import { relive, unpublish } from '@/lib/article-lifecycle'
 import {
   ensureAuthenticatedRequest,
   getRouteContextWithDb,
@@ -177,16 +177,6 @@ async function dispatchArticleLevelAction(
 
   if (resolvedArticleId !== articleId) {
     return jsonError(`${action}: articleId 与 slug 不匹配 (期望 ${resolvedArticleId})`, 409)
-  }
-
-  // B3-05 (issue #37): lifecycle commands write the immutable lifecycle ledger.
-  // Ensure the table idempotently (no-op when already present; never drops/alters).
-  if (action === 'unpublish' || action === 'relive') {
-    try {
-      await ensureArticleLifecycleTables(db)
-    } catch {
-      // A ledger-only DB without DDL channel access fails closed on the write.
-    }
   }
 
   const input = { articleId, expectedVersion, operationId }

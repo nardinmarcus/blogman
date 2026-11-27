@@ -28,7 +28,6 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import type { ArticleCommandSnapshot } from '@/lib/article-commands'
 import { create } from '@/lib/article-commands'
 import { aiProcessPostOperationId, runBackgroundJob } from '@/lib/background-jobs'
-import { ensurePublishSuggestionsTables } from '@/lib/publish-suggestions/ddl'
 import {
   bootstrapState,
   createDatabase,
@@ -70,7 +69,6 @@ beforeAll(async () => {
   state = mkdtempSync(join(tmpdir(), 'blogman-b207-bg-'))
   cleanup.push(state)
   await bootstrapState(state)
-  await ensurePublishSuggestionsTables(createDatabase())
 }, 300_000)
 
 afterAll(async () => {
