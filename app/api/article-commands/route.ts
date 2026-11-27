@@ -28,7 +28,6 @@ import {
   type RouteDbEnv,
 } from '@/lib/server/route-helpers'
 import { migrationRequiredResponse } from '@/lib/database-errors'
-import { invalidatePublicContentCache } from '@/lib/cache'
 import { enqueueBackgroundJob, aiProcessPostOperationId } from '@/lib/background-jobs'
 import { normalizePostSlug } from '@/lib/post-utils'
 import { nanoid } from 'nanoid'
@@ -81,7 +80,6 @@ function autoSlug(): string {
 function afterCommit(env: RouteEnv, ctx?: RouteCtx): ArticleCommandProjections {
   return {
     afterCommit: async (result) => {
-      await invalidatePublicContentCache(env)
       if (result.postRef) {
         await enqueueBackgroundJob(
           env,

@@ -12,14 +12,7 @@ export {
   type StatsRow,
 } from '@/lib/repositories/types'
 export { mapPostWithTags, normalizePostStatus, parsePostTags } from '@/lib/repositories/post-mappers'
-export {
-  getPostBySlug,
-  getPosts,
-  getPostsByCategory,
-  getPostsCount,
-  getPostsCountByCategory,
-  getStats,
-} from '@/lib/repositories/posts'
+export { getPostBySlug, getPosts } from '@/lib/repositories/posts'
 export { searchPosts } from '@/lib/repositories/search'
 export {
   createCategory,

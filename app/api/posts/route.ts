@@ -36,7 +36,6 @@ import {
 } from '@/lib/server/route-helpers'
 import { latestAppliedFacts } from '@/lib/repositories/articles'
 import { migrationRequiredResponse } from '@/lib/database-errors'
-import { invalidatePublicContentCache } from '@/lib/cache'
 import { enqueueBackgroundJob } from '@/lib/background-jobs'
 
 type RouteEnv = RouteDbEnv
@@ -45,7 +44,6 @@ type RouteEnv = RouteDbEnv
 function afterCommit(env: RouteEnv, ctx?: { waitUntil?: (promise: Promise<unknown>) => void }): ArticleCommandProjections {
   return {
     afterCommit: async (result) => {
-      await invalidatePublicContentCache(env)
       if (result.postRef) {
         await enqueueBackgroundJob(
           env,

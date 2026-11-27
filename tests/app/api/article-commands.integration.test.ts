@@ -23,7 +23,6 @@ const mocks = vi.hoisted(() => ({
   getRouteContextWithDb: vi.fn(),
   ensureAuthenticatedRequest: vi.fn(),
   parseJsonBody: vi.fn(),
-  invalidatePublicContentCache: vi.fn(),
   enqueueBackgroundJob: vi.fn(),
 }))
 
@@ -35,7 +34,6 @@ vi.mock('@/lib/server/route-helpers', () => ({
   parseJsonBody: mocks.parseJsonBody,
 }))
 
-vi.mock('@/lib/cache', () => ({ invalidatePublicContentCache: mocks.invalidatePublicContentCache }))
 vi.mock('@/lib/background-jobs', () => ({
   enqueueBackgroundJob: mocks.enqueueBackgroundJob,
   aiProcessPostOperationId: (postRef: number, version: number) =>
@@ -67,7 +65,6 @@ beforeEach(() => {
     ctx: { waitUntil: vi.fn() },
   })
   mocks.ensureAuthenticatedRequest.mockResolvedValue(null)
-  mocks.invalidatePublicContentCache.mockResolvedValue(undefined)
   mocks.enqueueBackgroundJob.mockResolvedValue(undefined)
 })
 
@@ -211,9 +208,9 @@ describe('app/api/article-commands — real kernel + D1', { timeout: 600_000 }, 
     const articleId = created.articleId
     expect(created.version).toBe(1)
 
-    // The out-of-transaction cache invalidation blows up — but the version
+    // The out-of-transaction background enqueue blows up — but the version
     // fact must still land: core result is applied and the failure is recorded.
-    mocks.invalidatePublicContentCache.mockRejectedValueOnce(new Error('kv unavailable'))
+    mocks.enqueueBackgroundJob.mockRejectedValueOnce(new Error('queue unavailable'))
     mocks.parseJsonBody.mockResolvedValue({
       action: 'save',
       articleId,
@@ -228,7 +225,7 @@ describe('app/api/article-commands — real kernel + D1', { timeout: 600_000 }, 
     }
     expect(applied.outcome).toBe('applied')
     expect(applied.version).toBe(2)
-    expect(applied.projectionFailures).toEqual(expect.arrayContaining([expect.stringContaining('kv unavailable')]))
+    expect(applied.projectionFailures).toEqual(expect.arrayContaining([expect.stringContaining('queue unavailable')]))
 
     // D1 still holds exactly [1, 2] — the failed projection added nothing.
     expect((await versions(articleId)).map((r) => r.version)).toEqual([1, 2])

@@ -24,41 +24,9 @@ vi.mock('@/lib/article-commands', () => ({
 import {
   coerceVersionedSnapshot,
   dispatchExternalWrite,
-  isExternalWriteAuthoritySwitched,
   isVersionedProtocol,
-  readLegacyTelemetry,
-  recordLegacyWrite,
   resolveArticleBySlug,
-  resolveClientType,
 } from '@/lib/external-write-api'
-
-/* In-memory fake D1 for telemetry / authority-gate reads. */
-function fakeDb(initial: Record<string, string> = {}) {
-  const rows = new Map(Object.entries(initial))
-  return {
-    rows,
-    db: {
-      prepare: () => {
-        const stmt = {
-          bind: (...values: unknown[]) => ({
-            first: async () => {
-              const hit = rows.get(String(values[0]))
-              return hit === undefined ? null : { value: hit }
-            },
-            run: async () => {
-              rows.set(String(values[0]), String(values[1] ?? ''))
-              return { meta: { last_row_id: 1 } }
-            },
-          }),
-          first: async () => null,
-          run: async () => ({ meta: { last_row_id: 1 } }),
-          all: async () => ({ results: [] }),
-        }
-        return stmt
-      },
-    } as never,
-  }
-}
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -72,54 +40,6 @@ describe('protocol negotiation', () => {
     expect(isVersionedProtocol({ protocol: 'v1' })).toBe(true)
     expect(isVersionedProtocol({ protocol: 'v2' })).toBe(false)
     expect(isVersionedProtocol({})).toBe(false)
-  })
-
-  it('classifies client types from header, then user-agent', () => {
-    expect(resolveClientType({ headers: { get: () => 'obsidian' } })).toBe('obsidian')
-    expect(resolveClientType({ headers: { get: (n: string) => (n === 'user-agent' ? 'Obsidian/x.y' : null) } })).toBe('obsidian')
-    expect(resolveClientType({ headers: { get: (n: string) => (n === 'user-agent' ? 'Mozilla/5.0 Chrome/120' : null) } })).toBe('chrome')
-    expect(resolveClientType({ headers: { get: (n: string) => (n === 'user-agent' ? 'curl/8.0' : null) } })).toBe('cli')
-    expect(resolveClientType({ headers: { get: (n: string) => (n === 'user-agent' ? 'node-fetch/2' : null) } })).toBe('agent')
-    expect(resolveClientType({ headers: { get: () => null } })).toBe('unknown')
-    expect(resolveClientType({})).toBe('unknown')
-  })
-})
-
-describe('authority gate', () => {
-  it('is off unless the versioned value is stored', async () => {
-    expect(await isExternalWriteAuthoritySwitched(fakeDb({}).db)).toBe(false)
-    expect(await isExternalWriteAuthoritySwitched(fakeDb({ external_write_authority: 'other' }).db)).toBe(false)
-    expect(await isExternalWriteAuthoritySwitched(fakeDb({ external_write_authority: 'versioned' }).db)).toBe(true)
-  })
-})
-
-describe('legacy telemetry (client type / operation / time only)', () => {
-  it('records and accumulates daily per-client operation counters; never content', async () => {
-    const { db, rows } = fakeDb({})
-    await recordLegacyWrite(db, { clientType: 'obsidian', operation: 'create', at: 1700000000 })
-    await recordLegacyWrite(db, { clientType: 'obsidian', operation: 'create', at: 1700000000 })
-    await recordLegacyWrite(db, { clientType: 'chrome', operation: 'create', at: 1700000060 })
-    await recordLegacyWrite(db, { clientType: 'obsidian', operation: 'update', at: 1700000120 })
-
-    const telemetry = await readLegacyTelemetry(db)
-    const day = '2023-11-14' // 2023-11-14T21:34:00Z / 1700000000
-    expect(telemetry.total).toBe(4)
-    expect(telemetry.daily[day].obsidian.create).toBe(2)
-    expect(telemetry.daily[day].obsidian.update).toBe(1)
-    expect(telemetry.daily[day].chrome.create).toBe(1)
-
-    // The stored blob is strictly structured fields — no freeform content.
-    const raw = rows.get('legacy_external_write_telemetry') as string
-    expect(raw).toContain('"obsidian"')
-    expect(raw).not.toContain('标题')
-    expect(raw).not.toContain('正文')
-  })
-
-  it('recovers from a corrupted blob without losing the ability to record', async () => {
-    const { db } = fakeDb({ legacy_external_write_telemetry: '{not-json' })
-    await recordLegacyWrite(db, { clientType: 'agent', operation: 'create', at: 1700000000 })
-    const telemetry = await readLegacyTelemetry(db)
-    expect(telemetry.total).toBe(1)
   })
 })
 

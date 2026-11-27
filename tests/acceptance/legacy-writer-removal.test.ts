@@ -97,14 +97,12 @@ describe('L1 acceptance — client matrix routes through versioned commands', ()
   }
 
   it('external-write public API no longer exports removed legacy adapters', () => {
-    for (const adapter of ['coerceLegacySnapshot', 'createLegacyDraft', 'updateLegacyDraft']) {
+    for (const adapter of ['coerceLegacySnapshot', 'createLegacyDraft', 'updateLegacyDraft', 'recordLegacyWrite', 'readLegacyTelemetry']) {
       expect(adapter in externalWriteApi).toBe(false)
     }
   })
 
-  it('external-write public API keeps privacy-safe legacy telemetry types', () => {
-    expect(typeof externalWriteApi.recordLegacyWrite).toBe('function')
-    expect(typeof externalWriteApi.readLegacyTelemetry).toBe('function')
+  it('external-write public API keeps the upgrade signal and protocol check', () => {
     expect(typeof externalWriteApi.upgradeSignal).toBe('function')
     expect(typeof externalWriteApi.isVersionedProtocol).toBe('function')
   })

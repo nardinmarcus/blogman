@@ -1,6 +1,6 @@
 # 部署指南
 
-Qiaomu Blog Open Source 的正式部署方式是 `OpenNext + Cloudflare Workers`。
+Blogman 的正式部署方式是 `OpenNext + Cloudflare Workers`。
 
 ## 首次部署
 
@@ -32,13 +32,7 @@ npx wrangler login
 npm run cf:init -- --site-url=https://your-domain.com
 ```
 
-如果还要启用公共缓存 KV：
-
-```bash
-npm run cf:init -- --site-url=https://your-domain.com --with-kv
-```
-
-这一步会生成本地的 `wrangler.local.toml`，自动写入真实 D1 / R2 / KV 绑定，并通过增量迁移账本初始化 D1。已有 current schema 会先验证再登记 baseline，不会重放整份 schema 或忽略错误。
+这一步会生成本地的 `wrangler.local.toml`，自动写入真实 D1 / R2 绑定，并通过增量迁移账本初始化 D1。已有 current schema 会先验证再登记 baseline，不会重放整份 schema 或忽略错误。
 
 ### 4. 设置 secrets
 

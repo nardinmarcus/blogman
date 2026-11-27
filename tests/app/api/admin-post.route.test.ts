@@ -5,7 +5,6 @@ const mocks = vi.hoisted(() => ({
   updatePost: vi.fn(),
   deletePost: vi.fn(),
   isAdminAuthenticated: vi.fn(),
-  invalidatePublicContentCache: vi.fn(),
   enqueueBackgroundJob: vi.fn(),
   getRouteContextWithDb: vi.fn(),
   parseJsonBody: vi.fn(),
@@ -61,10 +60,6 @@ vi.mock('@/lib/admin-auth', () => ({
   isAdminAuthenticated: mocks.isAdminAuthenticated,
 }))
 
-vi.mock('@/lib/cache', () => ({
-  invalidatePublicContentCache: mocks.invalidatePublicContentCache,
-}))
-
 vi.mock('@/lib/background-jobs', () => ({
   enqueueBackgroundJob: mocks.enqueueBackgroundJob,
 }))
@@ -84,13 +79,12 @@ describe('/api/admin/posts/[slug] route', () => {
     mocks.isAdminAuthenticated.mockResolvedValue(true)
     mocks.getRouteContextWithDb.mockResolvedValue({
       ok: true,
-      env: { CACHE: {} },
+      env: {},
       db: fakeDb(),
       ctx: { waitUntil: vi.fn() },
     })
     mocks.getPostBySlug.mockResolvedValue({ id: 7, slug: 'old-slug' })
     mocks.latestVersionAuthority.mockResolvedValue(2)
-    mocks.invalidatePublicContentCache.mockRejectedValue(new Error('cache down'))
   })
 
   const request = {
@@ -132,8 +126,6 @@ describe('/api/admin/posts/[slug] route', () => {
     expect(input.articleId).toBe(5)
     expect(input.expectedVersion).toBe(2)
     expect(String(input.operationId)).toContain('admin-put:5')
-    // Cache invalidation failures are tolerated (best-effort projection).
-    expect(mocks.invalidatePublicContentCache).toHaveBeenCalled()
   })
 
   it('maps status=deleted onto softDelete and status=draft onto restore', async () => {
@@ -163,7 +155,7 @@ describe('/api/admin/posts/[slug] route', () => {
     mocks.latestVersionAuthority.mockResolvedValue(null)
     mocks.getRouteContextWithDb.mockResolvedValue({
       ok: true,
-      env: { CACHE: {} },
+      env: {},
       db: fakeDb(),
       ctx: { waitUntil: vi.fn() },
     })

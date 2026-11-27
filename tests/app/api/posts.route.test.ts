@@ -14,7 +14,6 @@ const mocks = vi.hoisted(() => ({
   ensureAuthenticatedRequest: vi.fn(),
   getRouteContextWithDb: vi.fn(),
   parseJsonBody: vi.fn(),
-  invalidatePublicContentCache: vi.fn(),
   enqueueBackgroundJob: vi.fn(),
   isVersionedProtocol: vi.fn(),
   dispatchExternalWrite: vi.fn(),
@@ -29,7 +28,6 @@ vi.mock('@/lib/server/route-helpers', () => ({
   parseJsonBody: mocks.parseJsonBody,
 }))
 
-vi.mock('@/lib/cache', () => ({ invalidatePublicContentCache: mocks.invalidatePublicContentCache }))
 vi.mock('@/lib/background-jobs', () => ({ enqueueBackgroundJob: mocks.enqueueBackgroundJob }))
 
 vi.mock('@/lib/external-write-api', async (importOriginal) => {
@@ -82,7 +80,6 @@ beforeEach(() => {
     ctx: { waitUntil: vi.fn() },
   })
   mocks.ensureAuthenticatedRequest.mockResolvedValue(null)
-  mocks.invalidatePublicContentCache.mockResolvedValue(undefined)
   mocks.enqueueBackgroundJob.mockResolvedValue(undefined)
   mocks.isVersionedProtocol.mockReturnValue(false)
   mocks.dispatchExternalWrite.mockResolvedValue(CREATED)

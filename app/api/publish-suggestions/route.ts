@@ -25,25 +25,16 @@ import {
   jsonError,
   jsonOk,
   parseJsonBody,
-  type RouteDbEnv,
 } from '@/lib/server/route-helpers'
 import { migrationRequiredResponse } from '@/lib/database-errors'
-import { invalidatePublicContentCache } from '@/lib/cache'
 import { applySuggestion, ignoreSuggestion, readSuggestionState, revokeSuggestion } from '@/lib/publish-suggestions'
 
-type RouteEnv = RouteDbEnv
-
-function afterCommit(env: RouteEnv) {
-  return async () => {
-    await invalidatePublicContentCache(env)
-  }
-}
 
 export async function POST(req: NextRequest) {
   try {
     const route = await getRouteContextWithDb('数据库未配置')
     if (!route.ok) return route.response
-    const { env, db } = route
+    const { db } = route
 
     const authError = await ensureAuthenticatedRequest(req, db)
     if (authError) return authError
@@ -61,7 +52,6 @@ export async function POST(req: NextRequest) {
         suggestionId,
         actor,
         operationId,
-        projections: { afterCommit: afterCommit(env) },
       })
       return jsonOk(result)
     }
@@ -74,7 +64,6 @@ export async function POST(req: NextRequest) {
         suggestionId,
         actor,
         operationId,
-        projections: { afterCommit: afterCommit(env) },
       })
       return jsonOk(result)
     }

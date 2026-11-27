@@ -24,10 +24,8 @@ import {
   jsonError,
   jsonOk,
   parseJsonBody,
-  type RouteDbEnv,
 } from '@/lib/server/route-helpers'
 import { migrationRequiredResponse } from '@/lib/database-errors'
-import { invalidatePublicContentCache } from '@/lib/cache'
 import {
   cancelPrepare,
   confirmPublish,
@@ -39,16 +37,6 @@ import { getSiteUrl } from '@/lib/site-config'
 import { normalizePostSlug } from '@/lib/post-utils'
 import { getPostBySlug } from '@/lib/db'
 
-type RouteEnv = RouteDbEnv
-
-/** Best-effort external I/O after a committed confirm (cache invalidation). */
-function afterConfirm(env: RouteEnv) {
-  return async (_outbox: { event_id: string; article_id: number; payload: string }) => {
-    await invalidatePublicContentCache(env)
-    // The independent blog verifier reads the outbox row and posts the receipt
-    // back through POST /api/first-publish (action=receipt).
-  }
-}
 
 export async function POST(req: NextRequest) {
   try {
@@ -116,7 +104,6 @@ export async function POST(req: NextRequest) {
         expectedVersion,
         actor,
         siteUrl: (env.NEXT_PUBLIC_SITE_URL?.trim() || getSiteUrl()).replace(/\/+$/, ''),
-        afterCommit: afterConfirm(env),
       })
       return jsonOk(result)
     }
