@@ -12,6 +12,10 @@ Use the default Matt Pocock triage vocabulary. See `docs/agents/triage-labels.md
 
 Use a single-context `CONTEXT.md` and repository-level `docs/adr/`. See `docs/agents/domain.md`.
 
+### Local verification
+
+Run `WRANGLER_SEND_METRICS=false npm run verify:quick` locally. With Wrangler telemetry on, every Wrangler CLI call costs about 3–4 s instead of under 1 s, and the real-D1 suites (`tests/integration/request-*.test.ts`, `tests/scripts/rollout-safety.test.ts`, and others) hit their per-test timeouts.
+
 <!-- BEGIN:nextjs-agent-rules -->
 
 # This is NOT the Next.js you know

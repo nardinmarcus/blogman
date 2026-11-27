@@ -24,8 +24,11 @@ export interface CreatedArticle {
 }
 
 /** Boot the shared in-process D1 with the full canonical schema. */
-export async function bootstrapScheduledState(stateDir: string): Promise<void> {
-  await bootstrapState(stateDir)
+export async function bootstrapScheduledState(
+  stateDir: string,
+  options: Parameters<typeof bootstrapState>[1] = {},
+): Promise<void> {
+  await bootstrapState(stateDir, options)
 }
 
 /** Canonical sha256 of a body string. */
