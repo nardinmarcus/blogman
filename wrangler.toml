@@ -23,6 +23,11 @@ service = "blogman"
 # Modern Wrangler and Deploy buttons can auto-provision these resources.
 # `npm run cf:init` will replace them in `wrangler.local.toml` with concrete remote bindings.
 
+# Per-minute scheduled-publish scan (worker.ts `scheduled`). Set the secret or
+# var SCHEDULED_PUBLISH_DISABLED=1 to pause the executor without losing facts.
+[triggers]
+crons = ["* * * * *"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "blogman-db"

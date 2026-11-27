@@ -20,8 +20,11 @@
 import type { Database } from '@/lib/repositories/schema'
 import { confirmPublish, preparePublish } from '@/lib/first-publish'
 import { promoteRevision } from '@/lib/publish-revision'
+import { schedulePublish } from '@/lib/scheduled-publish'
+import { SCHEDULE_DISPLAY_TIMEZONE } from '@/lib/mobile-schedule/model'
 import { getMobilePublishConfirmation, readReceiptSurfaces } from './view'
 import {
+  failingConfirmBlockers,
   firstIntentId,
   firstPrepareId,
   type MobilePublishPath,
@@ -262,4 +265,86 @@ async function confirmRevisionPromote(
     publishedAt: now,
     receipt,
   }
+}
+
+export interface MobileScheduleInput {
+  articleId: number
+  /** The EXACT version the confirmation page displayed; drift aborts. */
+  expectedVersion: number
+  /** Future epoch second; displayed and entered in Asia/Shanghai. */
+  scheduledAt: number
+  actor: string
+  now?: number
+}
+
+export type MobileScheduleResult =
+  | { outcome: 'scheduled' | 'replayed'; scheduleId: string; version: number; scheduledAt: number; timezone: string }
+  | { outcome: 'conflict'; reason: string; serverVersion: number | null }
+  | { outcome: 'blocked'; reason: string; failures: string[] }
+  | { outcome: 'not-found'; articleId: number }
+  | { outcome: 'invalid'; reason: string }
+
+/** Deterministic schedule id: the same (article, version, time) replays. */
+export function mobileScheduleId(articleId: number, version: number, scheduledAt: number): string {
+  return `sched-${articleId}-v${version}-${scheduledAt}`
+}
+
+/**
+ * Schedule the EXACT confirmed version for a first publish through the shared
+ * #40 kernel. The per-minute Cron scan fires it; the schedule is then managed
+ * on /admin/schedule/[scheduleId] through the #41 control commands.
+ */
+export async function scheduleMobilePublish(
+  db: Database,
+  input: MobileScheduleInput,
+): Promise<MobileScheduleResult> {
+  const articleId = input.articleId
+  if (!Number.isInteger(articleId) || articleId <= 0) {
+    return { outcome: 'invalid', reason: 'articleId is required' }
+  }
+  if (!Number.isInteger(input.expectedVersion) || input.expectedVersion <= 0) {
+    return { outcome: 'invalid', reason: 'expectedVersion is required' }
+  }
+
+  const conf = await getMobilePublishConfirmation(db, articleId)
+  if (!conf) return { outcome: 'not-found', articleId }
+  if (conf.path !== 'first') {
+    return { outcome: 'blocked', reason: '只有尚未发布的文章可以定时发布', failures: ['path'] }
+  }
+  if (input.expectedVersion !== conf.exactVersion) {
+    return { outcome: 'conflict', reason: '确认期间文章版本已变化，请刷新后重试', serverVersion: conf.exactVersion }
+  }
+  if (!conf.canConfirm) {
+    return { outcome: 'blocked', reason: '发布准备未通过', failures: failingConfirmBlockers(conf.blockers).map(String) }
+  }
+
+  const version = conf.exactVersion
+  const scheduleId = mobileScheduleId(articleId, version, input.scheduledAt)
+  const result = await schedulePublish(db, {
+    scheduleId,
+    articleId,
+    version,
+    scheduledAt: input.scheduledAt,
+    timezone: SCHEDULE_DISPLAY_TIMEZONE,
+    actor: input.actor,
+    now: input.now,
+  })
+  if (result.outcome === 'scheduled' || result.outcome === 'replayed') {
+    return {
+      outcome: result.outcome,
+      scheduleId,
+      version,
+      scheduledAt: result.scheduledAt,
+      timezone: result.timezone,
+    }
+  }
+  if (result.outcome === 'not-found') return { outcome: 'not-found', articleId }
+  if (result.outcome === 'invalid') return { outcome: 'invalid', reason: result.reason }
+  if (result.reason === 'duplicate-version') {
+    return { outcome: 'conflict', reason: '这个版本已经有待执行的排期', serverVersion: version }
+  }
+  if (result.reason === 'already-published') {
+    return { outcome: 'blocked', reason: '文章已正式发布', failures: ['path'] }
+  }
+  return { outcome: 'conflict', reason: '排期与已有记录不一致', serverVersion: version }
 }

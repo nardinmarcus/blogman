@@ -8,7 +8,15 @@
  * drives the client component with no browser/crypto dependency.
  */
 
-export { confirmMobilePublish, type MobileConfirmInput, type MobileConfirmResult } from './kernel'
+export {
+  confirmMobilePublish,
+  mobileScheduleId,
+  scheduleMobilePublish,
+  type MobileConfirmInput,
+  type MobileConfirmResult,
+  type MobileScheduleInput,
+  type MobileScheduleResult,
+} from './kernel'
 export {
   getMobilePublishConfirmation,
   readReceiptSurfaces,
