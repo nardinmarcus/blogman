@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { initOpenNextCloudflareForDev } from "@opennextjs/cloudflare";
 import type { NextConfig } from "next";
@@ -8,14 +7,6 @@ if (process.env.NODE_ENV === "development") {
 }
 
 const nextConfig: NextConfig = {
-  generateBuildId: async () => {
-    try {
-      return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    } catch {
-      return null;
-    }
-  },
-
   // 图片优化（Cloudflare 有自己的优化）
   images: {
     unoptimized: true,
@@ -23,12 +14,6 @@ const nextConfig: NextConfig = {
 
   turbopack: {
     root: resolve(process.cwd()),
-  },
-
-  webpack: (config) => {
-    config.optimization ??= {};
-    config.optimization.moduleIds = "named";
-    return config;
   },
 
   // 移除客户端环境变量暴露（安全风险）
