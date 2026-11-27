@@ -27,8 +27,11 @@ export interface CreatedArticle {
 }
 
 /** Boot the identity + first-publish + scheduled schema (DDL runs twice: idempotency). */
-export async function bootstrapScheduledState(stateDir: string): Promise<void> {
-  await bootstrapState(stateDir)
+export async function bootstrapScheduledState(
+  stateDir: string,
+  options: Parameters<typeof bootstrapState>[1] = {},
+): Promise<void> {
+  await bootstrapState(stateDir, options)
   await ensureFirstPublishTables(createDatabase())
   await ensureScheduledPublishTables(createDatabase())
   await ensureScheduledPublishTables(createDatabase())
