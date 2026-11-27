@@ -5,7 +5,6 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts'],
-    setupFiles: ['tests/setup/issue-23-authority-isolation.ts'],
     clearMocks: true,
   },
   resolve: {

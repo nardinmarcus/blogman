@@ -38,17 +38,15 @@ node scripts/migrations.mjs apply \
 3. 只做 additive 变更，并让同一文件内的全部语句构成一个可原子提交的 migration。
 4. migration 一旦在任何环境登记成功，禁止修改、改号、删除或重排；修复必须新增前向 migration。
 
-Migration 可以带 checksum companion，以及一个仅用于冻结远程证明的 rollout companion：
+Migration 可以带 checksum companion，以及一个仅用于 remote baseline 验证的 companion：
 
 - `NNN_name.preflight.sql`：在该 migration 的任何写入前只读验证可兼容的已有 schema 形状；返回任意 `issue` 行都会 fail-closed。
 - `NNN_name.data.mjs`：为必须使用运行时 secret 的一次性数据迁移生成 SQL。模块每次只能执行一条 `SELECT` / `WITH` 查询，生成的 SQL 与主 migration 及账本登记在同一批次提交。
 - `NNN_name.remote.baseline.sql`：只允许 runner 内置合同按 migration 编号/名称、完整 baseline SHA、原 statement ordinal/SHA 和 replacement SHA 精确绑定。它只在 remote baseline 验证中用多个较小的只读 query 替换一个或多个已确认受 D1 remote 限制的 statement；任一身份漂移都在首次 Wrangler 调用前停止，且不得回退到原 statement。
 
-主 SQL、baseline、preflight 与 data sidecar 都参与账本 checksum；已应用后任一文件发生变化都会被 `verify` 拒绝。`remote.baseline.sql` 不改变历史 ledger checksum，但会进入 rollout migration-set、candidate commit、build 和审批包身份。Runner 在加载 migration 时绑定全部已校验 companion 原始字节，后续不会按路径重新读取。普通 sidecar 仍逐条通过 SQLite `EXPLAIN` 拒绝持久写 opcode；唯一例外是 Issue #23 批准的 migration `001` baseline statements `1` 与 `3` remote replacement，原 baseline 字节、本地验证路径和其他 statement 的 opcode proof 均保持不变。两个 replacement group 的六条 query 也各自经过普通 SELECT/WITH 与 `EXPLAIN` gate，并分别要求执行前后 schema fingerprint 完全一致。直接 `PRAGMA`、写型 CTE 和多语句 data query 都会在主 migration 批次前 fail-closed。条件加列由主 SQL 中声明的受限 directive 驱动，runner 先检查真实表/列形状，再把需要的 additive `ALTER TABLE ... ADD COLUMN` 注入同一个原子批次；不得用失败重试或吞错判断 schema。
+主 SQL、baseline、preflight 与 data sidecar 都参与账本 checksum；已应用后任一文件发生变化都会被 `verify` 拒绝。`remote.baseline.sql` 不改变历史 ledger checksum。Runner 在加载 migration 时绑定全部已校验 companion 原始字节，后续不会按路径重新读取。普通 sidecar 仍逐条通过 SQLite `EXPLAIN` 拒绝持久写 opcode；唯一例外是 migration `001` baseline statements `1` 与 `3` remote replacement，原 baseline 字节、本地验证路径和其他 statement 的 opcode proof 均保持不变。两个 replacement group 的六条 query 也各自经过普通 SELECT/WITH 与 `EXPLAIN` gate，并分别要求执行前后 schema fingerprint 完全一致。直接 `PRAGMA`、写型 CTE 和多语句 data query 都会在主 migration 批次前 fail-closed。条件加列由主 SQL 中声明的受限 directive 驱动，runner 先检查真实表/列形状，再把需要的 additive `ALTER TABLE ... ADD COLUMN` 注入同一个原子批次；不得用失败重试或吞错判断 schema。
 
 `db/migrations` 保存引入账本前的历史补丁，不是当前 runner 的输入。`001_initial_schema.sql` 是新空库的 canonical baseline；其中的初始 seed 只随空库 migration 执行一次。已有 current schema 只有在 `001_initial_schema.baseline.sql` 的 DDL 语义检查全部通过后才会被明确登记，不会重放业务 schema 或 seed。
-
-`db/issue-23-clean-start-reset.sql` 不是 migration runner 输入，也不是通用清库工具。它只属于 Issue #23 已密封的 clean-start 生产合同：在保持已绑定 D1 UUID 的前提下删除已知 Blogman 对象，随后必须证明不存在任何非内部 SQLite 对象，并要求 `plan` 将 001–006 全部判定为新空库 `apply`。未知对象、非空账本、`baseline` action 或 SQL 字节漂移都必须在 apply 前失败关闭。
 
 Legacy baseline 不把 `categories`、`site_settings`、`ai_actions`、`ai_post_generators` 等可变业务行当作 schema checksum。用户已修改或删除的数据会原样保留；只有列类型、约束、索引、触发器、FTS 等不可变 DDL 事实参与 baseline 判断。
 
@@ -60,9 +58,9 @@ Legacy baseline 不把 `categories`、`site_settings`、`ai_actions`、`ai_post_
 
 `005_fix_posts_fts_sync` 前向替换 canonical `posts_au` / `posts_ad` trigger。更新时先用 FTS5 external-content 的特殊 `delete` 行移除旧 token，再写入新 token；删除时只移除旧 token。文章行不重建、不覆盖，完整 canonical ledger schema 因而支持真实文章 CRUD 并保持搜索索引一致。
 
-`006_add_rollout_safety_controls` 新增 `rollout_controls` 当前控制事实与 `rollout_control_events` 不可变审计事件。它不 seed producer、authority 或 executor 的开启状态；缺少控制行时一律视为关闭。Issue #93 已退役旧 candidate-bound control mutation/status 接口；当前 delivery 只通过 `rollout controls-status` 读取现有事实，环境变量也只能在运行时紧急关闭，不能写入或强制开启 authority。未来若需要新的控制写入口，必须由独立规格和 manifest-owned interface 授权，不能恢复旧 compatibility path。
+`006_add_rollout_safety_controls` 新增 `rollout_controls` 当前控制事实与 `rollout_control_events` 不可变审计事件。它不 seed producer、authority 或 executor 的开启状态；缺少控制行时一律视为关闭。该迁移已登记，不能修改或删除；这两张表的去留由后续前向迁移决定。
 
-备份验证、隔离恢复、schema/ledger/文章对账、restored-D1 smoke 和 rollout control 只读状态的完整操作合同见 [`docs/rollout-safety.md`](../docs/rollout-safety.md)。历史候选与 v1–v7 证据只通过 [`docs/issue-23-history-audit.md`](../docs/issue-23-history-audit.md) 审计。
+D1 备份与恢复使用 Cloudflare D1 Time Travel（`wrangler d1 time-travel info` / `wrangler d1 time-travel restore`）。恢复会覆盖整个数据库；新事实出现后优先前向修复，不用旧时间点覆盖。
 
 应用账本后，真实请求路径不得执行 DDL、schema ensure、默认 seed 或 migration runner。缺表/缺列统一归类为 `DATABASE_MIGRATION_REQUIRED`，API 返回固定 503；修复只能新增下一条前向 migration。
 

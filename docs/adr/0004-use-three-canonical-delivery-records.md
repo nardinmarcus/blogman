@@ -1,3 +1,5 @@
 # Use three canonical delivery records
 
 Represent new Issue #23 Delivery with exactly three records: a Canonical Frozen Manifest containing facts and plan, an Authorization containing only the user decision bound to the manifest SHA-256, and a Terminal Result containing the attempt outcome and evidence hashes. Each record uses schema-ordered UTF-8 JSON with two-space indentation and one trailing newline, and its identity is the SHA-256 of those exact bytes. Secrets, raw private adapter output, mutable markers, bundles, approval packets, PRE-CAS documents, closure records, and runtime cache state are excluded; secret slot names and required scopes may be recorded without values. Any live precondition mismatch is Manifest Drift and terminates execution.
+
+Status: Completed. Issue #23 Delivery finished with the single production attempt (#99–#101, closed 2026-08-19). The delivery implementation, its schemas, tests, read-only history audit adapter and macOS CI gate were retired in #259; the historical code remains in Git history.
