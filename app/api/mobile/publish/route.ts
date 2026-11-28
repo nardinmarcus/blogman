@@ -5,7 +5,7 @@
  * server re-reads D1, re-verifies the exact version / path / lifecycle, then
  * dispatches through `confirmMobilePublish` (which runs prepare+confirm for a
  * first publish, or promote for a revision, with deterministic
- * idempotency) and re-reads the 博客/排期/渠道 receipt surfaces.
+ * idempotency) and re-reads the 博客/排期 receipt surfaces.
  *
  * GET  ?articleId=:  authoritative full-page confirmation (path, exact version
  *                    content, blocker status, existing public address).

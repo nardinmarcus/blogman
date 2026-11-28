@@ -66,6 +66,8 @@ Legacy baseline 不把 `categories`、`site_settings`、`ai_actions`、`ai_post_
 
 `010_align_schedule_and_wechat_tables` 修正旁路 DDL 留下的两处原地未升级：`CREATE TABLE IF NOT EXISTS` 不会改动已存在的表，所以生产的 `publish_schedules` 状态 CHECK 缺少排期控制命令写入的 `paused`，`wechat_draft_tasks` 缺少 B5-02/B5-03 的重试与代次列。`publish_schedules` 因 SQLite 不能修改 CHECK 而重建（保留全部行、id 与到期索引），微信列直接 `ALTER TABLE ADD COLUMN`；preflight 要求两张表都仍是 008 记录的原形状。
 
+`011_retire_unwired_fact_surfaces` 删除从未接入路由的微信草稿、主要源稿同步与邮件提醒事实表（#263，共 17 张）。data sidecar 在其中任一表有数据时失败关闭，并在同一批次用 guard 复查；`source_identities`、`source_url_variants` 与 `article_source_links` 仍由剪藏与文章命令使用，保留。
+
 D1 备份与恢复使用 Cloudflare D1 Time Travel（`wrangler d1 time-travel info` / `wrangler d1 time-travel restore`）。恢复会覆盖整个数据库；新事实出现后优先前向修复，不用旧时间点覆盖。
 
 应用账本后，真实请求路径不得执行 DDL、schema ensure、默认 seed 或 migration runner。缺表/缺列统一归类为 `DATABASE_MIGRATION_REQUIRED`，API 返回固定 503；修复只能新增下一条前向 migration。

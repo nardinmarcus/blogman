@@ -13,7 +13,7 @@
  *   - 版本变化: a version bump during confirmation aborts and returns conflict
  *     (no partial publish),
  *   - 修订上线: a formal article's active revision promotes through #34,
- *   - 回执事实: the combined receipt distinguishes 博客 / 排期 / 渠道 progress.
+ *   - 回执事实: the combined receipt distinguishes 博客 / 排期 progress.
  */
 
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -227,12 +227,12 @@ describe('mobile-publish — revision promote (#34 kernel)', { timeout: 600_000 
   })
 })
 
-describe('mobile-publish — receipt fact surfaces (博客 / 排期 / 渠道)', { timeout: 600_000 }, () => {
-  it('distinguishes schedule and WeChat channel progress after a publish', async () => {
-    const { articleId, slug, postRef } = await createDraftArticle(fresh('m-s1'), '排期渠道回执', '# 正文')
+describe('mobile-publish — receipt fact surfaces (博客 / 排期)', { timeout: 600_000 }, () => {
+  it('distinguishes schedule progress after a publish', async () => {
+    const { articleId, slug } = await createDraftArticle(fresh('m-s1'), '排期回执', '# 正文')
     await confirm(articleId, 1, 'first')
 
-    // Independent schedule + WeChat channel facts for the published version.
+    // An independent schedule fact for the published version.
     await createDatabase()
       .prepare(
         `INSERT INTO publish_schedules
@@ -241,37 +241,24 @@ describe('mobile-publish — receipt fact surfaces (博客 / 排期 / 渠道)', 
       )
       .bind(`sched-${slug}`, articleId, T0 + 100, T0, T0)
       .run()
-    await createDatabase()
-      .prepare(
-        `INSERT INTO wechat_draft_tasks
-           (task_id, article_id, post_ref, version, account_id, status, title, html_projection,
-            plaintext_projection, content_sha256, projection_sha256, source_url, created_at, updated_at)
-         VALUES (?, ?, ?, 1, 'acct-a', 'submitted', 't', 'h', 'p', '', ?, 'https://blog.example.test/x', ?, ?)`,
-      )
-      .bind(`task-${slug}`, articleId, postRef, '0'.repeat(64), T0, T0)
-      .run()
 
-    const surfaces = await readReceiptSurfaces(createDatabase(), articleId, 1)
-    expect(surfaces.map((s) => s.key)).toEqual(['blog', 'schedule', 'channel'])
+    const surfaces = await readReceiptSurfaces(createDatabase(), articleId)
+    expect(surfaces.map((s) => s.key)).toEqual(['blog', 'schedule'])
     const blog = surfaces.find((s) => s.key === 'blog')!
     const schedule = surfaces.find((s) => s.key === 'schedule')!
-    const channel = surfaces.find((s) => s.key === 'channel')!
     expect(blog.present).toBe(true)
     expect(blog.state).toBe('已上线')
     expect(schedule.present).toBe(true)
     expect(schedule.state).toBe('已排期')
-    expect(channel.present).toBe(true)
-    expect(channel.state).toBe('已递交')
   })
 
-  it('reports absent schedule / channel as not present (never fabricated)', async () => {
+  it('reports an absent schedule as not present (never fabricated)', async () => {
     const { articleId } = await createDraftArticle(fresh('m-s2'))
     await confirm(articleId, 1, 'first')
-    const surfaces = await readReceiptSurfaces(createDatabase(), articleId, 1)
+    const surfaces = await readReceiptSurfaces(createDatabase(), articleId)
     expect(surfaces[0].present).toBe(true) // blog always present after success
     expect(surfaces[1].present).toBe(false) // schedule absent
     expect(surfaces[1].state).toBe('未排期')
-    expect(surfaces[2].present).toBe(false) // channel absent
-    expect(surfaces[2].state).toBe('未生成')
+    expect(surfaces).toHaveLength(2)
   })
 })

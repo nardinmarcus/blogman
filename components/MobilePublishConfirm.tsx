@@ -19,7 +19,7 @@ import type { ReceiptSurface } from '@/lib/mobile-publish/model'
  * B8-05 — mobile full-page publish confirmation + receipt (issue #64).
  *
  * A standalone full page (390px-first single column) that shows the EXACT
- * version content, the existing public address / access / time / channel facts,
+ * version content, the existing public address / access / time facts,
  * and the blocker status. A SINGLE result-type primary button drives the SHARED
  * #33/#34 publish kernel through the thin `/api/mobile/publish` route — there
  * is NO second confirmation modal and the button disables on first click
@@ -27,7 +27,7 @@ import type { ReceiptSurface } from '@/lib/mobile-publish/model'
  *
  * - version drift during confirmation → the server returns conflict; the page
  *   aborts the attempt and returns to the prepare state with a refresh;
- * - success → a combined receipt distinguishing 博客 / 排期 / 渠道 progress,
+ * - success → a combined receipt distinguishing 博客 / 排期 progress,
  *   read fresh from D1.
  *
  * No `node:crypto` is imported anywhere on the client — the kernel computes
@@ -197,7 +197,7 @@ export function MobilePublishConfirm({
             <p className="mt-1 text-xs text-[var(--editor-muted)] font-mono break-all">/{conf.slug}</p>
           </section>
 
-          {/* access / address / time / channel */}
+          {/* access / address / time */}
           <section className="rounded-2xl border border-[var(--editor-line)] bg-[var(--editor-panel)] p-4 space-y-2.5">
             <div className="flex items-center gap-2 text-sm text-[var(--editor-ink)]">
               <Globe className="h-4 w-4 text-[var(--editor-muted)]" />

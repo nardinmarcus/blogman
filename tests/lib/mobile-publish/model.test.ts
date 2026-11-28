@@ -4,7 +4,7 @@
  * Pure node tests (no browser, no D1): publish path selection, confirmation
  * blockers (incl. the version-drift "confirm during → abort" rule), the
  * deterministic first-publish ids behind single-event/outbox idempotency, and
- * the combined 博客/排期/渠道 receipt shaping. Client-safe (no node:crypto).
+ * the combined 博客/排期 receipt shaping. Client-safe (no node:crypto).
  */
 
 import { describe, expect, it } from 'vitest'
@@ -109,22 +109,20 @@ describe('mobile-publish model — fixed Asia/Shanghai publish time', () => {
   })
 })
 
-describe('mobile-publish model — receipt distinguishes 博客 / 排期 / 渠道', () => {
-  const noExtras = { schedule: { present: false, status: null }, channel: { present: false, status: null } }
+describe('mobile-publish model — receipt distinguishes 博客 / 排期', () => {
+  const noExtras = { schedule: { present: false, status: null } }
 
   it('always reports the blog surface with the public url after success', () => {
     const surfaces = shapeReceiptSurfaces({
       blog: { present: true, url: 'https://blog.example.test/x', verified: true },
       ...noExtras,
     })
-    expect(surfaces.map((s) => s.key)).toEqual(['blog', 'schedule', 'channel'])
+    expect(surfaces.map((s) => s.key)).toEqual(['blog', 'schedule'])
     expect(surfaces[0].label).toBe('博客')
     expect(surfaces[0].state).toBe('已上线')
     expect(surfaces[0].url).toBe('https://blog.example.test/x')
     expect(surfaces[1].state).toBe('未排期')
     expect(surfaces[1].present).toBe(false)
-    expect(surfaces[2].state).toBe('未生成')
-    expect(surfaces[2].present).toBe(false)
   })
 
   it('an unverified receipt surfaces "待确证" on the blog surface', () => {
@@ -136,19 +134,8 @@ describe('mobile-publish model — receipt distinguishes 博客 / 排期 / 渠�
     const surfaces = shapeReceiptSurfaces({
       blog: { present: true },
       schedule: { present: true, status: 'fired' },
-      channel: { present: false, status: null },
     })
     expect(surfaces[1].state).toBe('已发布')
     expect(surfaces[1].present).toBe(true)
-  })
-
-  it('reports WeChat channel status independently (submitted = 已递交)', () => {
-    const surfaces = shapeReceiptSurfaces({
-      blog: { present: true },
-      schedule: { present: false, status: null },
-      channel: { present: true, status: 'submitted' },
-    })
-    expect(surfaces[2].state).toBe('已递交')
-    expect(surfaces[2].present).toBe(true)
   })
 })
