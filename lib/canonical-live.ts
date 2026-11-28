@@ -2,7 +2,7 @@
  * #234 Phase A — canonical live authoring state.
  *
  * The legacy `posts` row was the "current state" read by peripheral kernels
- * (deep-link, source-sync/refresh/conflict, publish-suggestions,
+ * (deep-link, publish-suggestions,
  * background-jobs, external write API). With the projection retired (ADR 0008)
  * the same facts resolve from the LATEST frozen version snapshot. Management
  * / access fields therefore reflect article-level commands immediately

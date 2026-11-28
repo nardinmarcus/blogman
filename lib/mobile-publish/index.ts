@@ -3,7 +3,7 @@
  *
  * Public entry: the D1 read view for the full-page confirmation, the thin
  * confirm adapter over the SHARED #33 first-publish / #34 revision-promote
- * kernels, the combined 博客/排期/渠道 receipt, and the pure mobile model
+ * kernels, the combined 博客/排期 receipt, and the pure mobile model
  * (path selection, blockers, deterministic ids, receipt shaping) that also
  * drives the client component with no browser/crypto dependency.
  */

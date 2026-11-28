@@ -19,9 +19,9 @@
  *            the #33 intent/outbox uniqueness; a version/content change is a
  *            fresh auditable operation. Revision promote is idempotent by the
  *            active revision id in the #34 kernel.
- *   - 回执:  a receipt distinguishes 博客 (public page) / 排期 (schedule) /
- *            渠道 (WeChat channel) progress — each surface is an independent
- *            read, never a client guess.
+ *   - 回执:  a receipt distinguishes 博客 (public page) / 排期 (schedule)
+ *            progress — each surface is an independent read, never a client
+ *            guess.
  */
 
 /** Which publish kernel the mobile full page will drive for an article. */
@@ -167,16 +167,16 @@ export function formatPublishTime(epochSec: number): string {
 }
 
 /* ------------------------------------------------------------------ */
-/* receipt shaping — 区分博客 / 排期 / 渠道                            */
+/* receipt shaping — 区分博客 / 排期                                   */
 /* ------------------------------------------------------------------ */
 
 /** One progress surface of the publish receipt. */
 export interface ReceiptSurface {
-  key: 'blog' | 'schedule' | 'channel'
+  key: 'blog' | 'schedule'
   label: string
   /** Human progress state (已上线 / 已排期 / 未生成 …). */
   state: string
-  /** null = not applicable / absent (e.g. no schedule, no WeChat task). */
+  /** false = not applicable / absent (e.g. no schedule). */
   present: boolean
   url?: string
 }
@@ -185,7 +185,6 @@ export interface ReceiptSurface {
 export interface ReceiptSurfacesInput {
   blog: { present: boolean; url?: string; verified?: boolean }
   schedule: { present: boolean; status: string | null }
-  channel: { present: boolean; status: string | null }
 }
 
 const SCHEDULE_STATUS_LABELS: Record<string, string> = {
@@ -197,16 +196,9 @@ const SCHEDULE_STATUS_LABELS: Record<string, string> = {
   cancelled: '已取消',
 }
 
-const CHANNEL_STATUS_LABELS: Record<string, string> = {
-  draft: '草稿已生成',
-  submitted: '已递交',
-  failed: '递交失败',
-  superseded: '已被新版本取代',
-}
-
 /**
  * Shape the independent receipt surfaces from the post-publish D1 facts.
- * 博客 always present after success; 排期 / 渠道 are independent and reported
+ * 博客 always present after success; 排期 is independent and reported
  * as `present:false` when no fact exists (never fabricated).
  */
 export function shapeReceiptSurfaces(input: ReceiptSurfacesInput): ReceiptSurface[] {
@@ -226,11 +218,5 @@ export function shapeReceiptSurfaces(input: ReceiptSurfacesInput): ReceiptSurfac
     state: input.schedule.status ? (SCHEDULE_STATUS_LABELS[input.schedule.status] ?? input.schedule.status) : '未排期',
     present: input.schedule.present,
   }
-  const channel: ReceiptSurface = {
-    key: 'channel',
-    label: '渠道',
-    state: input.channel.status ? (CHANNEL_STATUS_LABELS[input.channel.status] ?? input.channel.status) : '未生成',
-    present: input.channel.present,
-  }
-  return [blog, schedule, channel]
+  return [blog, schedule]
 }

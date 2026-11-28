@@ -12,7 +12,7 @@
  *              publish converge on the event/outbox uniqueness;
  *   - revision:#34 promoteRevision, idempotent by the active revision id.
  *
- * A successful confirm re-reads the receipt surfaces (博客 / 排期 / 渠道) from
+ * A successful confirm re-reads the receipt surfaces (博客 / 排期) from
  * D1 so the independent receipt always reflects committed facts. No new
  * publish fact table is created here.
  */
@@ -108,7 +108,7 @@ export async function confirmMobilePublish(
   const path = conf.path
   if (path === 'unavailable') return { outcome: 'blocked', reason: '文章不可发布', failures: ['lifecycle'] }
   if (path === 'already') {
-    const receipt = await readReceiptSurfaces(db, articleId, conf.exactVersion)
+    const receipt = await readReceiptSurfaces(db, articleId)
     return {
       outcome: 'already-published',
       path: 'revision',
@@ -193,7 +193,7 @@ async function confirmFirstPublish(
   if (confirmed.outcome === 'invalid') return { outcome: 'invalid', reason: confirmed.reason }
   if (confirmed.outcome === 'aborted') return { outcome: 'aborted', reason: confirmed.reason }
   if (confirmed.outcome === 'already-published') {
-    const receipt = await readReceiptSurfaces(db, conf.articleId, confirmed.formal.version)
+    const receipt = await readReceiptSurfaces(db, conf.articleId)
     return {
       outcome: 'already-published',
       path: 'first',
@@ -213,7 +213,7 @@ async function confirmFirstPublish(
     return { outcome: 'blocked', reason: 'slug 冲突', failures: ['slug'] }
   }
 
-  const receipt = await readReceiptSurfaces(db, conf.articleId, (confirmed as { version: number }).version)
+  const receipt = await readReceiptSurfaces(db, conf.articleId)
   return {
     outcome: confirmed.outcome === 'replayed' ? 'replayed' : 'delivered',
     path: 'first',
@@ -255,7 +255,7 @@ async function confirmRevisionPromote(
   }
 
   const version = promoted.promotedVersion
-  const receipt = await readReceiptSurfaces(db, conf.articleId, version)
+  const receipt = await readReceiptSurfaces(db, conf.articleId)
   return {
     outcome: promoted.outcome === 'replayed' ? 'replayed' : 'delivered',
     path: 'revision',

@@ -73,7 +73,12 @@ export async function bootstrapState(stateDir: string, options: BootstrapOptions
 
   const migrations = ledgerOnly
     ? ['001_initial_schema.sql']
-    : ['001_initial_schema.sql', '008_canonical_article_schema.sql', '010_align_schedule_and_wechat_tables.sql']
+    : [
+        '001_initial_schema.sql',
+        '008_canonical_article_schema.sql',
+        '010_align_schedule_and_wechat_tables.sql',
+        '011_retire_unwired_fact_surfaces.sql',
+      ]
   for (const migration of migrations) {
     for (const statement of splitSqlFile(join(repoRoot, 'db', 'ledger-migrations', migration))) {
       await sharedDb.prepare(statement).run()

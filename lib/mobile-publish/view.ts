@@ -4,7 +4,7 @@
  * Rebuilds a fresh, authoritative full-page confirmation from D1 on every
  * read — never a client-optimistic snapshot. It resolves the publish path
  * (#33 first vs #34 revision), surfaces the EXACT version content + blocker
- * status, and pre-reads the receipt surfaces (博客 / 排期 / 渠道) so the
+ * status, and pre-reads the receipt surfaces (博客 / 排期) so the
  * confirmation page shows real D1 facts. Pure reads; writes nothing here.
  */
 
@@ -201,20 +201,18 @@ export async function getMobilePublishConfirmation(
 /* ------------------------------------------------------------------ */
 
 /**
- * Re-read the three receipt surfaces from D1 after a publish so the receipt
+ * Re-read the receipt surfaces from D1 after a publish so the receipt
  * reflects real committed facts. Blog is authoritative from
- * `formal_publications` + the receipt verifier; schedule and WeChat channel are
- * independent reads, guarded so a ledger-only DB (table absent) degrades to
+ * `formal_publications` + the receipt verifier; the schedule is an
+ * independent read, guarded so a ledger-only DB (table absent) degrades to
  * "not present" instead of erroring the receipt.
  */
 export async function readReceiptSurfaces(
   db: Database,
   articleId: number,
-  formalVersion: number,
 ): Promise<ReceiptSurface[]> {
   let blog: ReceiptSurfacesInput['blog'] = { present: false }
   let schedule: ReceiptSurfacesInput['schedule'] = { present: false, status: null }
-  let channel: ReceiptSurfacesInput['channel'] = { present: false, status: null }
 
   try {
     const formal = await db
@@ -251,17 +249,6 @@ export async function readReceiptSurfaces(
     schedule = { present: false, status: null }
   }
 
-  try {
-    const task = await db
-      .prepare(
-        `SELECT status FROM wechat_draft_tasks WHERE article_id = ? AND version = ? ORDER BY id DESC LIMIT 1`,
-      )
-      .bind(articleId, formalVersion)
-      .first<{ status: string }>()
-    channel = { present: Boolean(task), status: task?.status ?? null }
-  } catch {
-    channel = { present: false, status: null }
-  }
 
-  return shapeReceiptSurfaces({ blog, schedule, channel })
+  return shapeReceiptSurfaces({ blog, schedule })
 }
